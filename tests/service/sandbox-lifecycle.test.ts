@@ -82,6 +82,40 @@ describe("sandbox lifecycle service", () => {
     assert.equal(saved?.cleanupStatus, "cleaned");
   });
 
+  it("marks non-terminal tasks expired when expired sandbox runs are reaped without overwriting terminal tasks", async () => {
+    const store = createLocalInMemoryProductStore();
+    const runningRun = sandboxRun({
+      expiresAt: "2026-07-03T23:59:59.000Z",
+      idleExpiresAt: "2026-07-04T00:30:00.000Z"
+    });
+    const completedRun = sandboxRunFor("task2", "run2", {
+      expiresAt: "2026-07-03T23:59:59.000Z",
+      idleExpiresAt: "2026-07-04T00:30:00.000Z"
+    });
+    await store.createTask(taskForRun(runningRun, "running"));
+    await store.createTask(taskForRun(completedRun, "completed"));
+    await store.sandboxRuns.put(runningRun);
+    await store.sandboxRuns.put(completedRun);
+    const port = new FakeLifecyclePort([
+      ...createdResourcesForRun(asObservedActiveRun(runningRun)),
+      ...createdResourcesForRun(asObservedActiveRun(completedRun))
+    ]);
+    const service = new SandboxLifecycleService(store, {
+      namespace: "agentsmith",
+      port,
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.equal(result.dryRun, false);
+    assert.deepEqual(result.errors, []);
+    assert.equal((await store.sandboxRuns.get(runningRun.runId))?.cleanupStatus, "cleaned");
+    assert.equal((await store.sandboxRuns.get(completedRun.runId))?.cleanupStatus, "cleaned");
+    assert.equal((await store.findTask(runningRun.taskId))?.status, "expired");
+    assert.equal((await store.findTask(completedRun.taskId))?.status, "completed");
+  });
+
   it("marks unknown managed resources for cleanup but never recreates missing active resources", async () => {
     const store = createLocalInMemoryProductStore();
     await store.sandboxRuns.put(sandboxRun({ phase: "running", cleanupStatus: "active" }));
@@ -317,6 +351,25 @@ function sandboxRunFor(taskId: string, runId: string, overrides: Partial<Sandbox
     },
     ...overrides
   });
+}
+
+function taskForRun(run: SandboxRunState, status: "running" | "completed") {
+  return {
+    id: run.taskId,
+    workspaceId: run.workspaceId,
+    projectId: run.projectId,
+    endpointId: `endpoint-${run.taskId}`,
+    prompt: "build",
+    status,
+    runId: run.runId,
+    sandbox: {
+      dryRun: true as const,
+      namespace: run.namespace,
+      resources: []
+    },
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt
+  };
 }
 
 function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {

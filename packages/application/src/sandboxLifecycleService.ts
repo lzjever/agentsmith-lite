@@ -1,4 +1,4 @@
-import type { KubernetesResource } from "../../contracts/src/api.js";
+import type { AgentTaskStatus, KubernetesResource } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import type { ProductStore, PersistedSandboxRunState } from "../../ports/src/store.js";
 import {
@@ -18,6 +18,9 @@ export interface SandboxKubernetesInventoryPort {
 }
 
 export type SandboxLifecycleKubernetesPort = SandboxKubernetesMutationPort & SandboxKubernetesInventoryPort;
+
+export const DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
+export const DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface SandboxLifecycleServiceConfig {
   namespace: string;
@@ -126,9 +129,10 @@ export class SandboxLifecycleService {
       if (action.type !== "store_run_state") {
         continue;
       }
-      const stored = await this.persistRunTransition(action.run);
-      if (stored) {
-        result.storedRunIds.push(stored.runId);
+      const transition = await this.persistRunTransition(action.run);
+      if (transition) {
+        result.storedRunIds.push(transition.stored.runId);
+        await this.advanceTaskAfterRunTransition(transition.previous, transition.stored);
       } else {
         result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
       }
@@ -212,16 +216,40 @@ export class SandboxLifecycleService {
     return errors;
   }
 
-  private async persistRunTransition(run: SandboxRunState): Promise<PersistedSandboxRunState | null> {
+  private async persistRunTransition(run: SandboxRunState): Promise<{
+    previous: PersistedSandboxRunState;
+    stored: PersistedSandboxRunState;
+  } | null> {
     const current = await this.store.sandboxRuns.get(run.runId);
     if (!current) {
       return null;
     }
     const now = (this.config.now?.() ?? new Date()).toISOString();
-    return this.store.sandboxRuns.updateWithFencing(run.runId, current.fencingToken, {
+    const stored = await this.store.sandboxRuns.updateWithFencing(run.runId, current.fencingToken, {
       ...(run as PersistedSandboxRunState),
       fencingToken: current.fencingToken + 1,
       updatedAt: now
+    });
+    return stored ? { previous: current, stored } : null;
+  }
+
+  private async advanceTaskAfterRunTransition(
+    previous: PersistedSandboxRunState,
+    stored: PersistedSandboxRunState
+  ): Promise<void> {
+    if (stored.cleanupStatus !== "cleaned" && stored.phase !== "cleaned") {
+      return;
+    }
+    const task = await this.store.findTask(stored.taskId);
+    if (!task || isTerminalTaskStatus(task.status)) {
+      return;
+    }
+    const now = this.config.now?.() ?? new Date();
+    const status: AgentTaskStatus = runWasExpired(previous, now) ? "expired" : "cleaned";
+    await this.store.updateTask({
+      ...task,
+      status,
+      updatedAt: now.toISOString()
     });
   }
 }
@@ -243,15 +271,26 @@ export async function requestSandboxRunCleanup(
   });
 }
 
-export async function refreshSandboxRunActivity(store: ProductStore, runId: string): Promise<void> {
+export async function refreshSandboxRunActivity(
+  store: ProductStore,
+  runId: string,
+  input: { idleTimeoutMs?: number; now?: Date } = {}
+): Promise<void> {
   const current = await store.sandboxRuns.get(runId);
   if (!current || current.cleanupStatus !== "active") {
     return;
   }
+  const now = input.now ?? new Date();
+  const nextIdleExpiresAt = extendedIdleExpiresAt(
+    current.idleExpiresAt,
+    now,
+    resolveDurationMs(input.idleTimeoutMs, DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS)
+  );
   await store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
     ...current,
+    idleExpiresAt: nextIdleExpiresAt,
     fencingToken: current.fencingToken + 1,
-    updatedAt: new Date().toISOString()
+    updatedAt: now.toISOString()
   });
 }
 
@@ -343,4 +382,38 @@ function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown sandbox lifecycle error";
+}
+
+function isTerminalTaskStatus(status: AgentTaskStatus | "canceled" | "cancelled"): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "expired" ||
+    status === "cleaned" ||
+    status === "canceled" ||
+    status === "cancelled"
+  );
+}
+
+function runWasExpired(run: PersistedSandboxRunState, now: Date): boolean {
+  return run.phase === "expired" || isExpired(run.expiresAt, now) || isExpired(run.idleExpiresAt, now);
+}
+
+function isExpired(value: string | null | undefined, now: Date): boolean {
+  return typeof value === "string" && Date.parse(value) <= now.getTime();
+}
+
+function extendedIdleExpiresAt(currentIdleExpiresAt: string | null | undefined, now: Date, idleTimeoutMs: number): string {
+  const next = new Date(now.getTime() + idleTimeoutMs).toISOString();
+  if (typeof currentIdleExpiresAt !== "string") {
+    return next;
+  }
+  return Date.parse(currentIdleExpiresAt) > Date.parse(next) ? currentIdleExpiresAt : next;
+}
+
+function resolveDurationMs(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(value));
 }

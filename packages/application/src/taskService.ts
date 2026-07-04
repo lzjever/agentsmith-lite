@@ -22,7 +22,14 @@ import {
   type SandboxRunState
 } from "../../sandbox-controller/src/reconciler.js";
 import { EndpointService } from "./endpointService.js";
-import { refreshSandboxRunActivity, requestSandboxRunCleanup, type SandboxKubernetesInventoryPort, type SandboxLifecycleService } from "./sandboxLifecycleService.js";
+import {
+  DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS,
+  DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS,
+  refreshSandboxRunActivity,
+  requestSandboxRunCleanup,
+  type SandboxKubernetesInventoryPort,
+  type SandboxLifecycleService
+} from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
 export interface TaskLiveSandboxConfig {
@@ -49,6 +56,8 @@ export interface TaskServiceConfig {
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   liveSandbox?: TaskLiveSandboxConfig;
+  liveSandboxMaxLifetimeMs?: number;
+  liveSandboxIdleTimeoutMs?: number;
   modelCredentialResolver?: ModelCredentialResolver;
   sandboxLifecycle?: SandboxLifecycleService;
 }
@@ -432,6 +441,8 @@ export class TaskService {
       fencingToken: 1,
       cleanupStatus: "active",
       createdAt: input.timestamp,
+      expiresAt: deadlineIso(input.timestamp, this.liveSandboxMaxLifetimeMs()),
+      idleExpiresAt: deadlineIso(input.timestamp, this.liveSandboxIdleTimeoutMs()),
       updatedAt: input.timestamp
     };
   }
@@ -530,8 +541,18 @@ export class TaskService {
       return;
     }
     if (events.length > 0 && isActiveTaskStatus(task.status)) {
-      await refreshSandboxRunActivity(this.store, task.runId);
+      await refreshSandboxRunActivity(this.store, task.runId, {
+        idleTimeoutMs: this.liveSandboxIdleTimeoutMs()
+      });
     }
+  }
+
+  private liveSandboxMaxLifetimeMs(): number {
+    return resolveDurationMs(this.config.liveSandboxMaxLifetimeMs, DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS);
+  }
+
+  private liveSandboxIdleTimeoutMs(): number {
+    return resolveDurationMs(this.config.liveSandboxIdleTimeoutMs, DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS);
   }
 }
 
@@ -679,4 +700,15 @@ function safeRuntimeCursor(cursor: string | null | undefined): string | undefine
     return undefined;
   }
   return cursor;
+}
+
+function deadlineIso(baseIso: string, durationMs: number): string {
+  return new Date(Date.parse(baseIso) + durationMs).toISOString();
+}
+
+function resolveDurationMs(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(value));
 }

@@ -26,6 +26,8 @@ export interface CreateApplicationServicesInput {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  liveSandboxMaxLifetimeMs?: number;
+  liveSandboxIdleTimeoutMs?: number;
 }
 
 export function createApplicationServices(input: CreateApplicationServicesInput) {
@@ -55,6 +57,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     botifiedServiceKeySecret: sessionSecret,
     modelCredentialResolver,
     sandboxLifecycle,
+    ...(input.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: input.liveSandboxMaxLifetimeMs } : {}),
+    ...(input.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: input.liveSandboxIdleTimeoutMs } : {}),
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})

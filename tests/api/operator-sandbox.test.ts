@@ -56,6 +56,31 @@ describe("operator sandbox API", () => {
     assert.ok(dryRun.actionSummary.some((action: { type: string }) => action.type === "store_run_state"));
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
   });
+
+  it("reports cleanup action summaries for expired sandbox runs", async () => {
+    const store = createLocalInMemoryProductStore();
+    await store.sandboxRuns.put(sandboxRun({
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      idleExpiresAt: "2999-01-01T00:00:00.000Z"
+    }));
+    api = await createApiServer({
+      port: 0,
+      dataRoot,
+      builtinAdminPassword: "admin-password",
+      store
+    });
+    const auth = await login(api.baseUrl);
+
+    const status = await auth.requestJson("GET", "/api/operator/sandbox/status");
+
+    assert.equal(status.runCounts.active, 1);
+    assert.ok(status.actionSummary.some((action: { type: string; runId?: string; reason?: string }) =>
+      action.type === "store_run_state" &&
+      action.runId === "run1" &&
+      action.reason === "cleanup_complete"
+    ));
+    assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real/);
+  });
 });
 
 async function login(baseUrl: string) {

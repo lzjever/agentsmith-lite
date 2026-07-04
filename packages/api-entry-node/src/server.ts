@@ -26,6 +26,8 @@ export interface ApiServerOptions {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  liveSandboxMaxLifetimeMs?: number;
+  liveSandboxIdleTimeoutMs?: number;
   store?: ProductStore;
 }
 
@@ -56,6 +58,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
     ...(options.chatClient ? { chatClient: options.chatClient } : {}),
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
+    ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);

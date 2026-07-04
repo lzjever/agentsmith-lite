@@ -231,8 +231,82 @@ describe("task service Botified orchestration", () => {
     const sandboxRun = await store.sandboxRuns.get(task.runId);
     assert.equal(sandboxRun?.phase, "running");
     assert.equal(sandboxRun?.cleanupStatus, "active");
+    assert.ok(sandboxRun?.expiresAt, "live sandbox run should persist a max lifetime deadline");
+    assert.ok(sandboxRun?.idleExpiresAt, "live sandbox run should persist an idle deadline");
+    assert.equal(Date.parse(sandboxRun.expiresAt) - Date.parse(sandboxRun.createdAt), 2 * 60 * 60 * 1000);
+    assert.equal(Date.parse(sandboxRun.idleExpiresAt) - Date.parse(sandboxRun.createdAt), 30 * 60 * 1000);
     assert.equal(JSON.stringify(sandboxRun).includes("test-service-key"), false);
     assert.equal(JSON.stringify(sandboxRun).includes("sk-real-model-key"), false);
+  });
+
+  it("extends only the live sandbox idle deadline when active timeline events are synced", async () => {
+    const botified = new FakeBotifiedClient([
+      { status: "ok", events: [], nextCursor: "c0" },
+      {
+        status: "ok",
+        events: [
+          { cursor: "c1", seq: 1, session_id: "s1", type: "assistant_message.completed", payload: { text: "still working" } }
+        ],
+        nextCursor: "c1"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1/"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "keep alive", endpointId });
+    const initialRun = await store.sandboxRuns.get(task.runId);
+    assert.ok(initialRun?.expiresAt);
+    assert.ok(initialRun.idleExpiresAt);
+    const shortenedIdleDeadline = new Date(Date.parse(initialRun.idleExpiresAt) - 60_000).toISOString();
+    const shortenedRun = await store.sandboxRuns.updateWithFencing(task.runId, initialRun.fencingToken, {
+      ...initialRun,
+      idleExpiresAt: shortenedIdleDeadline,
+      fencingToken: initialRun.fencingToken + 1
+    });
+    assert.ok(shortenedRun);
+
+    const events = await services.tasks.listTaskEvents(userId, task.id);
+
+    const refreshedRun = await store.sandboxRuns.get(task.runId);
+    assert.deepEqual(events.map((event) => event.kind), ["assistant_message"]);
+    assert.equal(refreshedRun?.expiresAt, initialRun.expiresAt);
+    assert.ok(refreshedRun?.idleExpiresAt);
+    assert.ok(Date.parse(refreshedRun.idleExpiresAt) > Date.parse(shortenedIdleDeadline));
+    assert.equal(JSON.stringify(refreshedRun).includes("test-service-key"), false);
+    assert.equal(JSON.stringify(refreshedRun).includes("sk-real-model-key"), false);
+  });
+
+  it("honors configured live sandbox max lifetime and idle timeout durations", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1/"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      },
+      liveSandboxMaxLifetimeMs: 90_000,
+      liveSandboxIdleTimeoutMs: 15_000
+    });
+
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "custom ttl", endpointId });
+
+    const sandboxRun = await store.sandboxRuns.get(task.runId);
+    assert.ok(sandboxRun?.expiresAt);
+    assert.ok(sandboxRun.idleExpiresAt);
+    assert.equal(Date.parse(sandboxRun.expiresAt) - Date.parse(sandboxRun.createdAt), 90_000);
+    assert.equal(Date.parse(sandboxRun.idleExpiresAt) - Date.parse(sandboxRun.createdAt), 15_000);
   });
 
   it("rejects live startup on endpoint credential baseUrl mismatch before creating a task", async () => {
@@ -657,6 +731,8 @@ interface SetupOptions {
   serviceKeyFactory?: () => string | undefined;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: CreateApplicationServicesInput["liveSandbox"];
+  liveSandboxMaxLifetimeMs?: number;
+  liveSandboxIdleTimeoutMs?: number;
 }
 
 async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory: SetupOptions | (() => string | undefined) = {}) {
@@ -670,6 +746,8 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     botifiedClient: botified,
     botifiedServiceKeyFactory: options.serviceKeyFactory ?? (() => "test-service-key"),
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
+    ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   });
   const { user } = await services.auth.loginAfterBootstrap("admin-password");
