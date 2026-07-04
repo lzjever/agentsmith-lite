@@ -62,6 +62,10 @@ export interface ModelEndpoint {
   updatedAt: ISODateString;
 }
 
+export type PublicModelEndpoint = Omit<ModelEndpoint, "apiKeySecretRef"> & {
+  hasCredentialRef: boolean;
+};
+
 export type ChatRole = "system" | "user" | "assistant";
 
 export interface ChatMessage {
@@ -154,7 +158,7 @@ export interface DashboardResponse {
   };
   user: User;
   workspaces: WorkspaceWithProjects[];
-  endpoints: ModelEndpoint[];
+  endpoints: PublicModelEndpoint[];
   tasks: AgentTask[];
 }
 

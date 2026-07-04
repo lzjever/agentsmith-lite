@@ -1,8 +1,7 @@
 const state = {
   csrfToken: null,
   workspaceId: null,
-  projectId: null,
-  endpointId: null
+  projectId: null
 };
 
 const healthEl = document.querySelector("#health");
@@ -46,30 +45,8 @@ seedButton.addEventListener("click", async () => {
     csrf: state.csrfToken,
     body: { name: "Sandbox Project" }
   });
-  const endpoint = await api(`/api/projects/${project.id}/endpoints`, {
-    method: "POST",
-    csrf: state.csrfToken,
-    body: {
-      name: "Compatible Model",
-      protocol: "openai_chat_completions",
-      baseUrl: "https://models.example.com/v1",
-      model: "gpt-compatible",
-      apiKeySecretRef: "secret/demo",
-      capabilities: ["text"],
-      requestTimeoutSecs: 30
-    }
-  });
   state.workspaceId = workspace.id;
   state.projectId = project.id;
-  state.endpointId = endpoint.id;
-  await api(`/api/projects/${project.id}/tasks`, {
-    method: "POST",
-    csrf: state.csrfToken,
-    body: {
-      endpointId: endpoint.id,
-      prompt: "Summarize project status"
-    }
-  });
   await refreshDashboard();
 });
 

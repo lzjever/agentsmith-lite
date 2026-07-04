@@ -66,6 +66,35 @@ describe("product services", () => {
 
     assert.equal(endpoint.protocol, "openai_chat_completions");
     assert.equal(store.observedExternalModelCalls, 0);
+
+    for (const apiKeySecretRef of ["sk-raw-key", "raw", "env:OPENAI_KEY", "secret/Bad", "secret/foo_bar", "secret/", "not-secret/openai"]) {
+      await assert.rejects(
+        () => services.endpoints.createEndpoint(user.id, project.id, {
+          name: `bad-${apiKeySecretRef}`,
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.example.com/v1",
+          model: "gpt-compatible",
+          apiKeySecretRef,
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        }),
+        /Endpoint apiKeySecretRef must be secret\/<slug>/
+      );
+    }
+
+    for (const baseUrl of ["http://models.example.com/v1", "https://models.example.com/v1?tenant=a", "https://models.example.com/v1#fragment"]) {
+      await assert.rejects(
+        () => services.endpoints.createEndpoint(user.id, project.id, {
+          name: `bad-${baseUrl}`,
+          protocol: "openai_chat_completions",
+          baseUrl,
+          model: "gpt-compatible",
+          apiKeySecretRef: "secret/openai",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        }),
+        /Endpoint baseUrl/
+      );
+    }
   });
 });
-

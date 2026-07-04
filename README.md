@@ -41,4 +41,6 @@ scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env
 scripts/deploy/smoke.sh --base-url http://127.0.0.1:3000
 ```
 
-App deploy renders only product secrets into app-owned Kubernetes Secrets: `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, `BUILTIN_ADMIN_INITIAL_PASSWORD`, and optional OIDC/admin secrets. S3 raw credentials and `JUICEFS_META_URL` stay with the substrate/CSI layer.
+App deploy renders product config into app-owned Kubernetes resources: non-secret model base URLs named `AGENTSMITH_LITE_MODEL_BASE_URL_*` go into the ConfigMap, while `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, `BUILTIN_ADMIN_INITIAL_PASSWORD`, optional OIDC/admin secrets, and model API keys named `AGENTSMITH_LITE_MODEL_API_KEY_*` go into the Secret. S3 raw credentials and `JUICEFS_META_URL` stay with the substrate/CSI layer.
+
+Model endpoints store `apiKeySecretRef` values such as `secret/openai`; the server maps that to both `AGENTSMITH_LITE_MODEL_API_KEY_OPENAI` and `AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI` when handling chat. The endpoint base URL must be HTTPS and must match the server-configured base URL for that secret ref.

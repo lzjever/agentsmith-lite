@@ -13,13 +13,15 @@ Rebuilt clean:
 - Postgres ports and in-memory adapter.
 - Sandbox manifest renderer.
 - Botified config generator and event projection.
+- Direct server-side OpenAI-compatible Chat Completions calls for product chat.
 - Deploy/offline script skeletons.
 
 Deleted/deferred:
 
 - old release/governance command paths;
 - old external control-plane clients;
-- old provider translation runtime;
+- old provider translation runtime, including LLMUP/provider registry style translation layers;
 - live terminal runtime;
 - Botified TUI as AgentSmith Lite product behavior.
 
+AgentSmith Lite does not introduce an LLMUP layer, OpenAI SDK wrapper, provider registry, streaming path, tool-call adapter, or retry framework for product chat. The P0 path is a single server-side adapter that posts `{ model, messages }` to the endpoint's OpenAI-compatible `/chat/completions` URL.

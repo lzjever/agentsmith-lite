@@ -17,7 +17,13 @@ describe("web ui client boundary", () => {
       "postgres",
       "fs.",
       "/v1/messages",
-      "/v1/timeline"
+      "/v1/timeline",
+      "chat/completions",
+      "authorization: bearer",
+      "authorization",
+      "bearer ",
+      "apikeysecretref",
+      "secret/"
     ];
 
     const hits = checked.flatMap(([file, text]) =>
@@ -41,4 +47,3 @@ async function listFiles(dir: string): Promise<string[]> {
   }));
   return files.flat();
 }
-

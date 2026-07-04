@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../application/src/factory.js";
 import type { BotifiedTaskAddressInput } from "../../application/src/taskService.js";
-import type { ChatMessage, CreateEndpointInput, UploadProjectFileInput } from "../../contracts/src/api.js";
+import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
+import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 
 export interface ApiServerOptions {
@@ -21,6 +22,8 @@ export interface ApiServerOptions {
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: () => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
+  chatClient?: OpenAICompatibleClient;
+  modelCredentialResolver?: ModelCredentialResolver;
 }
 
 export interface RunningApiServer {
@@ -41,7 +44,9 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {}),
     ...(options.botifiedClient ? { botifiedClient: options.botifiedClient } : {}),
     ...(options.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: options.botifiedServiceKeyFactory } : {}),
-    ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {})
+    ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
+    ...(options.chatClient ? { chatClient: options.chatClient } : {}),
+    ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {})
   };
   const services = createApplicationServices(serviceOptions);
 
@@ -115,7 +120,8 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     return sendJson(res, 200, {
       health: { status: "ok", version: "0.1.0" },
       user,
-      ...dashboard
+      ...dashboard,
+      endpoints: dashboard.endpoints.map(toPublicEndpoint)
     });
   }
 
@@ -143,10 +149,12 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     const projectId = segments[2];
     if (segments[3] === "endpoints") {
       if (method === "GET") {
-        return sendJson(res, 200, await services.endpoints.listEndpoints(user.id, projectId));
+        const endpoints = await services.endpoints.listEndpoints(user.id, projectId);
+        return sendJson(res, 200, endpoints.map(toPublicEndpoint));
       }
       if (method === "POST") {
-        return sendJson(res, 200, await services.endpoints.createEndpoint(user.id, projectId, asEndpointInput(await readJson(req))));
+        const endpoint = await services.endpoints.createEndpoint(user.id, projectId, asEndpointInput(await readJson(req)));
+        return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
     }
     if (segments[3] === "chat" && method === "POST") {
@@ -260,6 +268,14 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {
+  const { apiKeySecretRef: _apiKeySecretRef, ...publicEndpoint } = endpoint;
+  return {
+    ...publicEndpoint,
+    hasCredentialRef: true
+  };
 }
 
 function handleError(res: ServerResponse, error: unknown): void {

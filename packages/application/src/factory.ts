@@ -1,5 +1,5 @@
 import path from "node:path";
-import { MockOpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
+import { EnvModelCredentialResolver, FetchOpenAICompatibleClient, type ModelCredentialResolver, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthService } from "./authService.js";
@@ -20,6 +20,8 @@ export interface CreateApplicationServicesInput {
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: () => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
+  chatClient?: OpenAICompatibleClient;
+  modelCredentialResolver?: ModelCredentialResolver;
 }
 
 export function createApplicationServices(input: CreateApplicationServicesInput) {
@@ -27,7 +29,12 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const endpoints = new EndpointService(input.store, workspaces);
   const files = new FileService();
   const auth = new AuthService(input.store, input.builtinAdminPassword, input.sessionSecret ?? "dev-session-secret");
-  const chat = new ChatService(endpoints, workspaces, new MockOpenAICompatibleClient());
+  const chat = new ChatService(
+    endpoints,
+    workspaces,
+    input.chatClient ?? new FetchOpenAICompatibleClient(),
+    input.modelCredentialResolver ?? new EnvModelCredentialResolver()
+  );
   const taskConfig = {
     namespace: input.namespace ?? "agentsmith",
     pvcName: input.pvcName ?? "agentsmith-lite-files",

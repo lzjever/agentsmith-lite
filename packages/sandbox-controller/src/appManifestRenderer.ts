@@ -15,8 +15,15 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
     "agentsmith-lite/managed-by": "agentsmith-lite"
   };
   const apiLabels = { ...labels, "app.kubernetes.io/component": "api" };
+  const modelBaseUrlConfig = Object.fromEntries(
+    Object.entries(input.env).filter(([key]) => key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_"))
+  );
   const appSecretData: Record<string, string> = {};
-  for (const key of ["POSTGRES_APP_URL", "APP_SESSION_SECRET", "BUILTIN_ADMIN_INITIAL_PASSWORD", "OIDC_CLIENT_SECRET"]) {
+  const appSecretKeys = Object.keys(input.secrets).filter((key) =>
+    ["POSTGRES_APP_URL", "APP_SESSION_SECRET", "BUILTIN_ADMIN_INITIAL_PASSWORD", "OIDC_CLIENT_SECRET"].includes(key) ||
+    key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_")
+  );
+  for (const key of appSecretKeys) {
     const value = input.secrets[key];
     if (value) {
       appSecretData[key] = value;
@@ -32,7 +39,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         APP_PUBLIC_BASE_URL: input.env.APP_PUBLIC_BASE_URL ?? "http://localhost:3000",
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
-        AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin"
+        AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin",
+        ...modelBaseUrlConfig
       }
     },
     {

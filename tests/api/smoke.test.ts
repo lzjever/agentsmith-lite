@@ -4,18 +4,28 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("api smoke", () => {
   let baseUrl = "";
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
+  const chatCalls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-api-"));
     const api = await createApiServer({
       port: 0,
       dataRoot,
-      builtinAdminPassword: "admin-password"
+      builtinAdminPassword: "admin-password",
+      chatClient: fakeChatClient(chatCalls),
+      modelCredentialResolver: fakeResolver({
+        "secret/openai": {
+          apiKey: "sk-from-api-smoke",
+          baseUrl: "https://models.example.com/v1"
+        }
+      })
     });
     baseUrl = api.baseUrl;
     closeServer = api.close;
@@ -41,14 +51,22 @@ describe("api smoke", () => {
     const workspace = await postJson("/api/workspaces", { name: "Ops" }, cookie, csrf);
     const project = await postJson(`/api/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
     const endpoint = await postJson(`/api/projects/${project.id}/endpoints`, {
-      name: "Mock endpoint",
+      name: "OpenAI-compatible endpoint",
       protocol: "openai_chat_completions",
       baseUrl: "https://models.example.com/v1",
       model: "gpt-compatible",
-      apiKeySecretRef: "secret/mock",
+      apiKeySecretRef: "secret/openai",
       capabilities: ["text"],
       requestTimeoutSecs: 30
     }, cookie, csrf);
+    assertNoApiKeySecretRef(endpoint);
+    assert.equal(endpoint.hasCredentialRef, true);
+    assert.equal(endpoint.apiKeySecretRef, undefined);
+
+    const endpoints = await requestJson("GET", `/api/projects/${project.id}/endpoints`, undefined, cookie);
+    assertNoApiKeySecretRef(endpoints);
+    assert.equal(endpoints[0]?.hasCredentialRef, true);
+
     const chat = await postJson(`/api/projects/${project.id}/chat`, {
       endpointId: endpoint.id,
       messages: [{ role: "user", content: "hello" }]
@@ -74,8 +92,21 @@ describe("api smoke", () => {
       prompt: "write a file",
       endpointId: endpoint.id
     }, cookie, csrf);
+    const dashboard = await requestJson("GET", "/api/dashboard", undefined, cookie);
 
-    assert.match(chat.message.content, /mock openai-compatible response/i);
+    assertNoApiKeySecretRef(dashboard);
+    assert.equal(dashboard.endpoints[0]?.hasCredentialRef, true);
+    assert.equal(chat.message.content, "server-side fake chat response");
+    assert.equal(chatCalls.length, 1);
+    assert.equal(chatCalls[0]?.endpoint.id, endpoint.id);
+    assert.deepEqual(chatCalls[0]?.messages, [{ role: "user", content: "hello" }]);
+    assert.equal(chatCalls[0]?.apiKey, "sk-from-api-smoke");
+    assert.deepEqual(chat.endpointSnapshot, {
+      id: endpoint.id,
+      baseUrl: "https://models.example.com/v1",
+      model: "gpt-compatible",
+      protocol: "openai_chat_completions"
+    });
     assert.equal(fileValidation.normalizedPath, "files/readme.md");
     assert.deepEqual(uploadedFile, { path: "files/readme.md", bytes: 20 });
     assert.equal(listedFiles.entries.some((entry: { path: string }) => entry.path === "files/readme.md"), true);
@@ -131,3 +162,34 @@ describe("api smoke", () => {
     return response.json();
   }
 });
+
+function fakeChatClient(calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }>): OpenAICompatibleClient {
+  return {
+    async completeChat(endpoint, messages, options): Promise<ChatResponse> {
+      calls.push({ endpoint, messages, apiKey: options.apiKey });
+      return {
+        message: { role: "assistant", content: "server-side fake chat response" },
+        endpointSnapshot: {
+          id: endpoint.id,
+          baseUrl: endpoint.baseUrl,
+          model: endpoint.model,
+          protocol: endpoint.protocol
+        }
+      };
+    }
+  };
+}
+
+function fakeResolver(values: Record<string, { apiKey: string; baseUrl: string }>): ModelCredentialResolver {
+  return {
+    resolveCredential(secretRef: string): { apiKey: string; baseUrl: string } {
+      const value = values[secretRef];
+      assert.ok(value, `missing fake secret for ${secretRef}`);
+      return value;
+    }
+  };
+}
+
+function assertNoApiKeySecretRef(value: unknown): void {
+  assert.doesNotMatch(JSON.stringify(value), /apiKeySecretRef/);
+}
