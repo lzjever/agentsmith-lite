@@ -1,12 +1,12 @@
 # Sandbox Controller
 
-P0 renders one sandbox pod per active task in dry-run form and now has a first-pass fake reconciler for run resource state plus a tested in-cluster Kubernetes port/action applier. TaskService also has an explicit live startup path: when live mode is configured, it materializes the six per-run resources, applies them, waits for the Pod to become ready with a bounded poll loop, then posts the prompt to Botified.
+P0 renders one sandbox pod per active task in dry-run form and has a tested reconciler for run resource state plus a tested in-cluster Kubernetes port/action applier. TaskService also has an explicit live startup path: when live mode is configured, it persists run state, materializes the six per-run resources, applies them, waits for the Pod to become ready with a bounded poll loop, then posts the prompt to Botified.
 
-Background lease reconciliation, recycle loops, operator/watch behavior, and long-running cleanup controllers are still future slices.
+Background lease reconciliation, recycle loops, operator/watch behavior, and long-running cleanup controllers are still future slices. Cleanup/status in this slice is explicit and one-shot through the product API.
 
 ## Run State
 
-Desired sandbox state is represented in this slice by the pure `SandboxRunState` input to the reconciler. It records:
+Desired sandbox state is represented by the pure `SandboxRunState` input to the reconciler and persisted through the typed `ProductStore.sandboxRuns` port. The backing storage is the existing `postgres_json_docs` table using the `sandbox_run_state` collection; there is no dedicated `sandbox_runs` table or migration. It records:
 
 - workspace/project/task/run ids and namespace.
 - phase and cleanup status.
@@ -15,9 +15,9 @@ Desired sandbox state is represented in this slice by the pure `SandboxRunState`
 - task home, artifacts, and Botified data directories.
 - runner image, PVC/project subPath, port, and resource requests/limits.
 - expiry and idle expiry timestamps.
-- timeline cursor and fencing token for future store integration.
+- timeline cursor and fencing token for fenced store updates.
 
-This slice does not add a database table or store port. State transitions are emitted as idempotent `store_run_state` actions so a later persistence layer can fence writes with `run_id + fencing_token`.
+The run state document stores resource names, Secret key references, directories, limits, phase, cleanup status, and timestamps. It must not store real Botified service keys or model API keys; those values only appear in live Kubernetes Secret apply bodies. State transitions are emitted as idempotent `store_run_state` actions and are persisted only after cleanup mutations succeed.
 
 ## Rendered Resources
 
@@ -57,3 +57,17 @@ The API Role remains in app manifests, not per-run sandbox output. It intentiona
 `applySandboxReconcileActionsToKubernetes` maps create/delete/mark-cleanup actions to that port. Adopt and store-state actions remain no-op for live Kubernetes mutation.
 
 TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SANDBOX_MODE=live` has wired a real Kubernetes port. Default local development remains dry-run and does not resolve model credentials, apply Kubernetes resources, or wait for Pod readiness. Live API startup requires `POSTGRES_APP_URL` so sandbox lifecycle state cannot silently run on the local in-memory store.
+
+## Explicit Lifecycle Operations
+
+`SandboxLifecycleService` provides two explicit operations:
+
+- `getSandboxStatus()` reads persisted run state plus observed K8s resources and returns counts/action summaries without mutating anything.
+- `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete/mark-cleanup actions, then re-observes resources and persists store-state transitions with fencing.
+
+The product API exposes these as admin-only endpoints:
+
+- `GET /api/operator/sandbox/status`
+- `POST /api/operator/sandbox/reap`, defaulting to dry-run unless the JSON body contains `"apply": true`.
+
+`scripts/deploy/status.sh --resources` and `scripts/deploy/cleanup-stuck-tasks.sh --dry-run` remain simple kubectl/static instruments. They do not implement login/cookie handling and are not release gates.

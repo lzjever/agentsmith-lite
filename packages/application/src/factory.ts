@@ -6,6 +6,7 @@ import { AuthService } from "./authService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
+import { SandboxLifecycleService } from "./sandboxLifecycleService.js";
 import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
@@ -42,12 +43,18 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     input.chatClient ?? new FetchOpenAICompatibleClient(),
     modelCredentialResolver
   );
+  const namespace = input.namespace ?? "agentsmith";
+  const sandboxLifecycle = new SandboxLifecycleService(input.store, {
+    namespace,
+    ...(input.liveSandbox ? { port: input.liveSandbox.port } : {})
+  });
   const taskConfig = {
-    namespace: input.namespace ?? "agentsmith",
+    namespace,
     pvcName: input.pvcName ?? "agentsmith-lite-files",
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",
     botifiedServiceKeySecret: sessionSecret,
     modelCredentialResolver,
+    sandboxLifecycle,
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})
@@ -67,6 +74,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     chat,
     files,
     tasks,
+    sandboxLifecycle,
     dataRoot: input.dataRoot,
     projectAbsoluteRoot(projectRootPath: string): string {
       return path.resolve(input.dataRoot, projectRootPath);

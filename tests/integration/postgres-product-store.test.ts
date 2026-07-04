@@ -3,6 +3,7 @@ import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, ModelEndpoint, Project, StoredUser, Workspace } from "../../packages/contracts/src/api.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
+import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
 
 const postgresUrl = process.env.POSTGRES_APP_URL;
 const postgresDescribe = postgresUrl ? describe : describe.skip;
@@ -189,5 +190,65 @@ postgresDescribe("postgres product store", () => {
     assert.equal(second.lease?.fencingToken, 2);
     assert.equal(await store.leases.release("sandbox:task_pg", 1), false);
     assert.equal(await store.leases.release("sandbox:task_pg", 2), true);
+
+    const run = sandboxRun();
+    await store.sandboxRuns.put(run);
+    assert.deepEqual(await store.sandboxRuns.get(run.runId), run);
+    assert.deepEqual((await store.sandboxRuns.listActive()).map((item) => item.runId), [run.runId]);
+    assert.equal(
+      await store.sandboxRuns.updateWithFencing(run.runId, 0, { ...run, phase: "running", fencingToken: 2 }),
+      null
+    );
+    const updated = await store.sandboxRuns.updateWithFencing(run.runId, 1, {
+      ...run,
+      phase: "running",
+      fencingToken: 2
+    });
+    assert.equal(updated?.phase, "running");
   });
 });
+
+function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
+  return {
+    workspaceId: "ws_pg",
+    projectId: "proj_pg",
+    taskId: "task_pg",
+    runId: "run_pg",
+    namespace: "agentsmith",
+    phase: "starting",
+    image: "agentsmith-lite/botified-runner:test",
+    pvcName: "agentsmith-lite-files",
+    projectSubPath: "workspaces/ws_pg/projects/proj_pg",
+    botifiedPort: 3099,
+    resourceNames: {
+      pod: "asl-task-task_pg",
+      service: "asl-task-task_pg",
+      configMap: "asl-task-task_pg-config",
+      secret: "asl-botified-task_pg",
+      serviceAccount: "asl-task-task_pg",
+      networkPolicy: "asl-task-task_pg"
+    },
+    serviceKeySecretRef: {
+      name: "asl-botified-task_pg",
+      key: "BOTIFIED_SERVICE_KEY"
+    },
+    directories: {
+      taskHome: "/workspace/project/tasks/task_pg/home",
+      artifacts: "/workspace/project/tasks/task_pg/artifacts",
+      botified: "/workspace/project/tasks/task_pg/botified"
+    },
+    resourceLimits: {
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi"
+    },
+    expiresAt: "2026-07-04T01:00:00.000Z",
+    idleExpiresAt: "2026-07-04T00:30:00.000Z",
+    fencingToken: 1,
+    cleanupStatus: "active",
+    createdAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: "2026-07-04T00:00:00.000Z",
+    ...overrides
+  };
+}

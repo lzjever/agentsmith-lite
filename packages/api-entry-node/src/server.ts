@@ -10,6 +10,7 @@ import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoi
 import { ProductError } from "../../domain/src/errors.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
+import type { ProductStore } from "../../ports/src/store.js";
 
 export interface ApiServerOptions {
   port: number;
@@ -25,6 +26,7 @@ export interface ApiServerOptions {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  store?: ProductStore;
 }
 
 export interface RunningApiServer {
@@ -40,7 +42,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     requireLiveSandboxSessionSecret(options.sessionSecret);
   }
   await mkdir(options.dataRoot, { recursive: true });
-  const store = createInMemoryProductStore();
+  const store = options.store ?? createInMemoryProductStore();
   const serviceOptions = {
     store,
     dataRoot: options.dataRoot,
@@ -131,6 +133,21 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       ...dashboard,
       endpoints: dashboard.endpoints.map(toPublicEndpoint)
     });
+  }
+
+  if (segments[0] === "api" && segments[1] === "operator" && segments[2] === "sandbox") {
+    requireAdmin(user);
+    if (segments[3] === "status" && method === "GET") {
+      return sendJson(res, 200, await services.sandboxLifecycle.getSandboxStatus());
+    }
+    if (segments[3] === "reap" && method === "POST") {
+      const body = await readJson(req);
+      return sendJson(res, 200, await services.sandboxLifecycle.reapSandboxRunsOnce({
+        ...(typeof body.runId === "string" ? { runId: body.runId } : {}),
+        apply: body.apply === true,
+        dryRun: body.apply !== true
+      }));
+    }
   }
 
   if (method === "GET" && url.pathname === "/api/workspaces") {
@@ -341,6 +358,12 @@ function asString(value: unknown): string {
     throw new ProductError("Expected string field");
   }
   return value;
+}
+
+function requireAdmin(user: { role: string }): void {
+  if (user.role !== "admin") {
+    throw new ProductError("Admin role is required", 403);
+  }
 }
 
 function requiredSearchParam(url: URL, name: string): string {

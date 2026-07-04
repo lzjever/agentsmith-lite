@@ -14,12 +14,73 @@ export type JsonDocumentCollection =
   | "project_settings"
   | "endpoint_snapshots"
   | "sandbox_runtime_state"
+  | "sandbox_run_state"
   | "operator_status";
 
 export interface PostgresJsonDocStore {
   put(collection: JsonDocumentCollection, id: string, document: Record<string, unknown>): Promise<void>;
   get(collection: JsonDocumentCollection, id: string): Promise<Record<string, unknown> | null>;
   delete(collection: JsonDocumentCollection, id: string): Promise<void>;
+}
+
+export type PersistedSandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
+export type PersistedSandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
+
+export interface PersistedSandboxRunResourceNames {
+  pod: string;
+  service: string;
+  configMap: string;
+  secret: string;
+  serviceAccount?: string;
+  networkPolicy?: string;
+}
+
+export interface PersistedSandboxRunState {
+  namespace: string;
+  workspaceId: string;
+  projectId: string;
+  taskId: string;
+  runId: string;
+  phase: PersistedSandboxRunPhase;
+  image: string;
+  pvcName: string;
+  projectSubPath: string;
+  botifiedPort: number;
+  resourceNames: PersistedSandboxRunResourceNames;
+  serviceKeySecretRef: {
+    name: string;
+    key: string;
+  };
+  directories: {
+    taskHome: string;
+    artifacts: string;
+    botified: string;
+  };
+  resourceLimits: {
+    cpuRequest: string;
+    memoryRequest: string;
+    cpuLimit: string;
+    memoryLimit: string;
+  };
+  expiresAt?: string | null;
+  idleExpiresAt?: string | null;
+  timelineCursor?: string | null;
+  fencingToken: number;
+  cleanupStatus: PersistedSandboxCleanupStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SandboxRunStore {
+  put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState>;
+  get(runId: string): Promise<PersistedSandboxRunState | null>;
+  list(): Promise<PersistedSandboxRunState[]>;
+  listActive(): Promise<PersistedSandboxRunState[]>;
+  updateWithFencing(
+    runId: string,
+    expectedFencingToken: number,
+    run: PersistedSandboxRunState
+  ): Promise<PersistedSandboxRunState | null>;
 }
 
 export interface LeaseRecord {
@@ -56,6 +117,7 @@ export interface ProductStore {
   readonly observedExternalModelCalls: number;
   readonly jsonDocs: PostgresJsonDocStore;
   readonly leases: PostgresLeaseStore;
+  readonly sandboxRuns: SandboxRunStore;
 
   countUsers(): Promise<number>;
   createUser(user: StoredUser): Promise<User>;
@@ -86,4 +148,3 @@ export interface ProductStore {
   appendTaskArtifacts(artifacts: AgentTaskArtifact[]): Promise<void>;
   listTaskArtifacts(taskId: string): Promise<AgentTaskArtifact[]>;
 }
-

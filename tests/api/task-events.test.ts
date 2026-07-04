@@ -141,7 +141,8 @@ describe("task events API", () => {
                 applyResource: async () => "applied" as const,
                 patchLabels: async () => "patched" as const,
                 deleteResource: async () => "deleted" as const,
-                getPodReadiness: async () => "ready" as const
+                getPodReadiness: async () => "ready" as const,
+                listManagedResources: async () => []
               }
             }
           }),
@@ -164,7 +165,8 @@ describe("task events API", () => {
         applyResource: async () => "applied" as const,
         patchLabels: async () => "patched" as const,
         deleteResource: async () => "deleted" as const,
-        getPodReadiness: async () => "ready" as const
+        getPodReadiness: async () => "ready" as const,
+        listManagedResources: async () => []
       }
     };
 

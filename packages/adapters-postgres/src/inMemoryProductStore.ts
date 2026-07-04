@@ -16,9 +16,11 @@ import type {
   LeaseRecord,
   PostgresJsonDocStore,
   PostgresLeaseStore,
+  PersistedSandboxRunState,
   ProductStore
 } from "../../ports/src/store.js";
 import { createPostgresProductStore } from "./postgresProductStore.js";
+import { prepareSandboxRunDocument, sandboxRunFromDocument } from "./sandboxRunDocuments.js";
 
 export function createInMemoryProductStore(): ProductStore {
   const connectionString = process.env.POSTGRES_APP_URL?.trim();
@@ -37,6 +39,7 @@ export class InMemoryProductStore implements ProductStore {
 
   readonly jsonDocs: PostgresJsonDocStore = new InMemoryJsonDocStore();
   readonly leases: PostgresLeaseStore = new InMemoryLeaseStore();
+  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs);
 
   private readonly users = new Map<string, StoredUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -169,6 +172,51 @@ class InMemoryJsonDocStore implements PostgresJsonDocStore {
 
   async delete(collection: JsonDocumentCollection, id: string): Promise<void> {
     this.documents.delete(`${collection}:${id}`);
+  }
+
+  listCollection(collection: JsonDocumentCollection): Record<string, unknown>[] {
+    const prefix = `${collection}:`;
+    return [...this.documents.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, document]) => clone(document));
+  }
+}
+
+class InMemorySandboxRunStore {
+  constructor(private readonly jsonDocs: PostgresJsonDocStore) {}
+
+  async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
+    const document = prepareSandboxRunDocument(run);
+    await this.jsonDocs.put("sandbox_run_state", run.runId, document);
+    return sandboxRunFromDocument(document);
+  }
+
+  async get(runId: string): Promise<PersistedSandboxRunState | null> {
+    const document = await this.jsonDocs.get("sandbox_run_state", runId);
+    return document ? sandboxRunFromDocument(document) : null;
+  }
+
+  async list(): Promise<PersistedSandboxRunState[]> {
+    if (!(this.jsonDocs instanceof InMemoryJsonDocStore)) {
+      return [];
+    }
+    return this.jsonDocs.listCollection("sandbox_run_state").map(sandboxRunFromDocument);
+  }
+
+  async listActive(): Promise<PersistedSandboxRunState[]> {
+    return (await this.list()).filter((run) => run.cleanupStatus !== "cleaned" && run.phase !== "cleaned");
+  }
+
+  async updateWithFencing(
+    runId: string,
+    expectedFencingToken: number,
+    run: PersistedSandboxRunState
+  ): Promise<PersistedSandboxRunState | null> {
+    const current = await this.get(runId);
+    if (!current || current.fencingToken !== expectedFencingToken) {
+      return null;
+    }
+    return this.put(run);
   }
 }
 

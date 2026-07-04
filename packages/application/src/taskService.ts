@@ -9,25 +9,24 @@ import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, type ModelCredentialResolver } from "../../openai-compatible-client/src/index.js";
 import { BotifiedHttpError, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
-import type { ProductStore } from "../../ports/src/store.js";
+import type { PersistedSandboxRunState, ProductStore } from "../../ports/src/store.js";
 import {
   applySandboxReconcileActionsToKubernetes,
-  type KubernetesResourceRef,
   type SandboxKubernetesMutationPort,
   type SandboxKubernetesReadinessPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
 import { renderSandboxResources } from "../../sandbox-controller/src/manifestRenderer.js";
 import {
   reconcileSandboxRuns,
-  type SandboxCoreResourceKind,
   type SandboxReconcileAction,
   type SandboxRunState
 } from "../../sandbox-controller/src/reconciler.js";
 import { EndpointService } from "./endpointService.js";
+import { refreshSandboxRunActivity, requestSandboxRunCleanup, type SandboxKubernetesInventoryPort, type SandboxLifecycleService } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
 export interface TaskLiveSandboxConfig {
-  port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort;
+  port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort & SandboxKubernetesInventoryPort;
   readinessTimeoutMs?: number;
   readinessPollMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -51,6 +50,7 @@ export interface TaskServiceConfig {
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   liveSandbox?: TaskLiveSandboxConfig;
   modelCredentialResolver?: ModelCredentialResolver;
+  sandboxLifecycle?: SandboxLifecycleService;
 }
 
 export interface BotifiedTaskAddressInput {
@@ -175,6 +175,9 @@ export class TaskService {
 
     let acceptedPrompt = false;
     try {
+      if (liveRun) {
+        await this.store.sandboxRuns.put(liveRun);
+      }
       await this.writeRuntimeState(id, state);
       if (this.config.liveSandbox && liveRun && liveCredential) {
         await this.startLiveSandbox({
@@ -198,13 +201,17 @@ export class TaskService {
         ...state,
         ...(postMessageCursor !== undefined ? { postMessageCursor } : {})
       });
+      if (liveRun) {
+        await this.updatePersistedRun(liveRun.runId, { phase: "running", cleanupStatus: "active" });
+      }
       const running = await this.store.updateTask({ ...task, status: "running", updatedAt: nowIso() });
       return this.syncTaskTimeline(running);
     } catch (error) {
       if (!acceptedPrompt) {
         await this.bestEffortMarkTaskFailed(task);
         if (liveRun) {
-          await this.bestEffortCleanupLiveSandbox(liveRun);
+          await this.bestEffortRequestRunCleanup(liveRun.runId, "stopping");
+          await this.bestEffortReapSandboxRun(liveRun.runId);
         }
       }
       throw error;
@@ -222,7 +229,10 @@ export class TaskService {
     const serviceKey = this.serviceKeyForTask(task);
     await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
     const updated = { ...task, status: "stopping" as const, updatedAt: nowIso() };
-    return this.store.updateTask(updated);
+    const saved = await this.store.updateTask(updated);
+    await this.bestEffortRequestRunCleanup(task.runId, "stopping");
+    await this.bestEffortReapSandboxRun(task.runId);
+    return saved;
   }
 
   async listTaskEvents(userId: string, taskId: string): Promise<AgentTaskEvent[]> {
@@ -281,7 +291,9 @@ export class TaskService {
       lastSyncedAt: nowIso()
     });
 
-    return this.updateTaskStatusFromEvents(task, projection.events);
+    const updated = await this.updateTaskStatusFromEvents(task, projection.events);
+    await this.updateRunLifecycleAfterTimelineSync(updated, projection.events);
+    return updated;
   }
 
   private async updateTaskStatusFromEvents(task: AgentTask, events: AgentTaskEvent[]): Promise<AgentTask> {
@@ -465,31 +477,60 @@ export class TaskService {
     await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
   }
 
-  private async bestEffortCleanupLiveSandbox(run: SandboxRunState): Promise<void> {
-    const live = this.config.liveSandbox;
-    if (!live) {
-      return;
-    }
-    const actions = reconcileSandboxRuns({
-      desiredRuns: [run],
-      observedResources: [],
-      now: new Date()
-    }).actions;
-    const deleteActions = cleanupDeleteActionsForCreateActions(actions);
-    for (const action of deleteActions) {
-      try {
-        await live.port.deleteResource(resourceRef(action.resource), action.labels);
-      } catch {
-        // Cleanup must not hide the startup failure that triggered it.
-      }
-    }
-  }
-
   private async bestEffortMarkTaskFailed(task: AgentTask): Promise<void> {
     try {
       await this.store.updateTask({ ...task, status: "failed", updatedAt: nowIso() });
     } catch {
       // Startup cleanup and the original failure must not depend on the failed-state write.
+    }
+  }
+
+  private async updatePersistedRun(
+    runId: string,
+    updates: Pick<PersistedSandboxRunState, "phase" | "cleanupStatus">
+  ): Promise<void> {
+    const current = await this.store.sandboxRuns.get(runId);
+    if (!current) {
+      throw new ProductError("Sandbox run state not found", 409);
+    }
+    const updated = await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
+      ...current,
+      ...updates,
+      fencingToken: current.fencingToken + 1,
+      updatedAt: nowIso()
+    });
+    if (!updated) {
+      throw new ProductError("Sandbox run state fencing token changed", 409);
+    }
+  }
+
+  private async bestEffortRequestRunCleanup(runId: string, phase: PersistedSandboxRunState["phase"]): Promise<void> {
+    try {
+      await requestSandboxRunCleanup(this.store, runId, { phase, cleanupStatus: "cleanup_requested" });
+    } catch {
+      // Cleanup intent must not hide the task operation failure that triggered it.
+    }
+  }
+
+  private async bestEffortReapSandboxRun(runId: string): Promise<void> {
+    try {
+      await this.config.sandboxLifecycle?.reapSandboxRunsOnce({ runId, apply: true });
+    } catch {
+      // Reaping is recoverable through the explicit operator endpoint/status.
+    }
+  }
+
+  private async updateRunLifecycleAfterTimelineSync(task: AgentTask, events: AgentTaskEvent[]): Promise<void> {
+    if (!this.config.liveSandbox) {
+      return;
+    }
+    if (isTerminalTaskStatus(task.status)) {
+      await this.bestEffortRequestRunCleanup(task.runId, cleanupPhaseForTaskStatus(task.status));
+      await this.bestEffortReapSandboxRun(task.runId);
+      return;
+    }
+    if (events.length > 0 && isActiveTaskStatus(task.status)) {
+      await refreshSandboxRunActivity(this.store, task.runId);
     }
   }
 }
@@ -540,52 +581,6 @@ function materializeLiveCreateActions(
       resource
     };
   });
-}
-
-function cleanupDeleteActionsForCreateActions(actions: SandboxReconcileAction[]): Array<Extract<SandboxReconcileAction, { type: "delete_resource" }>> {
-  const creates = new Map<SandboxCoreResourceKind, Extract<SandboxReconcileAction, { type: "create_resource" }>>();
-  for (const action of actions) {
-    if (action.type === "create_resource") {
-      creates.set(action.kind, action);
-    }
-  }
-  const order: SandboxCoreResourceKind[] = ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"];
-  return order.flatMap((kind) => {
-    const create = creates.get(kind);
-    if (!create) {
-      return [];
-    }
-    return [
-      {
-        type: "delete_resource" as const,
-        runId: create.runId,
-        kind: create.kind,
-        name: create.name,
-        labels: create.labels,
-        resource: create.resource
-      }
-    ];
-  });
-}
-
-const sandboxCoreKinds: SandboxCoreResourceKind[] = ["Pod", "Service", "Secret", "ConfigMap", "ServiceAccount", "NetworkPolicy"];
-
-function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
-  if (!isSandboxCoreKind(resource.kind)) {
-    throw new ProductError(`Sandbox cleanup resource kind is not supported: ${resource.kind}`, 500);
-  }
-  if (!resource.metadata.namespace) {
-    throw new ProductError(`Sandbox cleanup resource is missing namespace: ${resource.metadata.name}`, 500);
-  }
-  return {
-    kind: resource.kind,
-    namespace: resource.metadata.namespace,
-    name: resource.metadata.name
-  };
-}
-
-function isSandboxCoreKind(kind: string): kind is SandboxCoreResourceKind {
-  return sandboxCoreKinds.includes(kind as SandboxCoreResourceKind);
 }
 
 async function waitForPodReady(
@@ -652,6 +647,18 @@ function nextStatusForEvents(current: AgentTaskStatus, events: AgentTaskEvent[])
     }
   }
   return status;
+}
+
+function isTerminalTaskStatus(status: AgentTaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "expired" || status === "cleaned";
+}
+
+function isActiveTaskStatus(status: AgentTaskStatus): boolean {
+  return status === "queued" || status === "starting" || status === "running";
+}
+
+function cleanupPhaseForTaskStatus(status: AgentTaskStatus): PersistedSandboxRunState["phase"] {
+  return status === "expired" ? "expired" : "stopping";
 }
 
 function stringDocumentField(document: Record<string, unknown>, field: string): string {

@@ -199,6 +199,7 @@ describe("task service Botified orchestration", () => {
       "Service",
       "Pod"
     ]);
+    assert.deepEqual(livePort.deletedRefs, []);
     assert.ok(operations.lastIndexOf("apply:Pod") < operations.indexOf("readiness:asl-task-" + task.id));
     assert.ok(operations.indexOf("readiness:asl-task-" + task.id) < operations.indexOf("post"));
 
@@ -227,6 +228,11 @@ describe("task service Botified orchestration", () => {
     const runtimeState = await store.jsonDocs.get("sandbox_runtime_state", task.id);
     assert.equal(JSON.stringify(runtimeState).includes("test-service-key"), false);
     assert.equal(JSON.stringify(runtimeState).includes("sk-real-model-key"), false);
+    const sandboxRun = await store.sandboxRuns.get(task.runId);
+    assert.equal(sandboxRun?.phase, "running");
+    assert.equal(sandboxRun?.cleanupStatus, "active");
+    assert.equal(JSON.stringify(sandboxRun).includes("test-service-key"), false);
+    assert.equal(JSON.stringify(sandboxRun).includes("sk-real-model-key"), false);
   });
 
   it("rejects live startup on endpoint credential baseUrl mismatch before creating a task", async () => {
@@ -302,6 +308,7 @@ describe("task service Botified orchestration", () => {
       assert.equal(task?.status, "failed");
       assert.equal(botified.postMessageCalls.length, 0);
       assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+      assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
     }
 
     const botified = new FakeBotifiedClient([]);
@@ -327,6 +334,7 @@ describe("task service Botified orchestration", () => {
     assert.equal(task?.status, "failed");
     assert.equal(botified.postMessageCalls.length, 0);
     assert.deepEqual(timeoutPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
   });
 
   it("still cleans up and rethrows the original startup error when failed-state update fails", async () => {
@@ -358,7 +366,10 @@ describe("task service Botified orchestration", () => {
     );
 
     assert.equal(failedUpdateAttempts, 1);
-    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), []);
+    const [task] = await store.listTasksForProject(projectId);
+    assert.ok(task);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
   });
 
   it("marks failed and cleans up on live apply or post failures while rethrowing the original error", async () => {
@@ -382,7 +393,7 @@ describe("task service Botified orchestration", () => {
       /Kubernetes apply fence mismatch/
     );
     assert.equal((await applyFailure.store.listTasksForProject(applyFailure.projectId))[0]?.status, "failed");
-    assert.deepEqual(applyPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.deepEqual(applyPort.deletedRefs.map((ref) => ref.kind), []);
 
     const postNotAcceptedPort = new FakeLiveSandboxPort({ readiness: ["ready"] });
     const postNotAcceptedBotified = new FakeBotifiedClient([], { postResult: { accepted: false } });
@@ -427,6 +438,129 @@ describe("task service Botified orchestration", () => {
     );
     assert.equal((await postError.store.listTasksForProject(postError.projectId))[0]?.status, "failed");
     assert.deepEqual(postErrorPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+  });
+
+  it("aborts live Botified tasks before marking stopping and then reaps the run", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "stop live", endpointId });
+
+    const cancelled = await services.tasks.cancelTask(userId, task.id);
+
+    assert.equal(cancelled.status, "stopping");
+    assert.deepEqual(botified.abortCalls.map((call) => call.baseUrl), [
+      `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`
+    ]);
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("does not delete live resources when Botified abort fails", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }], {
+      abortError: new Error("abort failed")
+    });
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "abort fail", endpointId });
+
+    await assert.rejects(() => services.tasks.cancelTask(userId, task.id), /Botified abort failed: abort failed/);
+
+    assert.deepEqual(livePort.deletedRefs, []);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.phase, "running");
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
+  });
+
+  it("requests live cleanup when terminal timeline events are projected", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          { cursor: "c1", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+        ],
+        nextCursor: "c1"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "finish", endpointId });
+
+    assert.equal(task.status, "completed");
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("retries terminal live cleanup when the first run-state write loses its fence", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          { cursor: "c1", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+        ],
+        nextCursor: "c1"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const updateRunWithFencing = store.sandboxRuns.updateWithFencing.bind(store.sandboxRuns);
+    let failedCleanupWrites = 0;
+    store.sandboxRuns.updateWithFencing = async (runId, expectedFencingToken, run) => {
+      if (run.cleanupStatus === "cleanup_requested" && failedCleanupWrites === 0) {
+        failedCleanupWrites += 1;
+        return null;
+      }
+      return updateRunWithFencing(runId, expectedFencingToken, run);
+    };
+
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "finish then retry", endpointId });
+
+    assert.equal(task.status, "completed");
+    assert.equal(failedCleanupWrites, 1);
+    assert.equal(livePort.deletedRefs.length, 0);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
+
+    const events = await services.tasks.listTaskEvents(userId, task.id);
+
+    assert.deepEqual(events.map((event) => event.kind), ["turn_completed"]);
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
   });
 
   it("redacts secret-like Botified error text before surfacing task errors", async () => {
@@ -571,6 +705,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       operations?: string[];
       postResult?: BotifiedPostMessageResult;
       postError?: Error;
+      abortError?: Error;
     } = {}
   ) {}
 
@@ -606,6 +741,9 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
 
   async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {
     this.abortCalls.push({ baseUrl, serviceKey });
+    if (this.options.abortError) {
+      throw this.options.abortError;
+    }
     return { aborted: true };
   }
 }
@@ -624,6 +762,7 @@ class FakeCredentialResolver implements ModelCredentialResolver {
 class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   readonly appliedResources: KubernetesResource[] = [];
   readonly deletedRefs: KubernetesResourceRef[] = [];
+  readonly patchedRefs: KubernetesResourceRef[] = [];
   readonly sleeps: number[] = [];
   readonly sleep = async (ms: number): Promise<void> => {
     this.sleeps.push(ms);
@@ -633,6 +772,7 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
   private readonly operations: string[] | undefined;
   private readonly readiness: PodReadiness[];
   private readonly applyResults: Array<"applied" | "fence_mismatch" | Error>;
+  private resources: KubernetesResource[] = [];
 
   constructor(input: {
     operations?: string[];
@@ -644,26 +784,56 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
     this.applyResults = [...(input.applyResults ?? [])];
   }
 
-  async applyResource(resource: KubernetesResource): Promise<"applied" | "fence_mismatch"> {
+  async listManagedResources(): Promise<KubernetesResource[]> {
+    return this.resources.map((resource) => structuredClone(resource));
+  }
+
+  async applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>): Promise<"applied" | "fence_mismatch"> {
     this.operations?.push(`apply:${resource.kind}`);
-    this.appliedResources.push(structuredClone(resource));
-    if (resource.kind === "Pod") {
-      this.taskId = resource.metadata.labels["agentsmith-lite/task-id"] ?? "";
-    }
     const result = this.applyResults.shift();
     if (result instanceof Error) {
       throw result;
     }
-    return result ?? "applied";
+    if (result === "fence_mismatch" || !hasLabels(resource, expectedLabels)) {
+      return "fence_mismatch";
+    }
+    this.appliedResources.push(structuredClone(resource));
+    this.resources = this.resources.filter((candidate) => !sameRef(candidate, resourceRef(resource)));
+    this.resources.push(structuredClone(resource));
+    if (resource.kind === "Pod") {
+      this.taskId = resource.metadata.labels["agentsmith-lite/task-id"] ?? "";
+    }
+    return "applied";
   }
 
-  async patchLabels(): Promise<"patched" | "not_found" | "fence_mismatch"> {
+  async patchLabels(
+    ref: KubernetesResourceRef,
+    expectedLabels: Record<string, string>,
+    labels: Record<string, string>
+  ): Promise<"patched" | "not_found" | "fence_mismatch"> {
+    this.patchedRefs.push(structuredClone(ref));
+    const resource = this.resources.find((candidate) => sameRef(candidate, ref));
+    if (!resource) {
+      return "not_found";
+    }
+    if (!hasLabels(resource, expectedLabels)) {
+      return "fence_mismatch";
+    }
+    Object.assign(resource.metadata.labels, labels);
     return "patched";
   }
 
-  async deleteResource(ref: KubernetesResourceRef): Promise<"deleted" | "not_found" | "fence_mismatch"> {
+  async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {
     this.operations?.push(`delete:${ref.kind}`);
     this.deletedRefs.push(structuredClone(ref));
+    const resource = this.resources.find((candidate) => sameRef(candidate, ref));
+    if (!resource) {
+      return "not_found";
+    }
+    if (!hasLabels(resource, expectedLabels)) {
+      return "fence_mismatch";
+    }
+    this.resources = this.resources.filter((candidate) => !sameRef(candidate, ref));
     return "deleted";
   }
 
@@ -672,6 +842,31 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
     const result = this.readiness.shift();
     return result ?? "pending";
   }
+}
+
+function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
+  assert.ok(resource.metadata.namespace);
+  assert.ok(
+    resource.kind === "Pod" ||
+      resource.kind === "Service" ||
+      resource.kind === "Secret" ||
+      resource.kind === "ConfigMap" ||
+      resource.kind === "ServiceAccount" ||
+      resource.kind === "NetworkPolicy"
+  );
+  return {
+    kind: resource.kind,
+    namespace: resource.metadata.namespace,
+    name: resource.metadata.name
+  };
+}
+
+function sameRef(resource: KubernetesResource, ref: KubernetesResourceRef): boolean {
+  return resource.kind === ref.kind && resource.metadata.namespace === ref.namespace && resource.metadata.name === ref.name;
+}
+
+function hasLabels(resource: KubernetesResource, expectedLabels: Record<string, string>): boolean {
+  return Object.entries(expectedLabels).every(([key, value]) => resource.metadata.labels[key] === value);
 }
 
 interface SecretResource extends KubernetesResource {

@@ -20,9 +20,11 @@ import type {
   LeaseRecord,
   PostgresJsonDocStore,
   PostgresLeaseStore,
+  PersistedSandboxRunState,
   ProductStore
 } from "../../ports/src/store.js";
 import type { Pool as PgPool, PoolClient } from "pg";
+import { prepareSandboxRunDocument, sandboxRunFromDocument } from "./sandboxRunDocuments.js";
 
 const { Pool } = createRequire(import.meta.url)("pg") as typeof import("pg");
 
@@ -34,6 +36,7 @@ export class PostgresProductStore implements ProductStore {
   readonly observedExternalModelCalls = 0;
   readonly jsonDocs: PostgresJsonDocStore;
   readonly leases: PostgresLeaseStore;
+  readonly sandboxRuns: PostgresSandboxRunStoreImpl;
 
   private readonly pool: PgPool;
 
@@ -41,6 +44,7 @@ export class PostgresProductStore implements ProductStore {
     this.pool = new Pool({ connectionString });
     this.jsonDocs = new PostgresJsonDocStoreImpl(this.pool);
     this.leases = new PostgresLeaseStoreImpl(this.pool);
+    this.sandboxRuns = new PostgresSandboxRunStoreImpl(this.pool);
   }
 
   async close(): Promise<void> {
@@ -327,6 +331,73 @@ class PostgresJsonDocStoreImpl implements PostgresJsonDocStore {
       `delete from postgres_json_docs where collection = $1 and id = $2`,
       [collection, id]
     );
+  }
+}
+
+class PostgresSandboxRunStoreImpl {
+  constructor(private readonly pool: PgPool) {}
+
+  async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
+    const document = prepareSandboxRunDocument(run);
+    await this.pool.query(
+      `insert into postgres_json_docs (collection, id, document, updated_at)
+       values ('sandbox_run_state', $1, $2::jsonb, now())
+       on conflict (collection, id)
+       do update set document = excluded.document, updated_at = now()`,
+      [run.runId, JSON.stringify(document)]
+    );
+    return sandboxRunFromDocument(document);
+  }
+
+  async get(runId: string): Promise<PersistedSandboxRunState | null> {
+    const result = await this.pool.query(
+      `select document from postgres_json_docs where collection = 'sandbox_run_state' and id = $1`,
+      [runId]
+    );
+    const document = result.rows[0]?.document as unknown;
+    return document ? sandboxRunFromDocument(asRecord(document)) : null;
+  }
+
+  async list(): Promise<PersistedSandboxRunState[]> {
+    const result = await this.pool.query(
+      `select document from postgres_json_docs
+       where collection = 'sandbox_run_state'
+       order by id`
+    );
+    return result.rows.map((row: { document: unknown }) => sandboxRunFromDocument(asRecord(row.document)));
+  }
+
+  async listActive(): Promise<PersistedSandboxRunState[]> {
+    const result = await this.pool.query(
+      `select document from postgres_json_docs
+       where collection = 'sandbox_run_state'
+         and coalesce(document->>'cleanupStatus', '') <> 'cleaned'
+         and coalesce(document->>'phase', '') <> 'cleaned'
+       order by id`
+    );
+    return result.rows.map((row: { document: unknown }) => sandboxRunFromDocument(asRecord(row.document)));
+  }
+
+  async updateWithFencing(
+    runId: string,
+    expectedFencingToken: number,
+    run: PersistedSandboxRunState
+  ): Promise<PersistedSandboxRunState | null> {
+    if (run.runId !== runId) {
+      throw new Error("Sandbox run fencing update runId mismatch");
+    }
+    const document = prepareSandboxRunDocument(run);
+    const result = await this.pool.query(
+      `update postgres_json_docs
+       set document = $3::jsonb, updated_at = now()
+       where collection = 'sandbox_run_state'
+         and id = $1
+         and (document->>'fencingToken')::bigint = $2
+       returning document`,
+      [runId, expectedFencingToken, JSON.stringify(document)]
+    );
+    const saved = result.rows[0]?.document as unknown;
+    return saved ? sandboxRunFromDocument(asRecord(saved)) : null;
   }
 }
 
