@@ -1,0 +1,380 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type { KubernetesResource } from "../../packages/contracts/src/api.js";
+import {
+  applySandboxReconcileActions,
+  reconcileSandboxRuns,
+  sandboxIdentityLabels,
+  type SandboxReconcileAction,
+  type SandboxRunState
+} from "../../packages/sandbox-controller/src/reconciler.js";
+import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
+
+describe("sandbox reconciler", () => {
+  it("creates missing run resources, then adopts matching managed resources idempotently", () => {
+    const run = sandboxRun();
+    const first = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    assert.deepEqual(first.actions.map(actionSummary), [
+      "create_resource:Secret:asl-botified-t1",
+      "create_resource:ConfigMap:asl-task-t1-config",
+      "create_resource:Pod:asl-task-t1",
+      "create_resource:Service:asl-task-t1",
+      "store_run_state:run1:running:desired_observed"
+    ]);
+
+    for (const action of first.actions) {
+      if (action.type !== "create_resource") {
+        continue;
+      }
+      assert.deepEqual(pickSandboxLabels(action.resource), sandboxIdentityLabels(run));
+    }
+
+    const applied = applySandboxReconcileActions({
+      observedResources: [],
+      actions: first.actions
+    });
+    const second = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: applied.observedResources,
+      now: new Date("2026-07-04T00:00:01.000Z")
+    });
+
+    assert.deepEqual(second.actions.map(actionSummary), [
+      "adopt_resource:Secret:asl-botified-t1",
+      "adopt_resource:ConfigMap:asl-task-t1-config",
+      "adopt_resource:Pod:asl-task-t1",
+      "adopt_resource:Service:asl-task-t1",
+      "store_run_state:run1:running:desired_observed"
+    ]);
+  });
+
+  it("marks unknown managed resources for cleanup, ignores unowned resources, and preserves desired NetworkPolicy", () => {
+    const run = sandboxRun();
+    const desiredNetworkPolicy = renderedResource(run, "NetworkPolicy");
+    const orphan = observedResource("Pod", "asl-task-orphan", {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1",
+      "agentsmith-lite/project-id": "p1",
+      "agentsmith-lite/task-id": "orphan",
+      "agentsmith-lite/run-id": "orphan-run"
+    });
+    const unowned = observedResource("Pod", "not-ours", {
+      "app.kubernetes.io/name": "someone-else"
+    });
+
+    const plan = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [desiredNetworkPolicy, orphan, unowned],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    assert.deepEqual(plan.actions.filter((action) => action.type === "mark_cleanup").map(actionSummary), [
+      "mark_cleanup:Pod:asl-task-orphan"
+    ]);
+
+    const applied = applySandboxReconcileActions({
+      observedResources: [desiredNetworkPolicy, orphan, unowned],
+      actions: plan.actions
+    });
+    const preserved = applied.observedResources.find((resource) => resource.kind === "NetworkPolicy");
+    const marked = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-orphan");
+    const ignored = applied.observedResources.find((resource) => resource.metadata.name === "not-ours");
+    assert.ok(preserved, "desired NetworkPolicy should not be treated as unknown");
+    assert.equal(marked?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
+    assert.equal(ignored?.metadata.labels["agentsmith-lite/cleanup-status"], undefined);
+  });
+
+  it("deletes stopping resources in pod-service-configmap-secret order with label fencing", () => {
+    const activeRun = sandboxRun();
+    const run = sandboxRun({
+      phase: "stopping",
+      cleanupStatus: "cleanup_requested",
+      expiresAt: "2026-07-04T00:10:00.000Z"
+    });
+    const created = createdResourcesForRun(activeRun);
+
+    const plan = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: created,
+      now: new Date("2026-07-04T00:00:05.000Z")
+    });
+
+    const deletes = plan.actions.filter(isDeleteAction);
+    assert.deepEqual(deletes.map((action) => `${action.kind}:${action.name}`), [
+      "Pod:asl-task-t1",
+      "Service:asl-task-t1",
+      "ConfigMap:asl-task-t1-config",
+      "Secret:asl-botified-t1"
+    ]);
+    for (const action of deletes) {
+      assert.deepEqual(action.labels, sandboxIdentityLabels(run));
+    }
+
+    const fenced = applySandboxReconcileActions({
+      observedResources: created,
+      actions: deletes.map((action) => ({
+        ...action,
+        labels: { ...action.labels, "agentsmith-lite/run-id": "wrong-run" }
+      }))
+    });
+    assert.equal(fenced.observedResources.length, created.length);
+
+    const applied = applySandboxReconcileActions({
+      observedResources: created,
+      actions: plan.actions
+    });
+    assert.equal(applied.observedResources.length, 0);
+
+    const afterDelete = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: applied.observedResources,
+      now: new Date("2026-07-04T00:00:06.000Z")
+    });
+    assert.deepEqual(afterDelete.actions.map(actionSummary), ["store_run_state:run1:cleaned:cleanup_complete"]);
+  });
+
+  it("moves expired and idle-expired runs into cleanup", () => {
+    const created = createdResourcesForRun(sandboxRun());
+    const expired = sandboxRun({
+      expiresAt: "2026-07-03T23:59:59.000Z",
+      idleExpiresAt: "2026-07-04T00:30:00.000Z"
+    });
+    const run2 = sandboxRun({
+      runId: "run2",
+      taskId: "t2",
+      resourceNames: {
+        pod: "asl-task-t2",
+        service: "asl-task-t2",
+        configMap: "asl-task-t2-config",
+        secret: "asl-botified-t2"
+      },
+      serviceKeySecretRef: {
+        name: "asl-botified-t2",
+        key: "BOTIFIED_SERVICE_KEY"
+      },
+      expiresAt: "2026-07-04T00:30:00.000Z",
+      idleExpiresAt: "2026-07-04T00:30:00.000Z"
+    });
+    const idleExpired = sandboxRun({
+      ...run2,
+      idleExpiresAt: "2026-07-03T23:59:59.000Z"
+    });
+    const idleCreated = createdResourcesForRun(run2);
+
+    const expiredPlan = reconcileSandboxRuns({
+      desiredRuns: [expired],
+      observedResources: created,
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    assert.deepEqual(expiredPlan.actions.filter(isDeleteAction).map((action) => `${action.kind}:${action.name}`), [
+      "Pod:asl-task-t1",
+      "Service:asl-task-t1",
+      "ConfigMap:asl-task-t1-config",
+      "Secret:asl-botified-t1"
+    ]);
+    assert.deepEqual(expiredPlan.actions.map(actionSummary), [
+      "delete_resource:Pod:asl-task-t1",
+      "delete_resource:Service:asl-task-t1",
+      "delete_resource:ConfigMap:asl-task-t1-config",
+      "delete_resource:Secret:asl-botified-t1",
+      "store_run_state:run1:expired:cleanup_in_progress"
+    ]);
+    const expiredStore = expiredPlan.actions.find(isStoreAction);
+    assert.equal(expiredStore?.run.phase, "expired");
+    assert.equal(expiredStore?.run.cleanupStatus, "deleting");
+
+    const idlePlan = reconcileSandboxRuns({
+      desiredRuns: [idleExpired],
+      observedResources: idleCreated,
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    assert.deepEqual(idlePlan.actions.filter(isDeleteAction).map((action) => `${action.kind}:${action.name}`), [
+      "Pod:asl-task-t2",
+      "Service:asl-task-t2",
+      "ConfigMap:asl-task-t2-config",
+      "Secret:asl-botified-t2"
+    ]);
+    assert.deepEqual(idlePlan.actions.map(actionSummary), [
+      "delete_resource:Pod:asl-task-t2",
+      "delete_resource:Service:asl-task-t2",
+      "delete_resource:ConfigMap:asl-task-t2-config",
+      "delete_resource:Secret:asl-botified-t2",
+      "store_run_state:run2:expired:cleanup_in_progress"
+    ]);
+    const idleStore = idlePlan.actions.find(isStoreAction);
+    assert.equal(idleStore?.run.phase, "expired");
+    assert.equal(idleStore?.run.cleanupStatus, "deleting");
+  });
+
+  it("marks expired and idle-expired runs cleaned when no matching resources remain", () => {
+    const expired = sandboxRun({
+      expiresAt: "2026-07-03T23:59:59.000Z",
+      idleExpiresAt: "2026-07-04T00:30:00.000Z"
+    });
+    const idleExpired = sandboxRun({
+      runId: "run2",
+      taskId: "t2",
+      resourceNames: {
+        pod: "asl-task-t2",
+        service: "asl-task-t2",
+        configMap: "asl-task-t2-config",
+        secret: "asl-botified-t2"
+      },
+      serviceKeySecretRef: {
+        name: "asl-botified-t2",
+        key: "BOTIFIED_SERVICE_KEY"
+      },
+      expiresAt: "2026-07-04T00:30:00.000Z",
+      idleExpiresAt: "2026-07-03T23:59:59.000Z"
+    });
+
+    const expiredPlan = reconcileSandboxRuns({
+      desiredRuns: [expired],
+      observedResources: [],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    const idlePlan = reconcileSandboxRuns({
+      desiredRuns: [idleExpired],
+      observedResources: [],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    assert.deepEqual(expiredPlan.actions.map(actionSummary), ["store_run_state:run1:cleaned:cleanup_complete"]);
+    assert.deepEqual(idlePlan.actions.map(actionSummary), ["store_run_state:run2:cleaned:cleanup_complete"]);
+    assert.equal(expiredPlan.actions.find(isStoreAction)?.run.cleanupStatus, "cleaned");
+    assert.equal(idlePlan.actions.find(isStoreAction)?.run.cleanupStatus, "cleaned");
+  });
+});
+
+function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
+  return {
+    workspaceId: "w1",
+    projectId: "p1",
+    taskId: "t1",
+    runId: "run1",
+    namespace: "agentsmith",
+    phase: "running",
+    image: "example/botified-runner@sha256:abc",
+    pvcName: "agentsmith-lite-files",
+    projectSubPath: "workspaces/w1/projects/p1",
+    botifiedPort: 3099,
+    resourceNames: {
+      pod: "asl-task-t1",
+      service: "asl-task-t1",
+      configMap: "asl-task-t1-config",
+      secret: "asl-botified-t1"
+    },
+    serviceKeySecretRef: {
+      name: "asl-botified-t1",
+      key: "BOTIFIED_SERVICE_KEY"
+    },
+    directories: {
+      taskHome: "/workspace/project/tasks/t1/home",
+      artifacts: "/workspace/project/tasks/t1/artifacts",
+      botified: "/workspace/project/tasks/t1/botified"
+    },
+    resourceLimits: {
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi"
+    },
+    expiresAt: "2026-07-04T01:00:00.000Z",
+    idleExpiresAt: "2026-07-04T00:30:00.000Z",
+    timelineCursor: "cursor-0",
+    fencingToken: 7,
+    cleanupStatus: "active",
+    createdAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: "2026-07-04T00:00:00.000Z",
+    ...overrides
+  };
+}
+
+function renderedResource(run: SandboxRunState, kind: string): KubernetesResource {
+  const resource = renderSandboxResources({
+    namespace: run.namespace,
+    workspaceId: run.workspaceId,
+    projectId: run.projectId,
+    taskId: run.taskId,
+    runId: run.runId,
+    image: run.image,
+    pvcName: run.pvcName,
+    projectSubPath: run.projectSubPath,
+    botifiedPort: run.botifiedPort,
+    serviceKeySecretName: run.resourceNames.secret,
+    serviceKeySecretKey: run.serviceKeySecretRef.key,
+    cpuRequest: run.resourceLimits.cpuRequest,
+    memoryRequest: run.resourceLimits.memoryRequest,
+    cpuLimit: run.resourceLimits.cpuLimit,
+    memoryLimit: run.resourceLimits.memoryLimit,
+    resourceNames: {
+      pod: run.resourceNames.pod,
+      service: run.resourceNames.service,
+      configMap: run.resourceNames.configMap
+    }
+  }).resources.find((candidate) => candidate.kind === kind);
+  assert.ok(resource, `${kind} should be rendered`);
+  return resource;
+}
+
+function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {
+  return applySandboxReconcileActions({
+    observedResources: [],
+    actions: reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    }).actions
+  }).observedResources;
+}
+
+function observedResource(kind: string, name: string, labels: Record<string, string>): KubernetesResource {
+  return {
+    apiVersion: "v1",
+    kind,
+    metadata: {
+      name,
+      namespace: "agentsmith",
+      labels
+    }
+  };
+}
+
+function actionSummary(action: SandboxReconcileAction): string {
+  switch (action.type) {
+    case "create_resource":
+    case "adopt_resource":
+    case "delete_resource":
+    case "mark_cleanup":
+      return `${action.type}:${action.kind}:${action.name}`;
+    case "store_run_state":
+      return `${action.type}:${action.run.runId}:${action.run.phase}:${action.reason}`;
+  }
+}
+
+function pickSandboxLabels(resource: KubernetesResource): Record<string, string> {
+  return {
+    "agentsmith-lite/managed-by": resource.metadata.labels["agentsmith-lite/managed-by"] ?? "",
+    "agentsmith-lite/workspace-id": resource.metadata.labels["agentsmith-lite/workspace-id"] ?? "",
+    "agentsmith-lite/project-id": resource.metadata.labels["agentsmith-lite/project-id"] ?? "",
+    "agentsmith-lite/task-id": resource.metadata.labels["agentsmith-lite/task-id"] ?? "",
+    "agentsmith-lite/run-id": resource.metadata.labels["agentsmith-lite/run-id"] ?? ""
+  };
+}
+
+function isDeleteAction(
+  action: SandboxReconcileAction
+): action is Extract<SandboxReconcileAction, { type: "delete_resource" }> {
+  return action.type === "delete_resource";
+}
+
+function isStoreAction(
+  action: SandboxReconcileAction
+): action is Extract<SandboxReconcileAction, { type: "store_run_state" }> {
+  return action.type === "store_run_state";
+}

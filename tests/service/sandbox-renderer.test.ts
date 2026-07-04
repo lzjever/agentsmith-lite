@@ -23,10 +23,20 @@ describe("sandbox manifest renderer", () => {
     });
 
     const pod = rendered.resources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
-    const role = rendered.resources.find((resource) => resource.kind === "Role") as RoleResource | undefined;
+    const serviceAccount = rendered.resources.find((resource) => resource.kind === "ServiceAccount") as
+      | ServiceAccountResource
+      | undefined;
     const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy");
 
-    assert.equal(pod?.metadata.labels["agentsmith-lite/task-id"], "t1");
+    for (const resource of rendered.resources) {
+      assert.equal(resource.metadata.labels["agentsmith-lite/managed-by"], "agentsmith-lite");
+      assert.equal(resource.metadata.labels["agentsmith-lite/workspace-id"], "w1");
+      assert.equal(resource.metadata.labels["agentsmith-lite/project-id"], "p1");
+      assert.equal(resource.metadata.labels["agentsmith-lite/task-id"], "t1");
+      assert.equal(resource.metadata.labels["agentsmith-lite/run-id"], "r1");
+    }
+
+    assert.equal(serviceAccount?.automountServiceAccountToken, false);
     assert.equal(pod?.spec.automountServiceAccountToken, false);
     assert.equal(pod?.spec.hostNetwork, false);
     assert.equal(pod?.spec.securityContext.runAsNonRoot, true);
@@ -34,14 +44,21 @@ describe("sandbox manifest renderer", () => {
     const projectMount = container?.volumeMounts[0];
     assert.ok(container);
     assert.ok(projectMount);
+    assert.equal(container.resources.requests.cpu, "250m");
+    assert.equal(container.resources.requests.memory, "512Mi");
+    assert.equal(container.resources.limits.cpu, "1");
+    assert.equal(container.resources.limits.memory, "1Gi");
     assert.equal(container.securityContext.allowPrivilegeEscalation, false);
+    assert.notEqual(container.securityContext.privileged, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
 
-    const ruleResources = JSON.stringify(role?.rules ?? []);
-    assert.ok(!ruleResources.includes("pods/exec"));
-    assert.ok(!ruleResources.includes("persistentvolumes"));
+    const serialized = JSON.stringify(rendered.resources);
+    assert.ok(!serialized.includes("pods/exec"));
+    assert.ok(!serialized.includes("persistentvolumes"));
+    assert.ok(!serialized.includes("hostPath"));
+    assert.ok(!serialized.includes('"privileged":true'));
   });
 });
 
@@ -51,8 +68,13 @@ interface PodResource extends KubernetesResource {
     hostNetwork: boolean;
     securityContext: { runAsNonRoot: boolean };
     containers: Array<{
+      resources: {
+        requests: { cpu: string; memory: string };
+        limits: { cpu: string; memory: string };
+      };
       securityContext: {
         allowPrivilegeEscalation: boolean;
+        privileged?: boolean;
         capabilities: { drop: string[] };
       };
       volumeMounts: Array<{ subPath: string }>;
@@ -60,6 +82,6 @@ interface PodResource extends KubernetesResource {
   };
 }
 
-interface RoleResource extends KubernetesResource {
-  rules: Array<Record<string, unknown>>;
+interface ServiceAccountResource extends KubernetesResource {
+  automountServiceAccountToken: boolean;
 }

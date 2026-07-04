@@ -1,4 +1,11 @@
 import type { KubernetesResource, SandboxRenderResult } from "../../contracts/src/api.js";
+import { sandboxResourceLabels } from "./labels.js";
+
+export interface SandboxResourceNameOverrides {
+  pod?: string;
+  service?: string;
+  configMap?: string;
+}
 
 export interface SandboxRenderInput {
   namespace: string;
@@ -11,17 +18,21 @@ export interface SandboxRenderInput {
   projectSubPath: string;
   botifiedPort: number;
   serviceKeySecretName: string;
+  serviceKeySecretKey?: string;
   cpuRequest: string;
   memoryRequest: string;
   cpuLimit: string;
   memoryLimit: string;
+  resourceNames?: SandboxResourceNameOverrides;
 }
 
 export function renderSandboxResources(input: SandboxRenderInput): SandboxRenderResult {
-  const labels = sandboxLabels(input);
+  const labels = sandboxResourceLabels(input);
   const serviceAccountName = `asl-task-${input.taskId}`;
-  const configName = `asl-task-${input.taskId}-config`;
-  const serviceName = `asl-task-${input.taskId}`;
+  const configName = input.resourceNames?.configMap ?? `asl-task-${input.taskId}-config`;
+  const podName = input.resourceNames?.pod ?? `asl-task-${input.taskId}`;
+  const serviceName = input.resourceNames?.service ?? `asl-task-${input.taskId}`;
+  const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
 
   const resources: KubernetesResource[] = [
     {
@@ -44,7 +55,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       },
       type: "Opaque",
       stringData: {
-        BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>"
+        [serviceKeySecretKey]: "<redacted-generated-per-task>"
       }
     },
     {
@@ -63,7 +74,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       apiVersion: "v1",
       kind: "Pod",
       metadata: {
-        name: `asl-task-${input.taskId}`,
+        name: podName,
         namespace: input.namespace,
         labels
       },
@@ -94,7 +105,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 valueFrom: {
                   secretKeyRef: {
                     name: input.serviceKeySecretName,
-                    key: "BOTIFIED_SERVICE_KEY"
+                    key: serviceKeySecretKey
                   }
                 }
               }
@@ -167,22 +178,6 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       }
     },
     {
-      apiVersion: "rbac.authorization.k8s.io/v1",
-      kind: "Role",
-      metadata: {
-        name: "agentsmith-lite-api-sandbox",
-        namespace: input.namespace,
-        labels: appLabels()
-      },
-      rules: [
-        {
-          apiGroups: [""],
-          resources: ["pods", "services", "secrets", "configmaps"],
-          verbs: ["create", "get", "list", "watch", "delete", "patch"]
-        }
-      ]
-    },
-    {
       apiVersion: "networking.k8s.io/v1",
       kind: "NetworkPolicy",
       metadata: {
@@ -244,24 +239,3 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
     resources
   };
 }
-
-function sandboxLabels(input: Pick<SandboxRenderInput, "workspaceId" | "projectId" | "taskId" | "runId">): Record<string, string> {
-  return {
-    ...appLabels(),
-    "app.kubernetes.io/component": "sandbox",
-    "agentsmith-lite/workspace-id": input.workspaceId,
-    "agentsmith-lite/project-id": input.projectId,
-    "agentsmith-lite/task-id": input.taskId,
-    "agentsmith-lite/run-id": input.runId
-  };
-}
-
-function appLabels(): Record<string, string> {
-  return {
-    "app.kubernetes.io/name": "agentsmith-lite",
-    "app.kubernetes.io/part-of": "agentsmith-lite",
-    "app.kubernetes.io/managed-by": "agentsmith-lite",
-    "agentsmith-lite/managed-by": "agentsmith-lite"
-  };
-}
-
