@@ -81,7 +81,7 @@ describe("api smoke", () => {
     assert.equal(listedFiles.entries.some((entry: { path: string }) => entry.path === "files/readme.md"), true);
     assert.deepEqual(downloadedFile, { path: "files/readme.md", content: "hello from API smoke" });
     assert.deepEqual(deletedFile, { deleted: true });
-    assert.equal(task.status, "starting");
+    assert.equal(task.status, "running");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);
 
     const traversal = await fetch(baseUrl + `/api/projects/${project.id}/files`, {

@@ -23,6 +23,8 @@ Current product API routes:
 - `POST /api/projects/{projectId}/files/validate`
 - `GET /api/projects/{projectId}/tasks`
 - `POST /api/projects/{projectId}/tasks`
+- `GET /api/tasks/{taskId}/events`
+- `GET /api/tasks/{taskId}/artifacts`
 - `POST /api/tasks/{taskId}/cancel`
 
 Mutating routes require the session cookie and `x-csrf-token`.

@@ -5,8 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../application/src/factory.js";
+import type { BotifiedTaskAddressInput } from "../../application/src/taskService.js";
 import type { ChatMessage, CreateEndpointInput, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
+import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 
 export interface ApiServerOptions {
   port: number;
@@ -16,6 +18,9 @@ export interface ApiServerOptions {
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
+  botifiedClient?: BotifiedRuntimeHttpClient;
+  botifiedServiceKeyFactory?: () => string | undefined;
+  botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
 }
 
 export interface RunningApiServer {
@@ -33,7 +38,10 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.sessionSecret ? { sessionSecret: options.sessionSecret } : {}),
     ...(options.namespace ? { namespace: options.namespace } : {}),
     ...(options.pvcName ? { pvcName: options.pvcName } : {}),
-    ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {})
+    ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {}),
+    ...(options.botifiedClient ? { botifiedClient: options.botifiedClient } : {}),
+    ...(options.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: options.botifiedServiceKeyFactory } : {}),
+    ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {})
   };
   const services = createApplicationServices(serviceOptions);
 
@@ -184,8 +192,18 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
 
   if (segments[0] === "api" && segments[1] === "tasks" && segments[2]) {
     const taskId = segments[2];
+    if (segments[3] === "events" && method === "GET") {
+      return sendJson(res, 200, await services.tasks.listTaskEvents(user.id, taskId));
+    }
+    if (segments[3] === "artifacts" && method === "GET") {
+      return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId));
+    }
     if (segments[3] === "cancel" && method === "POST") {
-      return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId));
+      try {
+        return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId));
+      } catch (error) {
+        return handleTaskRouteError(res, error);
+      }
     }
   }
 
@@ -252,6 +270,32 @@ function handleError(res: ServerResponse, error: unknown): void {
   const statusCode = error instanceof ProductError ? error.statusCode : 500;
   const message = error instanceof Error ? error.message : "Internal server error";
   sendJson(res, statusCode, { error: message });
+}
+
+function handleTaskRouteError(res: ServerResponse, error: unknown): void {
+  if (isStructuredTaskError(error)) {
+    return sendJson(res, error.statusCode, {
+      error: {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        ...error.details
+      }
+    });
+  }
+  return handleError(res, error);
+}
+
+function isStructuredTaskError(error: unknown): error is ProductError & {
+  code: string;
+  retryable: boolean;
+  details: Record<string, unknown>;
+} {
+  return error instanceof ProductError &&
+    typeof (error as { code?: unknown }).code === "string" &&
+    typeof (error as { retryable?: unknown }).retryable === "boolean" &&
+    typeof (error as { details?: unknown }).details === "object" &&
+    (error as { details?: unknown }).details !== null;
 }
 
 function getCookie(req: IncomingMessage, name: string): string | null {

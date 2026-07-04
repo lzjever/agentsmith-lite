@@ -46,3 +46,11 @@ The HTTP adapter sends `Authorization: Bearer <serviceKey>` to those endpoints a
 Timeline responses are Botified NDJSON. Blank lines are heartbeat frames and are ignored by the adapter. A `410` response with `error.code = "stale_cursor"` is converted into a structured reset result after fetching `GET /v1/timeline?tail=1`, so callers can replace local timeline state instead of treating the cursor as a generic fatal error.
 
 Non-2xx responses raise `BotifiedHttpError` with the HTTP status, Botified error code, retryability, timeline cursor when present, history boundary when present, and the original response body.
+
+## Task Service Orchestration
+
+P3 wires task creation to the Botified port without connecting to real Kubernetes or a real Botified network endpoint. `TaskService` generates a per-task service key, stores the server-only runtime state in the `sandbox_runtime_state` JSON document collection, creates the dry-run sandbox resources, sends the user prompt through the injected Botified client, and projects returned timeline frames into product task events/artifacts.
+
+Timeline reads reuse the shared projection rules in `packages/botified-runtime`. Existing Botified sequence numbers are passed back into the projection so repeated reads are idempotent, and the latest cursor is stored in the runtime state for subsequent `GET /api/tasks/{taskId}/events` and `GET /api/tasks/{taskId}/artifacts` calls.
+
+`POST /api/tasks/{taskId}/cancel` calls the Botified abort port with the stored service key before the task is marked `stopping`. Botified abort failures are returned from the task API as structured errors containing `code`, `message`, `retryable`, and cursor details when Botified supplies them.
