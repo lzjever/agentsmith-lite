@@ -18,8 +18,17 @@ import type {
   PostgresLeaseStore,
   ProductStore
 } from "../../ports/src/store.js";
+import { createPostgresProductStore } from "./postgresProductStore.js";
 
-export function createInMemoryProductStore(): InMemoryProductStore {
+export function createInMemoryProductStore(): ProductStore {
+  const connectionString = process.env.POSTGRES_APP_URL?.trim();
+  if (connectionString) {
+    return createPostgresProductStore(connectionString);
+  }
+  return createLocalInMemoryProductStore();
+}
+
+export function createLocalInMemoryProductStore(): InMemoryProductStore {
   return new InMemoryProductStore();
 }
 
@@ -233,4 +242,3 @@ function publicUser(user: StoredUser): User {
 function clone<T>(value: T): T {
   return value === null || value === undefined ? value : structuredClone(value);
 }
-

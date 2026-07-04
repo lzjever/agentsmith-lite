@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { POSTGRES_MIGRATIONS } from "../../packages/adapters-postgres/src/migrations.js";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
 
 describe("postgres adapter ports", () => {
   it("exposes JSONB document and fenced lease semantics without Redis or Mongo", async () => {
@@ -26,8 +26,10 @@ describe("postgres adapter ports", () => {
     assert.equal(current, true);
   });
 
-  it("keeps product schema migrations separate from substrate and JuiceFS metadata", () => {
-    const migrationSql = POSTGRES_MIGRATIONS.map((migration) => migration.sql).join("\n");
+  it("keeps product schema migrations sourced from SQL files and separate from substrate metadata", async () => {
+    const migrations = await readPostgresMigrations();
+    const migrationSql = migrations.map((migration) => migration.sql).join("\n");
+    assert.deepEqual(migrations.map((migration) => migration.id), ["001_initial_product_schema"]);
     assert.match(migrationSql, /create table if not exists workspaces/i);
     assert.match(migrationSql, /create table if not exists agent_tasks/i);
     assert.doesNotMatch(migrationSql, /juicefs/i);
@@ -35,4 +37,3 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migrationSql, /mongo/i);
   });
 });
-
