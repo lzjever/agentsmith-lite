@@ -1,6 +1,6 @@
 # Sandbox Controller
 
-P0 renders one sandbox pod per active task in dry-run form and now has a first-pass fake reconciler for run resource state. It still does not connect to a real Kubernetes API, start pods, exec into pods, or run Botified inside the sandbox.
+P0 renders one sandbox pod per active task in dry-run form and now has a first-pass fake reconciler for run resource state plus a tested in-cluster Kubernetes port/action applier. TaskService live wiring, materialization, readiness, pod startup, and Botified-in-sandbox execution are still the next slice.
 
 ## Run State
 
@@ -15,7 +15,7 @@ Desired sandbox state is represented in this slice by the pure `SandboxRunState`
 - expiry and idle expiry timestamps.
 - timeline cursor and fencing token for future store integration.
 
-This slice does not add a database table, store port, or real Kubernetes client. State transitions are emitted as idempotent `store_run_state` actions so a later persistence layer can fence writes with `run_id + fencing_token`.
+This slice does not add a database table or store port. State transitions are emitted as idempotent `store_run_state` actions so a later persistence layer can fence writes with `run_id + fencing_token`.
 
 ## Rendered Resources
 
@@ -38,16 +38,18 @@ Every per-run resource carries immutable identity labels:
 
 The API Role remains in app manifests, not per-run sandbox output. It intentionally excludes terminal exec subresources and cluster-wide volume management. App manifests also render ResourceQuota and LimitRange.
 
-## Fake Reconciler
+## Reconciler And Appliers
 
 `reconcileSandboxRuns` takes desired runs plus observed fake Kubernetes resources and emits deterministic actions:
 
-- create missing core resources: Secret, ConfigMap, Pod, Service.
+- create missing lifecycle resources: Secret, ConfigMap, ServiceAccount, NetworkPolicy, Service, Pod.
 - adopt observed resources whose kind/name/namespace and immutable labels match the desired run.
 - mark unknown Agentsmith-managed resources for cleanup while ignoring unowned resources.
-- delete stopping, expired, or idle-expired resources in Pod -> Service -> ConfigMap -> Secret order.
+- delete stopping, expired, or idle-expired resources in Pod -> Service -> NetworkPolicy -> ConfigMap -> Secret -> ServiceAccount order.
 - emit idempotent store-state actions for observed desired state and cleanup transitions.
 
-The fake reconciler P0 intentionally manages only the core per-run resources: Secret, ConfigMap, Pod, and Service. ServiceAccount and NetworkPolicy are still rendered and protected by immutable labels, but they are not part of the fake reconciler create/delete order in this slice.
-
 `applySandboxReconcileActions` is an in-memory fake applier for tests. It only mutates resources when the action labels match the resource labels, which preserves the same label fence the real Kubernetes client must use later.
+
+`SandboxKubernetesPort` is an in-cluster-only Kubernetes HTTP port for the same six lifecycle resources. It lists by `agentsmith-lite/managed-by=agentsmith-lite`, applies with server-side apply, patches cleanup labels with JSON Patch `test` fencing, deletes with UID preconditions when present, and reads Pod readiness with the same immutable label fence. It intentionally has no exec/log/attach/port-forward, PVC/PV, CRD/operator, watch loop, or governance-gate surface.
+
+`applySandboxReconcileActionsToKubernetes` maps create/delete/mark-cleanup actions to that port. Adopt and store-state actions remain no-op for live Kubernetes mutation.

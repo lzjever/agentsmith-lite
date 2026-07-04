@@ -132,7 +132,12 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       rules: [
         {
           apiGroups: [""],
-          resources: ["pods", "services", "secrets", "configmaps"],
+          resources: ["pods", "services", "secrets", "configmaps", "serviceaccounts"],
+          verbs: ["create", "get", "list", "watch", "delete", "patch"]
+        },
+        {
+          apiGroups: ["networking.k8s.io"],
+          resources: ["networkpolicies"],
           verbs: ["create", "get", "list", "watch", "delete", "patch"]
         }
       ]

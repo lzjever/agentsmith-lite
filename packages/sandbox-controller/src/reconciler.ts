@@ -10,7 +10,7 @@ import { renderSandboxResources } from "./manifestRenderer.js";
 
 export { sandboxIdentityLabels } from "./labels.js";
 
-export type SandboxCoreResourceKind = "Secret" | "ConfigMap" | "Pod" | "Service";
+export type SandboxCoreResourceKind = "Secret" | "ConfigMap" | "ServiceAccount" | "NetworkPolicy" | "Service" | "Pod";
 export type SandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
 export type SandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
 
@@ -19,6 +19,8 @@ export interface SandboxRunResourceNames {
   service: string;
   configMap: string;
   secret: string;
+  serviceAccount?: string;
+  networkPolicy?: string;
 }
 
 export interface SandboxServiceKeySecretRef {
@@ -118,8 +120,22 @@ export interface ApplySandboxReconcileActionsResult {
   storedRuns: SandboxRunState[];
 }
 
-const CREATE_ORDER: readonly SandboxCoreResourceKind[] = ["Secret", "ConfigMap", "Pod", "Service"];
-const DELETE_ORDER: readonly SandboxCoreResourceKind[] = ["Pod", "Service", "ConfigMap", "Secret"];
+const CREATE_ORDER: readonly SandboxCoreResourceKind[] = [
+  "Secret",
+  "ConfigMap",
+  "ServiceAccount",
+  "NetworkPolicy",
+  "Service",
+  "Pod"
+];
+const DELETE_ORDER: readonly SandboxCoreResourceKind[] = [
+  "Pod",
+  "Service",
+  "NetworkPolicy",
+  "ConfigMap",
+  "Secret",
+  "ServiceAccount"
+];
 
 export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxReconcileResult {
   const actions: SandboxReconcileAction[] = [];
@@ -181,11 +197,15 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
     if (belongsToDesiredRun && desiredKnownResourceKeys.has(resourceKey(resource))) {
       continue;
     }
+    const labels = resourceIdentityLabels(resource);
+    if (!labels) {
+      continue;
+    }
     actions.push({
       type: "mark_cleanup",
       kind: resource.kind,
       name: resource.metadata.name,
-      labels: structuredClone(resource.metadata.labels),
+      labels,
       resource: structuredClone(resource),
       reason: "unknown_managed_resource"
     });
@@ -282,6 +302,13 @@ function renderSandboxRunCoreResources(run: SandboxRunState): KubernetesResource
 }
 
 function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResource[] {
+  const resourceNames = {
+    pod: run.resourceNames.pod,
+    service: run.resourceNames.service,
+    configMap: run.resourceNames.configMap,
+    ...(run.resourceNames.serviceAccount ? { serviceAccount: run.resourceNames.serviceAccount } : {}),
+    ...(run.resourceNames.networkPolicy ? { networkPolicy: run.resourceNames.networkPolicy } : {})
+  };
   return renderSandboxResources({
     namespace: run.namespace,
     workspaceId: run.workspaceId,
@@ -298,11 +325,7 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     memoryRequest: run.resourceLimits.memoryRequest,
     cpuLimit: run.resourceLimits.cpuLimit,
     memoryLimit: run.resourceLimits.memoryLimit,
-    resourceNames: {
-      pod: run.resourceNames.pod,
-      service: run.resourceNames.service,
-      configMap: run.resourceNames.configMap
-    }
+    resourceNames
   }).resources;
 }
 
@@ -312,6 +335,10 @@ function expectedCoreResourceName(run: SandboxRunState, kind: SandboxCoreResourc
       return run.resourceNames.secret;
     case "ConfigMap":
       return run.resourceNames.configMap;
+    case "ServiceAccount":
+      return run.resourceNames.serviceAccount ?? `asl-task-${run.taskId}`;
+    case "NetworkPolicy":
+      return run.resourceNames.networkPolicy ?? `asl-task-${run.taskId}`;
     case "Pod":
       return run.resourceNames.pod;
     case "Service":
@@ -379,6 +406,21 @@ function hasLabels(resource: KubernetesResource, labels: Record<string, string>)
   return Object.entries(labels).every(([key, value]) => resource.metadata.labels[key] === value);
 }
 
+function resourceIdentityLabels(resource: KubernetesResource): Record<string, string> | null {
+  const labels = resource.metadata.labels;
+  const identity = {
+    [SANDBOX_LABEL_KEYS.managedBy]: labels[SANDBOX_LABEL_KEYS.managedBy],
+    [SANDBOX_LABEL_KEYS.workspaceId]: labels[SANDBOX_LABEL_KEYS.workspaceId],
+    [SANDBOX_LABEL_KEYS.projectId]: labels[SANDBOX_LABEL_KEYS.projectId],
+    [SANDBOX_LABEL_KEYS.taskId]: labels[SANDBOX_LABEL_KEYS.taskId],
+    [SANDBOX_LABEL_KEYS.runId]: labels[SANDBOX_LABEL_KEYS.runId]
+  };
+  if (Object.values(identity).some((value) => typeof value !== "string" || value.length === 0)) {
+    return null;
+  }
+  return identity as Record<string, string>;
+}
+
 function sameResource(left: KubernetesResource, right: KubernetesResource): boolean {
   return resourceKey(left) === resourceKey(right);
 }
@@ -411,7 +453,14 @@ function markResourceForCleanup(
 }
 
 function asCoreKind(kind: string): SandboxCoreResourceKind {
-  if (kind === "Secret" || kind === "ConfigMap" || kind === "Pod" || kind === "Service") {
+  if (
+    kind === "Secret" ||
+    kind === "ConfigMap" ||
+    kind === "ServiceAccount" ||
+    kind === "NetworkPolicy" ||
+    kind === "Service" ||
+    kind === "Pod"
+  ) {
     return kind;
   }
   throw new Error(`Unsupported sandbox core resource kind: ${kind}`);

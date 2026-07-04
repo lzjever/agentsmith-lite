@@ -49,4 +49,63 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
   });
+
+  it("grants the API only namespace-scoped sandbox lifecycle resources", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const role = manifests.find((manifest) => manifest.kind === "Role" && manifest.metadata.name === "agentsmith-lite-api-sandbox") as
+      | RoleResource
+      | undefined;
+
+    assert.ok(role, "API sandbox Role should be rendered");
+    assert.ok(
+      role.rules.some(
+        (rule) =>
+          rule.apiGroups.length === 1 &&
+          rule.apiGroups[0] === "" &&
+          ["pods", "services", "secrets", "configmaps", "serviceaccounts"].every((resource) => rule.resources.includes(resource))
+      )
+    );
+    assert.ok(
+      role.rules.some(
+        (rule) =>
+          rule.apiGroups.includes("networking.k8s.io") &&
+          rule.resources.includes("networkpolicies") &&
+          ["create", "get", "list", "delete", "patch"].every((verb) => rule.verbs.includes(verb))
+      )
+    );
+
+    const resources = role.rules.flatMap((rule) => rule.resources);
+    for (const forbidden of [
+      "pods/exec",
+      "pods/log",
+      "pods/attach",
+      "pods/portforward",
+      "persistentvolumes",
+      "persistentvolumeclaims",
+      "storageclasses",
+      "nodes",
+      "namespaces",
+      "clusterroles",
+      "clusterrolebindings"
+    ]) {
+      assert.equal(resources.includes(forbidden), false, `${forbidden} must not be granted`);
+    }
+  });
 });
+
+interface RoleResource {
+  kind: "Role";
+  metadata: {
+    name: string;
+  };
+  rules: Array<{
+    apiGroups: string[];
+    resources: string[];
+    verbs: string[];
+  }>;
+}

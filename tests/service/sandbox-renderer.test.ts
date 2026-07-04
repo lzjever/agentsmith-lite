@@ -27,6 +27,16 @@ describe("sandbox manifest renderer", () => {
       | ServiceAccountResource
       | undefined;
     const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy");
+    const secret = rendered.resources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
+
+    assert.deepEqual(rendered.resources.map((resource) => resource.kind), [
+      "ServiceAccount",
+      "Secret",
+      "ConfigMap",
+      "Pod",
+      "Service",
+      "NetworkPolicy"
+    ]);
 
     for (const resource of rendered.resources) {
       assert.equal(resource.metadata.labels["agentsmith-lite/managed-by"], "agentsmith-lite");
@@ -53,9 +63,14 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
+    assert.deepEqual(secret?.stringData, { BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>" });
 
     const serialized = JSON.stringify(rendered.resources);
     assert.ok(!serialized.includes("pods/exec"));
+    assert.ok(!serialized.includes("pods/log"));
+    assert.ok(!serialized.includes("pods/attach"));
+    assert.ok(!serialized.includes("pods/portforward"));
+    assert.ok(!serialized.includes("persistentvolumeclaims"));
     assert.ok(!serialized.includes("persistentvolumes"));
     assert.ok(!serialized.includes("hostPath"));
     assert.ok(!serialized.includes('"privileged":true'));
@@ -84,4 +99,8 @@ interface PodResource extends KubernetesResource {
 
 interface ServiceAccountResource extends KubernetesResource {
   automountServiceAccountToken: boolean;
+}
+
+interface SecretResource extends KubernetesResource {
+  stringData: Record<string, string>;
 }

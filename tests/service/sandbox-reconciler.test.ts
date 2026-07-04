@@ -22,8 +22,10 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(first.actions.map(actionSummary), [
       "create_resource:Secret:asl-botified-t1",
       "create_resource:ConfigMap:asl-task-t1-config",
-      "create_resource:Pod:asl-task-t1",
+      "create_resource:ServiceAccount:asl-task-t1",
+      "create_resource:NetworkPolicy:asl-task-t1",
       "create_resource:Service:asl-task-t1",
+      "create_resource:Pod:asl-task-t1",
       "store_run_state:run1:running:desired_observed"
     ]);
 
@@ -47,15 +49,31 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(second.actions.map(actionSummary), [
       "adopt_resource:Secret:asl-botified-t1",
       "adopt_resource:ConfigMap:asl-task-t1-config",
-      "adopt_resource:Pod:asl-task-t1",
+      "adopt_resource:ServiceAccount:asl-task-t1",
+      "adopt_resource:NetworkPolicy:asl-task-t1",
       "adopt_resource:Service:asl-task-t1",
+      "adopt_resource:Pod:asl-task-t1",
       "store_run_state:run1:running:desired_observed"
     ]);
   });
 
-  it("marks unknown managed resources for cleanup, ignores unowned resources, and preserves desired NetworkPolicy", () => {
+  it("marks unknown managed lifecycle resources for cleanup and ignores unowned resources", () => {
     const run = sandboxRun();
     const desiredNetworkPolicy = renderedResource(run, "NetworkPolicy");
+    const unknownServiceAccount = observedResource("ServiceAccount", "asl-task-old", {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1",
+      "agentsmith-lite/project-id": "p1",
+      "agentsmith-lite/task-id": "old",
+      "agentsmith-lite/run-id": "old-run"
+    });
+    const unknownNetworkPolicy = observedResource("NetworkPolicy", "asl-task-old", {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1",
+      "agentsmith-lite/project-id": "p1",
+      "agentsmith-lite/task-id": "old",
+      "agentsmith-lite/run-id": "old-run"
+    });
     const orphan = observedResource("Pod", "asl-task-orphan", {
       "agentsmith-lite/managed-by": "agentsmith-lite",
       "agentsmith-lite/workspace-id": "w1",
@@ -69,27 +87,64 @@ describe("sandbox reconciler", () => {
 
     const plan = reconcileSandboxRuns({
       desiredRuns: [run],
-      observedResources: [desiredNetworkPolicy, orphan, unowned],
+      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, unowned],
       now: new Date("2026-07-04T00:00:00.000Z")
     });
 
     assert.deepEqual(plan.actions.filter((action) => action.type === "mark_cleanup").map(actionSummary), [
+      "mark_cleanup:ServiceAccount:asl-task-old",
+      "mark_cleanup:NetworkPolicy:asl-task-old",
       "mark_cleanup:Pod:asl-task-orphan"
     ]);
 
     const applied = applySandboxReconcileActions({
-      observedResources: [desiredNetworkPolicy, orphan, unowned],
+      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, unowned],
       actions: plan.actions
     });
     const preserved = applied.observedResources.find((resource) => resource.kind === "NetworkPolicy");
+    const markedServiceAccount = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-old" && resource.kind === "ServiceAccount");
+    const markedNetworkPolicy = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-old" && resource.kind === "NetworkPolicy");
     const marked = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-orphan");
     const ignored = applied.observedResources.find((resource) => resource.metadata.name === "not-ours");
     assert.ok(preserved, "desired NetworkPolicy should not be treated as unknown");
+    assert.equal(markedServiceAccount?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
+    assert.equal(markedNetworkPolicy?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
     assert.equal(marked?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
     assert.equal(ignored?.metadata.labels["agentsmith-lite/cleanup-status"], undefined);
   });
 
-  it("deletes stopping resources in pod-service-configmap-secret order with label fencing", () => {
+  it("does not adopt or delete resources whose identity labels do not fully match", () => {
+    const run = sandboxRun();
+    const mismatchedPod = renderedResource(run, "Pod");
+    mismatchedPod.metadata.labels["agentsmith-lite/run-id"] = "other-run";
+
+    const activePlan = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [mismatchedPod],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    assert.equal(
+      activePlan.actions.some((action) => action.type === "adopt_resource" && action.kind === "Pod"),
+      false
+    );
+    assert.ok(
+      activePlan.actions.some((action) => action.type === "create_resource" && action.kind === "Pod"),
+      "label mismatch should create the expected fenced Pod instead of adopting"
+    );
+
+    const stopping = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    const cleanupPlan = reconcileSandboxRuns({
+      desiredRuns: [stopping],
+      observedResources: [mismatchedPod],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    assert.equal(
+      cleanupPlan.actions.some((action) => action.type === "delete_resource" && action.kind === "Pod"),
+      false
+    );
+  });
+
+  it("deletes stopping resources in pod-service-networkpolicy-configmap-secret-serviceaccount order with label fencing", () => {
     const activeRun = sandboxRun();
     const run = sandboxRun({
       phase: "stopping",
@@ -108,8 +163,10 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(deletes.map((action) => `${action.kind}:${action.name}`), [
       "Pod:asl-task-t1",
       "Service:asl-task-t1",
+      "NetworkPolicy:asl-task-t1",
       "ConfigMap:asl-task-t1-config",
-      "Secret:asl-botified-t1"
+      "Secret:asl-botified-t1",
+      "ServiceAccount:asl-task-t1"
     ]);
     for (const action of deletes) {
       assert.deepEqual(action.labels, sandboxIdentityLabels(run));
@@ -174,14 +231,18 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(expiredPlan.actions.filter(isDeleteAction).map((action) => `${action.kind}:${action.name}`), [
       "Pod:asl-task-t1",
       "Service:asl-task-t1",
+      "NetworkPolicy:asl-task-t1",
       "ConfigMap:asl-task-t1-config",
-      "Secret:asl-botified-t1"
+      "Secret:asl-botified-t1",
+      "ServiceAccount:asl-task-t1"
     ]);
     assert.deepEqual(expiredPlan.actions.map(actionSummary), [
       "delete_resource:Pod:asl-task-t1",
       "delete_resource:Service:asl-task-t1",
+      "delete_resource:NetworkPolicy:asl-task-t1",
       "delete_resource:ConfigMap:asl-task-t1-config",
       "delete_resource:Secret:asl-botified-t1",
+      "delete_resource:ServiceAccount:asl-task-t1",
       "store_run_state:run1:expired:cleanup_in_progress"
     ]);
     const expiredStore = expiredPlan.actions.find(isStoreAction);
@@ -196,14 +257,18 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(idlePlan.actions.filter(isDeleteAction).map((action) => `${action.kind}:${action.name}`), [
       "Pod:asl-task-t2",
       "Service:asl-task-t2",
+      "NetworkPolicy:asl-task-t2",
       "ConfigMap:asl-task-t2-config",
-      "Secret:asl-botified-t2"
+      "Secret:asl-botified-t2",
+      "ServiceAccount:asl-task-t2"
     ]);
     assert.deepEqual(idlePlan.actions.map(actionSummary), [
       "delete_resource:Pod:asl-task-t2",
       "delete_resource:Service:asl-task-t2",
+      "delete_resource:NetworkPolicy:asl-task-t2",
       "delete_resource:ConfigMap:asl-task-t2-config",
       "delete_resource:Secret:asl-botified-t2",
+      "delete_resource:ServiceAccount:asl-task-t2",
       "store_run_state:run2:expired:cleanup_in_progress"
     ]);
     const idleStore = idlePlan.actions.find(isStoreAction);

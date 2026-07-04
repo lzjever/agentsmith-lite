@@ -5,6 +5,8 @@ export interface SandboxResourceNameOverrides {
   pod?: string;
   service?: string;
   configMap?: string;
+  serviceAccount?: string;
+  networkPolicy?: string;
 }
 
 export interface SandboxRenderInput {
@@ -28,7 +30,8 @@ export interface SandboxRenderInput {
 
 export function renderSandboxResources(input: SandboxRenderInput): SandboxRenderResult {
   const labels = sandboxResourceLabels(input);
-  const serviceAccountName = `asl-task-${input.taskId}`;
+  const serviceAccountName = input.resourceNames?.serviceAccount ?? `asl-task-${input.taskId}`;
+  const networkPolicyName = input.resourceNames?.networkPolicy ?? `asl-task-${input.taskId}`;
   const configName = input.resourceNames?.configMap ?? `asl-task-${input.taskId}-config`;
   const podName = input.resourceNames?.pod ?? `asl-task-${input.taskId}`;
   const serviceName = input.resourceNames?.service ?? `asl-task-${input.taskId}`;
@@ -181,7 +184,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       apiVersion: "networking.k8s.io/v1",
       kind: "NetworkPolicy",
       metadata: {
-        name: `asl-task-${input.taskId}`,
+        name: networkPolicyName,
         namespace: input.namespace,
         labels
       },
