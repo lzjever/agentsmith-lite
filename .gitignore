@@ -5,4 +5,4 @@ out/
 .dev/
 .env
 *.log
-
+third_party/botified/target/

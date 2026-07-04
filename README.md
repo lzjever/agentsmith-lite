@@ -20,9 +20,9 @@ Default local login:
 
 Open `http://127.0.0.1:3000`.
 
-## Manual Gates
+## Manual Checks
 
-These are opt-in developer checks, not default release gates:
+These are opt-in developer checks, not part of the default release path:
 
 ```bash
 npm run e2e:smoke
@@ -42,4 +42,3 @@ scripts/deploy/smoke.sh --base-url http://127.0.0.1:3000
 ```
 
 App deploy renders only product secrets into app-owned Kubernetes Secrets: `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, `BUILTIN_ADMIN_INITIAL_PASSWORD`, and optional OIDC/admin secrets. S3 raw credentials and `JUICEFS_META_URL` stay with the substrate/CSI layer.
-

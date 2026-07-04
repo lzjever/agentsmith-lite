@@ -19,17 +19,3 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
-
-[[test]]
-name = "product_e2e"
-path = "tests/e2e/product.rs"
-test = false
-
-[[test]]
-name = "live_acceptance"
-path = "tests/e2e/live_acceptance.rs"
-test = false
