@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../application/src/factory.js";
-import type { ChatMessage, CreateEndpointInput } from "../../contracts/src/api.js";
+import type { ChatMessage, CreateEndpointInput, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 
 export interface ApiServerOptions {
@@ -145,12 +145,28 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       const body = await readJson(req);
       return sendJson(res, 200, await services.chat.sendChat(user.id, projectId, asString(body.endpointId), asMessages(body.messages)));
     }
-    if (segments[3] === "files" && segments[4] === "validate" && method === "POST") {
-      const body = await readJson(req);
+    if (segments[3] === "files") {
       const project = await services.workspaces.requireProjectForUser(user.id, projectId);
-      const normalizedPath = services.files.normalizeRelativeProjectPath(asString(body.path));
-      const absolutePath = await services.files.resolveSafeProjectPath(services.projectAbsoluteRoot(project.rootPath), normalizedPath);
-      return sendJson(res, 200, { normalizedPath, absolutePath });
+      const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+
+      if (segments[4] === "validate" && method === "POST") {
+        const body = await readJson(req);
+        const resolved = await services.files.resolveProjectFilesPath(projectRoot, asString(body.path), { allowFilesRoot: true });
+        return sendJson(res, 200, { normalizedPath: resolved.normalizedPath, absolutePath: resolved.absolutePath });
+      }
+      if (!segments[4] && method === "GET") {
+        return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
+      }
+      if (!segments[4] && method === "POST") {
+        return sendJson(res, 200, await services.files.uploadTextFile(projectRoot, asUploadProjectFileInput(await readJson(req))));
+      }
+      if (!segments[4] && method === "DELETE") {
+        const body = await readJson(req);
+        return sendJson(res, 200, await services.files.deleteFile(projectRoot, asString(body.path)));
+      }
+      if (segments[4] === "download" && method === "GET") {
+        return sendJson(res, 200, await services.files.downloadTextFile(projectRoot, requiredSearchParam(url, "path")));
+      }
     }
     if (segments[3] === "tasks") {
       if (method === "GET") {
@@ -257,6 +273,21 @@ function asString(value: unknown): string {
     throw new ProductError("Expected string field");
   }
   return value;
+}
+
+function requiredSearchParam(url: URL, name: string): string {
+  const value = url.searchParams.get(name);
+  if (value === null) {
+    throw new ProductError(`Missing ${name} query parameter`);
+  }
+  return value;
+}
+
+function asUploadProjectFileInput(body: Record<string, unknown>): UploadProjectFileInput {
+  return {
+    path: asString(body.path),
+    content: asString(body.content)
+  };
 }
 
 function asMessages(value: unknown): ChatMessage[] {

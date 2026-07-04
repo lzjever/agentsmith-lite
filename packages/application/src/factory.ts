@@ -4,7 +4,7 @@ import type { ProductStore } from "../../ports/src/store.js";
 import { AuthService } from "./authService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
-import { FilePathValidationService } from "./filePathValidationService.js";
+import { FileService } from "./fileService.js";
 import { TaskService } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
@@ -21,7 +21,7 @@ export interface CreateApplicationServicesInput {
 export function createApplicationServices(input: CreateApplicationServicesInput) {
   const workspaces = new WorkspaceService(input.store);
   const endpoints = new EndpointService(input.store, workspaces);
-  const files = new FilePathValidationService();
+  const files = new FileService();
   const auth = new AuthService(input.store, input.builtinAdminPassword, input.sessionSecret ?? "dev-session-secret");
   const chat = new ChatService(endpoints, workspaces, new MockOpenAICompatibleClient());
   const tasks = new TaskService(input.store, workspaces, endpoints, {
@@ -54,4 +54,3 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     }
   };
 }
-

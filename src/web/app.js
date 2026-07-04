@@ -10,6 +10,7 @@ const loginEl = document.querySelector("#login");
 const dashboardEl = document.querySelector("#dashboard");
 const loginForm = document.querySelector("#login-form");
 const seedButton = document.querySelector("#seed");
+const uploadFileButton = document.querySelector("#upload-file");
 
 await refreshHealth();
 await refreshDashboard();
@@ -58,12 +59,29 @@ seedButton.addEventListener("click", async () => {
       requestTimeoutSecs: 30
     }
   });
+  state.workspaceId = workspace.id;
+  state.projectId = project.id;
+  state.endpointId = endpoint.id;
   await api(`/api/projects/${project.id}/tasks`, {
     method: "POST",
     csrf: state.csrfToken,
     body: {
       endpointId: endpoint.id,
       prompt: "Summarize project status"
+    }
+  });
+  await refreshDashboard();
+});
+
+uploadFileButton.addEventListener("click", async () => {
+  if (!state.projectId) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await api(`/api/projects/${state.projectId}/files`, {
+    method: "POST",
+    csrf: state.csrfToken,
+    body: {
+      path: `files/demo-${stamp}.txt`,
+      content: `Created ${stamp}`
     }
   });
   await refreshDashboard();
@@ -85,12 +103,17 @@ async function refreshDashboard() {
   loginEl.classList.add("hidden");
   dashboardEl.classList.remove("hidden");
   renderDashboard(dashboard);
+  await refreshProjectFiles(dashboard);
 }
 
 function renderDashboard(data) {
   const workspaces = document.querySelector("#workspaces");
   const endpoints = document.querySelector("#endpoints");
   const tasks = document.querySelector("#tasks");
+  const projects = data.workspaces.flatMap((workspace) => workspace.projects);
+  if (!state.projectId || !projects.some((project) => project.id === state.projectId)) {
+    state.projectId = projects[0]?.id ?? null;
+  }
   workspaces.replaceChildren(...data.workspaces.map((workspace) => item(
     workspace.name,
     `${workspace.projects.length} project${workspace.projects.length === 1 ? "" : "s"}`
@@ -103,6 +126,23 @@ function renderDashboard(data) {
     task.prompt,
     `${task.status} · ${task.sandbox.resources.length} rendered resources`
   )));
+}
+
+async function refreshProjectFiles() {
+  const files = document.querySelector("#files");
+  const filesCount = document.querySelector("#files-count");
+  uploadFileButton.disabled = !state.projectId;
+  if (!state.projectId) {
+    filesCount.textContent = "0 entries";
+    files.replaceChildren(item("No project", "Create a demo project first"));
+    return;
+  }
+  const listed = await api(`/api/projects/${state.projectId}/files?path=files`);
+  filesCount.textContent = `${listed.entries.length} entr${listed.entries.length === 1 ? "y" : "ies"}`;
+  files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) => item(
+    entry.path,
+    entry.type === "file" ? `${entry.size} bytes` : "directory"
+  )) : [item("files/", "0 entries")]));
 }
 
 function item(title, detail) {
@@ -131,4 +171,3 @@ async function api(path, options = {}) {
   }
   return response.json();
 }
-

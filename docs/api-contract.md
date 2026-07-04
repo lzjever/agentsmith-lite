@@ -2,7 +2,7 @@
 
 The generated snapshot is `packages/contracts/api-contract.snapshot.json`.
 
-Current P0 routes:
+Current product API routes:
 
 - `GET /api/health`
 - `GET /api/bootstrap`
@@ -16,10 +16,13 @@ Current P0 routes:
 - `GET /api/projects/{projectId}/endpoints`
 - `POST /api/projects/{projectId}/endpoints`
 - `POST /api/projects/{projectId}/chat`
+- `GET /api/projects/{projectId}/files`
+- `POST /api/projects/{projectId}/files`
+- `GET /api/projects/{projectId}/files/download`
+- `DELETE /api/projects/{projectId}/files`
 - `POST /api/projects/{projectId}/files/validate`
 - `GET /api/projects/{projectId}/tasks`
 - `POST /api/projects/{projectId}/tasks`
 - `POST /api/tasks/{taskId}/cancel`
 
 Mutating routes require the session cookie and `x-csrf-token`.
-

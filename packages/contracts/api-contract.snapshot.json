@@ -14,6 +14,10 @@
     "GET /api/projects/{projectId}/endpoints",
     "POST /api/projects/{projectId}/endpoints",
     "POST /api/projects/{projectId}/chat",
+    "GET /api/projects/{projectId}/files",
+    "POST /api/projects/{projectId}/files",
+    "GET /api/projects/{projectId}/files/download",
+    "DELETE /api/projects/{projectId}/files",
     "POST /api/projects/{projectId}/files/validate",
     "GET /api/projects/{projectId}/tasks",
     "POST /api/projects/{projectId}/tasks",
@@ -21,4 +25,3 @@
   ],
   "clientBoundary": "web and future TUI clients call only these product API routes"
 }
-

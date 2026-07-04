@@ -26,7 +26,7 @@ describe("api smoke", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it("logs in and exercises workspace, project, endpoint, chat, file validation, and task resources", async () => {
+  it("logs in and exercises workspace, project, endpoint, chat, file CRUD, and task resources", async () => {
     const health = await fetch(baseUrl + "/api/health").then((response) => response.json());
     assert.equal(health.status, "ok");
 
@@ -56,6 +56,20 @@ describe("api smoke", () => {
     const fileValidation = await postJson(`/api/projects/${project.id}/files/validate`, {
       path: "files/readme.md"
     }, cookie, csrf);
+    const uploadedFile = await requestJson("POST", `/api/projects/${project.id}/files`, {
+      path: "files/readme.md",
+      content: "hello from API smoke"
+    }, cookie, csrf);
+    const listedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
+    const downloadedFile = await requestJson(
+      "GET",
+      `/api/projects/${project.id}/files/download?path=${encodeURIComponent("files/readme.md")}`,
+      undefined,
+      cookie
+    );
+    const deletedFile = await requestJson("DELETE", `/api/projects/${project.id}/files`, {
+      path: "files/readme.md"
+    }, cookie, csrf);
     const task = await postJson(`/api/projects/${project.id}/tasks`, {
       prompt: "write a file",
       endpointId: endpoint.id
@@ -63,8 +77,23 @@ describe("api smoke", () => {
 
     assert.match(chat.message.content, /mock openai-compatible response/i);
     assert.equal(fileValidation.normalizedPath, "files/readme.md");
+    assert.deepEqual(uploadedFile, { path: "files/readme.md", bytes: 20 });
+    assert.equal(listedFiles.entries.some((entry: { path: string }) => entry.path === "files/readme.md"), true);
+    assert.deepEqual(downloadedFile, { path: "files/readme.md", content: "hello from API smoke" });
+    assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "starting");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);
+
+    const traversal = await fetch(baseUrl + `/api/projects/${project.id}/files`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie,
+        "x-csrf-token": csrf
+      },
+      body: JSON.stringify({ path: "../secret.txt", content: "nope" })
+    });
+    assert.equal(traversal.status, 400);
 
     const forbidden = await fetch(baseUrl + `/api/workspaces`, {
       method: "POST",
@@ -83,15 +112,19 @@ describe("api smoke", () => {
   }
 
   async function postJson(pathname: string, body: unknown, cookie: string, csrf: string) {
-    const response = await fetch(baseUrl + pathname, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie,
-        "x-csrf-token": csrf
-      },
-      body: JSON.stringify(body)
-    });
+    return requestJson("POST", pathname, body, cookie, csrf);
+  }
+
+  async function requestJson(method: string, pathname: string, body: unknown, cookie: string, csrf?: string) {
+    const headers: Record<string, string> = { "content-type": "application/json", cookie };
+    if (csrf) {
+      headers["x-csrf-token"] = csrf;
+    }
+    const requestInit: RequestInit = { method, headers };
+    if (body) {
+      requestInit.body = JSON.stringify(body);
+    }
+    const response = await fetch(baseUrl + pathname, requestInit);
     if (response.status !== 200) {
       assert.fail(await response.text());
     }

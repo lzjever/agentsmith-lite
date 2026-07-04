@@ -182,3 +182,34 @@ export interface CreateTaskInput {
   endpointId: string;
 }
 
+export type ProjectFileEntryType = "file" | "directory";
+
+export interface ProjectFileEntry {
+  path: string;
+  type: ProjectFileEntryType;
+  size?: number;
+  updatedAt: ISODateString;
+}
+
+export interface ProjectFileListResponse {
+  entries: ProjectFileEntry[];
+}
+
+export interface UploadProjectFileInput {
+  path: string;
+  content: string;
+}
+
+export interface ProjectFileWriteResponse {
+  path: string;
+  bytes: number;
+}
+
+export interface ProjectFileContentResponse {
+  path: string;
+  content: string;
+}
+
+export interface DeleteProjectFileResponse {
+  deleted: true;
+}
