@@ -1,0 +1,37 @@
+{
+  "name": "agentsmith-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "packages/domain",
+    "packages/ports",
+    "packages/application",
+    "packages/adapters-postgres",
+    "packages/sandbox-controller",
+    "packages/botified-runtime",
+    "packages/openai-compatible-client",
+    "packages/api-entry-node"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-web-assets.mjs",
+    "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
+    "dev:api": "npm run build && node dist/packages/api-entry-node/src/main.js",
+    "dev:web": "npm run dev:api",
+    "dev": "npm run dev:api",
+    "check:forbidden-surfaces": "scripts/check-forbidden-surfaces.sh",
+    "e2e:smoke": "npm run build && node e2e/smoke/lite-smoke.mjs",
+    "visual:screenshot": "npm run build && node scripts/visual/screenshot.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

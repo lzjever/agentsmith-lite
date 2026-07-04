@@ -1,0 +1,7 @@
+{
+  "name": "@agentsmith-lite/openai-compatible-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module"
+}
+

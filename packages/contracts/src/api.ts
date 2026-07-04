@@ -1,0 +1,184 @@
+export type ISODateString = string;
+
+export type UserRole = "admin" | "member";
+
+export interface User {
+  id: string;
+  email: string;
+  role: UserRole;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export interface StoredUser extends User {
+  passwordHash: string;
+}
+
+export interface AuthSession {
+  id: string;
+  userId: string;
+  csrfToken: string;
+  createdAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export interface Project {
+  id: string;
+  workspaceId: string;
+  name: string;
+  ownerUserId: string;
+  rootPath: string;
+  taskConcurrencyLimit: number;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export interface WorkspaceWithProjects extends Workspace {
+  projects: Project[];
+}
+
+export type EndpointProtocol = "openai_chat_completions";
+export type EndpointCapability = "text" | "image" | "tool_calls";
+
+export interface ModelEndpoint {
+  id: string;
+  projectId: string;
+  name: string;
+  protocol: EndpointProtocol;
+  baseUrl: string;
+  model: string;
+  apiKeySecretRef: string;
+  capabilities: EndpointCapability[];
+  requestTimeoutSecs: number;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export type ChatRole = "system" | "user" | "assistant";
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export interface ChatResponse {
+  message: ChatMessage;
+  endpointSnapshot: Pick<ModelEndpoint, "id" | "baseUrl" | "model" | "protocol">;
+}
+
+export type AgentTaskStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "cleaned";
+
+export interface AgentTask {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  endpointId: string;
+  prompt: string;
+  status: AgentTaskStatus;
+  runId: string;
+  sandbox: SandboxRenderResult;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export type TaskEventKind =
+  | "user_input"
+  | "turn_started"
+  | "turn_completed"
+  | "turn_failed"
+  | "assistant_message"
+  | "tool_execution"
+  | "artifact"
+  | "runtime_error"
+  | "diagnostic";
+
+export interface AgentTaskEvent {
+  id: string;
+  taskId: string;
+  kind: TaskEventKind;
+  cursor: string;
+  botifiedSeq: number;
+  botifiedType: string;
+  sessionId: string;
+  payload: Record<string, unknown>;
+  createdAt: ISODateString;
+}
+
+export interface AgentTaskArtifact {
+  id: string;
+  taskId: string;
+  fileId: string;
+  name: string;
+  bytes: number;
+  createdAt: ISODateString;
+}
+
+export interface KubernetesResource {
+  apiVersion: string;
+  kind: string;
+  metadata: {
+    name: string;
+    namespace?: string;
+    labels: Record<string, string>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface SandboxRenderResult {
+  dryRun: true;
+  namespace: string;
+  resources: KubernetesResource[];
+}
+
+export interface DashboardResponse {
+  health: {
+    status: "ok";
+    version: string;
+  };
+  user: User;
+  workspaces: WorkspaceWithProjects[];
+  endpoints: ModelEndpoint[];
+  tasks: AgentTask[];
+}
+
+export interface CreateWorkspaceInput {
+  name: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  taskConcurrencyLimit?: number;
+}
+
+export interface CreateEndpointInput {
+  name: string;
+  protocol: EndpointProtocol;
+  baseUrl: string;
+  model: string;
+  apiKeySecretRef: string;
+  capabilities: EndpointCapability[];
+  requestTimeoutSecs: number;
+}
+
+export interface CreateTaskInput {
+  prompt: string;
+  endpointId: string;
+}
+

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentSmith Lite</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">AgentSmith Lite</p>
+          <h1>Operations Console</h1>
+        </div>
+        <div id="health" class="health">Checking</div>
+      </section>
+
+      <section id="login" class="panel">
+        <h2>Admin Login</h2>
+        <form id="login-form">
+          <label>
+            Email
+            <input name="email" autocomplete="username" value="admin@agentsmith-lite.local" />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="current-password" value="admin-password" />
+          </label>
+          <button type="submit">Sign in</button>
+        </form>
+      </section>
+
+      <section id="dashboard" class="dashboard hidden">
+        <div class="panel">
+          <div class="section-title">
+            <h2>Workspaces</h2>
+            <button id="seed">Create Demo</button>
+          </div>
+          <div id="workspaces" class="list"></div>
+        </div>
+        <div class="panel">
+          <h2>Endpoints</h2>
+          <div id="endpoints" class="list"></div>
+        </div>
+        <div class="panel">
+          <h2>Tasks & Resources</h2>
+          <div id="tasks" class="list"></div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
+

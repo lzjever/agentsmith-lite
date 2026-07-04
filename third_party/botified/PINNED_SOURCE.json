@@ -1,0 +1,9 @@
+{
+  "mode": "vendored_source",
+  "source": ".reference/botified",
+  "commit": "988f65d31652008ca4ea320ec99ec5c6d03e7890",
+  "checksum": "sha256:39ca21b0e790fe7fbd67701637f6b3b5b17e3f25c7e038a360552584da822d93",
+  "checksumMaterial": "Cargo.toml, Cargo.lock, src/ without TUI module, docs/http-examples.md, docs/ops-manual.md, selected runtime tests",
+  "runtimeEntrypoint": "botified serve",
+  "productTuiExposed": false
+}
