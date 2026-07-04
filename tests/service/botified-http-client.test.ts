@@ -166,6 +166,37 @@ describe("Botified HTTP client", () => {
     });
   });
 
+  it("downloads files with bearer auth and returns response metadata", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
+      assert.equal(String(input), "http://botified.local/v1/files/file_1");
+      assert.equal(init.method, "GET");
+      assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
+      return new Response(new Uint8Array([104, 101, 108, 108, 111]), {
+        status: 200,
+        headers: {
+          "content-type": "text/plain",
+          "content-disposition": "attachment; filename=\"report.txt\"",
+          "x-botified-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      });
+    });
+
+    const downloaded = await client.downloadFile("http://botified.local", "service-secret", "file_1");
+
+    assert.deepEqual([...downloaded.bytes], [104, 101, 108, 108, 111]);
+    assert.deepEqual({
+      filename: downloaded.filename,
+      mimeType: downloaded.mimeType,
+      sizeBytes: downloaded.sizeBytes,
+      sha256: downloaded.sha256
+    }, {
+      filename: "report.txt",
+      mimeType: "text/plain",
+      sizeBytes: 5,
+      sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    });
+  });
+
   it("raises structured HTTP errors without swallowing server details", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async () =>
       jsonResponse(

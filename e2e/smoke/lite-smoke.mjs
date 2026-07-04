@@ -7,13 +7,16 @@ const args = parseArgs(process.argv.slice(2));
 let server;
 let dataRoot;
 let baseUrl = args.baseUrl;
+const artifactBytes = new TextEncoder().encode("downloaded through product API");
 if (!baseUrl) {
   dataRoot = await mkdtemp(path.join(tmpdir(), "asl-e2e-"));
   server = await createApiServer({
     port: 0,
     dataRoot,
     builtinAdminPassword: "admin-password",
-    sessionSecret: "e2e-session-secret"
+    sessionSecret: "e2e-session-secret",
+    botifiedClient: fakeBotifiedClient(artifactBytes),
+    botifiedServiceKeyFactory: () => "e2e-service-key"
   });
   baseUrl = server.baseUrl;
 }
@@ -44,7 +47,12 @@ try {
     prompt: "E2E task"
   }, cookie, csrfToken);
   assert(task.sandbox.resources.some((resource) => resource.kind === "NetworkPolicy"), "sandbox network policy missing");
-  console.log(JSON.stringify({ status: "ok", baseUrl, taskId: task.id }, null, 2));
+  const artifacts = await request("GET", `/api/tasks/${task.id}/artifacts`, undefined, cookie);
+  assert(artifacts.length === 1, "published artifact missing from product API");
+  assert(artifacts[0].name === "e2e-report.txt", "published artifact name mismatch");
+  const download = await raw("GET", `/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`, undefined, cookie);
+  assert(await download.text() === "downloaded through product API", "artifact download content mismatch");
+  console.log(JSON.stringify({ status: "ok", baseUrl, taskId: task.id, artifactId: artifacts[0].id }, null, 2));
 } finally {
   await server?.close();
   if (dataRoot) {
@@ -87,3 +95,55 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function fakeBotifiedClient(bytes) {
+  const reads = [
+    {
+      status: "ok",
+      events: [
+        {
+          cursor: "c1",
+          seq: 1,
+          session_id: "s1",
+          type: "file.published",
+          payload: {
+            file_id: "e2e_file_1",
+            filename: "e2e-report.txt",
+            mime_type: "text/plain",
+            size_bytes: bytes.byteLength,
+            sha256: "c".repeat(64),
+            download_url: "http://botified.internal/v1/files/e2e_file_1?service_key=e2e-service-key"
+          }
+        }
+      ],
+      nextCursor: "c1"
+    }
+  ];
+  return {
+    async health() {
+      return { status: "ok" };
+    },
+    async postMessage() {
+      return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
+    },
+    async readTimeline(_baseUrl, _serviceKey, cursor) {
+      const next = reads.shift();
+      if (next) return next;
+      return cursor ? { status: "ok", events: [], nextCursor: cursor } : { status: "ok", events: [] };
+    },
+    async uploadFile() {
+      return { files: [] };
+    },
+    async downloadFile(_baseUrl, _serviceKey, fileId) {
+      assert(fileId === "e2e_file_1", "unexpected Botified file id");
+      return {
+        bytes,
+        filename: "e2e-report.txt",
+        mimeType: "text/plain",
+        sizeBytes: bytes.byteLength
+      };
+    },
+    async abort() {
+      return { aborted: true };
+    }
+  };
+}

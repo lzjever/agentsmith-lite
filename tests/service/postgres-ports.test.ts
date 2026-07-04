@@ -29,7 +29,10 @@ describe("postgres adapter ports", () => {
   it("keeps product schema migrations sourced from SQL files and separate from substrate metadata", async () => {
     const migrations = await readPostgresMigrations();
     const migrationSql = migrations.map((migration) => migration.sql).join("\n");
-    assert.deepEqual(migrations.map((migration) => migration.id), ["001_initial_product_schema"]);
+    assert.deepEqual(migrations.map((migration) => migration.id), [
+      "001_initial_product_schema",
+      "002_task_artifact_sha256"
+    ]);
     assert.match(migrationSql, /create table if not exists workspaces/i);
     assert.match(migrationSql, /create table if not exists agent_tasks/i);
     assert.doesNotMatch(migrationSql, /juicefs/i);

@@ -230,10 +230,25 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   if (segments[0] === "api" && segments[1] === "tasks" && segments[2]) {
     const taskId = segments[2];
     if (segments[3] === "events" && method === "GET") {
-      return sendJson(res, 200, await services.tasks.listTaskEvents(user.id, taskId));
+      try {
+        return sendJson(res, 200, await services.tasks.listTaskEvents(user.id, taskId));
+      } catch (error) {
+        return handleTaskRouteError(res, error);
+      }
     }
-    if (segments[3] === "artifacts" && method === "GET") {
-      return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId));
+    if (segments[3] === "artifacts" && segments[4] && segments[5] === "download" && method === "GET") {
+      try {
+        return sendArtifactDownload(res, await services.tasks.downloadTaskArtifact(user.id, taskId, segments[4]));
+      } catch (error) {
+        return handleTaskRouteError(res, error);
+      }
+    }
+    if (segments[3] === "artifacts" && !segments[4] && method === "GET") {
+      try {
+        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId));
+      } catch (error) {
+        return handleTaskRouteError(res, error);
+      }
     }
     if (segments[3] === "cancel" && method === "POST") {
       try {
@@ -279,6 +294,14 @@ function contentTypeFor(filePath: string): string {
   return "text/html; charset=utf-8";
 }
 
+function headerFilename(input: string): string {
+  const cleaned = input
+    .replace(/[\r\n"\\]/g, "_")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .trim();
+  return cleaned.length > 0 ? cleaned : "artifact";
+}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -297,6 +320,19 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+function sendArtifactDownload(
+  res: ServerResponse,
+  download: Awaited<ReturnType<Services["tasks"]["downloadTaskArtifact"]>>
+): void {
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(download.bytes.byteLength),
+    "content-disposition": `attachment; filename="${headerFilename(download.artifact.name || download.artifact.fileId)}"`,
+    "x-content-type-options": "nosniff"
+  });
+  res.end(download.bytes);
 }
 
 function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {

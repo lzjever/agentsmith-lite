@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { projectBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -48,6 +49,7 @@ export interface BotifiedServiceKeyInput {
 }
 
 export interface TaskServiceConfig {
+  dataRoot: string;
   namespace: string;
   pvcName: string;
   botifiedRunnerImage: string;
@@ -75,7 +77,12 @@ interface BotifiedTaskRuntimeState {
   lastSyncedAt?: string;
 }
 
-type BotifiedOperation = "send message" | "read timeline" | "abort";
+type BotifiedOperation = "send message" | "read timeline" | "download file" | "abort";
+
+export interface TaskArtifactDownload {
+  artifact: AgentTaskArtifact;
+  bytes: Buffer;
+}
 
 export class BotifiedTaskPortError extends ProductError {
   readonly code: string;
@@ -252,8 +259,34 @@ export class TaskService {
 
   async listTaskArtifacts(userId: string, taskId: string): Promise<AgentTaskArtifact[]> {
     const task = await this.requireTaskForUser(userId, taskId);
-    await this.syncTaskTimeline(task);
+    await this.bestEffortSyncTaskTimeline(task);
     return this.store.listTaskArtifacts(taskId);
+  }
+
+  async downloadTaskArtifact(userId: string, taskId: string, artifactId: string): Promise<TaskArtifactDownload> {
+    const task = await this.requireTaskForUser(userId, taskId);
+    let artifacts = await this.store.listTaskArtifacts(taskId);
+    let artifact = artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) {
+      await this.bestEffortSyncTaskTimeline(task);
+      artifacts = await this.store.listTaskArtifacts(taskId);
+      artifact = artifacts.find((candidate) => candidate.id === artifactId);
+    }
+    if (!artifact) {
+      throw new ProductError("Task artifact not found", 404);
+    }
+    const { filePath } = await this.taskArtifactStoragePath(task, artifact);
+    try {
+      return {
+        artifact,
+        bytes: await readFile(filePath)
+      };
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new ProductError("Task artifact file not found", 404);
+      }
+      throw error;
+    }
   }
 
   taskRuntimePaths(task: AgentTask): { projectMountPath: string; taskHomePath: string; botifiedDataPath: string; artifactPath: string } {
@@ -286,11 +319,28 @@ export class TaskService {
     );
     const projection = projectBotifiedTimelineEvents(task.id, timelineEvents(timeline.events), existingSeqs);
 
+    if (projection.artifacts.length > 0) {
+      const existingArtifacts = await this.store.listTaskArtifacts(task.id);
+      const existingFileIds = new Set(existingArtifacts.map((artifact) => artifact.fileId));
+      for (const artifact of projection.artifacts) {
+        if (existingFileIds.has(artifact.fileId)) {
+          continue;
+        }
+        const download = projection.artifactDownloads.find((candidate) => candidate.artifactId === artifact.id);
+        if (!download) {
+          throw new ProductError("Projected task artifact download metadata missing", 500);
+        }
+        const productArtifact = {
+          ...artifact,
+          name: sanitizeArtifactFilename(artifact.name, artifact.fileId)
+        };
+        await this.downloadAndStoreTaskArtifact(task, state.baseUrl, serviceKey, productArtifact, download.fileId);
+        await this.store.appendTaskArtifacts([productArtifact]);
+        existingFileIds.add(productArtifact.fileId);
+      }
+    }
     if (projection.events.length > 0) {
       await this.store.appendTaskEvents(projection.events);
-    }
-    if (projection.artifacts.length > 0) {
-      await this.store.appendTaskArtifacts(projection.artifacts);
     }
 
     const nextCursor = safeRuntimeCursor(timeline.nextCursor) ?? safeRuntimeCursor(projection.nextCursor) ?? state.timelineCursor;
@@ -303,6 +353,17 @@ export class TaskService {
     const updated = await this.updateTaskStatusFromEvents(task, projection.events);
     await this.updateRunLifecycleAfterTimelineSync(updated, projection.events);
     return updated;
+  }
+
+  private async bestEffortSyncTaskTimeline(task: AgentTask): Promise<void> {
+    try {
+      await this.syncTaskTimeline(task);
+    } catch (error) {
+      if (error instanceof BotifiedTaskPortError) {
+        return;
+      }
+      throw error;
+    }
   }
 
   private async updateTaskStatusFromEvents(task: AgentTask, events: AgentTaskEvent[]): Promise<AgentTask> {
@@ -380,6 +441,42 @@ export class TaskService {
     } catch (error) {
       throw new BotifiedTaskPortError(operation, error);
     }
+  }
+
+  private async downloadAndStoreTaskArtifact(
+    task: AgentTask,
+    baseUrl: string,
+    serviceKey: string,
+    artifact: AgentTaskArtifact,
+    botifiedFileId: string
+  ): Promise<void> {
+    const downloaded = await this.callBotified("download file", () =>
+      this.botified.downloadFile(baseUrl, serviceKey, botifiedFileId)
+    );
+    const { root, filePath } = await this.taskArtifactStoragePath(task, artifact);
+    await mkdir(root, { recursive: true });
+    try {
+      await writeFile(filePath, downloaded.bytes, { flag: "wx" });
+    } catch (error) {
+      if (isAlreadyExists(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async taskArtifactStoragePath(task: AgentTask, artifact: AgentTaskArtifact): Promise<{ root: string; filePath: string }> {
+    const project = await this.store.findProject(task.projectId);
+    if (!project) {
+      throw new ProductError("Task project not found", 409);
+    }
+    const dataRoot = path.resolve(this.config.dataRoot);
+    const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
+    assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
+    const filename = `${sanitizeArtifactFilename(artifact.id, "artifact")}-${sanitizeArtifactFilename(artifact.name, artifact.fileId)}`;
+    const filePath = path.resolve(root, filename);
+    assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
+    return { root, filePath };
   }
 
   private resolveLiveModelCredential(endpoint: ModelEndpoint): { apiKey: string; baseUrl: string } {
@@ -711,4 +808,44 @@ function resolveDurationMs(value: number | undefined, fallback: number): number 
     return fallback;
   }
   return Math.max(0, Math.floor(value));
+}
+
+function sanitizeArtifactFilename(input: string, fallback: string): string {
+  const base = path.posix.basename(input.replace(/\\/g, "/"));
+  const cleaned = base
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 180);
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+  const fallbackBase = path.posix.basename(fallback.replace(/\\/g, "/"));
+  const fallbackCleaned = fallbackBase
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 180);
+  return fallbackCleaned.length > 0 ? fallbackCleaned : "artifact";
+}
+
+function assertPathInside(root: string, candidate: string, message: string): void {
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new ProductError(message, 500);
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }

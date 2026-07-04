@@ -282,10 +282,18 @@ export class PostgresProductStore implements ProductStore {
   async appendTaskArtifacts(artifacts: AgentTaskArtifact[]): Promise<void> {
     for (const artifact of artifacts) {
       await this.pool.query(
-        `insert into agent_task_artifacts (id, task_id, file_id, name, bytes, created_at)
-         values ($1, $2, $3, $4, $5, $6)
+        `insert into agent_task_artifacts (id, task_id, file_id, name, bytes, sha256, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7)
          on conflict (task_id, file_id) do nothing`,
-        [artifact.id, artifact.taskId, artifact.fileId, artifact.name, artifact.bytes, artifact.createdAt]
+        [
+          artifact.id,
+          artifact.taskId,
+          artifact.fileId,
+          artifact.name,
+          artifact.bytes,
+          artifact.sha256 ?? null,
+          artifact.createdAt
+        ]
       );
     }
   }
@@ -571,6 +579,7 @@ interface AgentTaskArtifactRow {
   file_id: string;
   name: string;
   bytes: number;
+  sha256: string | null;
   created_at: unknown;
 }
 
@@ -672,7 +681,7 @@ function mapTaskEvent(row: AgentTaskEventRow): AgentTaskEvent {
 }
 
 function mapTaskArtifact(row: AgentTaskArtifactRow): AgentTaskArtifact {
-  return {
+  const artifact: AgentTaskArtifact = {
     id: row.id,
     taskId: row.task_id,
     fileId: row.file_id,
@@ -680,6 +689,10 @@ function mapTaskArtifact(row: AgentTaskArtifactRow): AgentTaskArtifact {
     bytes: row.bytes,
     createdAt: toIso(row.created_at)
   };
+  if (row.sha256 !== null && row.sha256 !== undefined) {
+    artifact.sha256 = row.sha256;
+  }
+  return artifact;
 }
 
 function mapLease(row: RuntimeLeaseRow | undefined): LeaseRecord {

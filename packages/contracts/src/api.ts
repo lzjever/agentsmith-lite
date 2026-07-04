@@ -130,6 +130,7 @@ export interface AgentTaskArtifact {
   fileId: string;
   name: string;
   bytes: number;
+  sha256?: string;
   createdAt: ISODateString;
 }
 

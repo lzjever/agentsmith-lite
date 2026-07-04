@@ -8,6 +8,7 @@ export interface BotifiedRuntimeHttpClient {
     options?: BotifiedReadTimelineOptions
   ): Promise<BotifiedTimelineReadResult>;
   uploadFile(baseUrl: string, serviceKey: string, file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult>;
+  downloadFile(baseUrl: string, serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult>;
   abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult>;
 }
 
@@ -53,6 +54,14 @@ export interface BotifiedUploadFileInput {
 
 export interface BotifiedUploadFileResult {
   files: unknown[];
+}
+
+export interface BotifiedDownloadFileResult {
+  bytes: Uint8Array;
+  filename?: string;
+  mimeType?: string;
+  sizeBytes: number;
+  sha256?: string;
 }
 
 export interface BotifiedAbortResult {
@@ -193,6 +202,35 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     const record = asRecord(body);
     const files = arrayField(record, "files");
     return { files };
+  }
+
+  async downloadFile(baseUrl: string, serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult> {
+    const response = await this.#fetchImpl(buildUrl(baseUrl, `/v1/files/${encodeURIComponent(fileId)}`), {
+      method: "GET",
+      headers: authHeaders(serviceKey)
+    });
+    if (!response.ok) {
+      throw this.httpError(response, await readJsonBody(response));
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const result: BotifiedDownloadFileResult = {
+      bytes,
+      sizeBytes: bytes.byteLength
+    };
+    const filename = filenameFromContentDisposition(response.headers.get("content-disposition"));
+    const mimeType = response.headers.get("content-type") ?? undefined;
+    const sha256 = response.headers.get("x-botified-sha256") ?? undefined;
+    if (filename !== undefined) {
+      result.filename = filename;
+    }
+    if (mimeType !== undefined) {
+      result.mimeType = mimeType;
+    }
+    if (sha256 !== undefined) {
+      result.sha256 = sha256;
+    }
+    return result;
   }
 
   async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {
@@ -341,6 +379,10 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { files: [] };
   }
 
+  async downloadFile(): Promise<BotifiedDownloadFileResult> {
+    return { bytes: new Uint8Array(), sizeBytes: 0 };
+  }
+
   async abort(): Promise<BotifiedAbortResult> {
     return { aborted: true };
   }
@@ -381,6 +423,26 @@ function fileBlob(file: BotifiedUploadFileInput): Blob {
   const copy = new Uint8Array(file.bytes.byteLength);
   copy.set(file.bytes);
   return new Blob([copy.buffer], options);
+}
+
+function filenameFromContentDisposition(value: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const extended = /(?:^|;)\s*filename\*=UTF-8''([^;]+)/i.exec(value)?.[1];
+  if (extended) {
+    try {
+      return decodeURIComponent(extended.trim());
+    } catch {
+      return extended.trim();
+    }
+  }
+  const quoted = /(?:^|;)\s*filename="([^"]*)"/i.exec(value)?.[1];
+  if (quoted !== undefined) {
+    return quoted;
+  }
+  const bare = /(?:^|;)\s*filename=([^;]+)/i.exec(value)?.[1];
+  return bare?.trim();
 }
 
 async function readJsonBody(response: Response): Promise<unknown> {

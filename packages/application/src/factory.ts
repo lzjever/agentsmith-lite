@@ -51,6 +51,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     ...(input.liveSandbox ? { port: input.liveSandbox.port } : {})
   });
   const taskConfig = {
+    dataRoot: input.dataRoot,
     namespace,
     pvcName: input.pvcName ?? "agentsmith-lite-files",
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",

@@ -14,7 +14,16 @@ export interface BotifiedTimelineEvent {
 export interface BotifiedProjectionResult {
   events: AgentTaskEvent[];
   artifacts: AgentTaskArtifact[];
+  artifactDownloads: BotifiedProjectedArtifactDownload[];
   nextCursor: string | null;
+}
+
+export interface BotifiedProjectedArtifactDownload {
+  artifactId: string;
+  fileId: string;
+  filename: string;
+  sizeBytes: number;
+  sha256?: string;
 }
 
 export function projectBotifiedTimelineEvents(
@@ -25,6 +34,7 @@ export function projectBotifiedTimelineEvents(
   const seen = new Set(alreadyProjectedSeqs);
   const events: AgentTaskEvent[] = [];
   const artifacts: AgentTaskArtifact[] = [];
+  const artifactDownloads: BotifiedProjectedArtifactDownload[] = [];
   let nextCursor: string | null = null;
 
   for (const item of timeline) {
@@ -42,7 +52,9 @@ export function projectBotifiedTimelineEvents(
     nextCursor = safeNextCursor(item.cursor, nextCursor);
 
     const kind = mapEventKind(item.type);
-    const payload = redactBotifiedPayload(item.payload ?? {});
+    const payload = item.type === "file.published"
+      ? projectedFilePublishedPayload(item.payload ?? {}, item.seq)
+      : redactBotifiedPayload(item.payload ?? {});
     events.push({
       id: newId("evt"),
       taskId,
@@ -56,20 +68,89 @@ export function projectBotifiedTimelineEvents(
     });
 
     if (item.type === "file.published") {
-      const rawFileId = String(item.payload?.file_id ?? item.payload?.id ?? `botified-${item.seq}`);
-      const fileId = redactSecretLikeText(rawFileId);
-      artifacts.push({
-        id: newId("art"),
+      const file = projectFileArtifact(item.payload ?? {}, item.seq);
+      const artifactId = newId("art");
+      const artifact: AgentTaskArtifact = {
+        id: artifactId,
         taskId,
-        fileId,
-        name: redactSecretLikeText(String(item.payload?.name ?? rawFileId)),
-        bytes: typeof item.payload?.bytes === "number" ? item.payload.bytes : 0,
+        fileId: redactSecretLikeText(file.fileId),
+        name: redactSecretLikeText(file.filename),
+        bytes: file.sizeBytes,
         createdAt: nowIso()
+      };
+      if (file.sha256 !== undefined) {
+        artifact.sha256 = redactSecretLikeText(file.sha256);
+      }
+      artifacts.push(artifact);
+      artifactDownloads.push({
+        artifactId,
+        fileId: file.fileId,
+        filename: file.filename,
+        sizeBytes: file.sizeBytes,
+        ...(file.sha256 !== undefined ? { sha256: file.sha256 } : {})
       });
     }
   }
 
-  return { events, artifacts, nextCursor };
+  const result = { events, artifacts, nextCursor } as BotifiedProjectionResult;
+  Object.defineProperty(result, "artifactDownloads", {
+    value: artifactDownloads,
+    enumerable: false
+  });
+  return result;
+}
+
+function projectedFilePublishedPayload(payload: Record<string, unknown>, seq: number): Record<string, unknown> {
+  const file = projectFileArtifact(payload, seq);
+  const projected: Record<string, unknown> = {
+    file_id: redactSecretLikeText(file.fileId),
+    filename: redactSecretLikeText(file.filename),
+    size_bytes: file.sizeBytes
+  };
+  const mimeType = stringField(payload, "mime_type");
+  const source = stringField(payload, "source");
+  const description = payload.description;
+  if (mimeType !== undefined) {
+    projected.mime_type = redactSecretLikeText(mimeType);
+  }
+  if (file.sha256 !== undefined) {
+    projected.sha256 = redactSecretLikeText(file.sha256);
+  }
+  if (source !== undefined) {
+    projected.source = redactSecretLikeText(source);
+  }
+  if (description !== undefined) {
+    projected.description = redactBotifiedPayload({ description }).description;
+  }
+  return projected;
+}
+
+function projectFileArtifact(payload: Record<string, unknown>, seq: number): {
+  fileId: string;
+  filename: string;
+  sizeBytes: number;
+  sha256?: string;
+} {
+  const fileId = stringField(payload, "file_id") ?? stringField(payload, "id") ?? `botified-${seq}`;
+  const filename = stringField(payload, "filename") ?? stringField(payload, "name") ?? fileId;
+  const sizeBytes = numberField(payload, "size_bytes") ?? numberField(payload, "bytes") ?? 0;
+  const sha256 = stringField(payload, "sha256");
+  return {
+    fileId,
+    filename,
+    sizeBytes,
+    ...(sha256 !== undefined ? { sha256 } : {})
+  };
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function safeNextCursor(cursor: string, current: string | null): string | null {

@@ -28,17 +28,32 @@ describe("task events API", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it("returns server-projected Botified events and artifacts without UI-facing Botified routes", async () => {
+  it("returns and downloads server-projected artifacts without UI-facing Botified routes or secrets", async () => {
+    const artifactBytes = new TextEncoder().encode("api artifact bytes");
     const botified = new FakeBotifiedClient([
       {
         status: "ok",
         events: [
           { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "make notes" } },
-          { cursor: "c2", seq: 2, session_id: "s1", type: "file.published", payload: { file_id: "f1", name: "notes.md", bytes: 42 } }
+          {
+            cursor: "c2",
+            seq: 2,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "f1",
+              filename: "notes.md",
+              mime_type: "text/markdown",
+              size_bytes: artifactBytes.byteLength,
+              sha256: "b".repeat(64),
+              download_url: "http://botified.internal/v1/files/f1?service_key=api-service-key"
+            }
+          }
         ],
         nextCursor: "c2"
       }
     ]);
+    botified.downloads.f1 = artifactBytes;
     api = await createApiServer({
       port: 0,
       dataRoot,
@@ -54,17 +69,33 @@ describe("task events API", () => {
     });
     const events = await auth.requestJson("GET", `/api/tasks/${task.id}/events`);
     const artifacts = await auth.requestJson("GET", `/api/tasks/${task.id}/artifacts`);
+    const leakedJson = JSON.stringify({ events, artifacts });
 
     assert.deepEqual(events.map((event: { kind: string; botifiedSeq: number }) => [event.kind, event.botifiedSeq]), [
       ["user_input", 1],
       ["artifact", 2]
     ]);
-    assert.deepEqual(artifacts.map((artifact: { fileId: string; name: string; bytes: number }) => [
+    assert.deepEqual(artifacts.map((artifact: { fileId: string; name: string; bytes: number; sha256?: string }) => [
       artifact.fileId,
       artifact.name,
-      artifact.bytes
-    ]), [["f1", "notes.md", 42]]);
+      artifact.bytes,
+      artifact.sha256
+    ]), [["f1", "notes.md", artifactBytes.byteLength, "b".repeat(64)]]);
     assert.equal(botified.postMessageCalls[0]?.serviceKey, "api-service-key");
+    assert.equal(botified.downloadFileCalls[0]?.serviceKey, "api-service-key");
+    assert.doesNotMatch(leakedJson, /api-service-key|botified\.internal|download_url|\/v1\/files/);
+
+    const anonymousDownload = await fetch(`${api.baseUrl}/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
+    assert.equal(anonymousDownload.status, 401);
+
+    const download = await auth.request("GET", `/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "application/octet-stream");
+    assert.match(download.headers.get("content-disposition") ?? "", /filename="notes\.md"/);
+    assert.equal(await download.text(), "api artifact bytes");
+    const downloadHeaders: string[] = [];
+    download.headers.forEach((value, key) => downloadHeaders.push(`${key}: ${value}`));
+    assert.doesNotMatch(JSON.stringify(downloadHeaders), /api-service-key|botified\.internal|download_url|\/v1\/files/);
   });
 
   it("aborts through the Botified port and reports abort failures as structured errors", async () => {
@@ -262,7 +293,9 @@ async function createProjectWithEndpoint(baseUrl: string) {
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
+  readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
   readonly abortCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
+  readonly downloads: Record<string, Uint8Array> = {};
   abortError: unknown;
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
@@ -291,6 +324,17 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
 
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> {
     return { files: [] };
+  }
+
+  async downloadFile(baseUrl: string, serviceKey: string, fileId: string) {
+    this.downloadFileCalls.push({ baseUrl, serviceKey, fileId });
+    const bytes = this.downloads[fileId] ?? new Uint8Array();
+    return {
+      bytes,
+      filename: `${fileId}.txt`,
+      mimeType: "application/octet-stream",
+      sizeBytes: bytes.byteLength
+    };
   }
 
   async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {

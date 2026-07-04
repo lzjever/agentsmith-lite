@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices, type CreateApplicationServicesInput } from "../../packages/application/src/factory.js";
@@ -670,7 +673,7 @@ describe("task service Botified orchestration", () => {
     );
   });
 
-  it("syncs timeline events idempotently before returning task events and artifacts", async () => {
+  it("syncs timeline events idempotently while returning stored task artifacts", async () => {
     const botified = new FakeBotifiedClient([
       {
         status: "ok",
@@ -710,6 +713,261 @@ describe("task service Botified orchestration", () => {
     assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "c2", "c3", "c3"]);
   });
 
+  it("downloads newly published Botified artifacts into the product artifact directory idempotently", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-"));
+    const artifactBytes = new TextEncoder().encode("hello from published artifact");
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "file_real_1",
+              filename: "../final report.txt",
+              mime_type: "text/plain",
+              size_bytes: artifactBytes.byteLength,
+              sha256: "a".repeat(64),
+              download_url: "http://botified.internal/v1/files/file_real_1?service_key=bsk_runtime_secret"
+            }
+          }
+        ],
+        nextCursor: "c1"
+      },
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "file_real_1",
+              filename: "../../overwrite.txt",
+              size_bytes: 999,
+              download_url: "http://botified.internal/v1/files/file_real_1"
+            }
+          }
+        ],
+        nextCursor: "c1"
+      }
+    ], {
+      downloads: {
+        file_real_1: artifactBytes
+      }
+    });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "publish", endpointId });
+
+      const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+      const events = await services.tasks.listTaskEvents(userId, task.id);
+      const artifact = artifacts[0];
+      assert.ok(artifact, "expected a projected artifact");
+      const project = await store.findProject(projectId);
+      assert.ok(project, "expected project fixture");
+      const artifactPath = path.join(dataRoot, project.rootPath, "tasks", task.id, "artifacts", `${artifact.id}-final-report.txt`);
+
+      assert.deepEqual(artifacts.map((item) => [item.fileId, item.name, item.bytes, item.sha256]), [
+        ["file_real_1", "final-report.txt", artifactBytes.byteLength, "a".repeat(64)]
+      ]);
+      assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
+      assert.deepEqual(botified.downloadFileCalls, [
+        {
+          baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+          serviceKey: "test-service-key",
+          fileId: "file_real_1"
+        }
+      ]);
+      assert.equal(JSON.stringify({ events, artifacts }).includes("download_url"), false);
+      assert.doesNotMatch(JSON.stringify({ events, artifacts }), /botified\.internal|bsk_runtime_secret|\/v1\/files/);
+
+      await services.tasks.listTaskArtifacts(userId, task.id);
+      assert.equal(botified.downloadFileCalls.length, 1);
+      assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("best-effort syncs task artifacts even when the ProductStore already has one", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-refresh-"));
+    const firstBytes = new TextEncoder().encode("first persisted artifact");
+    const secondBytes = new TextEncoder().encode("second later artifact");
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "refresh_file_1",
+              filename: "first.txt",
+              size_bytes: firstBytes.byteLength
+            }
+          }
+        ],
+        nextCursor: "c1"
+      },
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c2",
+            seq: 2,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "refresh_file_2",
+              filename: "second.txt",
+              size_bytes: secondBytes.byteLength
+            }
+          }
+        ],
+        nextCursor: "c2"
+      }
+    ], {
+      downloads: {
+        refresh_file_1: firstBytes,
+        refresh_file_2: secondBytes
+      }
+    });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "publish twice", endpointId });
+      const persisted = await store.listTaskArtifacts(task.id);
+      assert.deepEqual(persisted.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [
+        ["refresh_file_1", "first.txt", firstBytes.byteLength]
+      ]);
+
+      const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+
+      assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [
+        ["refresh_file_1", "first.txt", firstBytes.byteLength],
+        ["refresh_file_2", "second.txt", secondBytes.byteLength]
+      ]);
+      assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "c1"]);
+      assert.deepEqual(botified.downloadFileCalls.map((call) => call.fileId), ["refresh_file_1", "refresh_file_2"]);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("serves persisted task artifacts when the Botified runtime is unavailable", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-offline-"));
+    const artifactBytes = new TextEncoder().encode("persisted artifact survives runtime cleanup");
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "offline_file_1",
+              filename: "offline.txt",
+              size_bytes: artifactBytes.byteLength,
+              download_url: "http://botified.internal/v1/files/offline_file_1?service_key=bsk_runtime_secret"
+            }
+          }
+        ],
+        nextCursor: "c1"
+      }
+    ], {
+      downloads: {
+        offline_file_1: artifactBytes
+      }
+    });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "publish then disappear", endpointId });
+      const persisted = (await store.listTaskArtifacts(task.id))[0];
+      assert.ok(persisted, "expected the initial sync to persist an artifact");
+      botified.readTimelineError = new BotifiedHttpError({
+        status: 401,
+        code: "invalid_service_key",
+        message: "invalid service key bsk_runtime_secret",
+        retryable: false,
+        responseBody: { error: { code: "invalid_service_key" } }
+      });
+
+      const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+      const downloaded = await services.tasks.downloadTaskArtifact(userId, task.id, persisted.id);
+
+      assert.deepEqual(artifacts.map((artifact) => [artifact.id, artifact.fileId, artifact.name, artifact.bytes]), [
+        [persisted.id, "offline_file_1", "offline.txt", artifactBytes.byteLength]
+      ]);
+      assert.equal(downloaded.artifact.id, persisted.id);
+      assert.equal(downloaded.bytes.toString("utf8"), "persisted artifact survives runtime cleanup");
+      assert.doesNotMatch(JSON.stringify({ artifacts, downloaded: downloaded.artifact }), /botified\.internal|bsk_runtime_secret|download_url/);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("retries artifact persistence when the first Botified download fails", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-retry-"));
+    const artifactBytes = new TextEncoder().encode("retry fills product artifact");
+    const published = {
+      cursor: "c1",
+      seq: 1,
+      session_id: "s1",
+      type: "file.published",
+      payload: {
+        file_id: "retry_file_1",
+        filename: "retry.txt",
+        size_bytes: artifactBytes.byteLength
+      }
+    };
+    const botified = new FakeBotifiedClient([
+      { status: "ok", events: [published], nextCursor: "c1" },
+      { status: "ok", events: [published], nextCursor: "c1" }
+    ], {
+      downloads: {
+        retry_file_1: artifactBytes
+      },
+      downloadFailures: {
+        retry_file_1: [new Error("artifact download temporarily unavailable")]
+      }
+    });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+      await assert.rejects(
+        () => services.tasks.createTask(userId, projectId, { prompt: "publish with flaky download", endpointId }),
+        /Botified download file failed: artifact download temporarily unavailable/
+      );
+      const [task] = await store.listTasksForProject(projectId);
+      assert.ok(task, "task should remain available for a retry sync");
+      assert.deepEqual(await store.listTaskArtifacts(task.id), []);
+
+      await services.tasks.listTaskEvents(userId, task.id);
+      const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+      const downloaded = await services.tasks.downloadTaskArtifact(userId, task.id, artifacts[0]?.id ?? "");
+
+      assert.deepEqual((await store.listTaskEvents(task.id)).map((event) => event.botifiedSeq), [1]);
+      assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [
+        ["retry_file_1", "retry.txt", artifactBytes.byteLength]
+      ]);
+      assert.equal(downloaded.bytes.toString("utf8"), "retry fills product artifact");
+      assert.deepEqual(botified.downloadFileCalls.map((call) => call.fileId), ["retry_file_1", "retry_file_1"]);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("aborts Botified before marking a task as stopping", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
     const { services, userId, projectId, endpointId } = await setupTaskServices(botified);
@@ -729,6 +987,7 @@ describe("task service Botified orchestration", () => {
 
 interface SetupOptions {
   serviceKeyFactory?: () => string | undefined;
+  dataRoot?: string;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: CreateApplicationServicesInput["liveSandbox"];
   liveSandboxMaxLifetimeMs?: number;
@@ -740,7 +999,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
   const store = createInMemoryProductStore();
   const services = createApplicationServices({
     store,
-    dataRoot: "/agentsmith-lite",
+    dataRoot: options.dataRoot ?? path.join(tmpdir(), "agentsmith-lite-task-service"),
     builtinAdminPassword: "admin-password",
     sessionSecret: "test-session-secret",
     botifiedClient: botified,
@@ -775,7 +1034,9 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
+  readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
   readonly abortCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
+  readTimelineError: Error | null = null;
 
   constructor(
     private readonly timelineReads: BotifiedTimelineReadResult[],
@@ -784,6 +1045,8 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       postResult?: BotifiedPostMessageResult;
       postError?: Error;
       abortError?: Error;
+      downloads?: Record<string, Uint8Array>;
+      downloadFailures?: Record<string, Error[]>;
     } = {}
   ) {}
 
@@ -802,6 +1065,9 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
 
   async readTimeline(baseUrl: string, serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
     this.readTimelineCalls.push({ baseUrl, serviceKey, cursor });
+    if (this.readTimelineError) {
+      throw this.readTimelineError;
+    }
     const next = this.timelineReads.shift();
     if (next) {
       return next;
@@ -815,6 +1081,21 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
 
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> {
     return { files: [] };
+  }
+
+  async downloadFile(baseUrl: string, serviceKey: string, fileId: string) {
+    this.downloadFileCalls.push({ baseUrl, serviceKey, fileId });
+    const failure = this.options.downloadFailures?.[fileId]?.shift();
+    if (failure) {
+      throw failure;
+    }
+    const bytes = this.options.downloads?.[fileId] ?? new Uint8Array();
+    return {
+      bytes,
+      filename: `${fileId}.txt`,
+      mimeType: "text/plain",
+      sizeBytes: bytes.byteLength
+    };
   }
 
   async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {

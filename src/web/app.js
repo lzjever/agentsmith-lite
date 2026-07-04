@@ -80,7 +80,10 @@ async function refreshDashboard() {
   loginEl.classList.add("hidden");
   dashboardEl.classList.remove("hidden");
   renderDashboard(dashboard);
-  await refreshProjectFiles(dashboard);
+  await Promise.all([
+    refreshProjectFiles(),
+    refreshTaskArtifacts(dashboard.tasks)
+  ]);
 }
 
 function renderDashboard(data) {
@@ -122,6 +125,29 @@ async function refreshProjectFiles() {
   )) : [item("files/", "0 entries")]));
 }
 
+async function refreshTaskArtifacts(tasks) {
+  const artifactsEl = document.querySelector("#artifacts");
+  const artifactsCount = document.querySelector("#artifacts-count");
+  if (tasks.length === 0) {
+    artifactsCount.textContent = "0 files";
+    artifactsEl.replaceChildren(item("No artifacts", "0 files"));
+    return;
+  }
+
+  const groups = await Promise.all(tasks.map(async (task) => ({
+    task,
+    artifacts: await api(`/api/tasks/${task.id}/artifacts`)
+  })));
+  const rows = groups.flatMap((group) => group.artifacts.map((artifact) => ({
+    task: group.task,
+    artifact
+  })));
+  artifactsCount.textContent = `${rows.length} file${rows.length === 1 ? "" : "s"}`;
+  artifactsEl.replaceChildren(...(rows.length > 0 ? rows.map(({ task, artifact }) =>
+    artifactItem(task, artifact)
+  ) : [item("No artifacts", "0 files")]));
+}
+
 function item(title, detail) {
   const node = document.createElement("article");
   node.className = "item";
@@ -131,6 +157,28 @@ function item(title, detail) {
   paragraph.textContent = detail;
   node.append(heading, paragraph);
   return node;
+}
+
+function artifactItem(task, artifact) {
+  const node = item(artifact.name, `${formatBytes(artifact.bytes)} · ${task.status}`);
+  const link = document.createElement("a");
+  link.className = "download-link";
+  link.href = `/api/tasks/${task.id}/artifacts/${artifact.id}/download`;
+  link.download = artifact.name;
+  link.textContent = "Download";
+  node.append(link);
+  return node;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} bytes`;
+  }
+  const kib = bytes / 1024;
+  if (kib < 1024) {
+    return `${kib.toFixed(1)} KiB`;
+  }
+  return `${(kib / 1024).toFixed(1)} MiB`;
 }
 
 async function api(path, options = {}) {

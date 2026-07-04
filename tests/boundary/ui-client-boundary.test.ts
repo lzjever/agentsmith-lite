@@ -36,6 +36,14 @@ describe("web ui client boundary", () => {
       .filter(Boolean);
     assert.ok(fetchTargets.length > 0);
     assert.ok(fetchTargets.every((target) => target?.startsWith("/api/")));
+    assert.ok(
+      checked.some(([, text]) => text.includes("/api/tasks/") && text.includes("/artifacts")),
+      "browser UI must load task artifacts through the AgentSmith Lite API"
+    );
+    assert.ok(
+      checked.some(([, text]) => text.includes("/download") && text.includes("download")),
+      "browser UI must expose product artifact download links"
+    );
   });
 });
 

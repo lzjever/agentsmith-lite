@@ -172,6 +172,45 @@ describe("botified runtime integration", () => {
     assert.equal(projection.nextCursor, "c3");
   });
 
+  it("projects actual Botified file.published metadata without leaking download URLs", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "file.published",
+        payload: {
+          file_id: "file_actual_1",
+          filename: "actual-report.txt",
+          mime_type: "text/plain",
+          size_bytes: 17,
+          sha256: "f".repeat(64),
+          download_url: "http://botified.internal/v1/files/file_actual_1?service_key=bsk_file_secret",
+          source: "published",
+          description: "final report"
+        }
+      }
+    ]);
+
+    assert.equal(projection.events.length, 1);
+    assert.deepEqual(projection.artifacts.map((artifact) => ({
+      fileId: artifact.fileId,
+      name: artifact.name,
+      bytes: artifact.bytes,
+      sha256: artifact.sha256
+    })), [
+      {
+        fileId: "file_actual_1",
+        name: "actual-report.txt",
+        bytes: 17,
+        sha256: "f".repeat(64)
+      }
+    ]);
+    assert.equal("download_url" in (projection.events[0]?.payload ?? {}), false);
+    assert.equal("downloadUrl" in (projection.artifacts[0] ?? {}), false);
+    assert.doesNotMatch(JSON.stringify(projection), /download_url|botified\.internal|bsk_file_secret|\/v1\/files/);
+  });
+
   it("redacts secret-like timeline payload values recursively", () => {
     const projection = projectBotifiedTimelineEvents("task-1", [
       {
