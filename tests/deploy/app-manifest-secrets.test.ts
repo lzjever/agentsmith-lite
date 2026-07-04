@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { renderAppManifests } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
 
@@ -11,6 +12,8 @@ describe("app manifest rendering", () => {
         KUBE_NAMESPACE: "agentsmith",
         JUICEFS_PVC_NAME: "agentsmith-lite-files",
         APP_PUBLIC_BASE_URL: "https://agentsmith.example.com",
+        AGENTSMITH_LITE_SANDBOX_MODE: "live",
+        BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
         AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
         S3_ENDPOINT: "https://s3.example.com",
         S3_BUCKET: "agentsmith-lite-files",
@@ -46,6 +49,8 @@ describe("app manifest rendering", () => {
     const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
     const secretData = (secret as { stringData?: Record<string, string> } | undefined)?.stringData;
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
+    assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
   });
@@ -62,6 +67,10 @@ describe("app manifest rendering", () => {
       | undefined;
 
     assert.ok(role, "API sandbox Role should be rendered");
+    const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
+    const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "dry-run");
+    assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "agentsmith-lite/botified-runner:dev");
     assert.ok(
       role.rules.some(
         (rule) =>
@@ -80,6 +89,8 @@ describe("app manifest rendering", () => {
     );
 
     const resources = role.rules.flatMap((rule) => rule.resources);
+    const verbs = role.rules.flatMap((rule) => rule.verbs);
+    assert.equal(verbs.includes("watch"), false, "API sandbox Role should not grant watch");
     for (const forbidden of [
       "pods/exec",
       "pods/log",
@@ -94,6 +105,14 @@ describe("app manifest rendering", () => {
       "clusterrolebindings"
     ]) {
       assert.equal(resources.includes(forbidden), false, `${forbidden} must not be granted`);
+    }
+  });
+
+  it("keeps the deploy doctor aligned with forbidden sandbox RBAC resources", () => {
+    const doctor = readFileSync("scripts/deploy/doctor.sh", "utf8");
+
+    for (const forbidden of ["watch", "pods/(exec|log|attach|portforward)", "persistentvolumes", "persistentvolumeclaims"]) {
+      assert.match(doctor, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
   });
 });

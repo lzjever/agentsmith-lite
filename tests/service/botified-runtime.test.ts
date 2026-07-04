@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { generateBotifiedConfig } from "../../packages/botified-runtime/src/config.js";
+import { generateBotifiedConfig, serializeBotifiedConfig } from "../../packages/botified-runtime/src/config.js";
 import { projectBotifiedTimelineEvents } from "../../packages/botified-runtime/src/projection.js";
 
 describe("botified runtime integration", () => {
@@ -74,6 +74,7 @@ describe("botified runtime integration", () => {
       }
     });
     assert.equal(config.service.host, "0.0.0.0");
+    assert.equal(config.service.port, 3099);
     assert.equal(config.service.service_key_env, "BOTIFIED_SERVICE_KEY");
     assert.equal(config.service.max_queue_messages > 0, true);
     assert.equal(config.service.max_queue_bytes > 0, true);
@@ -90,6 +91,40 @@ describe("botified runtime integration", () => {
     assert.equal(config.subagents.enabled, false);
     assert.equal(config.profiling.enabled, false);
     assert.equal(config.llm_text_preview.enabled, false);
+  });
+
+  it("honors a custom service port and serializes without raw API keys", () => {
+    const config = generateBotifiedConfig({
+      endpoint: {
+        id: "e1",
+        projectId: "p1",
+        name: "model",
+        protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1",
+        model: "gpt-compatible",
+        apiKeySecretRef: "secret/model",
+        capabilities: ["text", "tool_calls"],
+        requestTimeoutSecs: 30,
+        createdAt: "2026-07-04T00:00:00.000Z",
+        updatedAt: "2026-07-04T00:00:00.000Z"
+      },
+      task: {
+        taskId: "t1",
+        projectMountPath: "/workspace/project",
+        taskHomePath: "/workspace/project/tasks/t1/home",
+        botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
+        modelApiKeyEnv: "MODEL_API_KEY",
+        servicePort: 4100
+      }
+    });
+
+    const serialized = serializeBotifiedConfig(config);
+
+    assert.equal(config.service.port, 4100);
+    assert.equal(serialized.includes('"port": 4100'), true);
+    assert.equal(serialized.includes('"api_key_env": "MODEL_API_KEY"'), true);
+    assert.equal(serialized.includes("sk-real-model-key"), false);
   });
 
   it("enables view_image only when the configured provider can handle images", () => {
@@ -135,5 +170,91 @@ describe("botified runtime integration", () => {
     assert.equal(projection.events[1]?.payload.api_key, "[redacted]");
     assert.equal(projection.artifacts[0]?.fileId, "f1");
     assert.equal(projection.nextCursor, "c3");
+  });
+
+  it("redacts secret-like timeline payload values recursively", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "service.error",
+        payload: {
+          message: "runner returned Bearer bsk_service_secret and sk-model-secret",
+          notes: ["plain", "array has bsk_array_secret", { detail: "nested sk-nested-secret" }],
+          nested: {
+            apiKey: "sk-field-secret",
+            trace: "Bearer bsk_nested_secret"
+          }
+        }
+      }
+    ]);
+
+    const payload = projection.events[0]?.payload as {
+      message?: string;
+      notes?: Array<string | { detail?: string }>;
+      nested?: { apiKey?: string; trace?: string };
+    };
+    assert.equal(payload.message, "runner returned Bearer <redacted> and sk-<redacted>");
+    assert.deepEqual(payload.notes, ["plain", "array has bsk_<redacted>", { detail: "nested sk-<redacted>" }]);
+    assert.deepEqual(payload.nested, {
+      apiKey: "[redacted]",
+      trace: "Bearer <redacted>"
+    });
+    assert.doesNotMatch(JSON.stringify(projection.events), /bsk_service_secret|sk-model-secret|bsk_array_secret|sk-nested-secret|sk-field-secret|bsk_nested_secret/);
+  });
+
+  it("redacts timeline control fields without advancing to a secret-like resume cursor", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      { cursor: "safe-c0", heartbeat: true },
+      {
+        cursor: "cursor-bsk_cursor_secret",
+        seq: 1,
+        session_id: "session-sk-session-secret",
+        type: "assistant_message.completed Bearer bsk_type_secret",
+        payload: { text: "ok" }
+      }
+    ]);
+
+    assert.equal(projection.events.length, 1);
+    assert.equal(projection.events[0]?.cursor, "cursor-bsk_<redacted>");
+    assert.equal(projection.events[0]?.botifiedType, "assistant_message.completed Bearer <redacted>");
+    assert.equal(projection.events[0]?.sessionId, "session-sk-<redacted>");
+    assert.equal(projection.nextCursor, "safe-c0");
+    assert.notEqual(projection.nextCursor, "cursor-bsk_<redacted>");
+    assert.doesNotMatch(JSON.stringify(projection), /bsk_cursor_secret|sk-session-secret|bsk_type_secret/);
+  });
+
+  it("redacts secret-like file artifact identifiers and names", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "file.published",
+        payload: {
+          file_id: "artifact-bsk_file_secret",
+          name: "report Bearer bsk_service_secret and sk-model-secret.txt",
+          bytes: 12
+        }
+      },
+      {
+        cursor: "c2",
+        seq: 2,
+        session_id: "s1",
+        type: "file.published",
+        payload: {
+          id: "artifact-sk-id-secret",
+          bytes: 8
+        }
+      }
+    ]);
+
+    assert.equal(projection.artifacts.length, 2);
+    assert.equal(projection.artifacts[0]?.fileId, "artifact-bsk_<redacted>");
+    assert.equal(projection.artifacts[0]?.name, "report Bearer <redacted> and sk-<redacted>.txt");
+    assert.equal(projection.artifacts[1]?.fileId, "artifact-sk-<redacted>");
+    assert.equal(projection.artifacts[1]?.name, "artifact-sk-<redacted>");
+    assert.doesNotMatch(JSON.stringify(projection.artifacts), /bsk_file_secret|bsk_service_secret|sk-model-secret|sk-id-secret/);
   });
 });

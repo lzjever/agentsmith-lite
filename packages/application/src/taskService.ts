@@ -1,23 +1,56 @@
-import { randomBytes } from "node:crypto";
+import { createHmac } from "node:crypto";
 import path from "node:path";
+import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { projectBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
-import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, AgentTaskStatus, CreateTaskInput } from "../../contracts/src/api.js";
+import { isSecretLikeText, redactSecretLikeText } from "../../botified-runtime/src/redaction.js";
+import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, AgentTaskStatus, CreateTaskInput, KubernetesResource, ModelEndpoint } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
+import { normalizeOpenAICompatibleBaseUrl, type ModelCredentialResolver } from "../../openai-compatible-client/src/index.js";
 import { BotifiedHttpError, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
+import {
+  applySandboxReconcileActionsToKubernetes,
+  type KubernetesResourceRef,
+  type SandboxKubernetesMutationPort,
+  type SandboxKubernetesReadinessPort
+} from "../../sandbox-controller/src/kubernetesPort.js";
 import { renderSandboxResources } from "../../sandbox-controller/src/manifestRenderer.js";
+import {
+  reconcileSandboxRuns,
+  type SandboxCoreResourceKind,
+  type SandboxReconcileAction,
+  type SandboxRunState
+} from "../../sandbox-controller/src/reconciler.js";
 import { EndpointService } from "./endpointService.js";
 import { WorkspaceService } from "./workspaceService.js";
+
+export interface TaskLiveSandboxConfig {
+  port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort;
+  readinessTimeoutMs?: number;
+  readinessPollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface BotifiedServiceKeyInput {
+  namespace: string;
+  workspaceId: string;
+  projectId: string;
+  taskId: string;
+  runId: string;
+}
 
 export interface TaskServiceConfig {
   namespace: string;
   pvcName: string;
   botifiedRunnerImage: string;
   botifiedPort?: number;
-  botifiedServiceKeyFactory?: () => string | undefined;
+  botifiedServiceKeySecret?: string;
+  botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
+  liveSandbox?: TaskLiveSandboxConfig;
+  modelCredentialResolver?: ModelCredentialResolver;
 }
 
 export interface BotifiedTaskAddressInput {
@@ -28,7 +61,6 @@ export interface BotifiedTaskAddressInput {
 
 interface BotifiedTaskRuntimeState {
   baseUrl: string;
-  serviceKey: string;
   timelineCursor?: string;
   postMessageCursor?: string;
   lastSyncedAt?: string;
@@ -43,20 +75,20 @@ export class BotifiedTaskPortError extends ProductError {
 
   constructor(operation: BotifiedOperation, error: unknown) {
     if (error instanceof BotifiedHttpError) {
-      super(`Botified ${operation} failed: ${error.message}`, error.status);
+      super(`Botified ${operation} failed: ${redactSecretLikeText(error.message)}`, error.status);
       this.code = error.code;
       this.retryable = error.retryable;
       this.details = {};
       if (error.timelineCursor !== undefined) {
-        this.details.timelineCursor = error.timelineCursor;
+        this.details.timelineCursor = redactSecretLikeText(error.timelineCursor);
       }
       if (error.historyBoundary !== undefined) {
-        this.details.historyBoundary = error.historyBoundary;
+        this.details.historyBoundary = redactSecretLikeText(error.historyBoundary);
       }
       return;
     }
 
-    const message = error instanceof Error ? error.message : "Unknown Botified error";
+    const message = error instanceof Error ? redactSecretLikeText(error.message) : "Unknown Botified error";
     super(`Botified ${operation} failed: ${message}`, 502);
     this.code = `botified_${operation.replace(/\s+/g, "_")}_failed`;
     this.retryable = true;
@@ -77,7 +109,7 @@ export class TaskService {
     const endpointId = requireNonEmptyString(input.endpointId, "task.endpointId");
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const project = await this.workspaces.requireProjectForUser(userId, projectId);
-    await this.endpoints.requireEndpointForProject(projectId, endpointId);
+    const endpoint = await this.endpoints.requireEndpointForProject(projectId, endpointId);
     const active = (await this.store.listTasksForProject(projectId)).filter((task) =>
       ["queued", "starting", "running", "stopping"].includes(task.status)
     );
@@ -85,11 +117,18 @@ export class TaskService {
       throw new ProductError("Project concurrent task limit reached", 409);
     }
 
+    const liveCredential = this.config.liveSandbox ? this.resolveLiveModelCredential(endpoint) : null;
     const id = newId("task");
     const runId = newId("run");
     const timestamp = nowIso();
     const botifiedPort = this.config.botifiedPort ?? 3099;
-    const serviceKey = this.generateServiceKey();
+    const serviceKey = this.generateServiceKey({
+      namespace: this.config.namespace,
+      workspaceId: project.workspaceId,
+      projectId,
+      taskId: id,
+      runId
+    });
     requireBotifiedServiceKey(serviceKey);
     const sandbox = renderSandboxResources({
       namespace: this.config.namespace,
@@ -102,6 +141,7 @@ export class TaskService {
       projectSubPath: project.rootPath,
       botifiedPort,
       serviceKeySecretName: `asl-botified-${id}`,
+      modelApiKeySecretKey: "MODEL_API_KEY",
       cpuRequest: "250m",
       memoryRequest: "512Mi",
       cpuLimit: "1",
@@ -121,23 +161,54 @@ export class TaskService {
       updatedAt: timestamp
     });
     const state: BotifiedTaskRuntimeState = {
-      baseUrl: this.botifiedBaseUrlForTask(id, botifiedPort),
-      serviceKey
+      baseUrl: this.botifiedBaseUrlForTask(id, botifiedPort)
     };
-    await this.writeRuntimeState(id, state);
+    const liveRun = this.config.liveSandbox
+      ? this.buildLiveSandboxRun({
+          task,
+          timestamp,
+          botifiedPort,
+          projectSubPath: project.rootPath,
+          serviceKeySecretName: `asl-botified-${id}`
+        })
+      : null;
 
-    const posted = await this.callBotified("send message", () =>
-      this.botified.postMessage(state.baseUrl, state.serviceKey, prompt)
-    );
-    if (!posted.accepted) {
-      throw new ProductError("Botified did not accept task prompt", 502);
+    let acceptedPrompt = false;
+    try {
+      await this.writeRuntimeState(id, state);
+      if (this.config.liveSandbox && liveRun && liveCredential) {
+        await this.startLiveSandbox({
+          endpoint,
+          task,
+          run: liveRun,
+          serviceKey,
+          modelApiKey: liveCredential.apiKey
+        });
+      }
+
+      const posted = await this.callBotified("send message", () =>
+        this.botified.postMessage(state.baseUrl, serviceKey, prompt)
+      );
+      if (!posted.accepted) {
+        throw new ProductError("Botified did not accept task prompt", 502);
+      }
+      acceptedPrompt = true;
+      const postMessageCursor = safeRuntimeCursor(posted.cursor);
+      await this.writeRuntimeState(id, {
+        ...state,
+        ...(postMessageCursor !== undefined ? { postMessageCursor } : {})
+      });
+      const running = await this.store.updateTask({ ...task, status: "running", updatedAt: nowIso() });
+      return this.syncTaskTimeline(running);
+    } catch (error) {
+      if (!acceptedPrompt) {
+        await this.bestEffortMarkTaskFailed(task);
+        if (liveRun) {
+          await this.bestEffortCleanupLiveSandbox(liveRun);
+        }
+      }
+      throw error;
     }
-    await this.writeRuntimeState(id, {
-      ...state,
-      ...(posted.cursor !== undefined ? { postMessageCursor: posted.cursor } : {})
-    });
-    const running = await this.store.updateTask({ ...task, status: "running", updatedAt: nowIso() });
-    return this.syncTaskTimeline(running);
   }
 
   async listTasks(userId: string, projectId: string): Promise<AgentTask[]> {
@@ -148,7 +219,8 @@ export class TaskService {
   async cancelTask(userId: string, taskId: string): Promise<AgentTask> {
     const task = await this.requireTaskForUser(userId, taskId);
     const state = await this.readRuntimeState(task.id);
-    await this.callBotified("abort", () => this.botified.abort(state.baseUrl, state.serviceKey));
+    const serviceKey = this.serviceKeyForTask(task);
+    await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
     const updated = { ...task, status: "stopping" as const, updatedAt: nowIso() };
     return this.store.updateTask(updated);
   }
@@ -187,10 +259,11 @@ export class TaskService {
 
   private async syncTaskTimeline(task: AgentTask): Promise<AgentTask> {
     const state = await this.readRuntimeState(task.id);
+    const serviceKey = this.serviceKeyForTask(task);
     const existing = await this.store.listTaskEvents(task.id);
     const existingSeqs = new Set(existing.map((event) => event.botifiedSeq));
     const timeline = await this.callBotified("read timeline", () =>
-      this.botified.readTimeline(state.baseUrl, state.serviceKey, state.timelineCursor)
+      this.botified.readTimeline(state.baseUrl, serviceKey, state.timelineCursor)
     );
     const projection = projectBotifiedTimelineEvents(task.id, timelineEvents(timeline.events), existingSeqs);
 
@@ -201,7 +274,7 @@ export class TaskService {
       await this.store.appendTaskArtifacts(projection.artifacts);
     }
 
-    const nextCursor = timeline.nextCursor ?? projection.nextCursor ?? state.timelineCursor;
+    const nextCursor = safeRuntimeCursor(timeline.nextCursor) ?? safeRuntimeCursor(projection.nextCursor) ?? state.timelineCursor;
     await this.writeRuntimeState(task.id, {
       ...state,
       ...(nextCursor !== undefined ? { timelineCursor: nextCursor } : {}),
@@ -225,11 +298,9 @@ export class TaskService {
       throw new ProductError("Task runtime state not found", 409);
     }
     const baseUrl = stringDocumentField(document, "botifiedBaseUrl");
-    const serviceKey = stringDocumentField(document, "serviceKey");
-    requireBotifiedServiceKey(serviceKey);
-    const state: BotifiedTaskRuntimeState = { baseUrl, serviceKey };
-    const timelineCursor = optionalStringDocumentField(document, "timelineCursor");
-    const postMessageCursor = optionalStringDocumentField(document, "postMessageCursor");
+    const state: BotifiedTaskRuntimeState = { baseUrl };
+    const timelineCursor = safeRuntimeCursor(optionalStringDocumentField(document, "timelineCursor"));
+    const postMessageCursor = safeRuntimeCursor(optionalStringDocumentField(document, "postMessageCursor"));
     const lastSyncedAt = optionalStringDocumentField(document, "lastSyncedAt");
     if (timelineCursor !== undefined) {
       state.timelineCursor = timelineCursor;
@@ -244,16 +315,16 @@ export class TaskService {
   }
 
   private async writeRuntimeState(taskId: string, state: BotifiedTaskRuntimeState): Promise<void> {
-    requireBotifiedServiceKey(state.serviceKey);
     const document: Record<string, unknown> = {
-      botifiedBaseUrl: state.baseUrl,
-      serviceKey: state.serviceKey
+      botifiedBaseUrl: state.baseUrl
     };
-    if (state.timelineCursor !== undefined) {
-      document.timelineCursor = state.timelineCursor;
+    const timelineCursor = safeRuntimeCursor(state.timelineCursor);
+    const postMessageCursor = safeRuntimeCursor(state.postMessageCursor);
+    if (timelineCursor !== undefined) {
+      document.timelineCursor = timelineCursor;
     }
-    if (state.postMessageCursor !== undefined) {
-      document.postMessageCursor = state.postMessageCursor;
+    if (postMessageCursor !== undefined) {
+      document.postMessageCursor = postMessageCursor;
     }
     if (state.lastSyncedAt !== undefined) {
       document.lastSyncedAt = state.lastSyncedAt;
@@ -261,8 +332,20 @@ export class TaskService {
     await this.store.jsonDocs.put("sandbox_runtime_state", taskId, document);
   }
 
-  private generateServiceKey(): string | undefined {
-    return (this.config.botifiedServiceKeyFactory ?? createBotifiedServiceKey)();
+  private serviceKeyForTask(task: AgentTask): string {
+    const serviceKey = this.generateServiceKey({
+      namespace: this.config.namespace,
+      workspaceId: task.workspaceId,
+      projectId: task.projectId,
+      taskId: task.id,
+      runId: task.runId
+    });
+    requireBotifiedServiceKey(serviceKey);
+    return serviceKey;
+  }
+
+  private generateServiceKey(input: BotifiedServiceKeyInput): string | undefined {
+    return this.config.botifiedServiceKeyFactory?.(input) ?? createBotifiedServiceKey(this.config.botifiedServiceKeySecret, input);
   }
 
   private botifiedBaseUrlForTask(taskId: string, port: number): string {
@@ -277,10 +360,148 @@ export class TaskService {
       throw new BotifiedTaskPortError(operation, error);
     }
   }
+
+  private resolveLiveModelCredential(endpoint: ModelEndpoint): { apiKey: string; baseUrl: string } {
+    const resolver = this.config.modelCredentialResolver;
+    if (!resolver) {
+      throw new ProductError("Live sandbox model credential resolver is not configured", 500);
+    }
+    const credential = resolver.resolveCredential(endpoint.apiKeySecretRef);
+    const endpointBaseUrl = normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl);
+    const credentialBaseUrl = normalizeOpenAICompatibleBaseUrl(credential.baseUrl, 500);
+    if (endpointBaseUrl !== credentialBaseUrl) {
+      throw new ProductError("Endpoint baseUrl does not match the configured credential binding");
+    }
+    return credential;
+  }
+
+  private buildLiveSandboxRun(input: {
+    task: AgentTask;
+    timestamp: string;
+    botifiedPort: number;
+    projectSubPath: string;
+    serviceKeySecretName: string;
+  }): SandboxRunState {
+    const paths = this.taskRuntimePaths(input.task);
+    return {
+      namespace: this.config.namespace,
+      workspaceId: input.task.workspaceId,
+      projectId: input.task.projectId,
+      taskId: input.task.id,
+      runId: input.task.runId,
+      phase: "starting",
+      image: this.config.botifiedRunnerImage,
+      pvcName: this.config.pvcName,
+      projectSubPath: input.projectSubPath,
+      botifiedPort: input.botifiedPort,
+      resourceNames: {
+        pod: `asl-task-${input.task.id}`,
+        service: `asl-task-${input.task.id}`,
+        configMap: `asl-task-${input.task.id}-config`,
+        secret: input.serviceKeySecretName,
+        serviceAccount: `asl-task-${input.task.id}`,
+        networkPolicy: `asl-task-${input.task.id}`
+      },
+      serviceKeySecretRef: {
+        name: input.serviceKeySecretName,
+        key: "BOTIFIED_SERVICE_KEY"
+      },
+      directories: {
+        taskHome: paths.taskHomePath,
+        artifacts: paths.artifactPath,
+        botified: paths.botifiedDataPath
+      },
+      resourceLimits: {
+        cpuRequest: "250m",
+        memoryRequest: "512Mi",
+        cpuLimit: "1",
+        memoryLimit: "1Gi"
+      },
+      fencingToken: 1,
+      cleanupStatus: "active",
+      createdAt: input.timestamp,
+      updatedAt: input.timestamp
+    };
+  }
+
+  private async startLiveSandbox(input: {
+    endpoint: ModelEndpoint;
+    task: AgentTask;
+    run: SandboxRunState;
+    serviceKey: string;
+    modelApiKey: string;
+  }): Promise<void> {
+    const live = this.config.liveSandbox;
+    if (!live) {
+      return;
+    }
+    const actions = reconcileSandboxRuns({
+      desiredRuns: [input.run],
+      observedResources: [],
+      now: new Date()
+    }).actions;
+    const config = generateBotifiedConfig({
+      endpoint: input.endpoint,
+      task: {
+        taskId: input.task.id,
+        projectMountPath: "/workspace/project",
+        taskHomePath: input.run.directories.taskHome,
+        botifiedDataPath: input.run.directories.botified,
+        serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
+        modelApiKeyEnv: "MODEL_API_KEY",
+        servicePort: input.run.botifiedPort
+      }
+    });
+    const materialized = materializeLiveCreateActions(actions, {
+      serviceKey: input.serviceKey,
+      modelApiKey: input.modelApiKey,
+      botifiedConfig: serializeBotifiedConfig(config)
+    });
+    await applySandboxReconcileActionsToKubernetes(live.port, materialized);
+    const podAction = materialized.find((action) => action.type === "create_resource" && action.kind === "Pod");
+    if (!podAction || podAction.type !== "create_resource") {
+      throw new ProductError("Live sandbox pod manifest was not generated", 500);
+    }
+    await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
+  }
+
+  private async bestEffortCleanupLiveSandbox(run: SandboxRunState): Promise<void> {
+    const live = this.config.liveSandbox;
+    if (!live) {
+      return;
+    }
+    const actions = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [],
+      now: new Date()
+    }).actions;
+    const deleteActions = cleanupDeleteActionsForCreateActions(actions);
+    for (const action of deleteActions) {
+      try {
+        await live.port.deleteResource(resourceRef(action.resource), action.labels);
+      } catch {
+        // Cleanup must not hide the startup failure that triggered it.
+      }
+    }
+  }
+
+  private async bestEffortMarkTaskFailed(task: AgentTask): Promise<void> {
+    try {
+      await this.store.updateTask({ ...task, status: "failed", updatedAt: nowIso() });
+    } catch {
+      // Startup cleanup and the original failure must not depend on the failed-state write.
+    }
+  }
 }
 
-function createBotifiedServiceKey(): string {
-  return `bsk_${randomBytes(32).toString("base64url")}`;
+function createBotifiedServiceKey(secret: string | undefined, input: BotifiedServiceKeyInput): string {
+  const seed = secret && secret.trim().length > 0 ? secret : "dev-session-secret";
+  const hmac = createHmac("sha256", seed);
+  for (const part of ["agentsmith-lite.botified-service-key.v1", input.namespace, input.workspaceId, input.projectId, input.taskId, input.runId]) {
+    hmac.update(part);
+    hmac.update("\0");
+  }
+  return `bsk_${hmac.digest("base64url")}`;
 }
 
 function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string {
@@ -291,6 +512,124 @@ function requireBotifiedServiceKey(serviceKey: string | undefined): asserts serv
   if (serviceKey === undefined || serviceKey.trim() === "") {
     throw new ProductError("Botified service key is required", 500);
   }
+}
+
+function materializeLiveCreateActions(
+  actions: SandboxReconcileAction[],
+  input: { serviceKey: string; modelApiKey: string; botifiedConfig: string }
+): SandboxReconcileAction[] {
+  return actions.map((action) => {
+    if (action.type !== "create_resource") {
+      return structuredClone(action);
+    }
+    const resource = structuredClone(action.resource);
+    if (action.kind === "Secret") {
+      resource.stringData = {
+        BOTIFIED_SERVICE_KEY: input.serviceKey,
+        MODEL_API_KEY: input.modelApiKey
+      };
+    }
+    if (action.kind === "ConfigMap") {
+      resource.data = {
+        ...(isRecord(resource.data) ? resource.data : {}),
+        "botified-config.yaml": input.botifiedConfig
+      };
+    }
+    return {
+      ...structuredClone(action),
+      resource
+    };
+  });
+}
+
+function cleanupDeleteActionsForCreateActions(actions: SandboxReconcileAction[]): Array<Extract<SandboxReconcileAction, { type: "delete_resource" }>> {
+  const creates = new Map<SandboxCoreResourceKind, Extract<SandboxReconcileAction, { type: "create_resource" }>>();
+  for (const action of actions) {
+    if (action.type === "create_resource") {
+      creates.set(action.kind, action);
+    }
+  }
+  const order: SandboxCoreResourceKind[] = ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"];
+  return order.flatMap((kind) => {
+    const create = creates.get(kind);
+    if (!create) {
+      return [];
+    }
+    return [
+      {
+        type: "delete_resource" as const,
+        runId: create.runId,
+        kind: create.kind,
+        name: create.name,
+        labels: create.labels,
+        resource: create.resource
+      }
+    ];
+  });
+}
+
+const sandboxCoreKinds: SandboxCoreResourceKind[] = ["Pod", "Service", "Secret", "ConfigMap", "ServiceAccount", "NetworkPolicy"];
+
+function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
+  if (!isSandboxCoreKind(resource.kind)) {
+    throw new ProductError(`Sandbox cleanup resource kind is not supported: ${resource.kind}`, 500);
+  }
+  if (!resource.metadata.namespace) {
+    throw new ProductError(`Sandbox cleanup resource is missing namespace: ${resource.metadata.name}`, 500);
+  }
+  return {
+    kind: resource.kind,
+    namespace: resource.metadata.namespace,
+    name: resource.metadata.name
+  };
+}
+
+function isSandboxCoreKind(kind: string): kind is SandboxCoreResourceKind {
+  return sandboxCoreKinds.includes(kind as SandboxCoreResourceKind);
+}
+
+async function waitForPodReady(
+  live: TaskLiveSandboxConfig,
+  namespace: string,
+  podName: string,
+  labels: Record<string, string>
+): Promise<void> {
+  const timeoutMs = Math.max(0, live.readinessTimeoutMs ?? 60_000);
+  const pollMs = Math.max(1, live.readinessPollMs ?? 1000);
+  const sleep = live.sleep ?? defaultSleep;
+  let elapsedMs = 0;
+
+  while (true) {
+    const readiness = await live.port.getPodReadiness(namespace, podName, labels);
+    switch (readiness) {
+      case "ready":
+        return;
+      case "failed":
+        throw new ProductError("Sandbox pod failed before readiness", 502);
+      case "fence_mismatch":
+        throw new ProductError("Sandbox pod readiness fence mismatch", 500);
+      case "pending":
+      case "not_found": {
+        if (elapsedMs >= timeoutMs) {
+          throw new ProductError("Timed out waiting for sandbox pod readiness", 504);
+        }
+        const delayMs = Math.min(pollMs, timeoutMs - elapsedMs);
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
+        elapsedMs += delayMs;
+        break;
+      }
+    }
+  }
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecord(value: unknown): value is Record<string, string> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function timelineEvents(events: unknown[]): BotifiedTimelineEvent[] {
@@ -326,4 +665,11 @@ function stringDocumentField(document: Record<string, unknown>, field: string): 
 function optionalStringDocumentField(document: Record<string, unknown>, field: string): string | undefined {
   const value = document[field];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function safeRuntimeCursor(cursor: string | null | undefined): string | undefined {
+  if (cursor === null || cursor === undefined || isSecretLikeText(cursor)) {
+    return undefined;
+  }
+  return cursor;
 }

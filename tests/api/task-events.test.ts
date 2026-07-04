@@ -91,10 +91,11 @@ describe("task events API", () => {
     failingBotified.abortError = new BotifiedHttpError({
       status: 503,
       code: "runner_unavailable",
-      message: "runner is not ready",
+      message: "runner leaked Bearer bsk_api_secret and sk-real-model-key",
       retryable: true,
       responseBody: { error: { code: "runner_unavailable" } },
-      timelineCursor: "c0"
+      timelineCursor: "cursor-bsk_api_secret",
+      historyBoundary: "boundary sk-real-model-key"
     });
     await api.close();
     api = await createApiServer({
@@ -112,14 +113,91 @@ describe("task events API", () => {
     const response = await failingAuth.request("POST", `/api/tasks/${failingTask.id}/cancel`, {});
 
     assert.equal(response.status, 503);
-    assert.deepEqual(await response.json(), {
+    const responseBody = await response.json();
+    assert.deepEqual(responseBody, {
       error: {
         code: "runner_unavailable",
-        message: "Botified abort failed: runner is not ready",
+        message: "Botified abort failed: runner leaked Bearer <redacted> and sk-<redacted>",
         retryable: true,
-        timelineCursor: "c0"
+        timelineCursor: "cursor-bsk_<redacted>",
+        historyBoundary: "boundary sk-<redacted>"
       }
     });
+    assert.doesNotMatch(JSON.stringify(responseBody), /bsk_api_secret|sk-real-model-key/);
+  });
+
+  it("fails fast when live sandbox mode has no persistent product store", async () => {
+    const previousPostgresUrl = process.env.POSTGRES_APP_URL;
+    delete process.env.POSTGRES_APP_URL;
+    try {
+      await assert.rejects(
+        () =>
+          createApiServer({
+            port: 0,
+            dataRoot,
+            builtinAdminPassword: "admin-password",
+            liveSandbox: {
+              port: {
+                applyResource: async () => "applied" as const,
+                patchLabels: async () => "patched" as const,
+                deleteResource: async () => "deleted" as const,
+                getPodReadiness: async () => "ready" as const
+              }
+            }
+          }),
+        /POSTGRES_APP_URL is required/
+      );
+    } finally {
+      if (previousPostgresUrl === undefined) {
+        delete process.env.POSTGRES_APP_URL;
+      } else {
+        process.env.POSTGRES_APP_URL = previousPostgresUrl;
+      }
+    }
+  });
+
+  it("fails fast when live sandbox mode would use the default session secret", async () => {
+    const previousPostgresUrl = process.env.POSTGRES_APP_URL;
+    process.env.POSTGRES_APP_URL = "postgresql://app:secret@db/app";
+    const liveSandbox = {
+      port: {
+        applyResource: async () => "applied" as const,
+        patchLabels: async () => "patched" as const,
+        deleteResource: async () => "deleted" as const,
+        getPodReadiness: async () => "ready" as const
+      }
+    };
+
+    try {
+      for (const sessionSecret of [undefined, "", "dev-session-secret", " dev-session-secret "]) {
+        await assert.rejects(
+          () =>
+            createApiServer({
+              port: 0,
+              dataRoot,
+              builtinAdminPassword: "admin-password",
+              ...(sessionSecret !== undefined ? { sessionSecret } : {}),
+              liveSandbox
+            }),
+          /APP_SESSION_SECRET must be set to a non-default value/
+        );
+      }
+
+      api = await createApiServer({
+        port: 0,
+        dataRoot,
+        builtinAdminPassword: "admin-password",
+        sessionSecret: "production-session-secret",
+        liveSandbox
+      });
+      assert.match(api.baseUrl, /^http:\/\/127\.0\.0\.1:/);
+    } finally {
+      if (previousPostgresUrl === undefined) {
+        delete process.env.POSTGRES_APP_URL;
+      } else {
+        process.env.POSTGRES_APP_URL = previousPostgresUrl;
+      }
+    }
   });
 });
 

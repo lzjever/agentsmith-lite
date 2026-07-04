@@ -1,5 +1,6 @@
 import type { AgentTaskArtifact, AgentTaskEvent, TaskEventKind } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
+import { isSecretLikeText, redactBotifiedPayload, redactSecretLikeText } from "./redaction.js";
 
 export interface BotifiedTimelineEvent {
   cursor?: string;
@@ -29,38 +30,39 @@ export function projectBotifiedTimelineEvents(
   for (const item of timeline) {
     if (item.heartbeat || item.seq === undefined || !item.type || !item.cursor) {
       if (item.cursor) {
-        nextCursor = item.cursor;
+        nextCursor = safeNextCursor(item.cursor, nextCursor);
       }
       continue;
     }
     if (seen.has(item.seq)) {
-      nextCursor = item.cursor;
+      nextCursor = safeNextCursor(item.cursor, nextCursor);
       continue;
     }
     seen.add(item.seq);
-    nextCursor = item.cursor;
+    nextCursor = safeNextCursor(item.cursor, nextCursor);
 
     const kind = mapEventKind(item.type);
-    const payload = redactPayload(item.payload ?? {});
+    const payload = redactBotifiedPayload(item.payload ?? {});
     events.push({
       id: newId("evt"),
       taskId,
       kind,
-      cursor: item.cursor,
+      cursor: redactSecretLikeText(item.cursor),
       botifiedSeq: item.seq,
-      botifiedType: item.type,
-      sessionId: item.session_id ?? "unknown",
+      botifiedType: redactSecretLikeText(item.type),
+      sessionId: redactSecretLikeText(item.session_id ?? "unknown"),
       payload,
       createdAt: nowIso()
     });
 
     if (item.type === "file.published") {
-      const fileId = String(item.payload?.file_id ?? item.payload?.id ?? `botified-${item.seq}`);
+      const rawFileId = String(item.payload?.file_id ?? item.payload?.id ?? `botified-${item.seq}`);
+      const fileId = redactSecretLikeText(rawFileId);
       artifacts.push({
         id: newId("art"),
         taskId,
         fileId,
-        name: String(item.payload?.name ?? fileId),
+        name: redactSecretLikeText(String(item.payload?.name ?? rawFileId)),
         bytes: typeof item.payload?.bytes === "number" ? item.payload.bytes : 0,
         createdAt: nowIso()
       });
@@ -68,6 +70,10 @@ export function projectBotifiedTimelineEvents(
   }
 
   return { events, artifacts, nextCursor };
+}
+
+function safeNextCursor(cursor: string, current: string | null): string | null {
+  return isSecretLikeText(cursor) ? current : cursor;
 }
 
 function mapEventKind(type: string): TaskEventKind {
@@ -97,18 +103,3 @@ function mapEventKind(type: string): TaskEventKind {
   }
   return "diagnostic";
 }
-
-function redactPayload(payload: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(payload)) {
-    if (/secret|token|api[_-]?key|password/i.test(key)) {
-      result[key] = "[redacted]";
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      result[key] = redactPayload(value as Record<string, unknown>);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-

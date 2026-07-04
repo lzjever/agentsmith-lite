@@ -4,8 +4,8 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
-import { createApplicationServices } from "../../application/src/factory.js";
-import type { BotifiedTaskAddressInput } from "../../application/src/taskService.js";
+import { createApplicationServices, requireLiveSandboxSessionSecret } from "../../application/src/factory.js";
+import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
 import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
@@ -20,10 +20,11 @@ export interface ApiServerOptions {
   pvcName?: string;
   botifiedRunnerImage?: string;
   botifiedClient?: BotifiedRuntimeHttpClient;
-  botifiedServiceKeyFactory?: () => string | undefined;
+  botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
+  liveSandbox?: TaskLiveSandboxConfig;
 }
 
 export interface RunningApiServer {
@@ -32,6 +33,12 @@ export interface RunningApiServer {
 }
 
 export async function createApiServer(options: ApiServerOptions): Promise<RunningApiServer> {
+  if (options.liveSandbox && !process.env.POSTGRES_APP_URL?.trim()) {
+    throw new Error("POSTGRES_APP_URL is required when AGENTSMITH_LITE_SANDBOX_MODE=live");
+  }
+  if (options.liveSandbox) {
+    requireLiveSandboxSessionSecret(options.sessionSecret);
+  }
   await mkdir(options.dataRoot, { recursive: true });
   const store = createInMemoryProductStore();
   const serviceOptions = {
@@ -46,7 +53,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: options.botifiedServiceKeyFactory } : {}),
     ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
     ...(options.chatClient ? { chatClient: options.chatClient } : {}),
-    ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {})
+    ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
 

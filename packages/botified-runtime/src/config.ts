@@ -7,6 +7,7 @@ export interface BotifiedTaskRuntimeInput {
   botifiedDataPath: string;
   serviceKeyEnv: string;
   modelApiKeyEnv: string;
+  servicePort?: number;
 }
 
 export interface GenerateBotifiedConfigInput {
@@ -128,7 +129,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     },
     service: {
       host: "0.0.0.0",
-      port: 3099,
+      port: input.task.servicePort ?? 3099,
       service_key_env: input.task.serviceKeyEnv,
       max_queue_messages: 32,
       max_queue_bytes: 33_554_432
@@ -178,6 +179,10 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     llm_text_preview: { enabled: false },
     registry: { enabled: false }
   };
+}
+
+export function serializeBotifiedConfig(config: BotifiedConfig): string {
+  return JSON.stringify(config, null, 2);
 }
 
 function providerConfig(endpoint: ModelEndpoint, modelApiKeyEnv: string): BotifiedProviderConfig {

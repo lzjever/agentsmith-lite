@@ -36,7 +36,7 @@ if [ -d "$out" ]; then
   rg -q 'kind: Deployment' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
   rg -q 'agentsmith-lite-schema-bootstrap' "$out" || { echo "schema bootstrap Job missing" >&2; exit 1; }
   rg -q 'kind: Role' "$out" || { echo "sandbox RBAC Role missing" >&2; exit 1; }
-  if rg -n 'pods/exec|persistentvolumes' "$out"; then
+  if rg -n 'watch|pods/(exec|log|attach|portforward)|persistentvolumes|persistentvolumeclaims' "$out"; then
     echo "app RBAC includes a forbidden resource" >&2
     exit 1
   fi

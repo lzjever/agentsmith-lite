@@ -21,6 +21,7 @@ export interface SandboxRenderInput {
   botifiedPort: number;
   serviceKeySecretName: string;
   serviceKeySecretKey?: string;
+  modelApiKeySecretKey?: string;
   cpuRequest: string;
   memoryRequest: string;
   cpuLimit: string;
@@ -36,6 +37,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const podName = input.resourceNames?.pod ?? `asl-task-${input.taskId}`;
   const serviceName = input.resourceNames?.service ?? `asl-task-${input.taskId}`;
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
+  const modelApiKeySecretKey = input.modelApiKeySecretKey ?? "MODEL_API_KEY";
 
   const resources: KubernetesResource[] = [
     {
@@ -58,7 +60,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       },
       type: "Opaque",
       stringData: {
-        [serviceKeySecretKey]: "<redacted-generated-per-task>"
+        [serviceKeySecretKey]: "<redacted-generated-per-task>",
+        [modelApiKeySecretKey]: "<redacted-model-api-key>"
       }
     },
     {
@@ -102,6 +105,12 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             imagePullPolicy: "IfNotPresent",
             command: ["botified", "serve", "--config", "/etc/botified/botified-config.yaml"],
             ports: [{ name: "http", containerPort: input.botifiedPort }],
+            readinessProbe: {
+              httpGet: {
+                path: "/healthz",
+                port: "http"
+              }
+            },
             env: [
               {
                 name: "BOTIFIED_SERVICE_KEY",
@@ -109,6 +118,15 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                   secretKeyRef: {
                     name: input.serviceKeySecretName,
                     key: serviceKeySecretKey
+                  }
+                }
+              },
+              {
+                name: "MODEL_API_KEY",
+                valueFrom: {
+                  secretKeyRef: {
+                    name: input.serviceKeySecretName,
+                    key: modelApiKeySecretKey
                   }
                 }
               }

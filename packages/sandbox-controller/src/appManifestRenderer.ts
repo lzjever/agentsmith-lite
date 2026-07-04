@@ -39,6 +39,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         APP_PUBLIC_BASE_URL: input.env.APP_PUBLIC_BASE_URL ?? "http://localhost:3000",
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
+        AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
+        BOTIFIED_RUNNER_IMAGE: input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`,
         AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin",
         ...modelBaseUrlConfig
       }
@@ -133,12 +135,12 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         {
           apiGroups: [""],
           resources: ["pods", "services", "secrets", "configmaps", "serviceaccounts"],
-          verbs: ["create", "get", "list", "watch", "delete", "patch"]
+          verbs: ["create", "get", "list", "delete", "patch"]
         },
         {
           apiGroups: ["networking.k8s.io"],
           resources: ["networkpolicies"],
-          verbs: ["create", "get", "list", "watch", "delete", "patch"]
+          verbs: ["create", "get", "list", "delete", "patch"]
         }
       ]
     },

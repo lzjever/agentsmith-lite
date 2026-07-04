@@ -6,8 +6,10 @@ import { AuthService } from "./authService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
-import { TaskService, type BotifiedTaskAddressInput } from "./taskService.js";
+import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
+
+export const DEFAULT_SESSION_SECRET = "dev-session-secret";
 
 export interface CreateApplicationServicesInput {
   store: ProductStore;
@@ -18,27 +20,35 @@ export interface CreateApplicationServicesInput {
   pvcName?: string;
   botifiedRunnerImage?: string;
   botifiedClient?: BotifiedRuntimeHttpClient;
-  botifiedServiceKeyFactory?: () => string | undefined;
+  botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
+  liveSandbox?: TaskLiveSandboxConfig;
 }
 
 export function createApplicationServices(input: CreateApplicationServicesInput) {
   const workspaces = new WorkspaceService(input.store);
   const endpoints = new EndpointService(input.store, workspaces);
   const files = new FileService();
-  const auth = new AuthService(input.store, input.builtinAdminPassword, input.sessionSecret ?? "dev-session-secret");
+  const sessionSecret = input.liveSandbox
+    ? requireLiveSandboxSessionSecret(input.sessionSecret)
+    : input.sessionSecret ?? DEFAULT_SESSION_SECRET;
+  const auth = new AuthService(input.store, input.builtinAdminPassword, sessionSecret);
+  const modelCredentialResolver = input.modelCredentialResolver ?? new EnvModelCredentialResolver();
   const chat = new ChatService(
     endpoints,
     workspaces,
     input.chatClient ?? new FetchOpenAICompatibleClient(),
-    input.modelCredentialResolver ?? new EnvModelCredentialResolver()
+    modelCredentialResolver
   );
   const taskConfig = {
     namespace: input.namespace ?? "agentsmith",
     pvcName: input.pvcName ?? "agentsmith-lite-files",
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",
+    botifiedServiceKeySecret: sessionSecret,
+    modelCredentialResolver,
+    ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})
   };
@@ -73,4 +83,12 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
       };
     }
   };
+}
+
+export function requireLiveSandboxSessionSecret(sessionSecret: string | undefined): string {
+  const trimmed = sessionSecret?.trim();
+  if (!trimmed || trimmed === DEFAULT_SESSION_SECRET) {
+    throw new Error("APP_SESSION_SECRET must be set to a non-default value when AGENTSMITH_LITE_SANDBOX_MODE=live");
+  }
+  return trimmed;
 }

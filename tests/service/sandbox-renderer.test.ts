@@ -54,6 +54,32 @@ describe("sandbox manifest renderer", () => {
     const projectMount = container?.volumeMounts[0];
     assert.ok(container);
     assert.ok(projectMount);
+    assert.deepEqual(container.env, [
+      {
+        name: "BOTIFIED_SERVICE_KEY",
+        valueFrom: {
+          secretKeyRef: {
+            name: "botified-t1",
+            key: "BOTIFIED_SERVICE_KEY"
+          }
+        }
+      },
+      {
+        name: "MODEL_API_KEY",
+        valueFrom: {
+          secretKeyRef: {
+            name: "botified-t1",
+            key: "MODEL_API_KEY"
+          }
+        }
+      }
+    ]);
+    assert.deepEqual(container.readinessProbe, {
+      httpGet: {
+        path: "/healthz",
+        port: "http"
+      }
+    });
     assert.equal(container.resources.requests.cpu, "250m");
     assert.equal(container.resources.requests.memory, "512Mi");
     assert.equal(container.resources.limits.cpu, "1");
@@ -63,9 +89,14 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
-    assert.deepEqual(secret?.stringData, { BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>" });
+    assert.deepEqual(secret?.stringData, {
+      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
+      MODEL_API_KEY: "<redacted-model-api-key>"
+    });
 
     const serialized = JSON.stringify(rendered.resources);
+    assert.equal(serialized.includes("test-service-key"), false);
+    assert.equal(serialized.includes("sk-real-model-key"), false);
     assert.ok(!serialized.includes("pods/exec"));
     assert.ok(!serialized.includes("pods/log"));
     assert.ok(!serialized.includes("pods/attach"));
@@ -92,6 +123,8 @@ interface PodResource extends KubernetesResource {
         privileged?: boolean;
         capabilities: { drop: string[] };
       };
+      env: unknown[];
+      readinessProbe: unknown;
       volumeMounts: Array<{ subPath: string }>;
     }>;
   };

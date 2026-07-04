@@ -36,7 +36,11 @@ export interface SandboxKubernetesMutationPort {
   deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch">;
 }
 
-type PodReadiness = "ready" | "pending" | "failed" | "not_found" | "fence_mismatch";
+export type PodReadiness = "ready" | "pending" | "failed" | "not_found" | "fence_mismatch";
+
+export interface SandboxKubernetesReadinessPort {
+  getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>): Promise<PodReadiness>;
+}
 
 const FIELD_MANAGER = "agentsmith-lite-sandbox";
 const MANAGED_LABEL_SELECTOR = `${SANDBOX_LABEL_KEYS.managedBy}=${SANDBOX_MANAGED_BY}`;
@@ -59,7 +63,7 @@ const LIST_ORDER: readonly SandboxCoreResourceKind[] = [
   "Pod"
 ];
 
-export class SandboxKubernetesPort implements SandboxKubernetesMutationPort {
+export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   private readonly transport: KubernetesTransport;
 
   constructor(options: { transport?: KubernetesTransport } = {}) {
