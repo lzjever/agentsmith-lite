@@ -22,7 +22,8 @@ describe("deploy app smoke", () => {
       "SMOKE_ENDPOINT_BASE_URL=https://models.env.test/v1",
       "SMOKE_ENDPOINT_MODEL=env-model",
       "SMOKE_ENDPOINT_SECRET_REF=secret/env",
-      "SMOKE_TASK=true"
+      "SMOKE_TASK=true",
+      "SMOKE_TASK_TIMEOUT_SECS=12"
     ].join("\n"));
     writeFileSync(secretsFile, `BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}\n`);
     writeFileSync(fakeNode, `#!/usr/bin/env bash
@@ -31,6 +32,7 @@ describe("deploy app smoke", () => {
   printf 'admin_password=%s\\n' "$BUILTIN_ADMIN_INITIAL_PASSWORD"
   printf 'endpoint_base_url=%s\\n' "$SMOKE_ENDPOINT_BASE_URL"
   printf 'task_smoke=%s\\n' "$SMOKE_TASK"
+  printf 'task_timeout=%s\\n' "$SMOKE_TASK_TIMEOUT_SECS"
 } > "$FAKE_NODE_CALLS"
 printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
 `);
@@ -59,6 +61,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     assert.match(call, new RegExp(`admin_password=${escapeRegExp(adminPassword)}`));
     assert.match(call, /endpoint_base_url=https:\/\/models\.env\.test\/v1/);
     assert.match(call, /task_smoke=true/);
+    assert.match(call, /task_timeout=12/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
   });
@@ -289,9 +292,11 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     }
   });
 
-  it("app-smoke.mjs runs task create and cancel only when explicitly enabled", async () => {
+  it("app-smoke.mjs runs task smoke through events, artifacts, and verified download without canceling success", async () => {
     const adminPassword = "task-admin-secret";
     const requests: SmokeRequest[] = [];
+    let eventPolls = 0;
+    let artifactPolls = 0;
     const server = createServer(async (req, res) => {
       const body = await readRequestBody(req);
       requests.push({
@@ -370,10 +375,13 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
         res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
       } else if (req.method === "POST" && req.url === "/api/projects/project_task/tasks") {
-        assert.deepEqual(parsedBody, {
-          endpointId: "endpoint_task",
-          prompt: "deploy smoke task: cancel immediately; do not modify files"
-        });
+        assert.equal(parsedBody.endpointId, "endpoint_task");
+        assert.equal(typeof parsedBody.prompt, "string");
+        assert.match(parsedBody.prompt as string, /bash/i);
+        assert.match(parsedBody.prompt as string, /publish_file/);
+        assert.match(parsedBody.prompt as string, /agentsmith-lite-task-smoke\.txt/);
+        assert.match(parsedBody.prompt as string, /AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+        assert.doesNotMatch(parsedBody.prompt as string, /\.\.\/artifacts/);
         assert.equal(JSON.stringify(parsedBody).includes("secret/task-smoke"), false);
         res.end(JSON.stringify({
           id: "task_smoke",
@@ -385,9 +393,42 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
             ]
           }
         }));
-      } else if (req.method === "POST" && req.url === "/api/tasks/task_smoke/cancel") {
-        assert.equal(body, "");
-        res.end(JSON.stringify({ id: "task_smoke", status: "stopping" }));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke/events") {
+        eventPolls += 1;
+        res.end(JSON.stringify(eventPolls === 1 ? [{
+          id: "event_started",
+          taskId: "task_smoke",
+          kind: "turn_started",
+          cursor: "c1",
+          botifiedSeq: 1,
+          botifiedType: "cycle.started",
+          sessionId: "session_1",
+          payload: {},
+          createdAt: "2026-01-01T00:00:00.000Z"
+        }] : [{
+          id: "event_completed",
+          taskId: "task_smoke",
+          kind: "turn_completed",
+          cursor: "c2",
+          botifiedSeq: 2,
+          botifiedType: "cycle.completed",
+          sessionId: "session_1",
+          payload: {},
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke/artifacts") {
+        artifactPolls += 1;
+        res.end(JSON.stringify(artifactPolls === 1 ? [] : [{
+          id: "artifact_task_smoke",
+          taskId: "task_smoke",
+          fileId: "file_task_smoke",
+          name: "agentsmith-lite-task-smoke.txt",
+          bytes: 49,
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke/artifacts/artifact_task_smoke/download") {
+        res.setHeader("content-type", "application/octet-stream");
+        res.end("runtime accepted\nAGENTSMITH_LITE_TASK_SMOKE_MARKER\n");
       } else {
         res.statusCode = 404;
         res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
@@ -425,11 +466,11 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
           status: "completed",
           taskId: "task_smoke",
           createStatus: "running",
-          cancelStatus: "stopping"
+          artifactId: "artifact_task_smoke",
+          artifactName: "agentsmith-lite-task-smoke.txt"
         }
       });
       assert.notEqual(report.task.createStatus, 200);
-      assert.notEqual(report.task.cancelStatus, 200);
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/task-smoke/);
       assert.doesNotMatch(result.stdout, /BOTIFIED_SERVICE_KEY|task-service-key-secret/);
@@ -449,16 +490,140 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         "DELETE /api/projects/project_task/files",
         "GET /api/operator/sandbox/status",
         "POST /api/projects/project_task/tasks",
-        "POST /api/tasks/task_smoke/cancel"
+        "GET /api/tasks/task_smoke/events",
+        "GET /api/tasks/task_smoke/artifacts",
+        "GET /api/tasks/task_smoke/events",
+        "GET /api/tasks/task_smoke/artifacts",
+        "GET /api/tasks/task_smoke/artifacts/artifact_task_smoke/download"
       ]);
       const taskCreate = requests.find((request) => request.url === "/api/projects/project_task/tasks");
-      const taskCancel = requests.find((request) => request.url === "/api/tasks/task_smoke/cancel");
       assert.ok(taskCreate);
-      assert.ok(taskCancel);
       assert.equal(taskCreate.cookie, "asl_session=task-session");
       assert.equal(taskCreate.csrf, "csrf-task");
-      assert.equal(taskCancel.cookie, "asl_session=task-session");
-      assert.equal(taskCancel.csrf, "csrf-task");
+      assert.equal(requests.some((request) => request.url === "/api/tasks/task_smoke/cancel"), false);
+      for (const request of requests.filter((candidate) => candidate.url?.startsWith("/api/tasks/"))) {
+        assert.equal(request.cookie, "asl_session=task-session", `${request.method} ${request.url} missing session cookie`);
+        assert.equal(request.csrf, "csrf-task", `${request.method} ${request.url} missing csrf token`);
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs cancels best-effort when task artifact verification fails without leaking secrets", async () => {
+    const adminPassword = "mismatch-admin-secret";
+    const requests: SmokeRequest[] = [];
+    const server = createServer(async (req, res) => {
+      const body = await readRequestBody(req);
+      requests.push({
+        method: req.method,
+        url: req.url,
+        cookie: req.headers.cookie,
+        csrf: req.headers["x-csrf-token"]?.toString(),
+        body
+      });
+      const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/api/health") {
+        res.end(JSON.stringify({ status: "ok", version: "test" }));
+      } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+        assert.deepEqual(parsedBody, { password: adminPassword });
+        res.end(JSON.stringify({ created: true }));
+      } else if (req.method === "POST" && req.url === "/api/auth/login") {
+        res.setHeader("set-cookie", "asl_session=mismatch-session; HttpOnly; Path=/");
+        res.end(JSON.stringify({ csrfToken: "csrf-mismatch" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces") {
+        res.end(JSON.stringify({ id: "workspace_mismatch", name: "Deploy Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces/workspace_mismatch/projects") {
+        res.end(JSON.stringify({ id: "project_mismatch", workspaceId: "workspace_mismatch", name: "API Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_mismatch/endpoints") {
+        assert.deepEqual(parsedBody, {
+          name: "Deploy Smoke Endpoint",
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.mismatch.test/v1",
+          model: "mismatch-model",
+          apiKeySecretRef: "secret/mismatch-smoke",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        });
+        res.end(JSON.stringify({ id: "endpoint_mismatch" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_mismatch/chat") {
+        res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_mismatch/files") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_mismatch/files?path=files") {
+        res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_mismatch/files/download?path=files%2Fdeploy-smoke.txt") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+      } else if (req.method === "DELETE" && req.url === "/api/projects/project_mismatch/files") {
+        res.end(JSON.stringify({ deleted: true }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+        res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0 }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_mismatch/tasks") {
+        assert.equal(JSON.stringify(parsedBody).includes("secret/mismatch-smoke"), false);
+        res.end(JSON.stringify({
+          id: "task_mismatch",
+          status: "running",
+          sandbox: {
+            resources: [
+              { kind: "Secret", stringData: { BOTIFIED_SERVICE_KEY: "mismatch-service-key-secret" } }
+            ]
+          }
+        }));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_mismatch/events") {
+        res.end(JSON.stringify([]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_mismatch/artifacts") {
+        res.end(JSON.stringify([{
+          id: "artifact_mismatch",
+          taskId: "task_mismatch",
+          fileId: "file_mismatch",
+          name: "agentsmith-lite-task-smoke.txt",
+          bytes: 13,
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_mismatch/artifacts/artifact_mismatch/download") {
+        res.setHeader("content-type", "application/octet-stream");
+        res.end("wrong content\n");
+      } else if (req.method === "POST" && req.url === "/api/tasks/task_mismatch/cancel") {
+        assert.equal(body, "");
+        res.end(JSON.stringify({ id: "task_mismatch", status: "stopping" }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.mismatch.test/v1",
+        "--endpoint-model",
+        "mismatch-model",
+        "--endpoint-secret-ref",
+        "secret/mismatch-smoke",
+        "--task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /artifact artifact_mismatch did not contain task smoke marker/);
+      assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(result.stderr, /secret\/mismatch-smoke/);
+      assert.doesNotMatch(result.stderr, /BOTIFIED_SERVICE_KEY|mismatch-service-key-secret/);
+      assert.deepEqual(requests.filter((request) => request.url?.startsWith("/api/tasks/")).map((request) => `${request.method} ${request.url}`), [
+        "GET /api/tasks/task_mismatch/events",
+        "GET /api/tasks/task_mismatch/artifacts",
+        "GET /api/tasks/task_mismatch/artifacts/artifact_mismatch/download",
+        "POST /api/tasks/task_mismatch/cancel"
+      ]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -517,6 +682,43 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       assert.equal(result.status, 2);
       assert.equal(result.stdout, "");
       assert.match(result.stderr, /SMOKE_TASK must be true, false, empty, or unset/);
+      assert.equal(requestCount, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs strictly parses SMOKE_TASK_TIMEOUT_SECS before HTTP", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      res.statusCode = 500;
+      res.end("unexpected request");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.timeout.test/v1",
+        "--endpoint-model",
+        "timeout-model",
+        "--endpoint-secret-ref",
+        "secret/timeout-smoke",
+        "--task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
+        SMOKE_TASK_TIMEOUT_SECS: "0"
+      });
+
+      assert.equal(result.status, 2);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /SMOKE_TASK_TIMEOUT_SECS must be a positive integer/);
+      assert.doesNotMatch(result.stderr, /secret\/timeout-smoke/);
       assert.equal(requestCount, 0);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

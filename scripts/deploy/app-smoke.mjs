@@ -5,7 +5,18 @@ const WORKSPACE_NAME = "Deploy Smoke";
 const PROJECT_NAME = "API Smoke";
 const FILE_PATH = "files/deploy-smoke.txt";
 const FILE_CONTENT = "hello from deploy smoke\n";
-const TASK_PROMPT = "deploy smoke task: cancel immediately; do not modify files";
+const TASK_ARTIFACT_NAME = "agentsmith-lite-task-smoke.txt";
+const TASK_MARKER = "AGENTSMITH_LITE_TASK_SMOKE_MARKER";
+const TASK_POLL_INTERVAL_MS = 500;
+const DEFAULT_TASK_TIMEOUT_SECS = 45;
+const TASK_PROMPT = [
+  "Deploy smoke runtime acceptance test.",
+  "Use bash in the current task home/cwd to create agentsmith-lite-task-smoke.txt.",
+  "The file content must include this exact marker on its own line: AGENTSMITH_LITE_TASK_SMOKE_MARKER.",
+  "Then use the Botified publish_file tool to publish that file with filename agentsmith-lite-task-smoke.txt.",
+  "Keep the response brief and do not include credentials or endpoint secret references."
+].join("\n");
+const TERMINAL_EVENT_KINDS = new Set(["turn_completed", "turn_failed", "runtime_error"]);
 
 const sensitiveValues = new Set();
 
@@ -22,6 +33,7 @@ async function main() {
       "task smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
     );
   }
+  const taskTimeoutSecs = taskSmoke ? taskSmokeTimeoutSecs() : DEFAULT_TASK_TIMEOUT_SECS;
 
   const adminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD;
   requireOption(adminPassword, "BUILTIN_ADMIN_INITIAL_PASSWORD");
@@ -115,7 +127,7 @@ async function main() {
 
   let task = { status: "skipped" };
   if (taskSmoke) {
-    task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"));
+    task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
   }
 
   console.log(JSON.stringify({
@@ -128,10 +140,10 @@ async function main() {
   }));
 }
 
-async function runTaskSmoke(smoke, projectId, endpointId) {
+async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
   let taskId;
   let createStatus;
-  let cancelAttempted = false;
+  let completed = false;
   try {
     const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
       auth: true,
@@ -143,18 +155,17 @@ async function runTaskSmoke(smoke, projectId, endpointId) {
     taskId = requireString(create.body.id, "task id");
     createStatus = requireString(create.body.status, "task create status");
 
-    cancelAttempted = true;
-    const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
-      auth: true
-    });
+    const verified = await waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs);
+    completed = true;
     return {
       status: "completed",
       taskId,
       createStatus,
-      cancelStatus: requireString(cancel.body.status, "task cancel status")
+      artifactId: verified.artifactId,
+      artifactName: verified.artifactName
     };
   } catch (error) {
-    if (taskId && !cancelAttempted) {
+    if (taskId && !completed) {
       try {
         await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
           auth: true
@@ -165,6 +176,50 @@ async function runTaskSmoke(smoke, projectId, endpointId) {
     }
     throw error;
   }
+}
+
+async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
+  const deadline = Date.now() + (timeoutSecs * 1000);
+  while (Date.now() <= deadline) {
+    const encodedTaskId = encodeURIComponent(taskId);
+    const events = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/events`, {
+      auth: true
+    }), "task events");
+    const artifacts = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/artifacts`, {
+      auth: true
+    }), "task artifacts");
+
+    for (const artifact of artifacts) {
+      const name = typeof artifact?.name === "string" ? artifact.name : "";
+      if (name !== TASK_ARTIFACT_NAME) {
+        continue;
+      }
+      const artifactId = requireString(artifact.id, "task artifact id");
+      const content = await smoke.requestText(
+        "GET",
+        `/api/tasks/${encodedTaskId}/artifacts/${encodeURIComponent(artifactId)}/download`,
+        { auth: true }
+      );
+      if (!content.includes(TASK_MARKER)) {
+        throw new Error(`artifact ${artifactId} did not contain task smoke marker`);
+      }
+      return {
+        artifactId,
+        artifactName: name
+      };
+    }
+
+    const terminal = events.find((event) => TERMINAL_EVENT_KINDS.has(event?.kind));
+    if (terminal) {
+      throw new Error(`task smoke reached terminal event ${terminal.kind} before verified artifact`);
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await sleep(Math.min(TASK_POLL_INTERVAL_MS, remainingMs));
+    }
+  }
+  throw new Error(`task smoke timed out after ${timeoutSecs} seconds waiting for verified artifact`);
 }
 
 class AppSmokeClient {
@@ -187,7 +242,20 @@ class AppSmokeClient {
     return response.body;
   }
 
+  async requestText(method, pathname, options = {}) {
+    const response = await this.fetchRaw(method, pathname, options);
+    return response.text;
+  }
+
   async fetchJson(method, pathname, options = {}) {
+    const response = await this.fetchRaw(method, pathname, options);
+    return {
+      body: parseJsonResponse(response.text, `${method} ${pathname}`),
+      setCookie: response.setCookie
+    };
+  }
+
+  async fetchRaw(method, pathname, options = {}) {
     const headers = {
       accept: "application/json"
     };
@@ -211,7 +279,7 @@ class AppSmokeClient {
       throw new Error(`${method} ${pathname} returned ${response.status}: ${redact(text)}`);
     }
     return {
-      body: parseJsonResponse(text, `${method} ${pathname}`),
+      text,
       setCookie: response.headers.get("set-cookie")
     };
   }
@@ -259,6 +327,10 @@ function taskSmokeEnabled(args) {
   return Boolean(args.taskSmoke || envTaskSmoke);
 }
 
+function taskSmokeTimeoutSecs() {
+  return parsePositiveIntegerEnv("SMOKE_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
+}
+
 function parseSmokeTaskEnv(value) {
   if (value === undefined || value === "" || value === "false") {
     return false;
@@ -299,6 +371,24 @@ function requireString(value, name) {
   return value;
 }
 
+function requireArray(value, name) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${name} missing from API response`);
+  }
+  return value;
+}
+
+function parsePositiveIntegerEnv(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined || value === "") {
+    return defaultValue;
+  }
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw new UsageError(`${name} must be a positive integer`);
+  }
+  return Number(value);
+}
+
 function cookieFromSetCookie(setCookie) {
   if (!setCookie) {
     throw new Error("login response did not set session cookie");
@@ -333,6 +423,10 @@ function redact(value) {
     }
   }
   return redacted;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errorMessage(error) {
