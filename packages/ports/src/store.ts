@@ -67,6 +67,13 @@ export interface PersistedSandboxRunState {
   timelineCursor?: string | null;
   fencingToken: number;
   cleanupStatus: PersistedSandboxCleanupStatus;
+  cleanupAttempts?: number;
+  lastCleanupAt?: string | null;
+  lastCleanupError?: {
+    at: string;
+    target: string;
+    message: string;
+  } | null;
   createdAt: string;
   updatedAt: string;
 }

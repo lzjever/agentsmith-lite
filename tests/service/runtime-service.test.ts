@@ -48,6 +48,7 @@ describe("live sandbox runtime service", () => {
     assert.deepEqual(result.taskSync.syncedTaskIds, [task.id]);
     assert.deepEqual(result.taskSync.failedTaskIds, []);
     assert.equal(result.sandboxReap.dryRun, false);
+    assert.deepEqual(result.sandboxReap.errors, []);
     assert.equal((await store.findTask(task.id))?.status, "completed");
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c0"]);
@@ -87,6 +88,7 @@ describe("live sandbox runtime service", () => {
     assert.deepEqual(result.taskSync.failedTaskIds, [firstTask.id]);
     assert.equal((await store.findTask(firstTask.id))?.status, "running");
     assert.equal((await store.findTask(secondTask.id))?.status, "completed");
+    assert.deepEqual(result.sandboxReap.errors, []);
     assert.equal((await store.sandboxRuns.get(secondTask.runId))?.cleanupStatus, "cleaned");
     assert.ok(livePort.listManagedResourcesCalls > 0, "tick should run the sandbox reaper even after a task sync error");
   });
@@ -126,7 +128,10 @@ describe("live sandbox runtime service", () => {
               stopping: 0,
               expired: 0
             },
+            activeTaskCount: 0,
             observedResourceCounts: {},
+            cleanupPlan: { targets: [], recentFailures: [] },
+            recentCleanupFailures: [],
             actionSummary: [],
             errors: [],
             dryRun: input.apply !== true,

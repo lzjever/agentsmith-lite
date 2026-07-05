@@ -57,6 +57,13 @@ export interface SandboxRunState extends SandboxIdentity {
   timelineCursor?: string | null;
   fencingToken: number;
   cleanupStatus: SandboxCleanupStatus;
+  cleanupAttempts?: number;
+  lastCleanupAt?: string | null;
+  lastCleanupError?: {
+    at: string;
+    target: string;
+    message: string;
+  } | null;
   createdAt: string;
   updatedAt: string;
 }

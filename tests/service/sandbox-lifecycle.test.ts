@@ -18,9 +18,12 @@ describe("sandbox lifecycle service", () => {
   it("reports persisted and observed state without exposing secrets", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+    await store.createTask(taskForRun(run, "running"));
+    await store.createTask(taskForRun(sandboxRunFor("task2", "run2"), "running"));
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
       now: () => new Date("2026-07-04T00:00:00.000Z")
@@ -28,10 +31,23 @@ describe("sandbox lifecycle service", () => {
 
     const status = await service.getSandboxStatus();
 
+    assert.equal(status.activeTaskCount, 2);
     assert.equal(status.runCounts.total, 1);
     assert.equal(status.runCounts.cleanupRequested, 1);
     assert.equal(status.observedResourceCounts.Pod, 1);
     assert.ok(status.actionSummary.some((action) => action.type === "delete_resource" && action.kind === "Pod"));
+    assert.ok(status.cleanupPlan.targets.some((target) => target.type === "delete_resource" && target.kind === "Pod"));
+    assert.ok(status.cleanupPlan.targets.some((target) => target.type === "store_run_state" && target.runId === run.runId));
+    assert.deepEqual(
+      status.cleanupPlan.targets
+        .filter((target) => target.type === "runtime_directory")
+        .map((target) => [target.directory, target.action]),
+      [
+        ["home", "delete"],
+        ["botified", "delete"],
+        ["artifacts", "retain"]
+      ]
+    );
     assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real|MODEL_API_KEY/);
   });
 
@@ -40,7 +56,13 @@ describe("sandbox lifecycle service", () => {
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
-    const service = new SandboxLifecycleService(store, { namespace: "agentsmith", port });
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: "agentsmith",
+      port,
+      runtimeDirectoryCleaner: cleaner
+    });
 
     const result = await service.reapSandboxRunsOnce({ dryRun: true });
 
@@ -55,6 +77,7 @@ describe("sandbox lifecycle service", () => {
       "ServiceAccount:asl-task-task1"
     ]);
     assert.deepEqual(port.deletedRefs, []);
+    assert.deepEqual(cleaner.removedPaths, []);
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
   });
 
@@ -63,7 +86,13 @@ describe("sandbox lifecycle service", () => {
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
-    const service = new SandboxLifecycleService(store, { namespace: "agentsmith", port });
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: "agentsmith",
+      port,
+      runtimeDirectoryCleaner: cleaner
+    });
 
     const result = await service.reapSandboxRunsOnce({ apply: true });
 
@@ -77,9 +106,88 @@ describe("sandbox lifecycle service", () => {
       "Secret:asl-botified-task1",
       "ServiceAccount:asl-task-task1"
     ]);
+    assert.deepEqual(cleaner.removedPaths, [
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+    ]);
     const saved = await store.sandboxRuns.get(run.runId);
     assert.equal(saved?.phase, "cleaned");
     assert.equal(saved?.cleanupStatus, "cleaned");
+  });
+
+  it("does not delete runtime directories or mark cleaned until Kubernetes resources are gone", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+    await store.sandboxRuns.put(run);
+    const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)), { keepResourcesAfterDelete: true });
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: "agentsmith",
+      port,
+      runtimeDirectoryCleaner: cleaner
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(cleaner.removedPaths, []);
+    assert.notEqual((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("rejects runtime directory cleanup that escapes dataRoot without deleting or marking cleaned", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({
+      cleanupStatus: "cleanup_requested",
+      phase: "stopping",
+      projectSubPath: "../escaped-project"
+    });
+    await store.sandboxRuns.put(run);
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: "agentsmith",
+      port: new FakeLifecyclePort([]),
+      runtimeDirectoryCleaner: cleaner
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.match(result.errors[0] ?? "", /outside the data root/);
+    assert.deepEqual(cleaner.removedPaths, []);
+    const saved = await store.sandboxRuns.get(run.runId);
+    assert.equal(saved?.cleanupStatus, "cleanup_requested");
+    assert.equal(saved?.lastCleanupError?.target, "runtime_directory:home");
+  });
+
+  it("records runtime cleanup failures without marking the run cleaned", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+    await store.sandboxRuns.put(run);
+    const cleaner = new FakeRuntimeDirectoryCleaner({ failPath: "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified" });
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: "agentsmith",
+      port: new FakeLifecyclePort([]),
+      runtimeDirectoryCleaner: cleaner,
+      now: () => new Date("2026-07-04T00:00:01.000Z")
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.match(result.errors[0] ?? "", /remove failed/);
+    assert.deepEqual(cleaner.removedPaths, [
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+    ]);
+    const saved = await store.sandboxRuns.get(run.runId);
+    assert.equal(saved?.cleanupStatus, "cleanup_requested");
+    assert.equal(saved?.cleanupAttempts, 1);
+    assert.equal(saved?.lastCleanupAt, "2026-07-04T00:00:01.000Z");
+    assert.equal(saved?.lastCleanupError?.target, "runtime_directory:botified");
+    assert.match(saved?.lastCleanupError?.message ?? "", /remove failed/);
+    assert.ok(result.recentCleanupFailures.some((failure) => failure.runId === run.runId));
+    assert.doesNotMatch(JSON.stringify({ result, saved }), /bsk_|sk-real|MODEL_API_KEY/);
   });
 
   it("marks non-terminal tasks expired when expired sandbox runs are reaped without overwriting terminal tasks", async () => {
@@ -101,6 +209,7 @@ describe("sandbox lifecycle service", () => {
       ...createdResourcesForRun(asObservedActiveRun(completedRun))
     ]);
     const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
       now: () => new Date("2026-07-04T00:00:00.000Z")
@@ -177,7 +286,7 @@ describe("sandbox lifecycle service", () => {
       ...createdResourcesForRun(asObservedActiveRun(otherRun)),
       unknown
     ]);
-    const service = new SandboxLifecycleService(store, { namespace: "agentsmith", port });
+    const service = new SandboxLifecycleService(store, { dataRoot: "/workspace", namespace: "agentsmith", port });
 
     const status = await service.getSandboxStatus({ runId: run.runId });
     assert.equal(status.observedResourceCounts.Pod, 1);
@@ -241,6 +350,7 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
     private readonly options: {
       deleteResult?: "deleted" | "not_found" | "fence_mismatch";
       deleteError?: Error;
+      keepResourcesAfterDelete?: boolean;
     } = {}
   ) {
     this.resources = resources.map((resource) => structuredClone(resource));
@@ -277,9 +387,25 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
     if (this.options.deleteResult) {
       return this.options.deleteResult;
     }
+    if (this.options.keepResourcesAfterDelete) {
+      return "deleted";
+    }
     const before = this.resources.length;
     this.resources = this.resources.filter((resource) => !sameRef(resource, ref));
     return this.resources.length === before ? "not_found" : "deleted";
+  }
+}
+
+class FakeRuntimeDirectoryCleaner {
+  readonly removedPaths: string[] = [];
+
+  constructor(private readonly options: { failPath?: string } = {}) {}
+
+  async removeRuntimePath(absolutePath: string): Promise<void> {
+    this.removedPaths.push(absolutePath);
+    if (absolutePath === this.options.failPath) {
+      throw new Error("remove failed for bsk_runtime_secret sk-real MODEL_API_KEY");
+    }
   }
 }
 

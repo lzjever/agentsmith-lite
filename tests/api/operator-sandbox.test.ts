@@ -23,7 +23,17 @@ describe("operator sandbox API", () => {
 
   it("requires auth and CSRF while defaulting reap to dry-run", async () => {
     const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    const run = sandboxRun({
+      phase: "stopping",
+      cleanupStatus: "cleanup_requested",
+      directories: runtimeDirectories(dataRoot, "task1"),
+      lastCleanupError: {
+        at: "2026-07-04T00:00:00.000Z",
+        target: "runtime_directory:home",
+        message: "previous cleanup failed"
+      }
+    });
+    await store.createTask(taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     api = await createApiServer({
       port: 0,
@@ -37,8 +47,27 @@ describe("operator sandbox API", () => {
 
     const auth = await login(api.baseUrl);
     const status = await auth.requestJson("GET", "/api/operator/sandbox/status");
+    assert.equal(status.activeTaskCount, 1);
     assert.equal(status.runCounts.cleanupRequested, 1);
     assert.equal(status.observedResourceCounts.Pod, 0);
+    assert.ok(status.cleanupPlan.targets.some((target: { type: string; runId?: string; reason?: string }) =>
+      target.type === "store_run_state" &&
+      target.runId === run.runId &&
+      target.reason === "cleanup_complete"
+    ));
+    assert.deepEqual(
+      status.cleanupPlan.targets
+        .filter((target: { type: string }) => target.type === "runtime_directory")
+        .map((target: { directory: string; action: string }) => [target.directory, target.action]),
+      [
+        ["home", "delete"],
+        ["botified", "delete"],
+        ["artifacts", "retain"]
+      ]
+    );
+    assert.deepEqual(status.recentCleanupFailures.map((failure: { runId: string; target: string }) => [failure.runId, failure.target]), [
+      [run.runId, "runtime_directory:home"]
+    ]);
     assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real/);
 
     const missingCsrf = await fetch(api.baseUrl + "/api/operator/sandbox/reap", {
@@ -54,12 +83,22 @@ describe("operator sandbox API", () => {
     const dryRun = await auth.requestJson("POST", "/api/operator/sandbox/reap", {});
     assert.equal(dryRun.dryRun, true);
     assert.ok(dryRun.actionSummary.some((action: { type: string }) => action.type === "store_run_state"));
+    assert.deepEqual(
+      dryRun.cleanupPlan.targets.map((target: { type: string; directory?: string; action?: string; runId?: string }) =>
+        target.type === "runtime_directory" ? `${target.type}:${target.directory}:${target.action}` : `${target.type}:${target.runId ?? ""}`
+      ),
+      status.cleanupPlan.targets.map((target: { type: string; directory?: string; action?: string; runId?: string }) =>
+        target.type === "runtime_directory" ? `${target.type}:${target.directory}:${target.action}` : `${target.type}:${target.runId ?? ""}`
+      )
+    );
+    assert.doesNotMatch(JSON.stringify(dryRun), /bsk_|sk-|MODEL_API_KEY/);
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
   });
 
   it("reports cleanup action summaries for expired sandbox runs", async () => {
     const store = createLocalInMemoryProductStore();
     await store.sandboxRuns.put(sandboxRun({
+      directories: runtimeDirectories(dataRoot, "task1"),
       expiresAt: "2000-01-01T00:00:00.000Z",
       idleExpiresAt: "2999-01-01T00:00:00.000Z"
     }));
@@ -74,10 +113,16 @@ describe("operator sandbox API", () => {
     const status = await auth.requestJson("GET", "/api/operator/sandbox/status");
 
     assert.equal(status.runCounts.active, 1);
+    assert.equal(status.activeTaskCount, 0);
     assert.ok(status.actionSummary.some((action: { type: string; runId?: string; reason?: string }) =>
       action.type === "store_run_state" &&
       action.runId === "run1" &&
       action.reason === "cleanup_complete"
+    ));
+    assert.ok(status.cleanupPlan.targets.some((target: { type: string; directory?: string; action?: string }) =>
+      target.type === "runtime_directory" &&
+      target.directory === "artifacts" &&
+      target.action === "retain"
     ));
     assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real/);
   });
@@ -161,5 +206,33 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     createdAt: "2026-07-04T00:00:00.000Z",
     updatedAt: "2026-07-04T00:00:00.000Z",
     ...overrides
+  };
+}
+
+function runtimeDirectories(dataRoot: string, taskId: string) {
+  const taskRoot = path.join(dataRoot, "workspaces/ws1/projects/proj1/tasks", taskId);
+  return {
+    taskHome: path.join(taskRoot, "home"),
+    artifacts: path.join(taskRoot, "artifacts"),
+    botified: path.join(taskRoot, "botified")
+  };
+}
+
+function taskForRun(run: SandboxRunState, status: "running" | "completed") {
+  return {
+    id: run.taskId,
+    workspaceId: run.workspaceId,
+    projectId: run.projectId,
+    endpointId: `endpoint-${run.taskId}`,
+    prompt: "build",
+    status,
+    runId: run.runId,
+    sandbox: {
+      dryRun: true as const,
+      namespace: run.namespace,
+      resources: []
+    },
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt
   };
 }

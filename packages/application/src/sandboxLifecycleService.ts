@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import path from "node:path";
 import type { AgentTaskStatus, KubernetesResource } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import type { ProductStore, PersistedSandboxRunState } from "../../ports/src/store.js";
@@ -24,7 +26,9 @@ export const DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface SandboxLifecycleServiceConfig {
   namespace: string;
+  dataRoot?: string;
   port?: SandboxLifecycleKubernetesPort;
+  runtimeDirectoryCleaner?: RuntimeDirectoryCleaner;
   now?: () => Date;
 }
 
@@ -38,6 +42,60 @@ export interface SandboxLifecycleActionSummary {
   kind?: string;
   name?: string;
   reason?: string;
+}
+
+export interface RuntimeDirectoryCleaner {
+  removeRuntimePath(absolutePath: string): Promise<void>;
+}
+
+export type SandboxRuntimeDirectoryName = "home" | "botified" | "artifacts";
+
+export interface SandboxRuntimeDirectoryTarget {
+  type: "runtime_directory";
+  source: "runtime";
+  runId: string;
+  directory: SandboxRuntimeDirectoryName;
+  path: string;
+  action: "delete" | "retain";
+  retention: "cleanup_candidate" | "durable";
+  reason: string;
+}
+
+export type SandboxCleanupPlanTarget =
+  | {
+      type: "delete_resource";
+      source: "kubernetes";
+      runId: string;
+      kind: string;
+      name: string;
+    }
+  | {
+      type: "mark_cleanup";
+      source: "kubernetes";
+      kind: string;
+      name: string;
+      reason: string;
+    }
+  | {
+      type: "store_run_state";
+      source: "store";
+      runId: string;
+      reason: string;
+      phase: string;
+      cleanupStatus: string;
+    }
+  | SandboxRuntimeDirectoryTarget;
+
+export interface SandboxRecentCleanupFailure {
+  runId: string;
+  at: string;
+  target: string;
+  message: string;
+}
+
+export interface SandboxCleanupPlan {
+  targets: SandboxCleanupPlanTarget[];
+  recentFailures: SandboxRecentCleanupFailure[];
 }
 
 export interface SandboxLifecycleRunCounts {
@@ -54,8 +112,11 @@ export interface SandboxLifecycleRunCounts {
 
 export interface SandboxStatusResult {
   namespace: string;
+  activeTaskCount: number;
   runCounts: SandboxLifecycleRunCounts;
   observedResourceCounts: Record<string, number>;
+  cleanupPlan: SandboxCleanupPlan;
+  recentCleanupFailures: SandboxRecentCleanupFailure[];
   actionSummary: SandboxLifecycleActionSummary[];
   errors: string[];
 }
@@ -78,12 +139,17 @@ export class SandboxLifecycleService {
 
   async getSandboxStatus(scope: SandboxLifecycleScope = {}): Promise<SandboxStatusResult> {
     const runs = await this.loadRuns(scope);
+    const activeTaskCount = await this.activeTaskCount(scope);
     const observed = await this.observe(scope);
     const plan = this.plan(runs.activeRuns, observed.resources);
+    const cleanupPlan = this.cleanupPlan(runs.activeRuns, plan.actions, runs.allRuns);
     return {
       namespace: this.config.namespace,
+      activeTaskCount,
       runCounts: runCounts(runs.allRuns),
       observedResourceCounts: resourceCounts(observed.resources),
+      cleanupPlan,
+      recentCleanupFailures: cleanupPlan.recentFailures,
       actionSummary: plan.actions.map(actionSummary),
       errors: observed.errors
     };
@@ -92,12 +158,17 @@ export class SandboxLifecycleService {
   async reapSandboxRunsOnce(input: SandboxReapInput = {}): Promise<SandboxReapResult> {
     const dryRun = input.apply === true && input.dryRun !== true ? false : true;
     const runs = await this.loadRuns(input);
+    const activeTaskCount = await this.activeTaskCount(input);
     const observed = await this.observe(input);
     const plan = this.plan(runs.activeRuns, observed.resources);
+    const cleanupPlan = this.cleanupPlan(runs.activeRuns, plan.actions, runs.allRuns);
     const result: SandboxReapResult = {
       namespace: this.config.namespace,
+      activeTaskCount,
       runCounts: runCounts(runs.allRuns),
       observedResourceCounts: resourceCounts(observed.resources),
+      cleanupPlan,
+      recentCleanupFailures: cleanupPlan.recentFailures,
       actionSummary: plan.actions.map(actionSummary),
       errors: [...observed.errors],
       dryRun,
@@ -124,10 +195,26 @@ export class SandboxLifecycleService {
       return result;
     }
     const finalPlan = this.plan(runs.activeRuns, refreshed.resources);
+    const finalCleanupPlan = this.cleanupPlan(runs.activeRuns, finalPlan.actions, runs.allRuns);
+    result.cleanupPlan = finalCleanupPlan;
+    result.recentCleanupFailures = finalCleanupPlan.recentFailures;
     result.actionSummary.push(...finalPlan.actions.map(actionSummary));
     for (const action of finalPlan.actions) {
       if (action.type !== "store_run_state") {
         continue;
+      }
+      if (action.reason === "cleanup_complete") {
+        const cleanupError = await this.removeRuntimeCleanupCandidates(action.run);
+        if (cleanupError) {
+          result.errors.push(cleanupError.message);
+          await this.persistCleanupFailure(action.run.runId, cleanupError.target, cleanupError.message);
+          const afterFailureRuns = await this.loadRuns(input);
+          result.runCounts = runCounts(afterFailureRuns.allRuns);
+          const afterFailurePlan = this.cleanupPlan(afterFailureRuns.activeRuns, finalPlan.actions, afterFailureRuns.allRuns);
+          result.cleanupPlan = afterFailurePlan;
+          result.recentCleanupFailures = afterFailurePlan.recentFailures;
+          return result;
+        }
       }
       const transition = await this.persistRunTransition(action.run);
       if (transition) {
@@ -140,6 +227,14 @@ export class SandboxLifecycleService {
     const afterRuns = await this.loadRuns(input);
     result.runCounts = runCounts(afterRuns.allRuns);
     return result;
+  }
+
+  private async activeTaskCount(scope: SandboxLifecycleScope): Promise<number> {
+    const tasks = await this.store.listActiveTasks();
+    if (!scope.runId) {
+      return tasks.length;
+    }
+    return tasks.filter((task) => task.runId === scope.runId).length;
   }
 
   private async loadRuns(scope: SandboxLifecycleScope): Promise<{
@@ -180,6 +275,38 @@ export class SandboxLifecycleService {
       observedResources,
       now: this.config.now?.() ?? new Date()
     });
+  }
+
+  private cleanupPlan(
+    activeRuns: PersistedSandboxRunState[],
+    actions: SandboxReconcileAction[],
+    allRuns: PersistedSandboxRunState[]
+  ): SandboxCleanupPlan {
+    const targets: SandboxCleanupPlanTarget[] = actions.flatMap((action) => cleanupTargetsForAction(action));
+    const runsById = new Map(activeRuns.map((run) => [run.runId, run]));
+    const runtimeCleanupRunIds = new Set<string>();
+    for (const action of actions) {
+      if (action.type === "delete_resource") {
+        runtimeCleanupRunIds.add(action.runId);
+      }
+      if (
+        action.type === "store_run_state" &&
+        (action.reason === "cleanup_in_progress" || action.reason === "cleanup_complete")
+      ) {
+        runtimeCleanupRunIds.add(action.run.runId);
+      }
+    }
+    for (const runId of runtimeCleanupRunIds) {
+      const run = runsById.get(runId);
+      if (!run) {
+        continue;
+      }
+      targets.push(...runtimeDirectoryTargets(run, this.config.dataRoot));
+    }
+    return {
+      targets,
+      recentFailures: recentCleanupFailures(allRuns)
+    };
   }
 
   private async applyCleanupActions(
@@ -231,6 +358,53 @@ export class SandboxLifecycleService {
       updatedAt: now
     });
     return stored ? { previous: current, stored } : null;
+  }
+
+  private async removeRuntimeCleanupCandidates(run: SandboxRunState): Promise<{ target: string; message: string } | null> {
+    const cleaner = this.config.runtimeDirectoryCleaner ?? defaultRuntimeDirectoryCleaner;
+    for (const directory of runtimeDirectoryTargets(run, this.config.dataRoot)) {
+      if (directory.action !== "delete") {
+        continue;
+      }
+      const target = `runtime_directory:${directory.directory}`;
+      try {
+        const absolutePath = this.resolveRuntimeCleanupPath(directory.path);
+        await cleaner.removeRuntimePath(absolutePath);
+      } catch (error) {
+        return {
+          target,
+          message: sanitizeCleanupError(errorMessage(error))
+        };
+      }
+    }
+    return null;
+  }
+
+  private resolveRuntimeCleanupPath(runtimePath: string): string {
+    if (!this.config.dataRoot) {
+      throw new ProductError("Sandbox lifecycle dataRoot is not configured", 409);
+    }
+    return assertRuntimePathInsideDataRoot(this.config.dataRoot, runtimePath);
+  }
+
+  private async persistCleanupFailure(runId: string, target: string, message: string): Promise<void> {
+    const current = await this.store.sandboxRuns.get(runId);
+    if (!current) {
+      return;
+    }
+    const now = (this.config.now?.() ?? new Date()).toISOString();
+    await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
+      ...current,
+      cleanupAttempts: (current.cleanupAttempts ?? 0) + 1,
+      lastCleanupAt: now,
+      lastCleanupError: {
+        at: now,
+        target,
+        message: sanitizeCleanupError(message)
+      },
+      fencingToken: current.fencingToken + 1,
+      updatedAt: now
+    });
   }
 
   private async advanceTaskAfterRunTransition(
@@ -296,6 +470,128 @@ export async function refreshSandboxRunActivity(
 
 function isActiveRun(run: PersistedSandboxRunState): boolean {
   return run.cleanupStatus !== "cleaned" && run.phase !== "cleaned";
+}
+
+const defaultRuntimeDirectoryCleaner: RuntimeDirectoryCleaner = {
+  async removeRuntimePath(absolutePath: string): Promise<void> {
+    await rm(absolutePath, { recursive: true, force: true });
+  }
+};
+
+function cleanupTargetsForAction(action: SandboxReconcileAction): SandboxCleanupPlanTarget[] {
+  switch (action.type) {
+    case "delete_resource":
+      return [{
+        type: "delete_resource",
+        source: "kubernetes",
+        runId: action.runId,
+        kind: action.kind,
+        name: action.name
+      }];
+    case "mark_cleanup":
+      return [{
+        type: "mark_cleanup",
+        source: "kubernetes",
+        kind: action.kind,
+        name: action.name,
+        reason: action.reason
+      }];
+    case "store_run_state":
+      return [{
+        type: "store_run_state",
+        source: "store",
+        runId: action.run.runId,
+        reason: action.reason,
+        phase: action.run.phase,
+        cleanupStatus: action.run.cleanupStatus
+      }];
+    case "create_resource":
+    case "adopt_resource":
+      return [];
+  }
+}
+
+function runtimeDirectoryTargets(run: PersistedSandboxRunState, dataRoot?: string): SandboxRuntimeDirectoryTarget[] {
+  const paths = runtimeDirectoryPaths(run, dataRoot);
+  return [
+    runtimeDirectoryTarget(run, "home", paths.home, "delete", "cleanup_candidate"),
+    runtimeDirectoryTarget(run, "botified", paths.botified, "delete", "cleanup_candidate"),
+    runtimeDirectoryTarget(run, "artifacts", paths.artifacts, "retain", "durable")
+  ];
+}
+
+function runtimeDirectoryPaths(
+  run: PersistedSandboxRunState,
+  dataRoot?: string
+): Record<SandboxRuntimeDirectoryName, string> {
+  if (!dataRoot) {
+    return {
+      home: run.directories.taskHome,
+      botified: run.directories.botified,
+      artifacts: run.directories.artifacts
+    };
+  }
+  const taskRoot = path.resolve(dataRoot, run.projectSubPath, "tasks", run.taskId);
+  return {
+    home: path.resolve(taskRoot, "home"),
+    botified: path.resolve(taskRoot, "botified"),
+    artifacts: path.resolve(taskRoot, "artifacts")
+  };
+}
+
+function runtimeDirectoryTarget(
+  run: PersistedSandboxRunState,
+  directory: SandboxRuntimeDirectoryName,
+  directoryPath: string,
+  action: "delete" | "retain",
+  retention: "cleanup_candidate" | "durable"
+): SandboxRuntimeDirectoryTarget {
+  return {
+    type: "runtime_directory",
+    source: "runtime",
+    runId: run.runId,
+    directory,
+    path: directoryPath,
+    action,
+    retention,
+    reason: action === "delete" ? "runtime_cleanup_candidate" : "durable_artifacts_retained"
+  };
+}
+
+function recentCleanupFailures(runs: PersistedSandboxRunState[]): SandboxRecentCleanupFailure[] {
+  return runs
+    .flatMap((run) => {
+      if (!run.lastCleanupError) {
+        return [];
+      }
+      return [{
+        runId: run.runId,
+        at: run.lastCleanupError.at,
+        target: run.lastCleanupError.target,
+        message: sanitizeCleanupError(run.lastCleanupError.message)
+      }];
+    })
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at))
+    .slice(0, 10);
+}
+
+function assertRuntimePathInsideDataRoot(dataRoot: string, runtimePath: string): string {
+  const root = path.resolve(dataRoot);
+  const absolutePath = path.resolve(runtimePath);
+  const relative = path.relative(root, absolutePath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new ProductError("Runtime directory is outside the data root", 409);
+  }
+  return absolutePath;
+}
+
+function sanitizeCleanupError(message: string): string {
+  return message
+    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\bbsk_[A-Za-z0-9_-]+/g, "<redacted>")
+    .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "<redacted>")
+    .replace(/\bMODEL_API_KEY\b/g, "<redacted>")
+    .slice(0, 300);
 }
 
 function runCounts(runs: PersistedSandboxRunState[]): SandboxLifecycleRunCounts {

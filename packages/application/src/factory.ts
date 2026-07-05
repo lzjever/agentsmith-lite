@@ -54,6 +54,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   );
   const namespace = input.namespace ?? "agentsmith";
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
+    dataRoot: input.dataRoot,
     namespace,
     ...(input.liveSandbox ? { port: input.liveSandbox.port } : {})
   });

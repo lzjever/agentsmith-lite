@@ -15,7 +15,7 @@ Desired sandbox state is represented by the pure `SandboxRunState` input to the 
 - task home, artifacts, and Botified data directories.
 - runner image, PVC/project subPath, port, and resource requests/limits.
 - expiry and idle expiry timestamps.
-- timeline cursor and fencing token for fenced store updates.
+- timeline cursor, fencing token, and minimal cleanup metadata for fenced store updates and recent cleanup diagnostics.
 
 The run state document stores resource names, Secret key references, directories, limits, phase, cleanup status, and timestamps. It must not store real Botified service keys or model API keys; those values only appear in live Kubernetes Secret apply bodies. State transitions are emitted as idempotent `store_run_state` actions and are persisted only after cleanup mutations succeed.
 
@@ -62,12 +62,14 @@ TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SAN
 
 `SandboxLifecycleService` provides two explicit operations:
 
-- `getSandboxStatus()` reads persisted run state plus observed K8s resources and returns counts/action summaries without mutating anything.
-- `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete/mark-cleanup actions, then re-observes resources and persists store-state transitions with fencing.
+- `getSandboxStatus()` reads active tasks, persisted run state, observed K8s resources, runtime directory state, and recent cleanup failures without mutating anything.
+- `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete/mark-cleanup actions, then re-observes resources. Only after K8s cleanup is complete does it remove runtime cleanup candidates (`home` and `botified`), retain durable `artifacts`, and persist cleaned store-state transitions with fencing.
+
+Both operations return the same server-generated `cleanupPlan.targets[]` shape as the lifecycle source of truth. Targets include non-secret K8s/store summaries (`delete_resource`, `mark_cleanup`, `store_run_state`) plus runtime directory targets that distinguish cleanup candidates from retained artifacts. Directory cleanup is performed only in the service layer after `dataRoot` containment checks. Cleanup failures are recorded back into the run state as bounded, redacted recent failure metadata and prevent the run from being marked cleaned.
 
 The product API exposes these as admin-only endpoints:
 
 - `GET /api/operator/sandbox/status`
 - `POST /api/operator/sandbox/reap`, defaulting to dry-run unless the JSON body contains `"apply": true`.
 
-`scripts/deploy/status.sh --resources` and `scripts/deploy/cleanup-stuck-tasks.sh --dry-run` remain simple kubectl/static instruments. They do not implement login/cookie handling and are not release gates.
+Operator scripts should be thin clients of these endpoints. They must not reimplement lifecycle business logic or build independent cleanup plans from kubectl output.
