@@ -140,7 +140,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async appendTaskEvents(events: AgentTaskEvent[]): Promise<void> {
     for (const event of events) {
-      if (!this.events.some((existing) => existing.taskId === event.taskId && existing.botifiedSeq === event.botifiedSeq)) {
+      if (!this.events.some((existing) => existing.taskId === event.taskId && existing.cursor === event.cursor)) {
         this.events.push(clone(event));
       }
     }

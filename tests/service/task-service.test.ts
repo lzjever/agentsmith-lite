@@ -714,6 +714,62 @@ describe("task service Botified orchestration", () => {
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
   });
 
+  it("handles Botified timeline reset when a new timeline reuses an old sequence number", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "timeline:old:1",
+            seq: 1,
+            session_id: "s1",
+            type: "assistant_message.completed",
+            payload: { text: "still running" }
+          }
+        ],
+        nextCursor: "timeline:old:1"
+      },
+      {
+        status: "reset",
+        reason: "stale_cursor",
+        historyBoundary: "timeline:new:0",
+        events: [
+          {
+            cursor: "timeline:new:1",
+            seq: 1,
+            session_id: "s1",
+            type: "cycle.completed",
+            payload: { ok: true }
+          }
+        ],
+        nextCursor: "timeline:new:1"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "reset then finish", endpointId });
+    const events = await services.tasks.listTaskEvents(userId, task.id);
+
+    assert.deepEqual(events.map((event) => [event.cursor, event.botifiedSeq, event.kind]), [
+      ["timeline:old:1", 1, "assistant_message"],
+      ["timeline:new:1", 1, "turn_completed"]
+    ]);
+    assert.equal((await store.findTask(task.id))?.status, "completed");
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "timeline:old:1"]);
+  });
+
   it("retries terminal live cleanup when the first run-state write loses its fence", async () => {
     const botified = new FakeBotifiedClient([
       {

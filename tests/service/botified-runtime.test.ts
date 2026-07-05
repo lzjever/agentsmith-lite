@@ -172,6 +172,37 @@ describe("botified runtime integration", () => {
     assert.equal(projection.nextCursor, "c3");
   });
 
+  it("deduplicates projected timeline events by cursor instead of sequence", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        cursor: "timeline:old:1",
+        seq: 1,
+        session_id: "s1",
+        type: "assistant_message.completed",
+        payload: { text: "old timeline" }
+      },
+      {
+        cursor: "timeline:new:1",
+        seq: 1,
+        session_id: "s1",
+        type: "cycle.completed",
+        payload: { ok: true }
+      },
+      {
+        cursor: "timeline:new:1",
+        seq: 1,
+        session_id: "s1",
+        type: "cycle.completed",
+        payload: { ok: false }
+      }
+    ]);
+
+    assert.deepEqual(projection.events.map((event) => [event.cursor, event.botifiedSeq, event.kind]), [
+      ["timeline:old:1", 1, "assistant_message"],
+      ["timeline:new:1", 1, "turn_completed"]
+    ]);
+  });
+
   it("projects actual Botified file.published metadata without leaking download URLs", () => {
     const projection = projectBotifiedTimelineEvents("task-1", [
       {

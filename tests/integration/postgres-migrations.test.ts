@@ -49,6 +49,23 @@ postgresDescribe("postgres migrations", () => {
         "users",
         "workspaces"
       ]);
+
+      const eventUniqueConstraints = await client.query<{ conname: string; definition: string }>(`
+        select c.conname, pg_get_constraintdef(c.oid) as definition
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        where t.relname = 'agent_task_events'
+          and c.contype = 'u'
+        order by c.conname
+      `);
+      assert.equal(
+        eventUniqueConstraints.rows.some((row) => /UNIQUE \(task_id, cursor\)/i.test(row.definition)),
+        true
+      );
+      assert.equal(
+        eventUniqueConstraints.rows.some((row) => /botified_seq/i.test(row.definition)),
+        false
+      );
     } finally {
       await client.end();
     }

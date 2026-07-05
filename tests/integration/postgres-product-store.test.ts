@@ -94,12 +94,27 @@ postgresDescribe("postgres product store", () => {
       id: "evt_pg",
       taskId: task.id,
       kind: "assistant_message",
-      cursor: "1",
+      cursor: "timeline:old:1",
       botifiedSeq: 1,
       botifiedType: "message",
       sessionId: "sess_pg",
       payload: { text: "hello" },
       createdAt: "2026-07-04T00:05:00.000Z"
+    };
+    const resetEvent: AgentTaskEvent = {
+      ...event,
+      id: "evt_pg_reset",
+      kind: "turn_completed",
+      cursor: "timeline:new:1",
+      botifiedType: "cycle.completed",
+      payload: { ok: true },
+      createdAt: "2026-07-04T00:05:01.000Z"
+    };
+    const duplicateResetEvent: AgentTaskEvent = {
+      ...resetEvent,
+      id: "evt_pg_reset_duplicate",
+      payload: { ok: false },
+      createdAt: "2026-07-04T00:05:02.000Z"
     };
     const artifact: AgentTaskArtifact = {
       id: "art_pg",
@@ -139,14 +154,14 @@ postgresDescribe("postgres product store", () => {
     await store.createEndpoint(endpoint);
     await store.createTask(task);
     await store.updateTask({ ...task, status: "running", updatedAt: "2026-07-04T00:07:00.000Z" });
-    await store.appendTaskEvents([event, event]);
+    await store.appendTaskEvents([event, event, resetEvent, duplicateResetEvent]);
     await store.appendTaskArtifacts([artifact, artifact]);
 
     assert.deepEqual(await store.listWorkspacesForUser(user.id), [workspace]);
     assert.deepEqual(await store.listProjectsForWorkspace(workspace.id), [project]);
     assert.deepEqual(await store.listEndpointsForProject(project.id), [endpoint]);
     assert.equal((await store.findTask(task.id))?.status, "running");
-    assert.deepEqual(await store.listTaskEvents(task.id), [event]);
+    assert.deepEqual(await store.listTaskEvents(task.id), [event, resetEvent]);
     assert.deepEqual(await store.listTaskArtifacts(task.id), [artifact]);
   });
 

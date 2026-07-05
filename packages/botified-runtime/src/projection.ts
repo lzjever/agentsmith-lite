@@ -31,9 +31,9 @@ export interface BotifiedProjectedArtifactDownload {
 export function projectBotifiedTimelineEvents(
   taskId: string,
   timeline: BotifiedTimelineEvent[],
-  alreadyProjectedSeqs = new Set<number>()
+  alreadyProjectedCursors = new Set<string>()
 ): BotifiedProjectionResult {
-  const seen = new Set(alreadyProjectedSeqs);
+  const seen = new Set(alreadyProjectedCursors);
   const events: AgentTaskEvent[] = [];
   const artifacts: AgentTaskArtifact[] = [];
   const artifactDownloads: BotifiedProjectedArtifactDownload[] = [];
@@ -46,11 +46,12 @@ export function projectBotifiedTimelineEvents(
       }
       continue;
     }
-    if (seen.has(item.seq)) {
+    const projectedCursor = redactSecretLikeText(item.cursor);
+    if (seen.has(projectedCursor)) {
       nextCursor = safeNextCursor(item.cursor, nextCursor);
       continue;
     }
-    seen.add(item.seq);
+    seen.add(projectedCursor);
     nextCursor = safeNextCursor(item.cursor, nextCursor);
 
     const kind = mapEventKind(item.type);
@@ -62,7 +63,7 @@ export function projectBotifiedTimelineEvents(
       id: newId("evt"),
       taskId,
       kind,
-      cursor: redactSecretLikeText(item.cursor),
+      cursor: projectedCursor,
       botifiedSeq: item.seq,
       botifiedType: redactSecretLikeText(item.type),
       sessionId: redactSecretLikeText(item.session_id ?? "unknown"),

@@ -336,11 +336,11 @@ export class TaskService {
     const state = await this.readRuntimeState(task.id);
     const serviceKey = this.serviceKeyForTask(task);
     const existing = await this.store.listTaskEvents(task.id);
-    const existingSeqs = new Set(existing.map((event) => event.botifiedSeq));
+    const existingCursors = new Set(existing.map((event) => event.cursor));
     const timeline = await this.callBotified("read timeline", () =>
       this.botified.readTimeline(state.baseUrl, serviceKey, state.timelineCursor)
     );
-    const projection = projectBotifiedTimelineEvents(task.id, timelineEvents(timeline.events), existingSeqs);
+    const projection = projectBotifiedTimelineEvents(task.id, timelineEvents(timeline.events), existingCursors);
 
     if (projection.artifacts.length > 0) {
       const existingArtifacts = await this.store.listTaskArtifacts(task.id);

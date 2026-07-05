@@ -264,7 +264,7 @@ export class PostgresProductStore implements ProductStore {
            id, task_id, kind, cursor, botified_seq, botified_type, session_id, payload, created_at
          )
          values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
-         on conflict (task_id, botified_seq) do nothing`,
+         on conflict (task_id, cursor) do nothing`,
         [
           event.id,
           event.taskId,
