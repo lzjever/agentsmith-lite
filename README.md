@@ -51,16 +51,17 @@ The operator lifecycle e2e and visual screenshot are independent manual gates; t
 ## Deploy Skeleton
 
 ```bash
-scripts/build-images.sh --tag dev --dry-run
+scripts/build-images.sh --tag dev --push --images-lock dist/images.lock
 scripts/build-offline-bundle.sh \
-  --app-image agentsmith-lite/app@sha256:<64hex> \
-  --runner-image agentsmith-lite/botified-runner@sha256:<64hex> \
+  --images-lock dist/images.lock \
   --output dist/app-offline-bundle
 scripts/deploy/import-images.sh --bundle dist/app-offline-bundle
 scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env --tag dev --out out/manifests --images-lock dist/app-offline-bundle/images.lock
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env --out out/manifests --bundle dist/app-offline-bundle
 scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env
 ```
+
+Use `scripts/build-images.sh --tag dev --push --images-lock dist/images.lock --dry-run` to print the build/push/write-lock intent without calling the container runtime. The digest-pinned lock is written only after a successful push, using the runtime-reported `RepoDigests`; a real registry digest is not available from the local image ID alone.
 
 Deploy smoke is an API-only remote check. It reads `APP_PUBLIC_BASE_URL` from the env file unless `--base-url` is provided, bootstraps/logs in with `BUILTIN_ADMIN_INITIAL_PASSWORD` from the secrets file, then covers health, workspace/project creation, file upload/list/download/delete, and operator sandbox status. Endpoint/chat smoke is opt-in with `--endpoint-base-url`, `--endpoint-model`, and `--endpoint-secret-ref`, or the matching `SMOKE_ENDPOINT_BASE_URL`, `SMOKE_ENDPOINT_MODEL`, and `SMOKE_ENDPOINT_SECRET_REF` env values. Task artifact smoke stays off by default; enable the Botified `publish_file` artifact smoke explicitly with `--task-smoke` or `SMOKE_TASK=true`, and only with complete endpoint smoke config. On success it creates a task, polls `/events` and `/artifacts`, downloads the artifact, and verifies the marker content. Task reclaim smoke is another explicit manual opt-in with `--task-reclaim-smoke` or `SMOKE_TASK_RECLAIM=true`; it creates a separate task, cancels it, then calls scoped `/api/operator/sandbox/reap` dry-run for that `runId`. Add `--task-reclaim-reap-apply` or `SMOKE_TASK_RECLAIM_REAP_APPLY=true` only with reclaim smoke to run scoped dry-run, scoped apply, and final scoped dry-run. These task smokes are not default gates and do not replace real Kubernetes/JuiceFS external evidence.
 

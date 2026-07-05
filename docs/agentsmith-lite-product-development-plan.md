@@ -435,7 +435,10 @@ npm run e2e:smoke
 npm run e2e:operator-lifecycle
 npm run visual:screenshot
 
-scripts/build-images.sh --tag <tag> [--dry-run]
+scripts/build-images.sh --tag <tag> [--runtime docker] [--push [--images-lock images.lock]] [--dry-run]
+scripts/build-offline-bundle.sh \
+  --images-lock images.lock \
+  [--output dist/app-offline-bundle] [--runtime docker]
 scripts/build-offline-bundle.sh \
   --app-image agentsmith-lite/app@sha256:<64hex> \
   --runner-image agentsmith-lite/botified-runner@sha256:<64hex> \
@@ -456,7 +459,7 @@ Known command status and gaps:
 - `scripts/dev/up.sh --env/--secrets` 已作为本地 dev env 契约补齐：allowlist 限制可加载的本地 env/secrets key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
 - `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。它们都不进入默认 gate，也不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file`、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
 - `scripts/deploy/operator-sandbox.mjs reap` 支持默认/显式 `--dry-run` 与显式 `--apply`；apply 通过 operator API 发送 `{ "apply": true }`，并由 deploy script 测试覆盖。
-- `scripts/build-images.sh --tag` 只产生 mutable tag。生产/离线验收必须后续解析并记录 digest。
+- `scripts/build-images.sh --push --images-lock images.lock` 已补齐 build/push 后的 digest-pinned lock 小闭环：push 成功后只从 runtime `RepoDigests` 捕获 app/runner digest refs；`--dry-run` 只打印 build/push/write-lock intent。真实 registry digest 仍必须在 push 后获得，不能用本地 image ID 代替。
 
 ### 7.3 Manual gates
 

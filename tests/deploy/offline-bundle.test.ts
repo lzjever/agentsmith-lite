@@ -62,6 +62,71 @@ describe("build offline bundle", () => {
     assert.equal(checksumEntries["images/botified-runner.tar"], sha256File(runnerArchive));
   });
 
+  it("reads digest refs from --images-lock instead of requiring manual image arguments", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-lock-"));
+    const outputDir = path.join(tempDir, "bundle");
+    const lockFile = path.join(tempDir, "images.lock");
+    const callsFile = path.join(tempDir, "runtime-calls.log");
+    const runtime = writeFakeRuntime(tempDir, callsFile, "write");
+    writeFileSync(lockFile, `# release image refs\n${appDigestRef}\n\n${runnerDigestRef}\n`);
+
+    const result = runBundle(["--images-lock", lockFile, "--runtime", runtime, "--output", outputDir]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(callsFile, "utf8").trim().split("\n"), [
+      `image save -o ${path.join(outputDir, "images/app.tar")} ${appDigestRef}`,
+      `image save -o ${path.join(outputDir, "images/botified-runner.tar")} ${runnerDigestRef}`
+    ]);
+    assert.deepEqual(parseAppImagesLock(readFileSync(path.join(outputDir, "images.lock"), "utf8")), {
+      app: appDigestRef,
+      botifiedRunner: runnerDigestRef
+    });
+  });
+
+  it("fails closed when --images-lock is mixed with explicit image arguments or contains invalid refs", () => {
+    const cases: Array<{
+      name: string;
+      lock: string;
+      args: string[];
+      error: RegExp;
+    }> = [
+      {
+        name: "mixed app image",
+        lock: `${appDigestRef}\n${runnerDigestRef}\n`,
+        args: ["--app-image", appDigestRef],
+        error: /--images-lock.*--app-image|--app-image.*--images-lock/
+      },
+      {
+        name: "mixed runner image",
+        lock: `${appDigestRef}\n${runnerDigestRef}\n`,
+        args: ["--runner-image", runnerDigestRef],
+        error: /--images-lock.*--runner-image|--runner-image.*--images-lock/
+      },
+      {
+        name: "invalid lock",
+        lock: `agentsmith-lite/app:dev\n${runnerDigestRef}\n`,
+        args: [],
+        error: /images\.lock|digest-pinned|mutable/
+      }
+    ];
+
+    for (const candidate of cases) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-lock-invalid-"));
+      const outputDir = path.join(tempDir, "bundle");
+      const lockFile = path.join(tempDir, "images.lock");
+      const callsFile = path.join(tempDir, "runtime-calls.log");
+      const runtime = writeFakeRuntime(tempDir, callsFile, "write");
+      writeFileSync(callsFile, "");
+      writeFileSync(lockFile, candidate.lock);
+
+      const result = runBundle(["--images-lock", lockFile, ...candidate.args, "--runtime", runtime, "--output", outputDir]);
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, candidate.error, candidate.name);
+      assert.equal(readFileSync(callsFile, "utf8").trim(), "", candidate.name);
+    }
+  });
+
   it("fails closed for mutable tags, missing image refs, and missing or empty archives", () => {
     const cases: Array<{
       name: string;
