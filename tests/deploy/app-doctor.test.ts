@@ -120,7 +120,7 @@ describe("deploy app doctor artifact checks", () => {
     );
 
     for (const resource of ["pods", "services", "secrets", "configmaps", "serviceaccounts", "networkpolicies"]) {
-      for (const verb of ["create", "get", "list", "delete"]) {
+      for (const verb of ["create", "get", "list", "delete", "patch"]) {
         assert.ok(
           calls.some(
             (call) =>
@@ -145,31 +145,36 @@ describe("deploy app doctor artifact checks", () => {
   });
 
   it("fails K8s fact checks without leaking deploy secrets when a required allow is denied", () => {
-    const fixture = writeDoctorFixture({
-      extraEnv: [
-        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
-        "KUBE_CONTEXT=kind-agentsmith",
-        "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
-      ],
-      postgresUrl: "postgres://DO_NOT_PRINT_APP_URL",
-      appSessionSecret: "DO_NOT_PRINT_APP_SESSION_SECRET_VALUE",
-      adminPassword: "DO_NOT_PRINT_INITIAL_PASSWORD"
-    });
-    const fakeKubectl = writeFakeKubectl(fixture.tempDir);
+    for (const [denyCheck, expectedDiagnostic] of [
+      ["create:pods", /create pods/i],
+      ["patch:pods", /patch pods/i]
+    ] as const) {
+      const fixture = writeDoctorFixture({
+        extraEnv: [
+          "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+          "KUBE_CONTEXT=kind-agentsmith",
+          "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
+        ],
+        postgresUrl: "postgres://DO_NOT_PRINT_APP_URL",
+        appSessionSecret: "DO_NOT_PRINT_APP_SESSION_SECRET_VALUE",
+        adminPassword: "DO_NOT_PRINT_INITIAL_PASSWORD"
+      });
+      const fakeKubectl = writeFakeKubectl(fixture.tempDir);
 
-    const result = runDoctor(fixture, [], {
-      PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
-      FAKE_KUBECTL_CALLS: fakeKubectl.callsFile,
-      FAKE_KUBECTL_DENY_CHECKS: "create:pods"
-    });
-    const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
-    const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+      const result = runDoctor(fixture, [], {
+        PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_KUBECTL_CALLS: fakeKubectl.callsFile,
+        FAKE_KUBECTL_DENY_CHECKS: denyCheck
+      });
+      const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
+      const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
 
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /create pods/i);
-    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_URL/);
-    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_SESSION_SECRET/);
-    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_INITIAL_PASSWORD/);
+      assert.notEqual(result.status, 0, denyCheck);
+      assert.match(result.stderr, expectedDiagnostic, denyCheck);
+      assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_URL/, denyCheck);
+      assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_SESSION_SECRET/, denyCheck);
+      assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_INITIAL_PASSWORD/, denyCheck);
+    }
   });
 
   it("fails K8s fact checks when a forbidden API service account surface is allowed", () => {
@@ -634,7 +639,7 @@ if [[ "$joined" == *" auth can-i "* ]]; then
   case "$resource" in
     pods|services|secrets|configmaps|serviceaccounts|networkpolicies)
       case "$verb" in
-        create|get|list|delete) exit 0 ;;
+        create|get|list|delete|patch) exit 0 ;;
       esac
       ;;
     pods/exec|persistentvolumes|persistentvolumeclaims|clusterroles)

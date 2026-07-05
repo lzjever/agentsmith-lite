@@ -151,7 +151,7 @@ run_k8s_fact_checks() {
   run_kubectl_check "JuiceFS PVC exists" get pvc "$JUICEFS_PVC_NAME"
 
   for resource in pods services secrets configmaps serviceaccounts networkpolicies; do
-    for verb in create get list delete; do
+    for verb in create get list delete patch; do
       run_kubectl_check "API service account can $verb $resource" auth can-i "$verb" "$resource" "--as=$service_account"
     done
   done

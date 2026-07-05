@@ -390,7 +390,7 @@ Core resource policy:
 
 - 所有 app-owned K8s resources 带 `agentsmith-lite/managed-by=agentsmith-lite`。
 - Sandbox resources 带 task/run labels。
-- API service account 只能 create/get/list/delete 必需 namespace resources。
+- API service account 只能 create/get/list/delete/patch 必需 namespace resources。
 - 禁止 cluster-wide RBAC 和 `pods/exec`。
 - `status.sh --resources` 可展示 active task/sandbox 状态。
 - `reap` 只清理 app-owned expired/cancelled resources。
