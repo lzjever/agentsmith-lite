@@ -38,6 +38,7 @@ The Botified service exposes `/healthz` without auth. All Lite runtime control/d
 
 - `POST /v1/messages`
 - `GET /v1/timeline`
+- `GET /v1/state`
 - `POST /v1/files`
 - `POST /v1/abort`
 
@@ -56,6 +57,8 @@ When live sandbox mode is explicitly configured, `TaskService` resolves the endp
 `TaskService` derives the per-task service key from the server session secret plus task/run identity. Live startup requires `APP_SESSION_SECRET` to be explicitly set to a non-default value; the development fallback is refused in live mode. The key is never written to ProductStore, task JSON, events, artifacts, or docs. It exists only in memory for Botified HTTP calls and, in live mode, in the Kubernetes Secret apply body.
 
 The `sandbox_runtime_state` JSON document stores only non-secret runtime metadata: Botified base URL, one timeline resume cursor, and sync timestamps. The `sandbox_run_state` JSON document stores resource identity, phase, cleanup status, and non-secret runtime paths. The model API key is not stored in task JSON, task events, artifacts, runtime docs, run state, or ConfigMaps; it is only materialized into the live Secret apply body.
+
+When `sandbox_runtime_state` is missing, `TaskService` rebuilds the non-secret Botified base URL from sandbox run metadata, reads `GET /v1/state`, stores only the safe `timeline_cursor`, and resumes timeline sync from that cursor.
 
 Timeline reads reuse the shared projection rules in `packages/botified-runtime`. Projection redacts secret-like field names and value-level secret-like strings such as bearer tokens, Botified service keys, and OpenAI-compatible API keys, including inside arrays and nested objects. Botified `/v1/timeline` envelopes are projected from their `data` field, with legacy `payload` test fakes still accepted as a fallback. Existing Botified sequence numbers are passed back into the projection so repeated reads are idempotent. The safe `timeline_cursor` returned by `POST /v1/messages` seeds the same runtime `timelineCursor` used by later reads, so the first forward sync does not fall back to `GET /v1/timeline?tail=1`; secret-like or missing cursors are ignored.
 

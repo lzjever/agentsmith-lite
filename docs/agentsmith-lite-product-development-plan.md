@@ -372,16 +372,16 @@ Core runtime:
 2. Sandbox controller 创建 namespace-scoped pod/configmap/secret/service。
 3. Pod 使用 `agentsmith-lite/botified-runner@sha256:*`。
 4. Runner 启动 `botified serve`，配置 OpenAI-compatible endpoint 和 project workspace。
-5. API 通过 Botified HTTP 调 `/v1/messages`、`/v1/timeline`、`/v1/abort`。
+5. API 通过 Botified HTTP 调 `/v1/messages`、`/v1/timeline`、`/v1/state`、`/v1/abort`。
 6. Botified bash tool 在 sandbox workspace 写文件。
 7. API 将 timeline/file events 投影为 task events/artifacts。
 8. Cancel 调 `/v1/abort`，随后删除 app-owned sandbox resources。
 9. TTL/reap 清理 pod/service/configmap/secret，但不自动删除 durable project files。
 
-Required Botified work still open unless separately proven:
+External Botified acceptance still open unless separately proven:
 
 - 构建 runner image 并运行真实 Botified acceptance；
-- 实现或补齐 `/v1/state` fallback，使 API restart 能从 cursor 或 state 恢复 timeline；
+- 在真实部署/API restart 中验收 `/v1/state` fallback 能从 cursor 或 state 恢复 timeline；
 - full smoke 中使用 bash 写入已知 artifact，并通过 API 下载校验。
 
 ### 6.5 Resource lifecycle
@@ -594,7 +594,7 @@ Core deliverables:
 
 - Botified runner image Dockerfile；
 - Botified config generator；
-- Botified HTTP client：messages、timeline、abort，补齐 state fallback；
+- Botified HTTP client：messages、timeline、state、abort；state fallback 已由 core tests 覆盖；
 - sandbox pod manifest renderer；
 - task event/artifact projection；
 - cancel/TTL/reap；
@@ -617,7 +617,7 @@ External Acceptance Evidence:
 - API events 出现 expected timeline；
 - artifact list/download 内容校验通过；
 - cancel 调用 `/v1/abort` 并删除 app-owned sandbox resources；
-- API restart 后能从 cursor 或 `/v1/state` 恢复 timeline，或清楚记录未完成。
+- 真实部署中 API restart 后能从 cursor 或 `/v1/state` 恢复 timeline，并归档 redacted evidence。
 
 Deferred:
 
