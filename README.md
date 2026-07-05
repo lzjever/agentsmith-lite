@@ -4,6 +4,8 @@ AgentSmith Lite is a small product repo for the P0/P2/P3 app skeleton: Node API,
 
 Business logic lives on the server side. The Web UI is a product API client only.
 
+Product planning: [AgentSmith Lite Product Development Plan](docs/agentsmith-lite-product-development-plan.md).
+
 ## Quick Start
 
 ```bash
