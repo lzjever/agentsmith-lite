@@ -22,6 +22,14 @@ Default local login:
 
 Open `http://127.0.0.1:3000`.
 
+`scripts/dev/up.sh` is the local-dev wrapper around `npm run dev`. With no flags it keeps the same local dry-run defaults and does not require substrate files. To run the local API with product-level substrate config, pass:
+
+```bash
+scripts/dev/up.sh --env substrate.env --secrets substrate.secrets.env
+```
+
+Only allowlisted product API variables are exported to the dev server, such as `POSTGRES_APP_URL`, app session/admin secrets, `APP_PUBLIC_BASE_URL`, Kubernetes namespace/context values, `JUICEFS_PVC_NAME`, model base URLs/API keys, and sandbox mode/limit settings. Raw substrate storage and CSI internals such as `S3_*`, `JUICEFS_META_URL`, `JUICEFS_BUCKET`, `JUICEFS_VOLUME_NAME`, `JUICEFS_SECRET_NAME`, `JUICEFS_CSI_DRIVER`, `JUICEFS_STORAGE_CLASS`, and `JUICEFS_MOUNT_ROOT` are not passed to the API child process.
+
 ## Manual Checks
 
 These are opt-in developer checks, not part of the default release path:

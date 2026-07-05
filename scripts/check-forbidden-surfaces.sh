@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 deny='AFSCP|JVS|WebDAV|LLMUP|MONGO_|REDIS_|KEYCLOAK_|ASBCP_|pods/exec|xterm|product:ready|gate:|release:campaign|agent-task-runner|agent-runner-contract'
+ledger="docs/migration-from-reference.md"
 paths=(package.json packages src infra e2e)
 existing=()
 for path in "${paths[@]}"; do
@@ -10,7 +11,7 @@ for path in "${paths[@]}"; do
 done
 
 if rg -n "$deny" "${existing[@]}" --glob '!**/*.md' --glob '!third_party/**'; then
-  echo "Forbidden removed surface found in active app source." >&2
+  echo "Forbidden removed surface found in active app source. See ${ledger} for migration decisions." >&2
   exit 1
 fi
 
@@ -23,7 +24,7 @@ term_f="$(printf '\143\162\157\163\163\164\145\162\155')"
 term_g="botified-${term_a}"
 third_party_pattern="${term_g}|${term_a}|${term_b}|${term_c}|${term_d}|${term_e}|${term_f}"
 if rg -n "$third_party_pattern" third_party/botified; then
-  echo "Forbidden optional Botified surface found in vendored runner input." >&2
+  echo "Forbidden optional Botified surface found in vendored runner input. See ${ledger} for vendor boundaries." >&2
   exit 1
 fi
 
