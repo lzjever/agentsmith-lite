@@ -10,7 +10,7 @@
 
 1. **范围分层混乱**：把 Lite 核心目标、未来增强项、参考系统遗留能力混进同一个 P0/P2 范围，导致 chat persistence、audit/usage、workspace/project 全量 CRUD、endpoint edit、file delete UI 等未实现或非核心能力被误写为 MVP。
 2. **证明层级混淆**：本地 unit/contract/fake smoke 只能证明代码路径、接口边界和安全限制，不能证明 clean VM、断网 VM、真实云 K8s、真实 Botified bash artifact 已经可用。计划必须把这些外部验收列为 redacted evidence，而不是用本地测试替代。
-3. **命令契约写法过度理想化**：部分文字描述了希望中的命令形状，但当前脚本并不支持，例如 `scripts/dev/up.sh --env --secrets`；部分脚本当前只做轻量 smoke，不等于完整 runtime acceptance。
+3. **命令契约与证明边界曾经混在一起**：`scripts/dev/up.sh --env/--secrets` 的本地 dev env 契约已补齐并测试；但它只证明本地开发启动契约，真实 clean/offline/existing-cloud、runner image/K8s/JuiceFS evidence 仍不能由本地命令替代。
 
 结构性修订原则：
 
@@ -76,14 +76,15 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 
 ### 2.3 External Acceptance Evidence
 
-以下验收不能由本地 fake/stub 测试替代。开发团队必须在真实环境中保存 redacted evidence：
+以下验收或证据边界不能由本地 fake/stub 测试替代。Botified runner 已拆为已完成的本地 process acceptance 与仍需真实环境的 full external acceptance；真实环境证据必须保存 redacted evidence：
 
 | Evidence | 必须证明 |
 | --- | --- |
 | Clean VM self-hosted install | 新 Linux VM 上执行 p1-real online install，生成 `substrate.env`、`substrate.secrets.env`、`doctor-report.json overallStatus=passed`。 |
 | Disconnected VM offline install | 同一 offline cache 复制到断网 VM；关闭 egress/DNS 后执行 offline install；证明无公网下载。 |
 | Existing-cloud validation | 管理员提供同格式 env/secrets，doctor 通过真实 K8s/Postgres/S3/JuiceFS PVC 检查。 |
-| Botified runner acceptance | 构建 runner image，启动 Botified 服务，真实调用 `/v1/messages`，通过 bash 写文件并产出 timeline/artifact。 |
+| Botified runner local process acceptance | 已由 `npm run acceptance:botified-runner` 覆盖：本地 vendored Botified binary、mock-provider、bash marker、timeline/state/abort。这是本地 process 证据，不替代 full external acceptance。 |
+| Full runner image/K8s/JuiceFS acceptance | 构建 runner image；在 K8s sandbox pod 中通过 PVC 挂载 JuiceFS 运行 Botified；真实调用 `/v1/messages` 或产品 task API；通过 bash 写 artifact 并产出 timeline/artifact。 |
 | Live sandbox task | App 部署到 K8s 后创建 task，sandbox pod 挂载 JuiceFS，Botified bash 写 artifact，API 能轮询 events、下载 artifact。 |
 | Resource reclaim | 长任务 cancel、TTL 过期、operator reap 能删除 app-owned pod/service/configmap/secret，并保留持久 project files。 |
 | App offline deploy | 使用 digest-pinned app offline bundle 导入镜像、render/apply、doctor、smoke。 |
@@ -449,10 +450,10 @@ scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env --en
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
-Known command gaps:
+Known command status and gaps:
 
-- `scripts/dev/up.sh` 当前不解析 `--env/--secrets`。如开发体验需要使用 substrate env 启动本地 API，应作为 P2/P4 待实现项，而不是现有契约。
-- `scripts/deploy/smoke.sh --task-smoke` 当前已覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker。它证明 smoke 脚本和产品 API artifact path，不替代真实 live Botified/K8s 证据；runner image、sandbox pod、JuiceFS mount、Botified `publish_file` 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
+- `scripts/dev/up.sh --env/--secrets` 已作为本地 dev env 契约补齐：allowlist 限制可加载的本地 env/secrets key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
+- `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker。二者都不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file` 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
 - `scripts/deploy/operator-sandbox.mjs reap` 当前脚本层只支持 `--dry-run`。如果需要脚本直接执行 cleanup apply，需要补齐并测试；否则文档应说明 apply 通过 operator API 完成。
 - `scripts/build-images.sh --tag` 只产生 mutable tag。生产/离线验收必须后续解析并记录 digest。
 
@@ -597,14 +598,15 @@ Local evidence:
 
 - unit tests for manifest/RBAC/resource labels；
 - fake Botified client tests for task lifecycle；
+- `npm run acceptance:botified-runner` 证明本地 vendored Botified binary process、mock-provider、bash marker、timeline/state/abort；
 - API contract tests for events/artifacts/cancel/reap；
 - Dockerfile/static checks 只证明形状，不证明 runtime 可跑。
 
 External Acceptance Evidence:
 
-- runner image build 成功并记录 digest；
-- runner container 启动 Botified，health/messages/timeline/abort 可用；
-- live K8s task 使用 bash 写已知文件；
+- full runner image build 成功并记录 digest；
+- runner image/container 启动 Botified，health/messages/timeline/abort 可用；
+- live K8s task 使用 runner image，在 sandbox pod 通过 PVC/JuiceFS 写已知文件；
 - API events 出现 expected timeline；
 - artifact list/download 内容校验通过；
 - cancel 调用 `/v1/abort` 并删除 app-owned sandbox resources；
@@ -645,7 +647,7 @@ External Acceptance Evidence:
 - self-hosted substrate 上 render/apply/status/doctor/smoke；
 - existing-cloud substrate 上 render/apply/status/doctor/smoke；
 - disconnected app offline deploy：import images、render/apply、doctor、smoke；
-- full acceptance smoke：login、endpoint、chat smoke、file upload/download、Botified task artifact、cancel/reap。
+- full external acceptance smoke：login、endpoint、chat smoke、file upload/download、runner image/K8s sandbox/JuiceFS Botified task artifact、cancel/reap。
 
 Deferred:
 
@@ -717,8 +719,8 @@ P5 不新增产品功能。任何新功能必须回到 Core/Deferred 分层重�
 | Substrate install | script control flow | clean host compatibility, no egress | clean VM + disconnected VM reports。 |
 | Product API | route/schema/service tests | real deployed ingress/session behavior | deploy smoke report。 |
 | UI boundary | static tests | visual usability | manual visual screenshot if UI changed。 |
-| Botified runtime | fake client/unit tests | real binary/image behavior | runner acceptance report。 |
-| Live sandbox | manifest tests | pod scheduling, PVC mount, bash artifact | live task artifact smoke report。 |
+| Botified runtime | fake client/unit tests；`npm run acceptance:botified-runner` 覆盖本地 vendored binary process、mock-provider、bash marker、timeline/state/abort | runner image behavior、K8s pod/PVC/JuiceFS artifact | local process acceptance log + full external runner/live task reports。 |
+| Live sandbox | manifest tests、本地 runner process acceptance | pod scheduling, PVC mount, JuiceFS-backed bash artifact | full runner image/K8s/JuiceFS live task artifact smoke report。 |
 | Cleanup/reap | unit/fake lifecycle | real K8s resource deletion | live cancel/TTL/reap report。 |
 | App offline bundle | bundle script validation | real disconnected import/deploy | disconnected app deploy report。 |
 
@@ -732,16 +734,15 @@ This checklist is for handoff, not a release gate bureaucracy.
 - [ ] App command contract matches current scripts or is marked TODO.
 - [ ] Substrate command contract matches current scripts or is marked TODO.
 - [ ] P0/P1/P2/P3/P4/P5 acceptance criteria distinguish local proof from external evidence.
-- [ ] Full Botified bash artifact smoke is implemented or explicitly tracked as open P3 work.
+- [ ] Full external Botified/K8s/JuiceFS bash artifact smoke is implemented or explicitly tracked as open P3 work.
 - [ ] Clean VM/offline VM/existing-cloud evidence is collected before claiming deployment readiness.
 - [ ] Visual/e2e/manual gates remain diagnostics, not default release mainline.
 - [ ] Root copy of this plan, if kept, is synchronized intentionally after review.
 
 ## 12. Immediate Next Work
 
-1. Finish `docs/migration-from-reference.md` and make forbidden checks reference it.
-2. Decide whether `scripts/dev/up.sh` should accept `--env/--secrets`; if yes, implement in P2/P4 with tests. If no, update README/DEVELOPMENT to document local-only dev defaults.
-3. Implement full Botified runner acceptance: build image, start service, call messages/timeline/abort, bash writes artifact.
-4. Run `scripts/deploy/smoke.sh --task-smoke` in real self-hosted/existing-cloud/offline deploys, archive redacted artifact smoke reports, and collect separate live cancel/reap evidence.
-5. Generate real `config/offline-artifacts.env` for substrates p1-real cache and run clean VM/disconnected VM/existing-cloud acceptance.
-6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.
+1. Completed: `docs/migration-from-reference.md` migration ledger, `scripts/dev/up.sh --env/--secrets` allowlist/tests, and `npm run acceptance:botified-runner` local process acceptance.
+2. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
+3. Run real `scripts/deploy/smoke.sh --task-smoke` in self-hosted/existing-cloud/offline deploys and archive redacted artifact smoke reports.
+4. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
+5. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.
