@@ -132,6 +132,14 @@ run_k8s_fact_checks() {
   done
 }
 
+require_secret_min_length() {
+  local name="$1"
+  local min_length="$2"
+  local value="${!name:-}"
+  [ -n "$value" ] || { echo "$name is required for app deploy" >&2; exit 1; }
+  [ "${#value}" -ge "$min_length" ] || { echo "$name must be at least $min_length characters for app deploy" >&2; exit 1; }
+}
+
 sandbox_mode="${AGENTSMITH_LITE_SANDBOX_MODE:-dry-run}"
 case "$sandbox_mode" in
   ""|dry-run|live) ;;
@@ -146,9 +154,10 @@ if [ -n "$sandbox_namespace_limit" ]; then
   }
 fi
 
-for required in POSTGRES_APP_URL APP_SESSION_SECRET BUILTIN_ADMIN_INITIAL_PASSWORD; do
+for required in POSTGRES_APP_URL BUILTIN_ADMIN_INITIAL_PASSWORD; do
   [ -n "${!required:-}" ] || { echo "$required is required for app deploy" >&2; exit 1; }
 done
+require_secret_min_length APP_SESSION_SECRET 32
 if [ "$sandbox_mode" = "live" ] && [ "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" = "admin-password" ]; then
   echo "BUILTIN_ADMIN_INITIAL_PASSWORD must be non-default when AGENTSMITH_LITE_SANDBOX_MODE=live" >&2
   exit 1

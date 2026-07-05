@@ -122,7 +122,7 @@ describe("app manifest rendering", () => {
       },
       secrets: {
         POSTGRES_APP_URL: "postgresql://app:secret@db/app",
-        APP_SESSION_SECRET: "app-session-secret",
+        APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
         BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
         AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai",
         S3_ACCESS_KEY: "raw-access",
@@ -289,7 +289,7 @@ describe("app manifest rendering", () => {
       env: {},
       secrets: {
         POSTGRES_APP_URL: "postgresql://app:secret@db/app",
-        APP_SESSION_SECRET: "app-session-secret",
+        APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
         S3_SECRET_KEY: "raw-secret"
       }
     });

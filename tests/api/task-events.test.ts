@@ -14,6 +14,8 @@ import {
   type BotifiedUploadFileResult
 } from "../../packages/ports/src/botified.js";
 
+const validProductionSessionSecret = "production-session-secret-32-chars";
+
 describe("task events API", () => {
   let api: RunningApiServer | undefined;
   let dataRoot = "";
@@ -187,7 +189,7 @@ describe("task events API", () => {
     }
   });
 
-  it("fails fast when live sandbox mode would use the default session secret", async () => {
+  it("fails fast when live sandbox mode would use a missing, default, or weak session secret", async () => {
     const previousPostgresUrl = process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL = "postgresql://app:secret@db/app";
     const liveSandbox = {
@@ -201,7 +203,7 @@ describe("task events API", () => {
     };
 
     try {
-      for (const sessionSecret of [undefined, "", "dev-session-secret", " dev-session-secret "]) {
+      for (const sessionSecret of [undefined, "", "dev-session-secret", " dev-session-secret ", "short-production-secret"]) {
         await assert.rejects(
           () =>
             createApiServer({
@@ -211,7 +213,7 @@ describe("task events API", () => {
               ...(sessionSecret !== undefined ? { sessionSecret } : {}),
               liveSandbox
             }),
-          /APP_SESSION_SECRET must be set to a non-default value/
+          /APP_SESSION_SECRET must be set to a non-default value of at least 32 characters/
         );
       }
 
@@ -219,7 +221,7 @@ describe("task events API", () => {
         port: 0,
         dataRoot,
         builtinAdminPassword: "production-admin-password",
-        sessionSecret: "production-session-secret",
+        sessionSecret: validProductionSessionSecret,
         liveSandbox
       });
       assert.match(api.baseUrl, /^http:\/\/127\.0\.0\.1:/);
@@ -253,7 +255,7 @@ describe("task events API", () => {
               port: 0,
               dataRoot,
               builtinAdminPassword,
-              sessionSecret: "production-session-secret",
+              sessionSecret: validProductionSessionSecret,
               liveSandbox
             }),
           /BUILTIN_ADMIN_INITIAL_PASSWORD must be set to a non-default value/

@@ -1218,7 +1218,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     store,
     dataRoot: options.dataRoot ?? path.join(tmpdir(), "agentsmith-lite-task-service"),
     builtinAdminPassword,
-    sessionSecret: "test-session-secret",
+    sessionSecret: "test-session-secret-at-least-32-chars",
     botifiedClient: botified,
     botifiedServiceKeyFactory: options.serviceKeyFactory ?? (() => "test-service-key"),
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),

@@ -11,6 +11,7 @@ const appDigestRef = "agentsmith-lite/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const runnerDigestRef = "agentsmith-lite/botified-runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const otherAppDigestRef = "agentsmith-lite/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const defaultSandboxNamespaceLimit = String(DEFAULT_SANDBOX_NAMESPACE_LIMIT);
+const validAppSessionSecret = "app-session-secret-at-least-32-chars";
 
 describe("deploy app doctor artifact checks", () => {
   it("passes rendered local-default manifests without requiring an Ingress", () => {
@@ -21,7 +22,7 @@ describe("deploy app doctor artifact checks", () => {
     writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
     writeFileSync(
       secretsFile,
-      "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\nBUILTIN_ADMIN_INITIAL_PASSWORD=admin-password\n"
+      `POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=${validAppSessionSecret}\nBUILTIN_ADMIN_INITIAL_PASSWORD=admin-password\n`
     );
 
     const render = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
@@ -134,7 +135,7 @@ describe("deploy app doctor artifact checks", () => {
         "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
       ],
       postgresUrl: "postgres://DO_NOT_PRINT_APP_URL",
-      appSessionSecret: "DO_NOT_PRINT_APP_SESSION_SECRET",
+      appSessionSecret: "DO_NOT_PRINT_APP_SESSION_SECRET_VALUE",
       adminPassword: "DO_NOT_PRINT_INITIAL_PASSWORD"
     });
     const fakeKubectl = writeFakeKubectl(fixture.tempDir);
@@ -190,6 +191,19 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /BUILTIN_ADMIN_INITIAL_PASSWORD is required/i);
+  });
+
+  it("fails when the app session secret is shorter than 32 characters without leaking the value", () => {
+    const weakSecret = "DO_NOT_PRINT_WEAK_SECRET";
+    const fixture = writeDoctorFixture({ appSessionSecret: weakSecret });
+
+    const result = runDoctor(fixture, []);
+    const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
+    const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /APP_SESSION_SECRET must be at least 32 characters/i);
+    assert.doesNotMatch(diagnosticText, new RegExp(weakSecret));
   });
 
   it("fails when live sandbox deploy uses the default built-in admin password", () => {
@@ -384,7 +398,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
     secretsFile,
     [
       `POSTGRES_APP_URL=${options.postgresUrl ?? "postgres://app"}`,
-      `APP_SESSION_SECRET=${options.appSessionSecret ?? "app-session-secret"}`,
+      `APP_SESSION_SECRET=${options.appSessionSecret ?? validAppSessionSecret}`,
       ...(adminPassword === null ? [] : [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`]),
       ""
     ].join("\n")

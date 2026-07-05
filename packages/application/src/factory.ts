@@ -13,6 +13,7 @@ import { WorkspaceService } from "./workspaceService.js";
 
 export const DEFAULT_SESSION_SECRET = "dev-session-secret";
 export const DEFAULT_BUILTIN_ADMIN_PASSWORD = "admin-password";
+export const MIN_SESSION_SECRET_LENGTH = 32;
 
 export interface CreateApplicationServicesInput {
   store: ProductStore;
@@ -115,8 +116,10 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
 
 export function requireLiveSandboxSessionSecret(sessionSecret: string | undefined): string {
   const trimmed = sessionSecret?.trim();
-  if (!trimmed || trimmed === DEFAULT_SESSION_SECRET) {
-    throw new Error("APP_SESSION_SECRET must be set to a non-default value when AGENTSMITH_LITE_SANDBOX_MODE=live");
+  if (!trimmed || trimmed === DEFAULT_SESSION_SECRET || trimmed.length < MIN_SESSION_SECRET_LENGTH) {
+    throw new Error(
+      `APP_SESSION_SECRET must be set to a non-default value of at least ${MIN_SESSION_SECRET_LENGTH} characters when AGENTSMITH_LITE_SANDBOX_MODE=live`
+    );
   }
   return trimmed;
 }

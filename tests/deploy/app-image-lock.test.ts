@@ -125,7 +125,7 @@ describe("deploy app images.lock", () => {
         ""
       ].join("\n")
     );
-    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
+    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret-at-least-32-chars\n");
 
     const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
       cwd: process.cwd(),

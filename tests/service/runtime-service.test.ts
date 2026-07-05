@@ -185,7 +185,7 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
     store,
     dataRoot: path.join(tmpdir(), "agentsmith-lite-runtime-service"),
     builtinAdminPassword: "test-admin-password",
-    sessionSecret: "test-session-secret",
+    sessionSecret: "test-session-secret-at-least-32-chars",
     botifiedClient: botified,
     botifiedServiceKeyFactory: () => "test-service-key",
     modelCredentialResolver: new FakeCredentialResolver({
