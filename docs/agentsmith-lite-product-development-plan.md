@@ -1,97 +1,102 @@
 # AgentSmith Lite 产品研发计划
 
-状态：收敛版开发交接稿
-日期：2026-07-04
+状态：本地单机 K8s 交付版开发交接稿
+日期：2026-07-05
 适用仓库：`agentsmith-lite`，配套仓库 `agentsmith-lite-substrates`
 
-## 0. 修订结论与根因分析
+## 0. 修订结论
 
-本计划不是“已完成报告”。它是给开发团队继续收敛实现、补齐真实验收证据的产品研发计划。当前审计发现，上一版计划有三个根因问题：
+本计划不是“已完成报告”，也不是可执行契约。测试不得 assert 本文措辞；测试应验证代码事实、API 行为、部署资源和运行结果。
 
-1. **范围分层混乱**：把 Lite 核心目标、未来增强项、参考系统遗留能力混进同一个 P0/P2 范围，导致 chat persistence、audit/usage、workspace/project 全量 CRUD、endpoint edit、project file delete UI 等未实现或非核心能力被误写为 MVP；同时曾把已经实现的 server-side project file delete API/core smoke 和 UI 删除能力混在一起。
-2. **证明层级混淆**：本地 unit/contract/fake smoke 只能证明代码路径、接口边界和安全限制，不能证明 clean VM、断网 VM、真实云 K8s、真实 Botified bash artifact 已经可用。计划必须把这些外部验收列为 redacted evidence，而不是用本地测试替代。
-3. **命令契约与证明边界曾经混在一起**：`scripts/dev/up.sh --env/--secrets` 加 `--app-env/--app-secrets` 的本地 dev env 契约已补齐并测试；但它只证明本地开发启动契约，真实 clean/offline/existing-cloud、runner image/K8s/JuiceFS evidence 仍不能由本地命令替代。
+本版只保留一个当前交付目标：
 
-结构性修订原则：
+> 在本地搭建的单机 K8s 测试环境中跑通完整系统闭环：substrates 安装 k3s/Postgres/S3-compatible storage/JuiceFS CSI/Keycloak 并生成 env/secrets；app 部署；用户经 OIDC 登录并建立 session；通过 API/UI 创建 endpoint/project/task；Botified sandbox pod 挂载 JuiceFS 写 artifact；API/UI 能 list/download；cancel、TTL、reap 能清理 app-owned resources。
 
-- 先定义 **MVP/Core**，再定义 **Deferred**，最后定义 **External Acceptance Evidence**。
-- P0-P5 每个阶段都写清：要交付什么、本地能证明什么、真实环境还必须提交什么证据。
-- 治理只保留为调试/发布仪表和事实报告，不进入主线开发路径。
-- Web UI 和未来 TUI 只能是 API client；业务逻辑必须在服务端完成。
+关键原则：
+
+- 当前交付不要求真正上云测试；`existing-cloud` 保留为后续/可选 deployment profile，不作为当前交付前置。
+- Keycloak/OIDC 是 Core。Keycloak 由 `agentsmith-lite-substrates` 安装和配置；app 只做 OIDC client、session 和 API 权限校验。
+- doctor/status/quick checks/workflow checks/report 只能是开发、调试、部署仪表信号，不能成为产品主线、第三 repo、发布治理体系、审计记录体系或独立系统。
+- 存量治理 overhead 也要删。已有治理类脚本、测试、文档、报告字段、命令参数、矩阵、记录，如果不直接服务本地单机 K8s 产品闭环或最小诊断，就删除；还有少量价值的，降级为手动、可选、生成输出，不进默认主线。
+- 默认发布前检查必须克制：少量、快速、精确、小范围，并且与本阶段或本次改动直接相关。
+- e2e 和 visual 只属于用户/开发者人工主动运行的 manual diagnostics，不进入整体发布主线。
+- 硬规则：凡是不直接帮助“在 K8s 中运行 Botified sandbox task，并通过 API/UI 管理 task/files/artifacts/cancel/reap”的内容，只能落在 doctor/status/diagnostics 或 Deferred。
 
 ## 1. 产品目标与不可变边界
 
-AgentSmith Lite 是从原 `agentsmith-project` 大幅简化出来的云端智能体平台。核心目标只有一个：
-
-> 在 Kubernetes 中运行可回收、可管理、可观察的沙箱智能体任务，通过 JuiceFS CSI 提供云端文件系统，通过 OpenAI-compatible LLM 接口接入模型，通过 Botified 执行 agent runtime。
-
-不可变技术决策：
+AgentSmith Lite 是从原 `agentsmith-project` 大幅简化出来的私有化智能体平台。核心目标是把 Botified agent runtime 放进可回收、可管理、可观察的 K8s sandbox task，并通过产品 API/UI 管理 endpoint、project files、task events、artifacts、cancel 和 resource reap。
 
 | 决策 | 说明 |
 | --- | --- |
-| 两个 repo | `agentsmith-lite` 和 `agentsmith-lite-substrates`。不再拆出 AFSCP、ASBCP、runner、release-kit 等产品 repo。 |
-| 外部依赖准备 | 不拆第三个 repo。外部依赖准备、离线缓存、lock/report 生成和 preflight/doctor 静态诊断都归入 `agentsmith-lite-substrates`；`dist/`、`offline-cache/`、`out/` 等为 generated artifacts，可发布到制品库/对象存储，但不进 git。 |
+| 两个 repo | 只保留 `agentsmith-lite` 和 `agentsmith-lite-substrates`。不拆 AFSCP、ASBCP、runner、release-kit 或第三个依赖准备 repo。 |
+| 当前交付 profile | 本地单机 K8s 测试环境。跑通完整闭环即可交付开发团队继续产品化。 |
+| 后续 profile | `existing-cloud` 和 disconnected/offline 保留为可选部署 profile，共用 env/secrets 契约，但不作为当前交付前置。 |
+| 身份系统 | Keycloak/OIDC 是 Core。substrates 安装/配置 Keycloak 并输出 app 可消费的 OIDC issuer/client/secret；app 不安装 Keycloak。 |
 | LLM 接口 | 只兼容 OpenAI-compatible Chat Completions/Responses 风格接口。移除 LLMUP。 |
-| Agent runtime | 使用 Botified。移除 Codex 作为 agent 核心的设计。 |
-| 文件系统 | 只支持 JuiceFS CSI 作为云端/私有化文件系统 provider。移除 JVS、WebDAV、远程/本地挂载。 |
-| 沙箱 | 保留。任务在 K8s sandbox pod 内运行，API 负责生命周期、事件投影、取消和回收。 |
-| UI 边界 | Web/TUI 只调用产品 API，不做 agent 编排、provider 调用、K8s 操作、DB 写入或文件授权判断。 |
-| 依赖最小化 | Core 依赖只包括 Kubernetes、PostgreSQL、S3-compatible object storage、JuiceFS CSI、App/Botified images。 |
-| 治理 | 不建设 release/rehearsal/evidence bureaucracy。只保留事实型 doctor/status/smoke/report。 |
+| Agent runtime | 使用 Botified。移除 Codex 作为 agent core 的设计。 |
+| 文件系统 | 只支持 JuiceFS CSI。移除 JVS、WebDAV、远程/本地挂载。 |
+| 沙箱 | 每个 task 一个 K8s sandbox pod；API 负责生命周期、事件投影、取消和回收。 |
+| UI/TUI 边界 | Web UI 和未来产品 TUI 只能调用产品 API，不做 provider 调用、K8s 操作、DB 写入、文件授权判断或认证业务逻辑。 |
+| 外部依赖准备 | 外部依赖准备、offline cache、preflight/doctor 静态诊断留在 substrates；preflight 只是 doctor `--dry-run` thin wrapper。 |
+| 治理 | 不建设 release/rehearsal/审计台账/质量矩阵。只保留事实型运行诊断。 |
 
 ## 2. 范围分层
 
 ### 2.1 MVP/Core
 
-MVP/Core 是开发团队必须优先完成并证明的闭环：
+MVP/Core 必须服务本地单机 K8s 完整闭环：
 
 | 范围 | Core 内容 |
 | --- | --- |
-| 部署模型 | 自建 substrates 或 existing-cloud 使用同一 `substrate.env` + `substrate.secrets.env` 契约。 |
-| API | 内建 admin/session、workspace/project 最小 create/list/select、endpoint create/list/use、chat smoke、task create/cancel/events/artifacts、project file list/upload/download/delete。 |
-| Runtime | Botified vendored/pinned，构建 runner image，sandbox pod 运行 Botified，支持 bash 写文件并发布 artifact。 |
-| Sandbox | 每个任务一个 sandbox pod；挂载 JuiceFS PVC；最小 RBAC；无 `pods/exec`；TTL/lease/reap/status。 |
-| Files | 服务端负责路径安全、权限、上传、下载、artifact 投影。UI 只通过 API 展示和触发。 |
-| Packaging | App image、Botified runner image、K8s manifest render/apply/status/down/doctor/smoke、digest-pinned app offline bundle。 |
-| Substrates | k3s self-hosted 安装、existing-cloud validation、offline cache、JuiceFS CSI、PostgreSQL、S3-compatible storage、doctor。 |
+| Substrates | 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI、Keycloak；生成 `substrate.env`、`substrate.secrets.env`、`kubeconfig` 和必要诊断输出。 |
+| Auth | Keycloak realm/client/user bootstrap；app 消费 OIDC issuer/client/client secret；服务端建立 session 并校验 API 权限。 |
+| API | session、workspace/project 最小 create/list/select、endpoint create/list/use、一次 server-side endpoint 调用检查、task create/cancel/status/events/artifacts、project file list/upload/download/delete。 |
+| Runtime | Botified vendored/pinned；构建 runner image；sandbox pod 运行 Botified；bash 写文件并发布 artifact。 |
+| Sandbox | JuiceFS PVC 挂载；最小 RBAC；无 `pods/exec`；TTL/lease/reap/status。 |
+| Files | 服务端负责 path normalization、权限、上传、下载、delete、artifact 投影。UI 只通过 API 展示和触发。 |
+| Packaging | App image、Botified runner image、K8s manifest render/apply/status/down/doctor、digest-pinned app offline bundle。 |
+| Checks | 少量 quick checks 与 workflow checks，只验证与当前阶段/改动相关的事实。 |
 
-Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通过已配置 endpoint 完成一次模型调用，用于验证 endpoint 与 server-side LLM access。
+Core 中的“chat”不是长期对话产品。MVP 只要求服务端能通过已配置 endpoint 完成一次模型调用，用来验证 endpoint 与 server-side LLM access。
 
-### 2.2 Deferred
+### 2.2 Deployment Profiles
 
-以下能力不进入 MVP/Core，除非用户另开需求并重新评估：
+| Profile | 当前定位 |
+| --- | --- |
+| local-single-node-k8s | 当前交付验证目标。必须跑通完整产品闭环。 |
+| existing-cloud | 后续/可选 profile。沿用相同 env/secrets 契约，验证管理员提供的 K8s/Postgres/S3/JuiceFS/Keycloak，不创建云资源，不作为当前交付前置。 |
+| disconnected/offline | 后续/可选 profile。offline cache 和 app offline bundle 是 generated deploy artifact/cache；可用于部署诊断，不是产品主线。 |
+
+### 2.3 Deferred
+
+以下能力不进入当前 MVP/Core，除非另开需求并重新评估：
 
 | Deferred 项 | 原因 |
 | --- | --- |
-| chat persistence、chat attachments、conversation UI | 不属于云端沙箱 agent 平台的首个闭环。 |
-| workspace/project 全量 CRUD、membership/group/template UI | 会把权限产品化提前，拖慢 sandbox runtime。Core 只保留最小所有者/admin 模型。 |
-| endpoint edit/delete、多 provider abstraction、模型路由 UI | Core 先支持 create/list/use；编辑删除后续再做。 |
-| project file delete UI、文件版本、save/restore、回收站 | Server-side file delete API 和 core smoke 已属于 Core；UI 删除流程、版本化恢复和回收站后置，避免把数据恢复语义过早产品化。 |
+| chat persistence、chat attachments、conversation UI | 不属于沙箱 agent 平台首个闭环。 |
+| workspace/project 全量 CRUD、membership/group/template UI | 会提前产品化权限管理。Core 先保留最小 owner/admin 语义，并由 OIDC session 承载身份。 |
+| endpoint edit/delete、多 provider abstraction、模型路由 UI | Core 先支持 create/list/use。 |
+| project file delete UI、文件版本、save/restore、回收站 | Server-side file delete API 属于 Core；UI 删除流程和恢复语义后置。 |
 | audit/usage dashboard | 可先保留 server logs/task events/resource counters；产品化报表后置。 |
-| OIDC/Keycloak、组织级 RBAC | 内建 admin 先完成私有化闭环。当前 app 不消费 `OIDC_CLIENT_SECRET`；generated `AUTH_MODE=builtin_admin` 和空 OIDC placeholders 可被容忍但必须过滤，不进入 app runtime/manifests。 |
-| TUI 产品面 | 未来 TUI 只能作为 API client，不承载业务逻辑。 |
-| product terminal、K8s `pods/exec` | shell 只能通过 Botified bash tool 运行在 sandbox 中。 |
+| 组织级 RBAC 深化 | OIDC 登录是 Core；复杂组织、组同步和细粒度角色后置。 |
+| 产品 TUI | 未来可做 API client，但不承载业务逻辑。 |
+| product terminal、K8s `pods/exec` | shell 只能通过 Botified bash tool 在 sandbox 中运行。 |
 | warm pool、多租户高级 quota、跨集群调度 | 先用 one pod per task + TTL/reap。 |
-| Redis、MongoDB、MinIO 作为必选依赖 | Core 不强制。MinIO 可作为自建 S3-compatible 实现细节。 |
-| visual gate、rehearsal matrix、release evidence ledger | 不进入默认发布主线。 |
+| Redis、MongoDB、MinIO 作为必选依赖 | Core 不强制。MinIO 只可作为自建 S3-compatible 实现细节。 |
+| visual/e2e/rehearsal matrix/审计台账 | 不进入默认发布主线。 |
 
-### 2.3 External Acceptance Evidence
+### 2.4 Deploy/Runtime Diagnostics
 
-以下验收或证据边界不能由本地 fake/stub 测试替代。Botified runner 已拆为已完成的本地 process acceptance、已实现入口但仍待真实运行归档的 runner image/container acceptance，以及仍需真实环境的 full external acceptance；真实环境证据必须保存 redacted evidence：
+本地 fake/stub 只能证明代码路径、接口边界和安全限制，不能冒称本地 K8s readiness。需要声明 readiness 时，运行对应诊断并脱敏分享必要输出；不要建设索引、台账或发布治理流程。
 
-| Evidence | 必须证明 |
+| 诊断信号 | 用途 |
 | --- | --- |
-| Clean VM self-hosted install | 新 Linux VM 上执行 p1-real online install，生成 `substrate.env`、`substrate.secrets.env`、`doctor-report.json overallStatus=passed`。 |
-| Disconnected VM offline install | 同一 offline cache 复制到断网 VM；关闭 egress/DNS 后执行 offline install；证明无公网下载。 |
-| Existing-cloud validation | 管理员提供同格式 env/secrets，doctor 通过真实 K8s/Postgres/S3/JuiceFS PVC 检查。 |
-| Botified runner local process acceptance | 已由 `npm run acceptance:botified-runner` 覆盖：本地 vendored Botified binary、mock-provider、bash marker、`file.published`、Botified file API 下载校验、timeline/state/abort。这是本地 process 证据，不替代 full external acceptance。 |
-| Botified runner image/container acceptance | `npm run acceptance:botified-runner-image` 已作为手动命令/本地验收入口实现，并有 fake-runtime contract tests 覆盖 build/run/cleanup/secret 边界；真实 runner image/container acceptance 仍需在可拉取 base image 的 Docker 环境中运行并归档 redacted 输出。命令成功时才是 runner-container-only 证据，不证明 K8s/PVC/JuiceFS/product task API/cancel-reap。 |
-| Full runner image/K8s/JuiceFS acceptance | 构建 runner image；在 K8s sandbox pod 中通过 PVC 挂载 JuiceFS 运行 Botified；真实调用 `/v1/messages` 或产品 task API；通过 bash 写 artifact 并产出 timeline/artifact。 |
-| Live sandbox task | App 部署到 K8s 后创建 task，sandbox pod 挂载 JuiceFS，Botified bash 写 artifact，API 能轮询 events、下载 artifact。 |
-| Resource reclaim | 长任务 cancel、TTL 过期、operator reap 能删除 app-owned pod/service/configmap/secret，并保留持久 project files。 |
-| App offline deploy | 使用 digest-pinned app offline bundle 导入镜像、render/apply、doctor、smoke。 |
-
-所有 evidence 必须脱敏：不能包含 raw secret、完整 token、云账号密钥、内部用户数据。
+| substrate readiness diagnostics | 确认本地 k3s/Postgres/S3/JuiceFS CSI/Keycloak 可用，并生成 app 可消费的 env/secrets。 |
+| auth workflow check | 经 Keycloak/OIDC 登录，app 建立 session，API 权限校验生效。 |
+| deploy workflow check | app image/runner image 使用 digest；render/apply/status/doctor 指向同一 env/secrets 契约。 |
+| task workflow check | 通过产品 API 创建 endpoint/project/task；sandbox pod 挂载 JuiceFS；Botified bash 写 artifact；API/UI list/download。 |
+| resource cleanup diagnostics | cancel、TTL、reap 只清理 app-owned pod/service/configmap/secret，不删除 durable project files。 |
+| disconnected/offline diagnostics | 可选 profile 的导入/部署诊断；`dist/`、`offline-cache/`、`out/` 均为 generated deploy artifact/cache 或 generated diagnostic output。 |
 
 ## 3. Repository 设计
 
@@ -101,24 +106,25 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 
 Owned by substrates repo:
 
-- self-hosted `k3s` bootstrap；
+- local single-node k3s bootstrap；
 - PostgreSQL 连接和 app database/bootstrap；
 - S3-compatible object storage 接入；
 - JuiceFS CSI 安装/验证；
+- Keycloak 安装、realm/client/user bootstrap、OIDC issuer/client 配置；
 - namespace、quota、StorageClass、PVC、dev ingress 基础资源；
-- p1-real offline cache download/validate/import；
-- `substrate.env`、`substrate.secrets.env`、`kubeconfig`、`doctor-report.json`；
-- generated offline cache、artifact lock、checksums、diagnostic reports；这些可由制品库/对象存储承载，但不作为 tracked git 内容；
-- existing-cloud 模式的环境校验。
+- optional offline cache download/validate/import；
+- `substrate.env`、`substrate.secrets.env`、`kubeconfig`、diagnostic output；
+- optional existing-cloud profile 的环境校验。
 
 Not owned:
 
 - App product code；
 - App DB migration bundle；
 - App/Botified runner image build；
-- App release gate；
+- App 发布治理流程；
 - 云供应商资源创建；
-- AFSCP/ASBCP/LLMUP/JVS 服务安装。
+- AFSCP/ASBCP/LLMUP/JVS 服务安装；
+- 第三个依赖准备 repo。
 
 Required layout:
 
@@ -132,10 +138,9 @@ agentsmith-lite-substrates/
     existing-cloud.md
     env-schema.md
   config/
-    substrates.self-hosted.example.yaml
+    substrates.local-k8s.example.yaml
     substrates.existing-cloud.example.yaml
     offline-artifacts.example.env
-    offline-cache-manifest.example.yaml
   schemas/
     substrate.env.v1.schema.json
     substrate.secrets.env.v1.schema.json
@@ -146,6 +151,7 @@ agentsmith-lite-substrates/
     install-online.sh
     install-offline.sh
     doctor.sh
+    preflight.sh
     validate-env.sh
     validate-juicefs-contract.sh
     reset-dev.sh
@@ -153,42 +159,41 @@ agentsmith-lite-substrates/
   manifests/
     namespace/
     postgres/
-    minio/
+    s3-compatible/
     juicefs-csi/
+    keycloak/
     quotas/
     ingress-dev/
   out/                # generated, gitignored
-  dist/offline-cache/ # generated, gitignored
+  dist/offline-cache/ # generated deploy cache, gitignored
 ```
 
 Required outputs:
 
 | Output | Producer | Consumer | Notes |
 | --- | --- | --- | --- |
-| `out/substrate.env` | install/validate scripts | app deploy/dev scripts | non-secret config only。 |
-| `out/substrate.secrets.env` | install/validate scripts 或管理员 | app deploy scripts consume product-secret subset | `0600`；不在日志打印 raw value。 |
-| `out/kubeconfig` | self-hosted install | operator scripts | 只在 self-hosted 模式产生。 |
-| `out/artifacts/offline-artifacts.env` | `prepare-offline-cache.sh` | `download-online.sh --artifacts` | generated/uncommitted 本地 lock；不进 git。 |
-| `dist/offline-cache/manifest.yaml` | `prepare-offline-cache.sh` or `download-online.sh --artifacts` | `install-offline.sh`, `doctor.sh` | 标记 `cacheMode: p1-real` 才能作为真实离线安装证据。 |
-| `dist/offline-cache/images/oci/*.tar` | `download-online.sh --artifacts` | `install-offline.sh` | 只允许 substrate-owned images。 |
-| `out/doctor-report.json` | `doctor.sh` | operator/developer | 事实报告，不是治理 ledger。 |
-
-Generated artifact policy：`dist/offline-cache/`、`out/artifacts/`、`out/doctor-report.json` 和同类 lock/checksum/report 均不进 git；需要跨环境复用或留存时发布到制品库/对象存储，并通过 manifest/checksum/digest 校验。
+| `out/substrate.env` | install/validate scripts | app deploy/dev scripts | non-secret config：namespace、ingress、OIDC issuer/client id 等。 |
+| `out/substrate.secrets.env` | install/validate scripts 或管理员 | app deploy scripts | `0600`；可包含 `POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`OIDC_CLIENT_SECRET` 等 app 必需 secret。 |
+| `out/kubeconfig` | local k3s install | operator/developer scripts | 只在 self-hosted/local 模式产生。 |
+| `dist/offline-cache/` | offline cache scripts | optional disconnected install | generated deploy cache，不进 git。 |
+| `out/doctor-report.json` | `doctor.sh` | operator/developer | generated diagnostic output，不是台账。 |
 
 Secret boundary:
 
-- `substrate.env` 不得包含 secret key/value。
-- `substrate.secrets.env` 包含 credentials，必须 `chmod 0600`。
-- App 只可把产品级 secret 渲染到 app-owned K8s Secret：`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`。OIDC/Keycloak deferred；当前 app 不消费 `OIDC_CLIENT_SECRET`，也不把 generated builtin auth metadata 或空 OIDC placeholders 导出到 app manifests/runtime；非 builtin `AUTH_MODE` 或非空 OIDC values 必须 fail closed 且不泄漏 value。
-- S3 raw credentials 和 `JUICEFS_META_URL` 只属于 substrate/CSI，不得注入 Web/API/Botified/sandbox containers。
+- `substrate.env` 不得包含 secret value。
+- `substrate.secrets.env` 包含 credentials，必须 `chmod 0600`，日志只打印 key 名和 redacted value。
+- App 可消费产品级 secret：`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`OIDC_CLIENT_SECRET`，以及必要的 app runtime secret refs。
+- Keycloak admin secret、raw S3 credentials、`JUICEFS_META_URL` 等只属于 substrate/CSI，不得注入 Web/UI/TUI 或 Botified runtime，除非它们被转换为 app 明确需要的受限 secret。
+- Dev-only bootstrap/admin 初始化可以保留，但生产身份系统只有 OIDC/Keycloak 一种做法。
 
 ### 3.2 `agentsmith-lite`
 
-职责：产品服务端、静态 Web UI、Botified runtime 集成、sandbox controller、App packaging 和 deploy。
+职责：产品服务端、静态 Web UI、OIDC client/session、Botified runtime 集成、sandbox controller、App packaging 和 deploy。
 
 Owned by app repo:
 
 - Node API 和 server-side business logic；
+- OIDC client、session、CSRF/API 权限校验；
 - static Web UI API client；
 - OpenAI-compatible endpoint 管理与调用；
 - PostgreSQL app migrations；
@@ -196,11 +201,12 @@ Owned by app repo:
 - Botified client、runner image、runtime config；
 - K8s sandbox manifest/reconciler；
 - app image、app offline bundle、deploy scripts；
-- smoke/doctor/status/down 等轻量事实脚本。
+- doctor/status/quick checks/workflow checks 等轻量诊断脚本。
 
 Not owned:
 
 - K8s cluster bootstrap；
+- Keycloak 安装和 realm bootstrap；
 - raw S3/JuiceFS credential lifecycle；
 - LLMUP；
 - Codex runner；
@@ -247,10 +253,9 @@ agentsmith-lite/
     build-images.sh
     build-offline-bundle.sh
   e2e/
-    smoke/
-    operator-lifecycle/
-  out/                         # generated, gitignored
-  dist/app-offline-bundle/      # generated, gitignored
+    workflow/
+  out/                         # generated diagnostic/deploy output, gitignored
+  dist/app-offline-bundle/      # generated deploy artifact, gitignored
 ```
 
 Required outputs:
@@ -259,37 +264,26 @@ Required outputs:
 | --- | --- | --- | --- |
 | `packages/contracts/api-contract.snapshot.json` | API contract test/build | Web/TUI clients | Product API only；不得暴露 K8s/Botified raw surface。 |
 | `dist/` | `npm run build` | tests/dev/docker | compiled server packages and web assets。 |
-| `agentsmith-lite/app@sha256:*` | image build/push | deploy/offline bundle | 生产/离线验收必须 digest-pinned。 |
-| `agentsmith-lite/botified-runner@sha256:*` | image build/push | sandbox pods/offline bundle | 必须来自 pinned Botified source 或等价批准来源。 |
-| `out/manifests/` | `scripts/deploy/render.sh` via `packages/sandbox-controller/src/appManifestRenderer.ts` | apply/doctor | generated namespace-scoped app resources only；no tracked static K8s manifest directory is required。 |
-| `dist/app-offline-bundle/` | `scripts/build-offline-bundle.sh` | disconnected app deploy | app images only，不包含 substrate cache。 |
-| `out/app-doctor-report.json` | `scripts/deploy/doctor.sh` | operator/developer | 事实报告，不是 release gate ledger。 |
-| `out/smoke-report.json` | smoke scripts | operator/developer | 轻量或 full smoke 结果，需标明 profile。 |
+| `agentsmith-lite/app@sha256:*` | image build/push | deploy/offline bundle | 部署用 digest-pinned image。 |
+| `agentsmith-lite/botified-runner@sha256:*` | image build/push | sandbox pods/offline bundle | 来自 pinned Botified source 或等价批准来源。 |
+| `out/manifests/` | deploy render | apply/doctor | generated namespace-scoped app resources only。 |
+| `dist/app-offline-bundle/` | bundle script | optional disconnected app deploy | generated deploy artifact/cache，不是外部验收材料。 |
+| `out/app-doctor-report.json` | app doctor | operator/developer | generated diagnostic output，不是台账。 |
+| `out/workflow-check-report.json` | workflow check scripts | operator/developer | generated diagnostic output；只记录所跑 workflow。 |
 
 ## 4. 从参考项目复制与修改策略
 
-目标不是手抄重建，而是从 `.reference` 中复制可用结构，再删掉不属于 Lite 的系统。复制必须留下 ledger，避免旧概念悄悄回流。
-
-Stages:
-
-1. `cp -a` 原始可复用目录到新 repo 临时工作区。
-2. 先删除禁用系统，再做适配。不要在旧系统旁边新增 Lite 分支。
-3. 保留能直接支撑 Core 的 domain/application/ports/API/UI 片段。
-4. 把 JVS/AFSCP/ASBCP/LLMUP/Codex runner/release governance 全部删出 active package graph。
-5. 每个 copied path 在 `docs/migration-from-reference.md` 记录 `keep / modify / delete / deferred`。
-6. 每次阶段验收运行 forbidden-surface check，确认没有 active import、workspace package、manifest、route 或 UI entrypoint 回流。
-
-Reference decision table:
+目标不是手抄重建，而是从 `.reference` 中复制可用结构，再删掉不属于 Lite 的系统。复制记录写入 `docs/migration-from-reference.md`，用于说明 keep/modify/delete/deferred，不能演变成治理台账。
 
 | Reference path | Decision | Lite target | Notes |
 | --- | --- | --- | --- |
 | `.reference/agentsmith/packages/domain` | modify | `packages/domain` | 只保留 workspace/project/endpoint/file/task/sandbox 基础实体。 |
 | `.reference/agentsmith/packages/application` | modify | `packages/application` | 业务逻辑服务端完成；删除 governance/JVS/runner-release paths。 |
-| `.reference/agentsmith/packages/api-entry-node` | modify | `packages/api-entry-node` | 保留 Node API；删除 Keycloak hard dependency、AFSCP、ASBCP、LLMUP。 |
+| `.reference/agentsmith/packages/api-entry-node` | modify | `packages/api-entry-node` | 保留 Node API；接入 OIDC client/session；删除 AFSCP、ASBCP、LLMUP。 |
 | `.reference/agentsmith/src` | modify | `src/web` | 静态 API client；删除 file versioning、mount、WebDAV、terminal。 |
-| `.reference/agentsmith/infra/deploy` | mine | `packages/sandbox-controller/src/appManifestRenderer.ts`, `scripts/deploy`, generated `out/manifests` | 只借鉴 namespace-scoped app manifest ideas；当前 repo 使用 renderer 生成 manifests，不维护 tracked static manifest directory。 |
-| `.reference/agentsmith/e2e` | selective | `e2e/smoke` | 保留少量行为 smoke；删除 story/gate/release matrix。 |
-| `.reference/agentsmith-release-kit` | mine | substrates scripts | 只取小型 redaction/offline helper ideas；不复制 evidence system。 |
+| `.reference/agentsmith/infra/deploy` | mine | `packages/sandbox-controller`, `scripts/deploy`, generated `out/manifests` | 只借鉴 namespace-scoped manifest ideas；不维护 tracked static manifest directory。 |
+| `.reference/agentsmith/e2e` | selective | `e2e/workflow` | 保留少量人工 workflow diagnostics；删除 story/release matrix。 |
+| `.reference/agentsmith-release-kit` | mine | substrates/scripts helper ideas | 只取小型 redaction/offline helper ideas；不复制 release-kit 体系。 |
 | `.reference/agentsmith-sandbox-control-plane` | mine | `packages/sandbox-controller` | 保留 sandbox 状态机/RBAC 思路；不保留第三控制平面。 |
 | `.reference/botified` | vendor | `third_party/botified` | pinned source；只用于 runner runtime。 |
 | `.reference/llm-universal-proxy` | delete | none | LLMUP 完全移除。 |
@@ -297,7 +291,7 @@ Reference decision table:
 | `.reference/agentsmith-fs-control-plane` | delete | none | 不保留文件控制平面/WebDAV/mount。 |
 | `.reference/agentsmith-runner` | delete/mine | none | Codex runner 不进入 Lite；只可借鉴 packaging 边界。 |
 
-## 5. 禁止 surface 与边界检查
+## 5. 禁止 surface 与测试边界
 
 Forbidden product surfaces:
 
@@ -306,17 +300,24 @@ Forbidden product surfaces:
 - JVS、save point、version restore、file version graph；
 - WebDAV、本地挂载、远程挂载、file sync daemon；
 - AFSCP/ASBCP 作为独立产品控制平面；
-- release rehearsal、GA report、evidence ledger、quality-gate matrix；
-- UI 直接访问 Botified、K8s、PostgreSQL、S3/JuiceFS raw credentials；
+- release rehearsal、GA report、审计台账、quality matrix；
+- UI/TUI 直接访问 Botified、K8s、PostgreSQL、S3/JuiceFS raw credentials；
 - Product terminal 或 `pods/exec`；
-- 测试治理系统本身的测试。
+- 测试治理系统本身，或让测试 assert 本计划 prose。
 
 Required checks:
 
-- App repo：`npm run check:forbidden-surfaces`。
-- Substrates repo：`scripts/check-forbidden-copy.sh` 或等价脚本。
-- API contract test 必须证明 UI/TUI 只依赖 product API。
+- App repo：`npm run check:forbidden-surfaces` 或等价快速检查。
+- Substrates repo：`scripts/check-forbidden-copy.sh` 或等价快速检查。
+- API contract test 必须证明 Web UI/TUI 只依赖 product API。
 - K8s manifest doctor 必须拒绝 `pods/exec`、cluster-wide RBAC、substrate-only secrets 注入 app workloads。
+
+测试策略：
+
+- 默认发布前只跑少量 quick checks：typecheck、相关 unit/contract、forbidden surface、与改动直接相关的 workflow check。
+- 不设计大量发布矩阵，不把 e2e/visual 绑进默认主线，不测试测试套本身。
+- e2e/visual/manual review 只在 UI 或跨组件风险需要时由用户/开发者主动运行。
+- 删除现有治理 overhead 的优先级：先删旧发布链路、rehearsal 和审计记录体系；再删测试治理系统本身的测试；再删笼统或冗余报告字段和命令参数；最后只保留小范围、精准、能说明产品闭环事实的 quick/workflow checks。
 
 ## 6. Core 架构
 
@@ -324,57 +325,43 @@ Required checks:
 
 所有业务能力必须在服务端完成：
 
-- auth/session；
+- OIDC callback、session、CSRF/API 权限校验；
 - workspace/project selection；
 - endpoint create/list/use；
 - OpenAI-compatible request/response；
-- file path normalization、安全校验、upload/download；
+- file path normalization、安全校验、upload/download/delete；
 - task state、events、artifacts；
 - sandbox create/cancel/reap/status；
 - Botified HTTP client；
 - database persistence；
 - K8s manifest rendering/reconciliation。
 
-Web UI 和未来 TUI 只做：
+### 6.2 身份系统边界
 
-- 登录/session 使用；
-- 表单、列表、timeline、artifact/file 展示；
-- 调用 `/api/...`；
-- 不保存 secret；
-- 不直接访问 Botified/K8s/Postgres/S3/JuiceFS。
+- Keycloak 是唯一生产身份系统。
+- `agentsmith-lite-substrates` 负责 Keycloak 安装、realm/client/user bootstrap，并输出 `OIDC_ISSUER_URL`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 等 env/secrets。
+- `agentsmith-lite` 只消费 OIDC 配置，完成 login callback、session 和 API 权限校验。
+- Web UI/TUI 不实现认证业务逻辑，只跟随 app session/API 状态。
+- Dev-only bootstrap/admin 初始化只能用于本地开发或初始设置，不能形成第二套生产 auth。
 
-### 6.2 数据模型分层
+### 6.3 TUI 边界
 
-Core tables:
+未来产品 TUI 只能消费 product API/types + thin HTTP client：
 
-| Area | Tables / records | Notes |
-| --- | --- | --- |
-| auth | `users`, `sessions` 或等价内建 admin/session | 私有化 MVP。 |
-| workspace/project | `workspaces`, `projects` | 最小 create/list/select；全量 CRUD deferred。 |
-| endpoints | `model_endpoints` | OpenAI-compatible fields；secret value 只存 secret ref 或 server-side secret。 |
-| files | `project_files` 可选索引；实际内容在 JuiceFS | 服务端负责 path safety。 |
-| tasks | `tasks`, `task_events`, `task_artifacts` | task lifecycle 和 Botified timeline projection。 |
-| sandbox | `postgres_json_docs` collection `sandbox_run_state` + `runtime_leases` | pod identity、TTL、cleanup status；没有 dedicated `sandbox_runs` 或 `sandbox_leases` table/migration。 |
+- 可以 import `packages/contracts` 或生成的 API types。
+- 不得 import `application`、`ports`、`sandbox-controller`、`botified-runtime`、`openai-compatible-client`、`adapters-postgres` 或 K8s client。
+- 不得调用 `/api/operator/*`。
+- 如需运维 TUI，必须是单独 ops client，面向 operator diagnostics，不进入产品 TUI。
 
-Deferred records:
+### 6.4 Files 与 artifacts
 
-- `chat_sessions`、`chat_messages`、`chat_attachments`；
-- `audit_events`、`usage_events` 的产品化报表；
-- membership/group/template/RBAC 扩展；
-- endpoint edit history；
-- file recycle/versioning metadata and UI delete workflow state。
-
-### 6.3 Files 与 artifacts
-
-Core 文件规则：
-
-- 项目文件位于 JuiceFS PVC 的 project-scoped 目录。
+- Project files 位于 JuiceFS PVC 的 project-scoped 目录。
 - API 对所有 path 做 normalization，禁止 traversal、absolute path、symlink escape。
 - Project files Core：list、upload、download、server-side delete API。Delete rejects the `files/` root and does not imply recycle/version restore semantics。
 - Task artifacts Core：从 Botified timeline 或 runtime marker 投影；支持 list/download。
 - Project file delete UI、版本化恢复和回收站 deferred。
 
-### 6.4 Sandbox 与 Botified
+### 6.5 Sandbox 与 Botified
 
 Core runtime:
 
@@ -388,15 +375,7 @@ Core runtime:
 8. Cancel 调 `/v1/abort`，随后删除 app-owned sandbox resources。
 9. TTL/reap 清理 pod/service/configmap/secret，但不自动删除 durable project files。
 
-External Botified acceptance still open unless separately proven:
-
-- 构建 runner image 并运行真实 Botified acceptance；
-- 在真实部署/API restart 中验收 `/v1/state` fallback 能从 cursor 或 state 恢复 timeline；
-- full smoke 中使用 bash 写入已知 artifact，并通过 API 下载校验。
-
-### 6.5 Resource lifecycle
-
-Core resource policy:
+### 6.6 Resource lifecycle
 
 - 所有 app-owned K8s resources 带 `agentsmith-lite/managed-by=agentsmith-lite`。
 - Sandbox resources 带 task/run labels。
@@ -404,21 +383,23 @@ Core resource policy:
 - 禁止 cluster-wide RBAC 和 `pods/exec`。
 - `status.sh --resources` 可展示 active task/sandbox 状态。
 - `reap` 只清理 app-owned expired/cancelled resources。
-- `down.sh` 默认只删 app-owned namespaced resources，不删 PVC/PV/bucket/database。
+- `down.sh` 默认只删 app-owned namespaced resources，不删 PVC/PV/bucket/database/Keycloak。
 
-## 7. 命令契约
+## 7. 命令与诊断语义
 
-本文区分“当前脚本已支持”和“阶段待实现”。如果命令未在当前脚本中支持，不得写成已完成验收。
+本文描述目标语义，不声称所有命令已经实现。脚本命名应尽量按具体场景命名：quick checks、auth workflow check、task workflow check、deploy diagnostics、readiness diagnostics。
 
-### 7.1 Substrates repo 当前命令
+### 7.1 Substrates
+
+Core commands:
 
 ```bash
 scripts/prepare-offline-cache.sh --artifacts-dir out/artifacts --output dist/offline-cache [--force]
 scripts/download-online.sh --output dist/offline-cache [--force] [--contract-only]
 scripts/download-online.sh --artifacts config/offline-artifacts.env --output dist/offline-cache --force
 
-scripts/install-online.sh --cache dist/offline-cache --config config/substrates.self-hosted.example.yaml --output out/ [--dry-run] [--force]
-scripts/install-offline.sh --cache dist/offline-cache --config config/substrates.self-hosted.example.yaml --output out/ [--dry-run] [--force]
+scripts/install-online.sh --cache dist/offline-cache --config config/substrates.local-k8s.example.yaml --output out/ [--dry-run] [--force]
+scripts/install-offline.sh --cache dist/offline-cache --config config/substrates.local-k8s.example.yaml --output out/ [--dry-run] [--force]
 
 scripts/validate-env.sh --env out/substrate.env --secrets out/substrate.secrets.env
 scripts/validate-juicefs-contract.sh --env out/substrate.env --secrets out/substrate.secrets.env
@@ -429,13 +410,15 @@ scripts/test.sh
 
 Important semantics:
 
-- `download-online.sh` without `--artifacts` writes a P0 contract skeleton only；它不是真实离线安装包。
-- `prepare-offline-cache.sh` 是 `agentsmith-lite-substrates` 内的一键下载/导出依赖入口，并委托 `download-online.sh` 生成 p1-real cache；它不是第三个 repo，不是 live install，也不提交 file:// lock/cache。
-- 非 dry-run `install-online.sh` / `install-offline.sh` 必须使用 `cacheMode: p1-real`。
-- Existing-cloud 使用同一 env/secrets 格式；它验证管理员提供的服务，不创建云资源。
-- `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 substrate 静态合同诊断 thin wrapper；它不是第三个 repo，不是 external evidence，也不替代 live doctor、clean VM、offline VM、existing-cloud 验证。
+- `download-online.sh` without `--artifacts` 只写 contract skeleton；不是真实 offline cache。
+- `prepare-offline-cache.sh` 留在 substrates；它不是第三个 repo，不是 live install，也不提交 generated cache。
+- 非 dry-run `install-online.sh` / `install-offline.sh` 必须使用真实 cache/profile。
+- Keycloak readiness 属于 substrate doctor：issuer discovery、client config、redirect URI、client secret presence、token validation path 都要可诊断。
+- `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 thin wrapper；它不是第三个 repo，不替代 live local K8s workflow。
 
-### 7.2 App repo 当前命令
+### 7.2 App
+
+Core commands:
 
 ```bash
 npm install
@@ -445,52 +428,43 @@ npm run check:forbidden-surfaces
 
 scripts/dev/up.sh [--env substrate.env --secrets substrate.secrets.env] [--app-env app.env] [--app-secrets app.secrets.env]
 
-npm run e2e:smoke
-npm run e2e:operator-lifecycle
-npm run visual:screenshot
-
 scripts/build-images.sh --tag <tag> [--runtime docker] [--push [--images-lock images.lock]] [--dry-run]
-scripts/build-offline-bundle.sh \
-  --images-lock images.lock \
-  [--output dist/app-offline-bundle] [--runtime docker]
-scripts/build-offline-bundle.sh \
-  --app-image agentsmith-lite/app@sha256:<64hex> \
-  --runner-image agentsmith-lite/botified-runner@sha256:<64hex> \
-  [--output dist/app-offline-bundle] [--runtime docker]
+scripts/build-offline-bundle.sh --images-lock images.lock [--output dist/app-offline-bundle] [--runtime docker]
 
 scripts/deploy/render.sh --env substrate.env [--secrets substrate.secrets.env] [--app-env app.env] [--app-secrets app.secrets.env] --tag <tag> --out out/manifests [--images-lock images.lock]
 scripts/deploy/apply.sh [--env substrate.env] [--out out/manifests] [--images-lock images.lock] [--timeout 300s] [--dry-run]
-scripts/deploy/status.sh --env substrate.env
-scripts/deploy/status.sh --env substrate.env --resources --base-url <url> --cookie-file <cookie-file> [--csrf-token <token>]
-scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run|--apply --cookie-file <cookie-file> [--csrf-token <token>] [--run-id <run-id>]
+scripts/deploy/status.sh --env substrate.env [--resources]
 scripts/deploy/preflight.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
-scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env [--app-env app.smoke.env] [--report out/smoke-report.json]
-scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.smoke.env] --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply] [--k8s-evidence] [--report out/smoke-report.json]
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
-Known command status and gaps:
+Workflow check targets:
 
-- `--env`/`--secrets` 只表示 substrate contract；`--app-env`/`--app-secrets` 只表示 app-owned deploy/runtime/smoke overlay。`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD` 仍来自 substrate secrets；`AGENTSMITH_LITE_SANDBOX_MODE`、`AGENTSMITH_LITE_MODEL_BASE_URL_*`、`SMOKE_*` 等来自 app env overlay，`AGENTSMITH_LITE_MODEL_API_KEY_*` 来自 app secrets overlay。OIDC/Keycloak deferred；当前 app 不消费 `OIDC_CLIENT_SECRET`，可容忍 generated `AUTH_MODE=builtin_admin`、`OIDC_ISSUER_URL=`、`OIDC_CLIENT_ID=`、`OIDC_CLIENT_SECRET=`，但这些 key 都不会导出到 app runtime 或 `appManifestRenderer`；非 builtin `AUTH_MODE` 或非空 OIDC values 必须 fail closed 且不泄漏 value。raw `S3_*`/JuiceFS substrate secrets 不能进入 app overlay。
-- `scripts/deploy/preflight.sh` 是 app doctor static-only thin entry，复用 env/manifest/bundle checks；它不运行 smoke/e2e/visual/build/push/import/live K8s，也不替代 substrate doctor 和外部 K8s/JuiceFS evidence。
-- `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` 已作为本地 dev env 契约补齐：allowlist 限制可加载的 substrate contract 与 app overlay key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
-- `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、`file.published`、Botified file API 下载校验、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker；`SMOKE_*` 只放在 app smoke overlay，不放在 substrate env。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。`--k8s-evidence` 只用于这些手动 full smoke，追加 read-only K8s observation，并且只按返回的 runIds scope 查询；它不证明 JuiceFS backend/full external evidence。这些手动 smoke 及其 `--k8s-evidence` 都不进入默认 gate，也不替代 full external acceptance；sandbox pod、JuiceFS mount、产品 task API artifact path、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
-- `scripts/deploy/operator-sandbox.mjs reap` 支持默认/显式 `--dry-run` 与显式 `--apply`；apply 通过 operator API 发送 `{ "apply": true }`，并由 deploy script 测试覆盖。
-- `scripts/build-images.sh --push --images-lock images.lock` 已补齐 build/push 后的 digest-pinned lock 小闭环：push 成功后只从 runtime `RepoDigests` 捕获 app/runner digest refs；`--dry-run` 只打印 build/push/write-lock intent。真实 registry digest 仍必须在 push 后获得，不能用本地 image ID 代替。
-- app offline bundle 固定包含 `manifest.yaml`、`images.lock`、`checksums.txt`、`images/app.tar`、`images/botified-runner.tar`。`checksums.txt` 是精确 allowlist，只允许校验 `manifest.yaml`、`images.lock`、`images/app.tar`、`images/botified-runner.tar`，消费端拒绝重复、路径逃逸、绝对路径、URL-like 或非 allowlist 条目。`scripts/build-offline-bundle.sh --images-lock`、`scripts/deploy/render.sh --images-lock`、`scripts/deploy/apply.sh --images-lock` 复用 `parseAppImagesLock()` 语义：输入 lock 可包含注释/空白/前后空格，输出 bundle lock 规范化成 app/runner 两行 digest refs。`scripts/deploy/doctor.sh --bundle` 会校验 bundle 文件、checksum allowlist、bundle `images.lock`，并确保 bundle lock 与 rendered manifests 一致；若同时给 `--images-lock`，还要求显式 lock 与 bundle lock 一致。这只是 app image bundle，不是 substrates p1-real offline cache，不替代真实 disconnected deploy evidence。
+- auth workflow check：OIDC login/callback/session/API permission。
+- deploy workflow check：render/apply/status/doctor 与 digest-pinned images。
+- task workflow check：endpoint/project/task/artifact/cancel/reap。
+- UI workflow check：API/UI list/download artifact and files。
 
-### 7.3 Manual gates
+Known semantics:
 
-这些命令是手动诊断，不进入默认发布主线：
+- `--env`/`--secrets` 表示 substrate contract；`--app-env`/`--app-secrets` 表示 app-owned overlay。
+- App runtime 可消费 `POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`OIDC_ISSUER_URL`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 等产品级配置。
+- raw `S3_*`、JuiceFS substrate secrets、Keycloak admin secret 不能进入 app overlay。
+- `scripts/deploy/preflight.sh` 是 app doctor static-only thin entry；不运行 workflow、visual、build/push/import/live K8s。
+- app offline bundle 是 app image bundle，不是 substrate offline cache，不替代 local K8s runtime diagnostics。
 
-- `npm run e2e:smoke`；
-- `npm run e2e:operator-lifecycle`；
-- `npm run visual:screenshot`；
-- full deploy smoke with real endpoint and task artifact；
-- Playwright visual/manual review。
+### 7.3 Manual Diagnostics
 
-默认主线只要求与阶段相关的 build/typecheck/unit/contract/forbidden checks。任何 visual/e2e 失败都应作为产品质量信号处理，但不再建设单独治理层。
+以下内容只能人工主动运行，不进入默认发布主线：
+
+- e2e workflow；
+- operator lifecycle workflow；
+- visual screenshot/manual review；
+- deploy workflow with real endpoint and task artifact；
+- resource cleanup diagnostics with scoped reap。
+
+默认主线只保留与阶段相关的 build/typecheck/unit/contract/forbidden checks，以及必要的小范围 workflow check。
 
 ## 8. Phase Plan
 
@@ -504,75 +478,66 @@ Deliverables:
 - `.reference/` 只作为参考，不进入 active package graph；
 - `third_party/botified/PINNED_SOURCE.json`；
 - forbidden surface check；
-- `docs/migration-from-reference.md` ledger；
+- `docs/migration-from-reference.md` 迁移记录；
 - README/DEVELOPMENT/OPERATOR 基础说明。
 
-Local evidence:
+Dev checks:
 
-- `git status --short` clean；
 - app `npm run check:forbidden-surfaces`；
 - substrates forbidden-copy check；
 - app `npm install && npm run typecheck`；
 - Botified pin 文件存在并通过 checksum/source policy 检查。
 
-External evidence:
+Deploy/runtime diagnostics:
 
-- 无。P0 不声称真实 runtime 或部署可用。
+- 无。P0 不声明 runtime 或部署 readiness。
 
-Not P0:
+### P1：Local K8s Substrate And Keycloak
 
-- chat persistence；
-- full CRUD；
-- app offline deploy；
-- clean VM/offline VM evidence。
-
-### P1：Substrate Installer
-
-Goal：自建和 existing-cloud 都输出同格式 env/secrets，并能证明 JuiceFS CSI/Postgres/S3/K8s 可用。
+Goal：本地单机 K8s 安装 k3s/Postgres/S3-compatible storage/JuiceFS CSI/Keycloak，并输出 app 可消费的 env/secrets。
 
 Deliverables:
 
-- `download-online.sh` 支持 p1-real artifact lock；
-- `install-online.sh` 和 `install-offline.sh` 非 dry-run 支持 p1-real；
-- `doctor.sh` 检查 env split、Postgres、S3 probe、JuiceFS CSI、PVC Bound、RWX smoke；Postgres live 检查不依赖宿主机 `psql`，而是在集群内启动临时 Job，使用 digest-pinned postgres image 执行 read-only `select 1`；
+- `install-online.sh` 和 `install-offline.sh` 支持 local-k8s profile；
+- Keycloak realm/client/user bootstrap；
+- OIDC issuer/client/client secret 输出；
+- `doctor.sh` 检查 env split、Postgres、S3 probe、JuiceFS CSI、PVC Bound、RWX write/read、Keycloak issuer/client/token path；
 - allowlist 拒绝 app-owned images 和未知 OCI archives；
 - `out/substrate.env`、`out/substrate.secrets.env`、`out/doctor-report.json`；
-- docs：offline install、existing-cloud、env schema。
+- docs：local-k8s install、offline install、existing-cloud optional profile、env schema。
 
-Local evidence:
+Dev checks:
 
 - `scripts/test.sh`；
 - `download-online.sh --contract-only` 只证明 skeleton contract；
-- `download-online.sh --artifacts file://fixtures` 可证明 lock/checksum/allowlist 逻辑；
 - `install-*.sh --dry-run` 只证明 env/cache validation；
 - fake `kubectl/probe` tests 只证明 doctor control flow、probe invocation 和 redaction。
 
-External Acceptance Evidence:
+Deploy/runtime diagnostics:
 
-- 真实 `config/offline-artifacts.env` 生成 p1-real cache；
-- clean VM online self-hosted install，doctor `overallStatus=passed`；
-- disconnected VM offline install，无 public download 证据；
-- existing-cloud validation，doctor `overallStatus=passed`；
-- redacted manifest/checksums/images.lock/doctor reports。
+- 本地单机 K8s 非 dry-run install；
+- doctor 输出显示 k3s/Postgres/S3/JuiceFS/Keycloak readiness；
+- env/secrets 可被 app deploy 消费，脱敏后可分享。
 
 Deferred:
 
+- 真实云运行；
 - 多 Linux 发行版矩阵；
 - 云资源自动创建；
 - PostgreSQL HA/backup productization；
-- pgvector，除非后续 feature 明确需要 embeddings；
 - TLS policy 深度审计，除非部署目标要求。
 
-### P2：Product API And UI Client
+### P2：Product API, OIDC Session And UI Client
 
 Goal：完成服务端产品最小闭环，Web UI 只作为 API client。
 
-Core deliverables:
+Deliverables:
 
-- built-in admin/session；
+- OIDC login/callback/session/logout；
+- API 权限校验和 CSRF/session boundary；
 - workspace/project create/list/select；
 - endpoint create/list/use，字段限定 OpenAI-compatible；
-- server-side chat smoke，不要求持久化；
+- server-side endpoint call check，不要求 chat persistence；
 - project file list/upload/download/delete through server-side API；
 - task create/cancel/status/events/artifacts API；
 - API contract snapshot；
@@ -580,18 +545,19 @@ Core deliverables:
 - UI boundary test 禁止 provider/K8s/DB/Botified direct access；
 - server-side path safety 和 secret redaction。
 
-Local evidence:
+Dev checks:
 
 - `npm run typecheck`；
 - `npm test`；
 - API contract test；
 - UI boundary test；
-- `npm run e2e:smoke` 只证明本地 API/UI smoke，不证明真实 K8s runtime。
+- auth/session unit and contract tests。
 
-External Acceptance Evidence:
+Deploy/runtime diagnostics:
 
-- 已部署 app 通过 `scripts/deploy/smoke.sh --base-url ... --secrets ... [--app-env app.smoke.env]` 完成登录/session、workspace/project、endpoint create/list、chat smoke；
-- smoke report 脱敏。
+- 在本地 K8s app 上完成 auth workflow check；
+- 通过 UI/API 创建 project、endpoint，并完成一次 server-side endpoint call check；
+- diagnostic output 脱敏即可分享，不建设 index。
 
 Deferred:
 
@@ -601,40 +567,39 @@ Deferred:
 - chat_sessions/chat_messages/chat_attachments；
 - audit/usage dashboard；
 - project file delete UI、版本化恢复、回收站；
-- OIDC/Keycloak auth 和 OIDC client secret consumption。
+- 组织级 RBAC 深化。
 
 ### P3：Botified Sandbox Agent Tasks
 
 Goal：真实 sandbox task 可以通过 Botified bash 运行、写文件、发布 artifact，并可被取消/回收。
 
-Core deliverables:
+Deliverables:
 
 - Botified runner image Dockerfile；
 - Botified config generator；
-- Botified HTTP client：messages、timeline、state、abort；state fallback 已由 core tests 覆盖；
+- Botified HTTP client：messages、timeline、state、abort；
 - sandbox pod manifest renderer；
 - task event/artifact projection；
 - cancel/TTL/reap；
-- operator status/reap API。
+- operator status/reap API for deploy scripts only。
 
-Local evidence:
+Dev checks:
 
 - unit tests for manifest/RBAC/resource labels；
 - fake Botified client tests for task lifecycle；
-- `npm run acceptance:botified-runner` 证明本地 vendored Botified binary process、mock-provider、bash marker、timeline/state/abort；
-- `npm run acceptance:botified-runner-image` 已作为 runner image/container 手动验收入口实现，fake-runtime contract tests 覆盖 build/run/cleanup/secret 边界；真实 runner-container-only evidence 仍需在可拉取 base image 的 Docker 环境中运行并归档 redacted 输出；
+- local Botified process acceptance：vendored binary、mock-provider、bash marker、timeline/state/abort；
+- runner image/container command 可作为手动验证入口；
 - API contract tests for events/artifacts/cancel/reap；
-- Dockerfile/static checks 只证明形状，不证明 runtime 可跑。
+- Dockerfile/static checks 只证明形状，不证明 K8s runtime。
 
-External Acceptance Evidence:
+Deploy/runtime diagnostics:
 
-- full runner image build 成功并记录 digest；
-- runner image/container 启动 Botified，health/messages/timeline/abort 可用；
-- live K8s task 使用 runner image，在 sandbox pod 通过 PVC/JuiceFS 写已知文件；
-- API events 出现 expected timeline；
-- artifact list/download 内容校验通过；
+- 本地 K8s task workflow check：通过产品 API 创建 task；
+- sandbox pod 使用 digest-pinned runner image；
+- pod 挂载 JuiceFS PVC 并通过 Botified bash 写已知 artifact；
+- API events/artifacts/list/download 内容校验通过；
 - cancel 调用 `/v1/abort` 并删除 app-owned sandbox resources；
-- 真实部署中 API restart 后能从 cursor 或 `/v1/state` 恢复 timeline，并归档 redacted evidence。
+- API restart 后能从 cursor 或 `/v1/state` 恢复 timeline。
 
 Deferred:
 
@@ -644,21 +609,21 @@ Deferred:
 - direct pod exec；
 - long-running session attach UX。
 
-### P4：K8s App Packaging And Deploy
+### P4：K8s App Packaging And Local Deploy
 
-Goal：App 可以在开发环境调试，也可以打包成 K8s 容器服务并部署到 self-hosted 或 existing-cloud substrate。
+Goal：App 可以打包成 K8s 容器服务，并部署到本地单机 K8s substrate。
 
-Core deliverables:
+Deliverables:
 
 - `scripts/build-images.sh`；
 - digest capture/publish runbook；
 - `scripts/build-offline-bundle.sh` using digest-pinned images；
 - K8s manifests for API/web/schema bootstrap/sandbox RBAC/network policy；
-- deploy scripts：render/apply/status/doctor/smoke/down/import-images；
+- deploy scripts：render/apply/status/doctor/down/import-images；
 - app doctor 检查 secret boundary、RBAC、schema job、image lock/bundle；
-- smoke 分层：default lightweight，manual full acceptance。
+- quick checks 和 workflow checks 按场景命名。
 
-Local evidence:
+Dev checks:
 
 - `scripts/build-images.sh --dry-run`；
 - render/doctor static checks；
@@ -666,15 +631,17 @@ Local evidence:
 - offline bundle validation with local digest-pinned images；
 - deploy script unit/contract tests。
 
-External Acceptance Evidence:
+Deploy/runtime diagnostics:
 
-- self-hosted substrate 上 render/apply/status/doctor/smoke；
-- existing-cloud substrate 上 render/apply/status/doctor/smoke；
-- disconnected app offline deploy：import images、render/apply、doctor、smoke；
-- full external acceptance smoke：login、endpoint、chat smoke、file upload/download、runner image/K8s sandbox/JuiceFS Botified task artifact、cancel/reap。
+- local-k8s substrate 上 render/apply/status/doctor；
+- auth workflow check；
+- deploy workflow check；
+- task workflow check；
+- disconnected app deploy 只作为 optional profile 诊断：import images、render/apply、doctor、workflow check。
 
 Deferred:
 
+- real cloud validation；
 - multi-region deploy；
 - Helm chart productization；
 - advanced backup/restore UX；
@@ -687,26 +654,27 @@ Goal：关闭迁移尾巴，保证 Lite 的边界清晰、操作方式简单、�
 Deliverables:
 
 - `docs/architecture.md`；
-- `docs/migration-from-reference.md` 完整 ledger；
+- `docs/migration-from-reference.md` 迁移记录；
 - `docs/operator-runbook.md` 或 `OPERATOR.md`；
 - env/secrets examples 脱敏；
 - forbidden surface checks 常态化；
 - least-privilege RBAC review；
 - resource cleanup runbook；
-- evidence index template。
+- operator runbook 可链接最近一次脱敏 diagnostic output；
+- known Deferred backlog。
 
-Local evidence:
+Dev checks:
 
 - app `npm run typecheck && npm test && npm run check:forbidden-surfaces`；
 - substrates `scripts/test.sh`；
 - docs sanity：关键章节、命令、产出物存在；
 - generated output 不被误提交。
 
-External Acceptance Evidence:
+Deploy/runtime diagnostics:
 
-- P1/P3/P4 evidence index 链接到 redacted reports；
-- handoff checklist 全部勾选；
-- 已知 deferred 项明确写入 backlog，不混入 Core。
+- 本地单机 K8s 完整闭环已跑通；
+- runbook 包含最近一次脱敏诊断输出的链接或路径；
+- 已知 Deferred 项明确写入 backlog，不混入 Core。
 
 P5 不新增产品功能。任何新功能必须回到 Core/Deferred 分层重新判断。
 
@@ -715,8 +683,8 @@ P5 不新增产品功能。任何新功能必须回到 Core/Deferred 分层重�
 | Artifact | Repo | Status target | Purpose |
 | --- | --- | --- | --- |
 | `docs/agentsmith-lite-product-development-plan.md` | app | Core | 本计划。 |
-| `docs/architecture.md` | app | Core | 服务端、sandbox、Botified、files、deploy 架构。 |
-| `docs/migration-from-reference.md` | app | Core | cp/modify/delete ledger。 |
+| `docs/architecture.md` | app | Core | 服务端、OIDC、sandbox、Botified、files、deploy 架构。 |
+| `docs/migration-from-reference.md` | app | Core | copied paths 的迁移记录。 |
 | `docs/api-contract.md` + snapshot | app | Core | UI/TUI 只依赖产品 API。 |
 | `docs/storage-and-files.md` | app | Core | JuiceFS path layout、path safety、artifact boundary。 |
 | `docs/sandbox-controller.md` | app | Core | K8s labels/RBAC/reconciler/cleanup。 |
@@ -724,50 +692,61 @@ P5 不新增产品功能。任何新功能必须回到 Core/Deferred 分层重�
 | `infra/db/migrations/` | app | Core | MVP schema。 |
 | `infra/docker/Dockerfile.app` | app | Core | App image。 |
 | `infra/docker/Dockerfile.botified-runner` | app | Core | Botified runner image。 |
-| `scripts/deploy/*` | app | Core | render/apply/status/doctor/smoke/down/import。 |
-| `dist/app-offline-bundle/` | app | External evidence | 生成产物，不进 git。 |
+| `scripts/deploy/*` | app | Core | render/apply/status/doctor/down/import/workflow diagnostics。 |
+| `dist/app-offline-bundle/` | app | Generated deploy artifact/cache | 生成产物，不进 git。 |
+| `out/app-doctor-report.json` | app | Generated diagnostic output | 运行诊断输出，不是台账。 |
+| `out/workflow-check-report.json` | app | Generated diagnostic output | 按 workflow 标明范围，不是发布治理材料。 |
 | `schemas/*.json` | substrates | Core | env/config validation。 |
-| `scripts/install-online.sh` | substrates | Core | online/self-hosted/existing-cloud validation entrypoint。 |
-| `scripts/install-offline.sh` | substrates | Core | disconnected install entrypoint。 |
-| `scripts/download-online.sh` | substrates | Core | p1-real cache producer。 |
-| `scripts/doctor.sh` | substrates | Core | substrate factual readiness report。 |
-| `dist/offline-cache/` | substrates | External evidence | 生成产物，不进 git。 |
+| `scripts/install-online.sh` | substrates | Core | local-k8s install；existing-cloud optional profile validation。 |
+| `scripts/install-offline.sh` | substrates | Optional profile | disconnected install entrypoint。 |
+| `scripts/download-online.sh` | substrates | Optional profile | offline cache producer。 |
+| `scripts/doctor.sh` | substrates | Core diagnostics | substrate readiness diagnostics。 |
+| `dist/offline-cache/` | substrates | Generated deploy artifact/cache | 生成产物，不进 git。 |
+| `out/doctor-report.json` | substrates | Generated diagnostic output | 运行诊断输出，不是台账。 |
 
-## 10. Acceptance Matrix
+## 10. 验证边界
 
-| Capability | Local proof can prove | Local proof cannot prove | Required external evidence |
-| --- | --- | --- | --- |
-| Removed systems absent | static grep/import/package checks | historical files under `.reference` are irrelevant | none unless forbidden surface appears in active repo。 |
-| Env/secrets split | schema tests, redaction tests | operator-provided secrets correctness | redacted real env validation report。 |
-| Offline cache | checksum/allowlist/manifest logic | that real internet artifacts are complete | p1-real cache manifest/checksums/images.lock。 |
-| Substrate install | script control flow | clean host compatibility, no egress | clean VM + disconnected VM reports。 |
-| Product API | route/schema/service tests | real deployed ingress/session behavior | deploy smoke report。 |
-| UI boundary | static tests | visual usability | manual visual screenshot if UI changed。 |
-| Botified runtime | fake client/unit tests；`npm run acceptance:botified-runner` 覆盖本地 vendored binary process、`file.published` 与 Botified file API 下载；`npm run acceptance:botified-runner-image` 入口和 fake-runtime contract tests 已实现 | successful runner-container-only command output、K8s pod/PVC/JuiceFS artifact、product task artifact、cancel/reap | local process acceptance log + successful container acceptance log + full external runner/live task reports。 |
-| Live sandbox | manifest tests、本地 runner process/container acceptance | pod scheduling, PVC mount, JuiceFS-backed bash artifact | full runner image/K8s/JuiceFS live task artifact smoke report。 |
-| Cleanup/reap | unit/fake lifecycle | real K8s resource deletion | live cancel/TTL/reap report。 |
-| App offline bundle | bundle script validation | real disconnected import/deploy | disconnected app deploy report。 |
+| Capability | Quick/dev checks can prove | Local K8s runtime must prove |
+| --- | --- | --- |
+| Removed systems absent | static grep/import/package checks | none unless forbidden surface appears in active repo。 |
+| Env/secrets split | schema tests, redaction tests | app consumes OIDC/Postgres/session config without leaking substrate-only secrets。 |
+| Keycloak/OIDC | config parser, callback/session unit tests | Keycloak issuer/client works；login/session/API permission path works。 |
+| Substrate install | script control flow, dry-run validation | local k3s/Postgres/S3/JuiceFS/Keycloak readiness。 |
+| Product API | route/schema/service tests | deployed ingress/session behavior and product API workflow。 |
+| UI boundary | static tests | manual UI review only when UI changed。 |
+| Botified runtime | fake client/unit tests, local process check | K8s pod/PVC/JuiceFS artifact path through product task API。 |
+| Cleanup/reap | unit/fake lifecycle | real app-owned K8s resource deletion after cancel/TTL/reap。 |
+| App offline bundle | bundle script validation | optional disconnected profile only；not required for current local-k8s delivery。 |
 
-## 11. Ready For Development Checklist
+默认发布前验证只选与本次改动有关的行，不跑全表，不扩大成矩阵。
 
-This checklist is for handoff, not a release gate bureaucracy.
+## 11. Development Handoff Checklist
 
-- [ ] Core/Deferred/External Evidence scope reviewed by product and engineering.
-- [ ] `docs/migration-from-reference.md` covers every copied active path.
-- [ ] Forbidden surfaces absent from active package graph, manifests, routes, UI.
-- [ ] App command contract matches current scripts or is marked TODO.
-- [ ] Substrate command contract matches current scripts or is marked TODO.
-- [ ] P0/P1/P2/P3/P4/P5 acceptance criteria distinguish local proof from external evidence.
-- [ ] Full external Botified/K8s/JuiceFS bash artifact smoke is implemented or explicitly tracked as open P3 work.
-- [ ] Clean VM/offline VM/existing-cloud evidence is collected before claiming deployment readiness.
-- [ ] Visual/e2e/manual gates remain diagnostics, not default release mainline.
-- [ ] Root copy of this plan, if kept, is synchronized intentionally after review.
+此清单只用于开发交接，不是发布治理流程。
+
+- [ ] Core/Deferred scope reviewed by product and engineering.
+- [ ] 当前交付目标明确为 local-single-node-k8s full loop。
+- [ ] `existing-cloud` 写为 optional deployment profile。
+- [ ] Keycloak/OIDC 是 Core，且没有第二套生产身份系统。
+- [ ] `docs/migration-from-reference.md` covers copied active paths。
+- [ ] Forbidden surfaces absent from active package graph, manifests, routes, UI。
+- [ ] App command contract matches current scripts or is marked TODO。
+- [ ] Substrate command contract matches current scripts or is marked TODO。
+- [ ] Web UI 和未来产品 TUI 只依赖 product API/types。
+- [ ] Manual diagnostics 不进入默认发布主线。
+- [ ] Generated deploy artifacts/cache 和 diagnostic output 不被误提交。
 
 ## 12. Immediate Next Work
 
-1. Completed: `docs/migration-from-reference.md` migration ledger, `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` allowlist/tests, and `npm run acceptance:botified-runner` local process acceptance.
-2. Completed: `npm run acceptance:botified-runner-image` has passed in a Docker environment that could pull base images; this is real runner-container-only acceptance evidence and still does not cover K8s/PVC/JuiceFS/product task API/cancel-reap.
-3. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
-4. Run real `scripts/deploy/smoke.sh --task-smoke` with any `SMOKE_*` values in `--app-env`, and, when collecting manual reclaim evidence, `--task-reclaim-smoke [--task-reclaim-reap-apply]` in self-hosted/existing-cloud/offline deploys and archive redacted reports; these smokes remain supporting evidence and do not replace real K8s/JuiceFS observations.
-5. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
-6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、project file delete UI/version/restore/recycle bin in deferred backlog until Core runtime/deploy evidence exists; keep the existing server-side file delete API/core smoke as Core.
+1. 先清存量治理 overhead：删除不服务本地 K8s 产品闭环或最小诊断的旧发布链路、rehearsal、审计记录、报告、测试参数和文档；保留项必须降级为手动、可选、生成输出。
+2. Build/push digest-pinned app image and Botified runner image，生成 images lock。
+3. 在本地单机 K8s 环境安装 substrates：k3s/Postgres/S3-compatible storage/JuiceFS CSI/Keycloak。
+4. 生成并校验 `substrate.env`、`substrate.secrets.env`，确保 OIDC issuer/client/client secret 可供 app 使用。
+5. Render/apply app manifests，确认 app 使用 digest-pinned images 和正确 env/secrets。
+6. 跑 auth workflow check：Keycloak login/callback/session/API permission。
+7. 通过产品 API/UI 创建 project 和 OpenAI-compatible endpoint。
+8. 通过产品 API 创建 task，让 Botified sandbox pod 挂载 JuiceFS 并写 artifact。
+9. 通过 API/UI list/download task artifacts 和 project files。
+10. 验证 cancel、TTL、reap 清理 app-owned resources，保留 durable project files。
+11. 再按需运行 optional profiles：existing-cloud validation、disconnected/offline deploy diagnostics。
+12. chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、project file delete UI/version/restore/recycle bin 继续留在 Deferred。
