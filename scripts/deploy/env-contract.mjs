@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const baseEnvKeys = new Set([
+const substrateEnvKeys = new Set([
   "KUBE_NAMESPACE",
   "KUBECONFIG_PATH",
   "KUBE_CONTEXT",
@@ -11,12 +11,15 @@ const baseEnvKeys = new Set([
   "APP_INGRESS_CLASS",
   "APP_TLS_SECRET_NAME",
   "JUICEFS_PVC_NAME",
+  "AUTH_MODE"
+]);
+
+const appEnvKeys = new Set([
   "BOTIFIED_RUNNER_IMAGE",
   "AGENTSMITH_LITE_DATA_DIR",
   "AGENTSMITH_LITE_SANDBOX_MODE",
   "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT",
-  "AGENTSMITH_LITE_RUNTIME_TICK_MS",
-  "AUTH_MODE"
+  "AGENTSMITH_LITE_RUNTIME_TICK_MS"
 ]);
 
 const smokeEnvKeys = new Set([
@@ -29,7 +32,7 @@ const smokeEnvKeys = new Set([
   "SMOKE_TASK_TIMEOUT_SECS"
 ]);
 
-const secretKeys = new Set([
+const productSecretKeys = new Set([
   "POSTGRES_APP_URL",
   "APP_SESSION_SECRET",
   "BUILTIN_ADMIN_INITIAL_PASSWORD",
@@ -51,12 +54,20 @@ export async function readContractFiles(options = {}) {
   const secretEntries = options.secretsFile
     ? await readContractFile(options.secretsFile, "secrets", { profile: options.profile })
     : [];
+  const appEnvEntries = options.appEnvFile
+    ? await readContractFile(options.appEnvFile, "app-env", { profile: options.profile })
+    : [];
+  const appSecretEntries = options.appSecretsFile
+    ? await readContractFile(options.appSecretsFile, "app-secrets", { profile: options.profile })
+    : [];
+  const env = [...envEntries, ...appEnvEntries];
+  const secrets = [...secretEntries, ...appSecretEntries];
 
   return {
-    entries: [...envEntries, ...secretEntries],
-    env: Object.fromEntries(envEntries),
-    secrets: Object.fromEntries(secretEntries),
-    values: Object.fromEntries([...envEntries, ...secretEntries])
+    entries: [...envEntries, ...secretEntries, ...appEnvEntries, ...appSecretEntries],
+    env: Object.fromEntries(env),
+    secrets: Object.fromEntries(secrets),
+    values: Object.fromEntries([...env, ...secrets])
   };
 }
 
@@ -67,8 +78,8 @@ export async function readContractFile(file, kind, options = {}) {
 
 export function parseContractText(text, options = {}) {
   const kind = options.kind;
-  if (kind !== "env" && kind !== "secrets") {
-    throw new EnvContractError("env contract parser requires kind env or secrets");
+  if (kind !== "env" && kind !== "secrets" && kind !== "app-env" && kind !== "app-secrets") {
+    throw new EnvContractError("env contract parser requires kind env, secrets, app-env, or app-secrets");
   }
 
   const profile = options.profile ?? "default";
@@ -142,44 +153,80 @@ function parseValue(rawValue, key, context) {
 
 function classifyKey(key, kind, profile) {
   if (kind === "env") {
-    if (isAllowedEnvKey(key, profile)) {
+    if (isSubstrateEnvKey(key)) {
       return "allow";
     }
     if (isSubstrateOnlyKey(key)) {
       return "ignore";
     }
-    if (isSecretKey(key)) {
+    if (isProductSecretKey(key) || isAppSecretKey(key)) {
+      return "secret-in-env";
+    }
+    if (isAnyAppEnvKey(key)) {
+      return "app-only-in-substrate";
+    }
+    return "unknown-env";
+  }
+
+  if (kind === "secrets") {
+    if (isProductSecretKey(key)) {
+      return "allow";
+    }
+    if (isSubstrateOnlyKey(key)) {
+      return "ignore";
+    }
+    if (isSubstrateEnvKey(key) || isAnyAppEnvKey(key)) {
+      return "config-in-secrets";
+    }
+    if (isAppSecretKey(key)) {
+      return "app-only-in-substrate";
+    }
+    return "unknown-secrets";
+  }
+
+  if (kind === "app-env") {
+    if (isAppEnvKey(key, profile)) {
+      return "allow";
+    }
+    if (smokeEnvKeys.has(key)) {
+      return "smoke-profile-required";
+    }
+    if (isProductSecretKey(key) || isAppSecretKey(key)) {
       return "secret-in-env";
     }
     return "unknown-env";
   }
 
-  if (isSecretKey(key)) {
+  if (isAppSecretKey(key)) {
     return "allow";
   }
-  if (isSubstrateOnlyKey(key)) {
-    return "ignore";
+  if (isProductSecretKey(key)) {
+    return "product-secret-in-app-secrets";
   }
-  if (isAnyEnvKey(key)) {
+  if (isSubstrateEnvKey(key) || isAnyAppEnvKey(key)) {
     return "config-in-secrets";
   }
   return "unknown-secrets";
 }
 
-function isAllowedEnvKey(key, profile) {
-  return isBaseEnvKey(key) || (profile === "smoke" && smokeEnvKeys.has(key));
+function isSubstrateEnvKey(key) {
+  return substrateEnvKeys.has(key);
 }
 
-function isAnyEnvKey(key) {
-  return isBaseEnvKey(key) || smokeEnvKeys.has(key);
+function isAppEnvKey(key, profile) {
+  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || (profile === "smoke" && smokeEnvKeys.has(key));
 }
 
-function isBaseEnvKey(key) {
-  return baseEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_");
+function isAnyAppEnvKey(key) {
+  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || smokeEnvKeys.has(key);
 }
 
-function isSecretKey(key) {
-  return secretKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
+function isProductSecretKey(key) {
+  return productSecretKeys.has(key);
+}
+
+function isAppSecretKey(key) {
+  return key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
 }
 
 function isSubstrateOnlyKey(key) {
@@ -197,6 +244,12 @@ function formatKeyError(disposition, key, file, lineNumber) {
       return `unknown env key ${key} at ${location}`;
     case "unknown-secrets":
       return `unknown secrets key ${key} at ${location}`;
+    case "app-only-in-substrate":
+      return `app overlay key ${key} is not allowed in substrate contract at ${location}`;
+    case "smoke-profile-required":
+      return `smoke overlay key ${key} requires --profile smoke at ${location}`;
+    case "product-secret-in-app-secrets":
+      return `product secret key ${key} must come from substrate secrets at ${location}`;
     default:
       return `invalid env contract key ${key} at ${location}`;
   }
@@ -209,18 +262,18 @@ function describeLocation(context) {
 function parseCliArgs(argv) {
   const command = argv[0];
   if (command !== "export") {
-    throw new EnvContractError("usage: env-contract.mjs export [--env file] [--secrets file] [--profile smoke]");
+    throw new EnvContractError("usage: env-contract.mjs export [--env file] [--secrets file] [--app-env file] [--app-secrets file] [--profile smoke]");
   }
 
   const parsed = { profile: "default" };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--env" || arg === "--secrets" || arg === "--profile") {
+    if (arg === "--env" || arg === "--secrets" || arg === "--app-env" || arg === "--app-secrets" || arg === "--profile") {
       const value = argv[index + 1];
       if (!value) {
         throw new EnvContractError(`${arg} requires a value`);
       }
-      parsed[arg.slice(2)] = value;
+      parsed[arg.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
       index += 1;
     } else {
       throw new EnvContractError(`unknown env-contract argument: ${arg}`);
@@ -237,6 +290,8 @@ async function runCli(argv) {
   const { entries } = await readContractFiles({
     envFile: args.env,
     secretsFile: args.secrets,
+    appEnvFile: args.appEnv,
+    appSecretsFile: args.appSecrets,
     profile: args.profile
   });
   for (const [key, value] of entries) {

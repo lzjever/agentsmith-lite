@@ -151,14 +151,40 @@ describe("deploy app images.lock", () => {
     }
   });
 
-  it("render.sh accepts generated substrate env/secrets files and keeps substrate-only values out of manifests", () => {
+  it("render.sh accepts generated substrate env/secrets files plus app overlay and keeps substrate-only values out of manifests", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-generated-substrate-render-"));
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const appEnvFile = path.join(tempDir, "app.env");
+    const appSecretsFile = path.join(tempDir, "app.secrets.env");
     const outDir = path.join(tempDir, "manifests");
     writeGeneratedSubstrateFiles(envFile, secretsFile);
+    writeFileSync(
+      appEnvFile,
+      [
+        "AGENTSMITH_LITE_SANDBOX_MODE=live",
+        "BOTIFIED_RUNNER_IMAGE=registry.example.test/agentsmith/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=https://models.example.test/v1",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(appSecretsFile, "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=sk-overlay-model-key\n");
 
-    const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
+    const result = spawnSync("bash", [
+      "scripts/deploy/render.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--app-env",
+      appEnvFile,
+      "--app-secrets",
+      appSecretsFile,
+      "--out",
+      outDir,
+      "--tag",
+      "dev"
+    ], {
       cwd: process.cwd(),
       encoding: "utf8"
     });
@@ -171,6 +197,10 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, /kind: Ingress/);
     assert.match(manifest, /ingressClassName: nginx/);
     assert.match(manifest, /secretName: agentsmith-lite-tls/);
+    assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: live/);
+    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: registry\.example\.test\/agentsmith\/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333/);
+    assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: https:\/\/models\.example\.test\/v1/);
+    assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: sk-overlay-model-key/);
     assert.match(manifest, /POSTGRES_APP_URL: postgresql:\/\/app:secret@db\/agentsmith/);
     assert.match(manifest, /OIDC_CLIENT_SECRET: oidc-client-secret-from-substrate/);
     assert.doesNotMatch(manifest + result.stdout + result.stderr, /DO_NOT_PRINT/);

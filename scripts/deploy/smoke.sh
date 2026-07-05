@@ -5,6 +5,8 @@ cd "$(dirname "$0")/../.."
 base_url=
 env_file=
 secrets_file=
+app_env_file=
+app_secrets_file=
 endpoint_base_url=
 endpoint_model=
 endpoint_secret_ref=
@@ -16,6 +18,8 @@ while [ "$#" -gt 0 ]; do
     --base-url) base_url="$2"; shift 2 ;;
     --env) env_file="$2"; shift 2 ;;
     --secrets) secrets_file="$2"; shift 2 ;;
+    --app-env) app_env_file="$2"; shift 2 ;;
+    --app-secrets) app_secrets_file="$2"; shift 2 ;;
     --endpoint-base-url) endpoint_base_url="$2"; shift 2 ;;
     --endpoint-model) endpoint_model="$2"; shift 2 ;;
     --endpoint-secret-ref) endpoint_secret_ref="$2"; shift 2 ;;
@@ -48,6 +52,12 @@ load_contract_env() {
   fi
   if [ -n "$secrets_file" ]; then
     args+=(--secrets "$secrets_file")
+  fi
+  if [ -n "$app_env_file" ]; then
+    args+=(--app-env "$app_env_file")
+  fi
+  if [ -n "$app_secrets_file" ]; then
+    args+=(--app-secrets "$app_secrets_file")
   fi
   assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs "${args[@]}")"
   while IFS= read -r assignment; do

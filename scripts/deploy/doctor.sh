@@ -4,6 +4,8 @@ cd "$(dirname "$0")/../.."
 
 env_file=
 secrets_file=
+app_env_file=
+app_secrets_file=
 out=out/manifests
 bundle=
 images_lock=
@@ -11,6 +13,8 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --env) env_file="$2"; shift 2 ;;
     --secrets) secrets_file="$2"; shift 2 ;;
+    --app-env) app_env_file="$2"; shift 2 ;;
+    --app-secrets) app_secrets_file="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --bundle) bundle="$2"; shift 2 ;;
     --images-lock) images_lock="$2"; shift 2 ;;
@@ -38,8 +42,15 @@ unset_substrate_only_env() {
 }
 
 load_contract_env() {
+  local args=(export --env "$env_file" --secrets "$secrets_file")
   local assignments assignment
-  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs export --env "$env_file" --secrets "$secrets_file")"
+  if [ -n "$app_env_file" ]; then
+    args+=(--app-env "$app_env_file")
+  fi
+  if [ -n "$app_secrets_file" ]; then
+    args+=(--app-secrets "$app_secrets_file")
+  fi
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs "${args[@]}")"
   while IFS= read -r assignment; do
     [ -n "$assignment" ] || continue
     case "$assignment" in

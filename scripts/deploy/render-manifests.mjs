@@ -6,10 +6,15 @@ import { readContractFiles } from "./env-contract.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.env || !args.out) {
-  throw new Error("usage: render.sh --env substrate.env [--secrets substrate.secrets.env] --tag dev --out out/manifests");
+  throw new Error("usage: render.sh --env substrate.env [--secrets substrate.secrets.env] [--app-env app.env] [--app-secrets app.secrets.env] --tag dev --out out/manifests");
 }
 
-const { env, secrets } = await readContractFiles({ envFile: args.env, secretsFile: args.secrets });
+const { env, secrets } = await readContractFiles({
+  envFile: args.env,
+  secretsFile: args.secrets,
+  appEnvFile: args.app_env,
+  appSecretsFile: args.app_secrets
+});
 const namespace = env.KUBE_NAMESPACE ?? "agentsmith";
 const tag = args.tag ?? "dev";
 const imageRefs = args.images_lock ? parseAppImagesLock(await readFile(args.images_lock, "utf8")) : undefined;
@@ -28,7 +33,7 @@ function parseArgs(argv) {
   const parsed = {};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--env" || arg === "--secrets" || arg === "--tag" || arg === "--out" || arg === "--images-lock") {
+    if (arg === "--env" || arg === "--secrets" || arg === "--app-env" || arg === "--app-secrets" || arg === "--tag" || arg === "--out" || arg === "--images-lock") {
       parsed[arg.slice(2).replace("-", "_")] = argv[index + 1];
       index += 1;
     } else {

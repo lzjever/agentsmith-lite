@@ -235,6 +235,17 @@ describe("deploy app doctor artifact checks", () => {
     assert.match(result.stderr, /BUILTIN_ADMIN_INITIAL_PASSWORD must be non-default/i);
   });
 
+  it("fails when sandbox mode is placed in substrate env instead of the app overlay without leaking the value", () => {
+    const fixture = writeDoctorFixture();
+    writeFileSync(fixture.envFile, `${readFileSync(fixture.envFile, "utf8")}AGENTSMITH_LITE_SANDBOX_MODE=DO_NOT_PRINT_SUBSTRATE_SANDBOX\n`);
+
+    const result = runDoctor(fixture, []);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /AGENTSMITH_LITE_SANDBOX_MODE/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_SUBSTRATE_SANDBOX/);
+  });
+
   it("fails when sandbox mode has a typo", () => {
     const fixture = writeDoctorFixture({ sandboxMode: "liv" });
 
@@ -396,6 +407,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
   const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-doctor-"));
   const envFile = path.join(tempDir, "substrate.env");
   const secretsFile = path.join(tempDir, "substrate.secrets.env");
+  const appEnvFile = path.join(tempDir, "app.env");
   const outDir = path.join(tempDir, "manifests");
   const bundleDir = path.join(tempDir, "bundle");
 
@@ -405,9 +417,15 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
     [
       "KUBE_NAMESPACE=agentsmith",
       ...(options.publicBaseUrl ? [`APP_PUBLIC_BASE_URL=${options.publicBaseUrl}`] : []),
+      ...(options.extraEnv ?? []),
+      ""
+    ].join("\n")
+  );
+  writeFileSync(
+    appEnvFile,
+    [
       ...(options.sandboxMode ? [`AGENTSMITH_LITE_SANDBOX_MODE=${options.sandboxMode}`] : []),
       ...(options.sandboxNamespaceLimit ? [`AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=${options.sandboxNamespaceLimit}`] : []),
-      ...(options.extraEnv ?? []),
       ""
     ].join("\n")
   );
@@ -431,7 +449,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
   });
   writeBundle(bundleDir, appDigestRef, runnerDigestRef);
 
-  return { tempDir, envFile, secretsFile, outDir, bundleDir };
+  return { tempDir, envFile, secretsFile, appEnvFile, outDir, bundleDir };
 }
 
 function writeManifests(outDir: string, options: DoctorFixtureOptions): void {
@@ -539,7 +557,18 @@ images:
 }
 
 function runDoctor(fixture: DoctorFixture, args: string[], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", fixture.envFile, "--secrets", fixture.secretsFile, "--out", fixture.outDir, ...args], {
+  return spawnSync("bash", [
+    "scripts/deploy/doctor.sh",
+    "--env",
+    fixture.envFile,
+    "--secrets",
+    fixture.secretsFile,
+    "--app-env",
+    fixture.appEnvFile,
+    "--out",
+    fixture.outDir,
+    ...args
+  ], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
@@ -629,6 +658,7 @@ interface DoctorFixture {
   tempDir: string;
   envFile: string;
   secretsFile: string;
+  appEnvFile: string;
   outDir: string;
   bundleDir: string;
 }

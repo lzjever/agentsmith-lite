@@ -11,7 +11,9 @@ Required app product secrets:
 
 Substrate-only secrets such as `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `JUICEFS_META_URL` must not be injected into app server, sandbox pods, Botified env, or app-owned Secrets.
 
-App doctor owns app delivery checks: image metadata, schema bootstrap job, web/API readiness, sandbox RBAC shape, and Botified serve smoke. Deploy smoke is API-only: it bootstraps/logs in with the configured built-in admin secret, checks product API health, workspace/project/file CRUD, optional endpoint/chat, and operator sandbox status. Optional task artifact smoke requires explicit `--task-smoke` or `SMOKE_TASK=true` plus complete endpoint smoke config. Optional task reclaim smoke requires explicit `--task-reclaim-smoke` or `SMOKE_TASK_RECLAIM=true`; it creates a separate task, cancels it, and reaps only the returned `runId` in dry-run unless `--task-reclaim-reap-apply` or `SMOKE_TASK_RECLAIM_REAP_APPLY=true` is also set. These deploy task smokes are manual opt-ins, not default gates, and do not replace real Kubernetes/JuiceFS external evidence. App doctor always runs static manifest/env checks; when the substrate env file sets `KUBECONFIG_PATH` or `KUBE_CONTEXT`, it also verifies deployed schema/API/PVC/RBAC facts. Substrate doctor owns Kubernetes/PostgreSQL/S3/JuiceFS/RWX substrate readiness.
+`--env`/`--secrets` are the substrate contract. App-owned deploy/runtime/smoke overrides belong in `--app-env`/`--app-secrets`; product core secrets still come from substrate secrets, and raw S3/JuiceFS substrate secrets must not be placed in app overlay.
+
+App doctor owns app delivery checks: image metadata, schema bootstrap job, web/API readiness, sandbox RBAC shape, and Botified serve smoke. Deploy smoke is API-only: it bootstraps/logs in with the configured built-in admin secret, checks product API health, workspace/project/file CRUD, optional endpoint/chat, and operator sandbox status. Optional task artifact smoke requires explicit `--task-smoke` or `SMOKE_TASK=true` from app overlay plus complete endpoint smoke config. Optional task reclaim smoke requires explicit `--task-reclaim-smoke` or `SMOKE_TASK_RECLAIM=true` from app overlay; it creates a separate task, cancels it, and reaps only the returned `runId` in dry-run unless `--task-reclaim-reap-apply` or `SMOKE_TASK_RECLAIM_REAP_APPLY=true` from app overlay is also set. These deploy task smokes are manual opt-ins, not default gates, and do not replace real Kubernetes/JuiceFS external evidence. App doctor always runs static manifest/env checks; when the substrate env file sets `KUBECONFIG_PATH` or `KUBE_CONTEXT`, it also verifies deployed schema/API/PVC/RBAC facts. Substrate doctor owns Kubernetes/PostgreSQL/S3/JuiceFS/RWX substrate readiness.
 
 ## Sandbox Operator CLI
 
@@ -21,9 +23,10 @@ Sandbox lifecycle status and cleanup are API-backed. Use an admin session cookie
 scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --apply --cookie-file admin.cookie --csrf-token <csrf> [--run-id <run-id>]
+scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
-Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh` calls `POST /api/operator/sandbox/reap`. Dry-run sends `{}` or `{ "runId": "..." }`; apply sends `{ "apply": true }` plus `runId` when `--run-id` is provided. `--dry-run` and `--apply` cannot be combined.
+Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the substrate env file. Status, cleanup, and down only need substrate env, not app overlay. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh` calls `POST /api/operator/sandbox/reap`. Dry-run sends `{}` or `{ "runId": "..." }`; apply sends `{ "apply": true }` plus `runId` when `--run-id` is provided. `--dry-run` and `--apply` cannot be combined.
 
 The formatted cleanup plan comes only from the product API. `kubectl` must not be used to derive sandbox cleanup targets.
 

@@ -20,19 +20,17 @@ describe("dev/up.sh", () => {
     assert.equal(env.POSTGRES_APP_URL, undefined);
   });
 
-  it("exports only allowlisted product variables from substrate env and secrets", () => {
+  it("exports substrate variables plus app env and secret overlays", () => {
     const fixture = createFixture();
     const substrateEnv = path.join(fixture.tempDir, "substrate.env");
     const substrateSecrets = path.join(fixture.tempDir, "substrate.secrets.env");
+    const appEnv = path.join(fixture.tempDir, "app.env");
+    const appSecrets = path.join(fixture.tempDir, "app.secrets.env");
     writeFileSync(substrateEnv, [
       "APP_PUBLIC_BASE_URL=https://app.example.test",
       "KUBE_NAMESPACE=agentsmith-preview",
       "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
       "KUBE_CONTEXT=kind-agentsmith",
-      "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=https://models.example.test/v1",
-      "AGENTSMITH_LITE_SANDBOX_MODE=live",
-      "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
-      "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
       "export S3_ACCESS_KEY=DO_NOT_EXPORT_S3_ACCESS",
       "S3_ENDPOINT=DO_NOT_EXPORT_S3_ENDPOINT",
       "export JUICEFS_META_URL=DO_NOT_EXPORT_JUICEFS_META",
@@ -49,13 +47,20 @@ describe("dev/up.sh", () => {
       "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
       "APP_SESSION_SECRET=session-secret-from-substrate",
       "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
-      "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=sk-from-substrate",
       "export S3_SECRET_KEY=DO_NOT_EXPORT_S3_SECRET",
       "export JUICEFS_ACCESS_KEY=DO_NOT_EXPORT_JUICEFS_ACCESS",
       ""
     ].join("\n"));
+    writeFileSync(appEnv, [
+      "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=https://models.example.test/v1",
+      "AGENTSMITH_LITE_SANDBOX_MODE=live",
+      "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
+      "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
+      ""
+    ].join("\n"));
+    writeFileSync(appSecrets, "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=sk-from-overlay\n");
 
-    const result = runDevUp(["--env", substrateEnv, "--secrets", substrateSecrets], fixture);
+    const result = runDevUp(["--env", substrateEnv, "--secrets", substrateSecrets, "--app-env", appEnv, "--app-secrets", appSecrets], fixture);
 
     assert.equal(result.status, 0, result.stderr);
     const env = readCapturedEnv(fixture.envFile);
@@ -67,7 +72,7 @@ describe("dev/up.sh", () => {
     assert.equal(env.KUBECONFIG_PATH, "/tmp/agentsmith.kubeconfig");
     assert.equal(env.KUBE_CONTEXT, "kind-agentsmith");
     assert.equal(env.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.test/v1");
-    assert.equal(env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-from-substrate");
+    assert.equal(env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-from-overlay");
     assert.equal(env.AGENTSMITH_LITE_SANDBOX_MODE, "live");
     assert.equal(env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, "7");
     assert.equal(env.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
@@ -83,6 +88,18 @@ describe("dev/up.sh", () => {
     assert.equal(env.JUICEFS_STORAGE_CLASS, undefined);
     assert.equal(env.JUICEFS_MOUNT_ROOT, undefined);
     assert.equal(env.JUICEFS_ACCESS_KEY, undefined);
+  });
+
+  it("fails when an app overlay key is placed in substrate env without leaking the value", () => {
+    const fixture = createFixture();
+    const substrateEnv = path.join(fixture.tempDir, "substrate.env");
+    writeFileSync(substrateEnv, "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=DO_NOT_PRINT_MODEL_BASE_URL\n");
+
+    const result = runDevUp(["--env", substrateEnv], fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_MODEL_BASE_URL/);
   });
 
   it("fails closed for unknown substrate keys without printing their values", () => {
@@ -101,6 +118,7 @@ describe("dev/up.sh", () => {
     const fixture = createFixture();
     const substrateEnv = path.join(fixture.tempDir, "substrate.env");
     const substrateSecrets = path.join(fixture.tempDir, "substrate.secrets.env");
+    const appSecrets = path.join(fixture.tempDir, "app.secrets.env");
     const envMarker = path.join(fixture.tempDir, "env-marker");
     const secretMarker = path.join(fixture.tempDir, "secret-marker");
     const substrateMarker = path.join(fixture.tempDir, "substrate-marker");
@@ -111,12 +129,12 @@ describe("dev/up.sh", () => {
       ""
     ].join("\n"));
     writeFileSync(substrateSecrets, [
-      `AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=\`touch ${secretMarker}\``,
       "S3_SECRET_KEY=DO_NOT_EXPORT_S3_SECRET",
       ""
     ].join("\n"));
+    writeFileSync(appSecrets, `AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=\`touch ${secretMarker}\`\n`);
 
-    const result = runDevUp(["--env", substrateEnv, "--secrets", substrateSecrets], fixture, {
+    const result = runDevUp(["--env", substrateEnv, "--secrets", substrateSecrets, "--app-secrets", appSecrets], fixture, {
       S3_ENDPOINT: "DO_NOT_EXPORT_PARENT_S3_ENDPOINT",
       JUICEFS_META_URL: "DO_NOT_EXPORT_PARENT_JUICEFS_META"
     });

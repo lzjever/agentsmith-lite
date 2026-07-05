@@ -32,18 +32,31 @@ describe("deploy env contract", () => {
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
-  it("parses app env and secrets with export, comments, and quotes while ignoring substrate-only keys", () => {
+  it("rejects app-only keys in substrate env without printing the value", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-app-only-substrate-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    writeFileSync(envFile, "AGENTSMITH_LITE_SANDBOX_MODE=DO_NOT_PRINT_SANDBOX_MODE\n");
+
+    const result = runContract(["export", "--env", envFile]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /AGENTSMITH_LITE_SANDBOX_MODE/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_SANDBOX_MODE/);
+  });
+
+  it("exports the substrate intersection plus app env and secret overlays", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-"));
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const appEnvFile = path.join(tempDir, "app.env");
+    const appSecretsFile = path.join(tempDir, "app.secrets.env");
     writeFileSync(
       envFile,
       [
         "",
-        "# app env",
+        "# substrate env",
         "export KUBE_NAMESPACE='agentsmith-preview'",
         "APP_PUBLIC_BASE_URL=\"https://agentsmith.example.test/app\"",
-        "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI='https://models.example.test/v1'",
         "JUICEFS_PVC_NAME=\"agentsmith-lite-files\"",
         "S3_ACCESS_KEY=DO_NOT_PRINT_S3_ACCESS",
         "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META",
@@ -56,26 +69,90 @@ describe("deploy env contract", () => {
         "# product secrets",
         "POSTGRES_APP_URL='postgresql://app:secret@db/agentsmith'",
         "export APP_SESSION_SECRET=\"app-session-secret-at-least-32-chars\"",
-        "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI='sk-from-contract'",
         "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET",
         "JUICEFS_ACCESS_KEY=DO_NOT_PRINT_JUICEFS_ACCESS",
         ""
       ].join("\n")
     );
+    writeFileSync(
+      appEnvFile,
+      [
+        "# app overlay",
+        "BOTIFIED_RUNNER_IMAGE='registry.example.test/agentsmith/botified-runner:release'",
+        "AGENTSMITH_LITE_DATA_DIR=\"/agentsmith-lite-data\"",
+        "AGENTSMITH_LITE_SANDBOX_MODE=live",
+        "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
+        "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
+        "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI='https://models.example.test/v1'",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(appSecretsFile, "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI='sk-from-overlay'\n");
 
-    const result = runContract(["export", "--env", envFile, "--secrets", secretsFile]);
+    const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile, "--app-secrets", appSecretsFile]);
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readAssignments(result.stdout), {
       KUBE_NAMESPACE: "agentsmith-preview",
       APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
-      AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.test/v1",
       JUICEFS_PVC_NAME: "agentsmith-lite-files",
       POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
       APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
-      AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-from-contract"
+      BOTIFIED_RUNNER_IMAGE: "registry.example.test/agentsmith/botified-runner:release",
+      AGENTSMITH_LITE_DATA_DIR: "/agentsmith-lite-data",
+      AGENTSMITH_LITE_SANDBOX_MODE: "live",
+      AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: "7",
+      AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
+      AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.test/v1",
+      AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-from-overlay"
     });
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
+  });
+
+  it("fails closed for unknown overlay keys and misplaced overlay config or secrets", () => {
+    const cases: Array<{
+      name: string;
+      file: "app.env" | "app.secrets.env";
+      contents: string;
+      error: RegExp;
+      leakedValue: RegExp;
+    }> = [
+      {
+        name: "unknown app env",
+        file: "app.env",
+        contents: "NOT_APP_OVERLAY=DO_NOT_PRINT_UNKNOWN_OVERLAY\n",
+        error: /NOT_APP_OVERLAY/,
+        leakedValue: /DO_NOT_PRINT_UNKNOWN_OVERLAY/
+      },
+      {
+        name: "secret in app env",
+        file: "app.env",
+        contents: "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=DO_NOT_PRINT_MODEL_SECRET\n",
+        error: /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI/,
+        leakedValue: /DO_NOT_PRINT_MODEL_SECRET/
+      },
+      {
+        name: "config in app secrets",
+        file: "app.secrets.env",
+        contents: "AGENTSMITH_LITE_SANDBOX_MODE=DO_NOT_PRINT_SANDBOX_CONFIG\n",
+        error: /AGENTSMITH_LITE_SANDBOX_MODE/,
+        leakedValue: /DO_NOT_PRINT_SANDBOX_CONFIG/
+      }
+    ];
+
+    for (const candidate of cases) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-${candidate.name.replace(/\s+/g, "-")}-`));
+      const overlayFile = path.join(tempDir, candidate.file);
+      writeFileSync(overlayFile, candidate.contents);
+
+      const result = candidate.file === "app.env"
+        ? runContract(["export", "--app-env", overlayFile])
+        : runContract(["export", "--app-secrets", overlayFile]);
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, candidate.error, candidate.name);
+      assert.doesNotMatch(result.stderr + result.stdout, candidate.leakedValue, candidate.name);
+    }
   });
 
   it("fails closed for unknown env keys without printing the value", () => {
@@ -117,13 +194,22 @@ describe("deploy env contract", () => {
       envFile,
       [
         `APP_PUBLIC_BASE_URL=$(touch ${marker})`,
+        `S3_ACCESS_KEY=$(touch ${path.join(tempDir, "substrate-marker")})`,
+        "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META",
+        ""
+      ].join("\n")
+    );
+    const appEnvFile = path.join(tempDir, "app.env");
+    writeFileSync(
+      appEnvFile,
+      [
         `AGENTSMITH_LITE_DATA_DIR=\`touch ${backtickMarker}\``,
         "PATH=/tmp/should-not-be-accepted",
         ""
       ].join("\n")
     );
 
-    const result = runContract(["export", "--env", envFile]);
+    const result = runContract(["export", "--env", envFile, "--app-env", appEnvFile]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /PATH/);

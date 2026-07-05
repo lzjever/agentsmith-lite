@@ -10,7 +10,7 @@
 
 1. **范围分层混乱**：把 Lite 核心目标、未来增强项、参考系统遗留能力混进同一个 P0/P2 范围，导致 chat persistence、audit/usage、workspace/project 全量 CRUD、endpoint edit、file delete UI 等未实现或非核心能力被误写为 MVP。
 2. **证明层级混淆**：本地 unit/contract/fake smoke 只能证明代码路径、接口边界和安全限制，不能证明 clean VM、断网 VM、真实云 K8s、真实 Botified bash artifact 已经可用。计划必须把这些外部验收列为 redacted evidence，而不是用本地测试替代。
-3. **命令契约与证明边界曾经混在一起**：`scripts/dev/up.sh --env/--secrets` 的本地 dev env 契约已补齐并测试；但它只证明本地开发启动契约，真实 clean/offline/existing-cloud、runner image/K8s/JuiceFS evidence 仍不能由本地命令替代。
+3. **命令契约与证明边界曾经混在一起**：`scripts/dev/up.sh --env/--secrets` 加 `--app-env/--app-secrets` 的本地 dev env 契约已补齐并测试；但它只证明本地开发启动契约，真实 clean/offline/existing-cloud、runner image/K8s/JuiceFS evidence 仍不能由本地命令替代。
 
 结构性修订原则：
 
@@ -429,7 +429,7 @@ npm run typecheck
 npm test
 npm run check:forbidden-surfaces
 
-scripts/dev/up.sh
+scripts/dev/up.sh [--env substrate.env --secrets substrate.secrets.env] [--app-env app.env] [--app-secrets app.secrets.env]
 
 npm run e2e:smoke
 npm run e2e:operator-lifecycle
@@ -444,20 +444,22 @@ scripts/build-offline-bundle.sh \
   --runner-image agentsmith-lite/botified-runner@sha256:<64hex> \
   [--output dist/app-offline-bundle] [--runtime docker]
 
-scripts/deploy/render.sh --env substrate.env [--secrets substrate.secrets.env] --tag <tag> --out out/manifests [--images-lock images.lock]
+scripts/deploy/render.sh --env substrate.env [--secrets substrate.secrets.env] [--app-env app.env] [--app-secrets app.secrets.env] --tag <tag> --out out/manifests [--images-lock images.lock]
 scripts/deploy/apply.sh [--env substrate.env] [--out out/manifests] [--images-lock images.lock] [--timeout 300s] [--dry-run]
 scripts/deploy/status.sh --env substrate.env
 scripts/deploy/status.sh --env substrate.env --resources --base-url <url> --cookie-file <cookie-file> [--csrf-token <token>]
-scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
-scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env
-scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply]
+scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run|--apply --cookie-file <cookie-file> [--csrf-token <token>] [--run-id <run-id>]
+scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
+scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env [--app-env app.smoke.env]
+scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.smoke.env] --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply]
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
 Known command status and gaps:
 
-- `scripts/dev/up.sh --env/--secrets` 已作为本地 dev env 契约补齐：allowlist 限制可加载的本地 env/secrets key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
-- `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。它们都不进入默认 gate，也不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file`、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
+- `--env`/`--secrets` 只表示 substrate contract；`--app-env`/`--app-secrets` 只表示 app-owned deploy/runtime/smoke overlay。`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`、`OIDC_CLIENT_SECRET` 仍来自 substrate secrets；`AGENTSMITH_LITE_SANDBOX_MODE`、`AGENTSMITH_LITE_MODEL_BASE_URL_*`、`SMOKE_*` 等来自 app env overlay，`AGENTSMITH_LITE_MODEL_API_KEY_*` 来自 app secrets overlay。raw `S3_*`/JuiceFS substrate secrets 不能进入 app overlay。
+- `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` 已作为本地 dev env 契约补齐：allowlist 限制可加载的 substrate contract 与 app overlay key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
+- `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker；`SMOKE_*` 只放在 app smoke overlay，不放在 substrate env。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。它们都不进入默认 gate，也不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file`、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
 - `scripts/deploy/operator-sandbox.mjs reap` 支持默认/显式 `--dry-run` 与显式 `--apply`；apply 通过 operator API 发送 `{ "apply": true }`，并由 deploy script 测试覆盖。
 - `scripts/build-images.sh --push --images-lock images.lock` 已补齐 build/push 后的 digest-pinned lock 小闭环：push 成功后只从 runtime `RepoDigests` 捕获 app/runner digest refs；`--dry-run` 只打印 build/push/write-lock intent。真实 registry digest 仍必须在 push 后获得，不能用本地 image ID 代替。
 
@@ -571,7 +573,7 @@ Local evidence:
 
 External Acceptance Evidence:
 
-- 已部署 app 通过 `scripts/deploy/smoke.sh --base-url ... --secrets ...` 完成登录/session、workspace/project、endpoint create/list、chat smoke；
+- 已部署 app 通过 `scripts/deploy/smoke.sh --base-url ... --secrets ... [--app-env app.smoke.env]` 完成登录/session、workspace/project、endpoint create/list、chat smoke；
 - smoke report 脱敏。
 
 Deferred:
@@ -746,9 +748,9 @@ This checklist is for handoff, not a release gate bureaucracy.
 
 ## 12. Immediate Next Work
 
-1. Completed: `docs/migration-from-reference.md` migration ledger, `scripts/dev/up.sh --env/--secrets` allowlist/tests, and `npm run acceptance:botified-runner` local process acceptance.
+1. Completed: `docs/migration-from-reference.md` migration ledger, `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` allowlist/tests, and `npm run acceptance:botified-runner` local process acceptance.
 2. Completed: `npm run acceptance:botified-runner-image` has passed in a Docker environment that could pull base images; this is real runner-container-only acceptance evidence and still does not cover K8s/PVC/JuiceFS/product task API/`publish_file`/cancel-reap.
 3. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
-4. Run real `scripts/deploy/smoke.sh --task-smoke` and, when collecting manual reclaim evidence, `--task-reclaim-smoke [--task-reclaim-reap-apply]` in self-hosted/existing-cloud/offline deploys and archive redacted reports; these smokes remain supporting evidence and do not replace real K8s/JuiceFS observations.
+4. Run real `scripts/deploy/smoke.sh --task-smoke` with any `SMOKE_*` values in `--app-env`, and, when collecting manual reclaim evidence, `--task-reclaim-smoke [--task-reclaim-reap-apply]` in self-hosted/existing-cloud/offline deploys and archive redacted reports; these smokes remain supporting evidence and do not replace real K8s/JuiceFS observations.
 5. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
 6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.

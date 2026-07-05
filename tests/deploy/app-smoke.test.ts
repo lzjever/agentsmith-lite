@@ -12,6 +12,7 @@ describe("deploy app smoke", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-"));
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const appEnvFile = path.join(tempDir, "app.env");
     const fakeNode = path.join(tempDir, "node");
     const callsFile = path.join(tempDir, "node-calls.txt");
     const adminPassword = "admin-secret-from-file";
@@ -21,6 +22,9 @@ describe("deploy app smoke", () => {
     writeFileSync(envFile, [
       "APP_PUBLIC_BASE_URL=http://deploy.example.test",
       `APP_INGRESS_CLASS=$(touch ${envMarker})`,
+      ""
+    ].join("\n"));
+    writeFileSync(appEnvFile, [
       "SMOKE_ENDPOINT_BASE_URL=https://models.env.test/v1",
       "SMOKE_ENDPOINT_MODEL=env-model",
       "SMOKE_ENDPOINT_SECRET_REF=secret/env",
@@ -50,6 +54,8 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       envFile,
       "--secrets",
       secretsFile,
+      "--app-env",
+      appEnvFile,
       "--task-reclaim-smoke",
       "--task-reclaim-reap-apply"
     ], {
@@ -77,6 +83,27 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     assert.match(call, /task_timeout=12/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+  });
+
+  it("smoke.sh rejects SMOKE_* keys in substrate env without printing their values", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-substrate-smoke-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\nSMOKE_TASK=DO_NOT_PRINT_SMOKE_TASK\n");
+    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\n");
+
+    const result = spawnSync("bash", ["scripts/deploy/smoke.sh", "--env", envFile, "--secrets", secretsFile], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SMOKE_TASK/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_SMOKE_TASK/);
   });
 
   it("app-smoke.mjs exercises remote API smoke with cookie, CSRF, endpoint, chat, files, and operator status", async () => {
