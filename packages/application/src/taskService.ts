@@ -579,6 +579,7 @@ export class TaskService {
     if (!live) {
       return;
     }
+    await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
     const actions = reconcileSandboxRuns({
       desiredRuns: [input.run],
       observedResources: [],
@@ -607,6 +608,19 @@ export class TaskService {
       throw new ProductError("Live sandbox pod manifest was not generated", 500);
     }
     await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
+  }
+
+  private async prepareLiveRuntimeDirectories(task: AgentTask, projectRootPath: string): Promise<void> {
+    const dataRoot = path.resolve(this.config.dataRoot);
+    const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
+    assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
+    const directories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified"), path.resolve(taskRoot, "artifacts")];
+    for (const directory of directories) {
+      assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
+    }
+    for (const directory of directories) {
+      await mkdir(directory, { recursive: true });
+    }
   }
 
   private async bestEffortMarkTaskFailed(task: AgentTask): Promise<void> {

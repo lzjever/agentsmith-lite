@@ -6,6 +6,8 @@ The app consumes a substrate-provided JuiceFS PVC by name and mounts project pat
 workspaces/<workspace_id>/projects/<project_id>
 ```
 
+The app Deployment sets `AGENTSMITH_LITE_DATA_DIR=/agentsmith-lite` by default, matching the PVC mount root; deploy env may override it when a different mounted data root is intentionally supplied.
+
 P0 implements path validation as product logic:
 
 - reject absolute paths;

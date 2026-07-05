@@ -11,6 +11,7 @@ export interface AppManifestInput {
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
+  const appDataRoot = input.env.AGENTSMITH_LITE_DATA_DIR ?? "/agentsmith-lite";
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
     "app.kubernetes.io/part-of": "agentsmith-lite",
@@ -43,6 +44,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       metadata: { name: "agentsmith-lite-config", namespace: input.namespace, labels },
       data: {
         APP_PUBLIC_BASE_URL: publicBaseUrl,
+        AGENTSMITH_LITE_DATA_DIR: appDataRoot,
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",

@@ -155,6 +155,41 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
   });
 
+  it("defaults the API data root to the PVC mount root while allowing env override", () => {
+    const defaultManifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const defaultConfigMap = defaultManifests.find(
+      (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
+    );
+    const defaultDeployment = defaultManifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
+    const defaultConfigMapData = (defaultConfigMap as { data?: Record<string, string> } | undefined)?.data;
+    const defaultMountPath = defaultDeployment?.spec.template.spec.containers[0]?.volumeMounts[0]?.mountPath;
+
+    assert.equal(defaultConfigMapData?.AGENTSMITH_LITE_DATA_DIR, "/agentsmith-lite");
+    assert.equal(defaultMountPath, "/agentsmith-lite");
+
+    const overrideManifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        AGENTSMITH_LITE_DATA_DIR: "/custom-data-root"
+      },
+      secrets: {}
+    });
+    const overrideConfigMap = overrideManifests.find(
+      (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
+    );
+    const overrideConfigMapData = (overrideConfigMap as { data?: Record<string, string> } | undefined)?.data;
+
+    assert.equal(overrideConfigMapData?.AGENTSMITH_LITE_DATA_DIR, "/custom-data-root");
+  });
+
   it("grants the API only namespace-scoped sandbox lifecycle resources", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -281,6 +316,24 @@ interface JobResource {
               name: string;
             };
           }>;
+        }>;
+      };
+    };
+  };
+}
+
+interface DeploymentResource {
+  kind: "Deployment";
+  metadata: {
+    name: string;
+    namespace?: string;
+    labels: Record<string, string>;
+  };
+  spec: {
+    template: {
+      spec: {
+        containers: Array<{
+          volumeMounts: Array<{ mountPath: string }>;
         }>;
       };
     };

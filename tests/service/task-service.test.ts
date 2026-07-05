@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { access, readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -240,6 +240,99 @@ describe("task service Botified orchestration", () => {
     assert.equal(Date.parse(sandboxRun.idleExpiresAt) - Date.parse(sandboxRun.createdAt), 30 * 60 * 1000);
     assert.equal(JSON.stringify(sandboxRun).includes("test-service-key"), false);
     assert.equal(JSON.stringify(sandboxRun).includes("sk-real-model-key"), false);
+  });
+
+  it("creates live Botified runtime directories under dataRoot before applying resources", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-live-dirs-"));
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        dataRoot,
+        modelCredentialResolver: new FakeCredentialResolver({
+          apiKey: "sk-real-model-key",
+          baseUrl: "https://models.example.com/v1/"
+        }),
+        liveSandbox: {
+          port: new FakeLiveSandboxPort({
+            readiness: ["ready"],
+            beforeApply: async (resource) => {
+              const project = await store.findProject(projectId);
+              assert.ok(project, "expected project fixture");
+              const taskId = resource.metadata.labels["agentsmith-lite/task-id"];
+              assert.ok(taskId, "expected task id label before apply");
+              const taskRoot = path.join(dataRoot, project.rootPath, "tasks", taskId);
+
+              await assertDirectory(path.join(taskRoot, "home"));
+              await assertDirectory(path.join(taskRoot, "botified"));
+              await assertDirectory(path.join(taskRoot, "artifacts"));
+            }
+          })
+        }
+      });
+
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "live dirs", endpointId });
+      const project = await store.findProject(projectId);
+      assert.ok(project, "expected project fixture");
+      const taskRoot = path.join(dataRoot, project.rootPath, "tasks", task.id);
+
+      await assertDirectory(path.join(taskRoot, "home"));
+      await assertDirectory(path.join(taskRoot, "botified"));
+      await assertDirectory(path.join(taskRoot, "artifacts"));
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create Botified runtime directories for dry-run tasks", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-dry-dirs-"));
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "dry dirs", endpointId });
+      const project = await store.findProject(projectId);
+      assert.ok(project, "expected project fixture");
+
+      await assertMissing(path.join(dataRoot, project.rootPath, "tasks", task.id));
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects live runtime directory creation that would escape dataRoot", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-live-escape-"));
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const botified = new FakeBotifiedClient([]);
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        dataRoot,
+        modelCredentialResolver: new FakeCredentialResolver({
+          apiKey: "sk-real-model-key",
+          baseUrl: "https://models.example.com/v1/"
+        }),
+        liveSandbox: {
+          port: livePort,
+          sleep: livePort.sleep
+        }
+      });
+      const findProject = store.findProject.bind(store);
+      store.findProject = async (id) => {
+        const project = await findProject(id);
+        if (project && id === projectId) {
+          return { ...project, rootPath: "../escaped-project" };
+        }
+        return project;
+      };
+
+      await assert.rejects(
+        () => services.tasks.createTask(userId, projectId, { prompt: "escape", endpointId }),
+        /Task runtime directory is outside the data root/
+      );
+      assert.deepEqual(livePort.appliedResources, []);
+      await assertMissing(path.resolve(dataRoot, "../escaped-project"));
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 
   it("extends only the live sandbox idle deadline when active timeline events are synced", async () => {
@@ -1031,6 +1124,15 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
   };
 }
 
+async function assertDirectory(directory: string): Promise<void> {
+  const stats = await stat(directory);
+  assert.equal(stats.isDirectory(), true, `${directory} should be a directory`);
+}
+
+async function assertMissing(candidate: string): Promise<void> {
+  await assert.rejects(() => access(candidate), { code: "ENOENT" });
+}
+
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
@@ -1131,16 +1233,19 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
   private readonly operations: string[] | undefined;
   private readonly readiness: PodReadiness[];
   private readonly applyResults: Array<"applied" | "fence_mismatch" | Error>;
+  private readonly beforeApply: ((resource: KubernetesResource) => void | Promise<void>) | undefined;
   private resources: KubernetesResource[] = [];
 
   constructor(input: {
     operations?: string[];
     readiness?: PodReadiness[];
     applyResults?: Array<"applied" | "fence_mismatch" | Error>;
+    beforeApply?: (resource: KubernetesResource) => void | Promise<void>;
   } = {}) {
     this.operations = input.operations;
     this.readiness = [...(input.readiness ?? ["ready"])];
     this.applyResults = [...(input.applyResults ?? [])];
+    this.beforeApply = input.beforeApply;
   }
 
   async listManagedResources(): Promise<KubernetesResource[]> {
@@ -1148,6 +1253,7 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
   }
 
   async applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>): Promise<"applied" | "fence_mismatch"> {
+    await this.beforeApply?.(resource);
     this.operations?.push(`apply:${resource.kind}`);
     const result = this.applyResults.shift();
     if (result instanceof Error) {
