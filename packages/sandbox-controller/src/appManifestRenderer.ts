@@ -106,6 +106,9 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       kind: "Job",
       metadata: { name: "agentsmith-lite-schema-bootstrap", namespace: input.namespace, labels },
       spec: {
+        backoffLimit: 2,
+        activeDeadlineSeconds: 300,
+        ttlSecondsAfterFinished: 600,
         template: {
           metadata: { labels },
           spec: {

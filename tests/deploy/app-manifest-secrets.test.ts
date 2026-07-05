@@ -115,6 +115,38 @@ describe("app manifest rendering", () => {
       assert.match(doctor, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
   });
+
+  it("renders a fixed schema bootstrap Job with bounded retries and only app-owned secrets", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {
+        POSTGRES_APP_URL: "postgresql://app:secret@db/app",
+        APP_SESSION_SECRET: "app-session-secret",
+        S3_SECRET_KEY: "raw-secret"
+      }
+    });
+    const job = manifests.find((manifest) => manifest.kind === "Job" && manifest.metadata.name === "agentsmith-lite-schema-bootstrap") as
+      | JobResource
+      | undefined;
+
+    assert.ok(job, "fixed schema bootstrap Job should be rendered for delete-before-apply readiness");
+    assert.equal(job.metadata.namespace, "agentsmith");
+    assert.equal(job.spec.backoffLimit, 2);
+    assert.equal(job.spec.activeDeadlineSeconds, 300);
+    assert.equal(job.spec.ttlSecondsAfterFinished, 600);
+    assert.equal(job.spec.template.spec.restartPolicy, "OnFailure");
+
+    const container = job.spec.template.spec.containers.find((candidate) => candidate.name === "schema-bootstrap");
+    assert.ok(container, "schema bootstrap container should be rendered");
+    assert.deepEqual(container.envFrom, [{ secretRef: { name: "agentsmith-lite-app-secrets" } }]);
+
+    const serializedJob = JSON.stringify(job);
+    assert.match(serializedJob, /agentsmith-lite-app-secrets/);
+    assert.doesNotMatch(serializedJob, /S3_SECRET_KEY/);
+    assert.doesNotMatch(serializedJob, /raw-secret/);
+  });
 });
 
 interface RoleResource {
@@ -127,4 +159,30 @@ interface RoleResource {
     resources: string[];
     verbs: string[];
   }>;
+}
+
+interface JobResource {
+  kind: "Job";
+  metadata: {
+    name: string;
+    namespace?: string;
+  };
+  spec: {
+    backoffLimit: number;
+    activeDeadlineSeconds: number;
+    ttlSecondsAfterFinished: number;
+    template: {
+      spec: {
+        restartPolicy: string;
+        containers: Array<{
+          name: string;
+          envFrom?: Array<{
+            secretRef: {
+              name: string;
+            };
+          }>;
+        }>;
+      };
+    };
+  };
 }
