@@ -450,8 +450,8 @@ scripts/deploy/status.sh --env substrate.env
 scripts/deploy/status.sh --env substrate.env --resources --base-url <url> --cookie-file <cookie-file> [--csrf-token <token>]
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run|--apply --cookie-file <cookie-file> [--csrf-token <token>] [--run-id <run-id>]
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
-scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env [--app-env app.smoke.env]
-scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.smoke.env] --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply]
+scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env [--app-env app.smoke.env] [--report out/smoke-report.json]
+scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.smoke.env] --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply] [--report out/smoke-report.json]
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 

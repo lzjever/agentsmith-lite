@@ -10,6 +10,7 @@ app_secrets_file=
 endpoint_base_url=
 endpoint_model=
 endpoint_secret_ref=
+report_path=out/smoke-report.json
 task_smoke=false
 task_reclaim_smoke=false
 task_reclaim_reap_apply=false
@@ -23,6 +24,7 @@ while [ "$#" -gt 0 ]; do
     --endpoint-base-url) endpoint_base_url="$2"; shift 2 ;;
     --endpoint-model) endpoint_model="$2"; shift 2 ;;
     --endpoint-secret-ref) endpoint_secret_ref="$2"; shift 2 ;;
+    --report) report_path="$2"; shift 2 ;;
     --task-smoke) task_smoke=true; shift ;;
     --task-reclaim-smoke) task_reclaim_smoke=true; shift ;;
     --task-reclaim-reap-apply) task_reclaim_reap_apply=true; shift ;;
@@ -74,7 +76,7 @@ base_url="${base_url:-${APP_PUBLIC_BASE_URL:-}}"
 [ -n "$base_url" ] || { echo "smoke.sh requires --base-url or APP_PUBLIC_BASE_URL" >&2; exit 2; }
 [ -n "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" ] || { echo "smoke.sh requires BUILTIN_ADMIN_INITIAL_PASSWORD from --secrets or environment" >&2; exit 2; }
 
-args=(scripts/deploy/app-smoke.mjs --base-url "$base_url")
+args=(scripts/deploy/app-smoke.mjs --base-url "$base_url" --report "$report_path")
 if [ -n "$endpoint_base_url" ]; then
   args+=(--endpoint-base-url "$endpoint_base_url")
 fi

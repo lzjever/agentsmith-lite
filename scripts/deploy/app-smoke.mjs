@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+
 const ADMIN_EMAIL = "admin@agentsmith-lite.local";
 const WORKSPACE_NAME = "Deploy Smoke";
 const PROJECT_NAME = "API Smoke";
@@ -149,6 +152,7 @@ async function main() {
 
   const report = {
     status: "ok",
+    profile: taskSmoke || taskReclaimSmoke ? "full" : "light",
     baseUrl: args.baseUrl,
     workspaceId,
     projectId,
@@ -165,7 +169,11 @@ async function main() {
     );
   }
 
-  console.log(JSON.stringify(report));
+  const reportJson = `${JSON.stringify(report)}\n`;
+  if (args.report) {
+    await writeReport(args.report, reportJson);
+  }
+  process.stdout.write(reportJson);
 }
 
 async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
@@ -398,6 +406,9 @@ function parseArgs(argv) {
       parsed.taskReclaimSmoke = true;
     } else if (arg === "--task-reclaim-reap-apply") {
       parsed.taskReclaimReapApply = true;
+    } else if (arg === "--report") {
+      parsed.report = requireValue(argv, index, arg);
+      index += 1;
     } else {
       throw new UsageError(`unknown argument: ${arg}`);
     }
@@ -434,6 +445,11 @@ function taskReclaimReapApplyEnabled(args) {
 
 function taskSmokeTimeoutSecs() {
   return parsePositiveIntegerEnv("SMOKE_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
+}
+
+async function writeReport(reportPath, reportJson) {
+  await mkdir(dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, reportJson, "utf8");
 }
 
 function parseSmokeBooleanEnv(name) {

@@ -44,7 +44,7 @@ describe("deploy app smoke", () => {
   printf 'task_reclaim_reap_apply=%s\\n' "$SMOKE_TASK_RECLAIM_REAP_APPLY"
   printf 'task_timeout=%s\\n' "$SMOKE_TASK_TIMEOUT_SECS"
 } > "$FAKE_NODE_CALLS"
-printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
+printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
 `);
     chmodSync(fakeNode, 0o755);
 
@@ -73,7 +73,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     assert.equal(existsSync(envMarker), false);
     assert.equal(existsSync(secretMarker), false);
     const call = readFileSync(callsFile, "utf8");
-    assert.match(call, /args=scripts\/deploy\/app-smoke\.mjs --base-url http:\/\/deploy\.example\.test --task-reclaim-smoke --task-reclaim-reap-apply/);
+    assert.match(call, /args=scripts\/deploy\/app-smoke\.mjs --base-url http:\/\/deploy\.example\.test --report out\/smoke-report\.json --task-reclaim-smoke --task-reclaim-reap-apply/);
     assert.doesNotMatch(call, /e2e\/smoke\/lite-smoke\.mjs/);
     assert.match(call, new RegExp(`admin_password=${escapeRegExp(adminPassword)}`));
     assert.match(call, /endpoint_base_url=https:\/\/models\.env\.test\/v1/);
@@ -83,6 +83,47 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     assert.match(call, /task_timeout=12/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+  });
+
+  it("smoke.sh forwards a report path override to app-smoke", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-report-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const fakeNode = path.join(tempDir, "node");
+    const callsFile = path.join(tempDir, "node-calls.txt");
+    const reportPath = path.join(tempDir, "reports", "custom-smoke-report.json");
+
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\n");
+    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+printf 'args=%s\\n' "$*" > "$FAKE_NODE_CALLS"
+printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
+`);
+    chmodSync(fakeNode, 0o755);
+
+    const result = spawnSync("bash", [
+      "scripts/deploy/smoke.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--report",
+      reportPath
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const call = readFileSync(callsFile, "utf8");
+    assert.match(call, new RegExp(`--report ${escapeRegExp(reportPath)}`));
+    assert.doesNotMatch(call, /--report out\/smoke-report\.json/);
   });
 
   it("smoke.sh rejects SMOKE_* keys in substrate env without printing their values", () => {
@@ -108,6 +149,8 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
 
   it("app-smoke.mjs exercises remote API smoke with cookie, CSRF, endpoint, chat, files, and operator status", async () => {
     const adminPassword = "remote-admin-secret";
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-smoke-report-"));
+    const reportPath = path.join(tempDir, "nested", "smoke-report.json");
     const requests: SmokeRequest[] = [];
     const server = createServer(async (req, res) => {
       const body = await readRequestBody(req);
@@ -204,7 +247,9 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         "--endpoint-model",
         "remote-model",
         "--endpoint-secret-ref",
-        "secret/remote-smoke"
+        "secret/remote-smoke",
+        "--report",
+        reportPath
       ], {
         BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
       });
@@ -213,6 +258,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       assert.equal(result.stderr, "");
       const report = JSON.parse(result.stdout) as {
         status: string;
+        profile: string;
         baseUrl: string;
         workspaceId: string;
         projectId: string;
@@ -221,14 +267,19 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       };
       assert.deepEqual(report, {
         status: "ok",
+        profile: "light",
         baseUrl,
         workspaceId: "workspace_1",
         projectId: "project_1",
         chat: { status: "completed" },
         task: { status: "skipped" }
       });
+      assert.equal(readFileSync(reportPath, "utf8"), result.stdout);
+      assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), report);
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/remote-smoke/);
+      assert.doesNotMatch(readFileSync(reportPath, "utf8"), new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(readFileSync(reportPath, "utf8"), /secret\/remote-smoke/);
       assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
 
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
@@ -308,6 +359,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       assert.equal(result.status, 0, result.stderr);
       assert.deepEqual(JSON.parse(result.stdout), {
         status: "ok",
+        profile: "light",
         baseUrl,
         workspaceId: "workspace_skip",
         projectId: "project_skip",
@@ -498,6 +550,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       const report = JSON.parse(result.stdout);
       assert.deepEqual(report, {
         status: "ok",
+        profile: "full",
         baseUrl,
         workspaceId: "workspace_task",
         projectId: "project_task",
@@ -739,6 +792,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       const report = JSON.parse(result.stdout);
       assert.deepEqual(report, {
         status: "ok",
+        profile: "full",
         baseUrl,
         workspaceId: "workspace_reclaim",
         projectId: "project_reclaim",
@@ -810,6 +864,8 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
 
   it("app-smoke.mjs can opt in to scoped reclaim reap apply without any unscoped apply", async () => {
     const adminPassword = "apply-admin-secret";
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-smoke-reclaim-report-"));
+    const reportPath = path.join(tempDir, "reports", "smoke-report.json");
     const requests: SmokeRequest[] = [];
     let reapCalls = 0;
     const server = createServer(async (req, res) => {
@@ -901,7 +957,9 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         "--endpoint-secret-ref",
         "secret/apply-smoke",
         "--task-reclaim-smoke",
-        "--task-reclaim-reap-apply"
+        "--task-reclaim-reap-apply",
+        "--report",
+        reportPath
       ], {
         BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
       });
@@ -910,6 +968,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       const report = JSON.parse(result.stdout);
       assert.deepEqual(report, {
         status: "ok",
+        profile: "full",
         baseUrl,
         workspaceId: "workspace_apply",
         projectId: "project_apply",
@@ -946,8 +1005,12 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
           }
         }
       });
+      assert.equal(readFileSync(reportPath, "utf8"), result.stdout);
+      assert.deepEqual(JSON.parse(readFileSync(reportPath, "utf8")), report);
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/apply-smoke/);
+      assert.doesNotMatch(readFileSync(reportPath, "utf8"), new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(readFileSync(reportPath, "utf8"), /secret\/apply-smoke/);
       assert.equal(reapCalls, 3);
       assert.deepEqual(requests.filter((request) => request.url === "/api/operator/sandbox/reap").map((request) => JSON.parse(request.body)), [
         { runId: "run_reclaim_apply" },
