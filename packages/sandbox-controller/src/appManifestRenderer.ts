@@ -11,6 +11,7 @@ export interface AppManifestInput {
 }
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
+  rejectDeferredAuthSurface(input);
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
   const appDataRoot = resolveAppDataRoot(input.env);
   const labels = {
@@ -25,7 +26,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   );
   const appSecretData: Record<string, string> = {};
   const appSecretKeys = Object.keys(input.secrets).filter((key) =>
-    ["POSTGRES_APP_URL", "APP_SESSION_SECRET", "BUILTIN_ADMIN_INITIAL_PASSWORD", "OIDC_CLIENT_SECRET"].includes(key) ||
+    ["POSTGRES_APP_URL", "APP_SESSION_SECRET", "BUILTIN_ADMIN_INITIAL_PASSWORD"].includes(key) ||
     key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_")
   );
   for (const key of appSecretKeys) {
@@ -52,7 +53,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
           input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
-        AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin",
         ...modelBaseUrlConfig
       }
     },
@@ -197,6 +197,14 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     }
   ];
+}
+
+function rejectDeferredAuthSurface(input: AppManifestInput): void {
+  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"]) {
+    if (Object.hasOwn(input.env, key) || Object.hasOwn(input.secrets, key)) {
+      throw new Error(`deferred auth key ${key} is not allowed in app manifests`);
+    }
+  }
 }
 
 function resolveAppDataRoot(env: Record<string, string>): string {

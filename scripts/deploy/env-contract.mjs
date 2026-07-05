@@ -10,8 +10,7 @@ const substrateEnvKeys = new Set([
   "APP_PUBLIC_BASE_URL",
   "APP_INGRESS_CLASS",
   "APP_TLS_SECRET_NAME",
-  "JUICEFS_PVC_NAME",
-  "AUTH_MODE"
+  "JUICEFS_PVC_NAME"
 ]);
 
 const appEnvKeys = new Set([
@@ -35,14 +34,11 @@ const smokeEnvKeys = new Set([
 const productSecretKeys = new Set([
   "POSTGRES_APP_URL",
   "APP_SESSION_SECRET",
-  "BUILTIN_ADMIN_INITIAL_PASSWORD",
-  "OIDC_CLIENT_SECRET"
+  "BUILTIN_ADMIN_INITIAL_PASSWORD"
 ]);
 
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
-  "OIDC_ISSUER_URL",
-  "OIDC_CLIENT_ID",
   "REGISTRY_URL",
   "IMAGE_PULL_SECRET_NAME"
 ]);
@@ -92,7 +88,7 @@ export function parseContractText(text, options = {}) {
       continue;
     }
     const { key, value } = parsed;
-    const disposition = classifyKey(key, kind, profile);
+    const disposition = classifyKey(key, kind, profile, value);
     if (disposition === "allow") {
       entries.set(key, value);
       continue;
@@ -151,7 +147,12 @@ function parseValue(rawValue, key, context) {
   return rawValue.slice(1, -1);
 }
 
-function classifyKey(key, kind, profile) {
+function classifyKey(key, kind, profile, value) {
+  const authMetadataDisposition = classifyAuthMetadataKey(key, kind, value);
+  if (authMetadataDisposition) {
+    return authMetadataDisposition;
+  }
+
   if (kind === "env") {
     if (isSubstrateEnvKey(key)) {
       return "allow";
@@ -209,6 +210,28 @@ function classifyKey(key, kind, profile) {
   return "unknown-secrets";
 }
 
+function classifyAuthMetadataKey(key, kind, value) {
+  if (key === "AUTH_MODE") {
+    if (kind === "env" && (value.trim() === "" || value.trim() === "builtin_admin")) {
+      return "ignore";
+    }
+    return "invalid-auth-mode";
+  }
+  if (key === "OIDC_CLIENT_SECRET") {
+    if (kind === "secrets" && value.trim() === "") {
+      return "ignore";
+    }
+    return "non-empty-oidc-secret";
+  }
+  if (key === "OIDC_ISSUER_URL" || key === "OIDC_CLIENT_ID") {
+    if (kind === "env" && value.trim() === "") {
+      return "ignore";
+    }
+    return "non-empty-oidc-public-metadata";
+  }
+  return null;
+}
+
 function isSubstrateEnvKey(key) {
   return substrateEnvKeys.has(key);
 }
@@ -250,6 +273,12 @@ function formatKeyError(disposition, key, file, lineNumber) {
       return `smoke overlay key ${key} requires --profile smoke at ${location}`;
     case "product-secret-in-app-secrets":
       return `product secret key ${key} must come from substrate secrets at ${location}`;
+    case "invalid-auth-mode":
+      return `deferred auth key ${key} must be empty or builtin_admin in substrate env at ${location}`;
+    case "non-empty-oidc-secret":
+      return `deferred auth key ${key} must be empty in substrate secrets at ${location}`;
+    case "non-empty-oidc-public-metadata":
+      return `deferred auth key ${key} must be empty in substrate env at ${location}`;
     default:
       return `invalid env contract key ${key} at ${location}`;
   }

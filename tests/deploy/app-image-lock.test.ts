@@ -192,7 +192,6 @@ describe("deploy app images.lock", () => {
     assert.equal(result.status, 0, result.stderr);
     const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
     assert.match(manifest, /namespace: agentsmith-preview/);
-    assert.match(manifest, /AUTH_MODE: oidc/);
     assert.match(manifest, /JUICEFS_PVC_NAME: agentsmith-lite-files/);
     assert.match(manifest, /kind: Ingress/);
     assert.match(manifest, /ingressClassName: nginx/);
@@ -202,7 +201,10 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: https:\/\/models\.example\.test\/v1/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: sk-overlay-model-key/);
     assert.match(manifest, /POSTGRES_APP_URL: postgresql:\/\/app:secret@db\/agentsmith/);
-    assert.match(manifest, /OIDC_CLIENT_SECRET: oidc-client-secret-from-substrate/);
+    assert.doesNotMatch(manifest, /AUTH_MODE/);
+    assert.doesNotMatch(manifest, /OIDC_CLIENT_SECRET/);
+    assert.doesNotMatch(manifest, /OIDC_ISSUER_URL/);
+    assert.doesNotMatch(manifest, /OIDC_CLIENT_ID/);
     assert.doesNotMatch(manifest + result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
@@ -239,9 +241,9 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_REGION=DO_NOT_PRINT_S3_REGION",
       "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
       "S3_FORCE_PATH_STYLE=DO_NOT_PRINT_S3_FORCE_PATH_STYLE",
-      "AUTH_MODE=oidc",
-      "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL",
-      "OIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID",
+      "AUTH_MODE=builtin_admin",
+      "OIDC_ISSUER_URL=",
+      "OIDC_CLIENT_ID=",
       "JUICEFS_VOLUME_NAME=DO_NOT_PRINT_JUICEFS_VOLUME_NAME",
       "JUICEFS_BUCKET=DO_NOT_PRINT_JUICEFS_BUCKET",
       "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
@@ -267,7 +269,7 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
       "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
       "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
-      "OIDC_CLIENT_SECRET=oidc-client-secret-from-substrate",
+      "OIDC_CLIENT_SECRET=",
       ""
     ].join("\n")
   );

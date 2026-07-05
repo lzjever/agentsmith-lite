@@ -132,6 +132,8 @@ describe("app manifest rendering", () => {
     });
 
     const serialized = JSON.stringify(manifests);
+    assert.doesNotMatch(serialized, /AUTH_MODE/);
+    assert.doesNotMatch(serialized, /OIDC_CLIENT_SECRET/);
     assert.match(serialized, /POSTGRES_APP_URL/);
     assert.match(serialized, /APP_SESSION_SECRET/);
     assert.match(serialized, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
@@ -155,6 +157,40 @@ describe("app manifest rendering", () => {
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
+  });
+
+  it("fails closed when deferred auth keys reach the renderer without leaking values", () => {
+    const cases: Array<{
+      key: string;
+      location: "env" | "secrets";
+      value: string;
+    }> = [
+      { key: "AUTH_MODE", location: "env", value: "DO_NOT_PRINT_AUTH_MODE" },
+      { key: "OIDC_CLIENT_SECRET", location: "secrets", value: "DO_NOT_PRINT_OIDC_CLIENT_SECRET" },
+      { key: "OIDC_ISSUER_URL", location: "env", value: "DO_NOT_PRINT_OIDC_ISSUER_URL_ENV" },
+      { key: "OIDC_ISSUER_URL", location: "secrets", value: "DO_NOT_PRINT_OIDC_ISSUER_URL_SECRET" },
+      { key: "OIDC_CLIENT_ID", location: "env", value: "DO_NOT_PRINT_OIDC_CLIENT_ID_ENV" },
+      { key: "OIDC_CLIENT_ID", location: "secrets", value: "DO_NOT_PRINT_OIDC_CLIENT_ID_SECRET" }
+    ];
+
+    for (const candidate of cases) {
+      assert.throws(
+        () =>
+          renderAppManifests({
+            namespace: "agentsmith",
+            imageTag: "dev",
+            env: candidate.location === "env" ? { [candidate.key]: candidate.value } : {},
+            secrets: candidate.location === "secrets" ? { [candidate.key]: candidate.value } : {}
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error, candidate.key);
+          assert.match(error.message, new RegExp(candidate.key), candidate.key);
+          assert.doesNotMatch(error.message, new RegExp(candidate.value), candidate.key);
+          return true;
+        },
+        `${candidate.key} in ${candidate.location}`
+      );
+    }
   });
 
   it("defaults the API data root to the PVC mount root while allowing env override", () => {
@@ -257,6 +293,7 @@ describe("app manifest rendering", () => {
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "dry-run");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "agentsmith-lite/botified-runner:dev");
+    assert.equal(configMapData?.AUTH_MODE, undefined);
     assert.ok(
       role.rules.some(
         (rule) =>

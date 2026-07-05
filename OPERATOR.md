@@ -7,7 +7,8 @@ Required app product secrets:
 - `POSTGRES_APP_URL`
 - `APP_SESSION_SECRET`
 - `BUILTIN_ADMIN_INITIAL_PASSWORD` for built-in admin bootstrap
-- optional OIDC/admin secrets when OIDC is enabled later
+
+OIDC/Keycloak is deferred. The current app does not consume or render `OIDC_CLIENT_SECRET`. The app deploy contract tolerates generated builtin auth metadata and empty OIDC placeholders (`AUTH_MODE=builtin_admin`, `OIDC_ISSUER_URL=`, `OIDC_CLIENT_ID=`, `OIDC_CLIENT_SECRET=`) and filters them; non-builtin auth modes and non-empty OIDC values fail closed without printing values.
 
 Substrate-only secrets such as `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `JUICEFS_META_URL` must not be injected into app server, sandbox pods, Botified env, or app-owned Secrets.
 

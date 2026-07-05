@@ -19,17 +19,79 @@ describe("deploy env contract", () => {
       KUBECONFIG_PATH: "/tmp/agentsmith.kubeconfig",
       KUBE_CONTEXT: "kind-agentsmith",
       KUBE_NAMESPACE: "agentsmith-preview",
-      AUTH_MODE: "oidc",
       JUICEFS_PVC_NAME: "agentsmith-lite-files",
       APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
       APP_INGRESS_CLASS: "nginx",
       APP_TLS_SECRET_NAME: "agentsmith-lite-tls",
       POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
       APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
-      BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret-from-substrate",
-      OIDC_CLIENT_SECRET: "oidc-client-secret-from-substrate"
+      BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret-from-substrate"
     });
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
+  });
+
+  it("rejects active OIDC auth and non-empty OIDC secret values without printing their values", () => {
+    const cases: Array<{
+      name: string;
+      flag: "--env" | "--secrets";
+      file: string;
+      contents: string;
+      error: RegExp;
+      leakedValue: RegExp;
+    }> = [
+      {
+        name: "OIDC auth mode in substrate env",
+        flag: "--env",
+        file: "substrate.env",
+        contents: "AUTH_MODE=oidc\n",
+        error: /AUTH_MODE/,
+        leakedValue: /oidc/
+      },
+      {
+        name: "non-builtin auth mode in substrate env",
+        flag: "--env",
+        file: "substrate.env",
+        contents: "AUTH_MODE=DO_NOT_PRINT_AUTH_MODE\n",
+        error: /AUTH_MODE/,
+        leakedValue: /DO_NOT_PRINT_AUTH_MODE/
+      },
+      {
+        name: "non-empty OIDC client secret in substrate secrets",
+        flag: "--secrets",
+        file: "substrate.secrets.env",
+        contents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "non-empty OIDC issuer URL in substrate env",
+        flag: "--env",
+        file: "substrate.env",
+        contents: "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\n",
+        error: /OIDC_ISSUER_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      },
+      {
+        name: "non-empty OIDC client ID in substrate env",
+        flag: "--env",
+        file: "substrate.env",
+        contents: "OIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID\n",
+        error: /OIDC_CLIENT_ID/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
+      }
+    ];
+
+    for (const candidate of cases) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-${candidate.name.replace(/\s+/g, "-")}-`));
+      const contractFile = path.join(tempDir, candidate.file);
+      writeFileSync(contractFile, candidate.contents);
+
+      const result = runContract(["export", candidate.flag, contractFile]);
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, candidate.error, candidate.name);
+      assert.doesNotMatch(result.stderr + result.stdout, candidate.leakedValue, candidate.name);
+    }
   });
 
   it("rejects app-only keys in substrate env without printing the value", () => {
@@ -247,9 +309,9 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_REGION=DO_NOT_PRINT_S3_REGION",
       "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
       "S3_FORCE_PATH_STYLE=DO_NOT_PRINT_S3_FORCE_PATH_STYLE",
-      "AUTH_MODE=oidc",
-      "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL",
-      "OIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID",
+      "AUTH_MODE=builtin_admin",
+      "OIDC_ISSUER_URL=",
+      "OIDC_CLIENT_ID=",
       "JUICEFS_VOLUME_NAME=DO_NOT_PRINT_JUICEFS_VOLUME_NAME",
       "JUICEFS_BUCKET=DO_NOT_PRINT_JUICEFS_BUCKET",
       "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
@@ -275,7 +337,7 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
       "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
       "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
-      "OIDC_CLIENT_SECRET=oidc-client-secret-from-substrate",
+      "OIDC_CLIENT_SECRET=",
       ""
     ].join("\n")
   );

@@ -21,6 +21,9 @@ describe("deploy app smoke", () => {
 
     writeFileSync(envFile, [
       "APP_PUBLIC_BASE_URL=http://deploy.example.test",
+      "AUTH_MODE=builtin_admin",
+      "OIDC_ISSUER_URL=",
+      "OIDC_CLIENT_ID=",
       `APP_INGRESS_CLASS=$(touch ${envMarker})`,
       ""
     ].join("\n"));
@@ -33,7 +36,7 @@ describe("deploy app smoke", () => {
       "SMOKE_TASK_RECLAIM_REAP_APPLY=true",
       "SMOKE_TASK_TIMEOUT_SECS=12"
     ].join("\n"));
-    writeFileSync(secretsFile, [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`, `OIDC_CLIENT_SECRET=$(touch ${secretMarker})`, ""].join("\n"));
+    writeFileSync(secretsFile, [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`, "OIDC_CLIENT_SECRET=", `S3_SECRET_KEY=$(touch ${secretMarker})`, ""].join("\n"));
     writeFileSync(fakeNode, `#!/usr/bin/env bash
 {
   printf 'args=%s\\n' "$*"
@@ -93,8 +96,8 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
     const callsFile = path.join(tempDir, "node-calls.txt");
     const reportPath = path.join(tempDir, "reports", "custom-smoke-report.json");
 
-    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\n");
-    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\n");
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\nAUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\n");
+    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\nOIDC_CLIENT_SECRET=\n");
     writeFileSync(fakeNode, `#!/usr/bin/env bash
 printf 'args=%s\\n' "$*" > "$FAKE_NODE_CALLS"
 printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
@@ -130,8 +133,8 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-substrate-smoke-"));
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
-    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\nSMOKE_TASK=DO_NOT_PRINT_SMOKE_TASK\n");
-    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\n");
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\nAUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\nSMOKE_TASK=DO_NOT_PRINT_SMOKE_TASK\n");
+    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\nOIDC_CLIENT_SECRET=\n");
 
     const result = spawnSync("bash", ["scripts/deploy/smoke.sh", "--env", envFile, "--secrets", secretsFile], {
       cwd: process.cwd(),

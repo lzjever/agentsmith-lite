@@ -19,10 +19,10 @@ describe("deploy app doctor artifact checks", () => {
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
     const outDir = path.join(tempDir, "manifests");
-    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\nAUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\n");
     writeFileSync(
       secretsFile,
-      `POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=${validAppSessionSecret}\nBUILTIN_ADMIN_INITIAL_PASSWORD=admin-password\n`
+      `POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=${validAppSessionSecret}\nBUILTIN_ADMIN_INITIAL_PASSWORD=admin-password\nOIDC_CLIENT_SECRET=\n`
     );
 
     const render = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
@@ -58,7 +58,7 @@ describe("deploy app doctor artifact checks", () => {
     const fixture = writeDoctorFixture({
       extraEnv: [`APP_INGRESS_CLASS=$(touch ${envMarker})`]
     });
-    writeFileSync(fixture.secretsFile, `${readFileSync(fixture.secretsFile, "utf8")}OIDC_CLIENT_SECRET=$(touch ${secretMarker})\n`);
+    writeFileSync(fixture.secretsFile, `${readFileSync(fixture.secretsFile, "utf8")}S3_SECRET_KEY=$(touch ${secretMarker})\n`);
 
     const result = runDoctor(fixture, []);
 
@@ -479,6 +479,9 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
     envFile,
     [
       "KUBE_NAMESPACE=agentsmith",
+      "AUTH_MODE=builtin_admin",
+      "OIDC_ISSUER_URL=",
+      "OIDC_CLIENT_ID=",
       ...(options.publicBaseUrl ? [`APP_PUBLIC_BASE_URL=${options.publicBaseUrl}`] : []),
       ...(options.extraEnv ?? []),
       ""
@@ -498,6 +501,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
       `POSTGRES_APP_URL=${options.postgresUrl ?? "postgres://app"}`,
       `APP_SESSION_SECRET=${options.appSessionSecret ?? validAppSessionSecret}`,
       ...(adminPassword === null ? [] : [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`]),
+      "OIDC_CLIENT_SECRET=",
       ""
     ].join("\n")
   );

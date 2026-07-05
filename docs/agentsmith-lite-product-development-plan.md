@@ -67,7 +67,7 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 | endpoint edit/delete、多 provider abstraction、模型路由 UI | Core 先支持 create/list/use；编辑删除后续再做。 |
 | project file delete UI、文件版本、save/restore、回收站 | Server-side file delete API 和 core smoke 已属于 Core；UI 删除流程、版本化恢复和回收站后置，避免把数据恢复语义过早产品化。 |
 | audit/usage dashboard | 可先保留 server logs/task events/resource counters；产品化报表后置。 |
-| OIDC/Keycloak、组织级 RBAC | 内建 admin 先完成私有化闭环。 |
+| OIDC/Keycloak、组织级 RBAC | 内建 admin 先完成私有化闭环。当前 app 不消费 `OIDC_CLIENT_SECRET`；generated `AUTH_MODE=builtin_admin` 和空 OIDC placeholders 可被容忍但必须过滤，不进入 app runtime/manifests。 |
 | TUI 产品面 | 未来 TUI 只能作为 API client，不承载业务逻辑。 |
 | product terminal、K8s `pods/exec` | shell 只能通过 Botified bash tool 运行在 sandbox 中。 |
 | warm pool、多租户高级 quota、跨集群调度 | 先用 one pod per task + TTL/reap。 |
@@ -172,7 +172,7 @@ Secret boundary:
 
 - `substrate.env` 不得包含 secret key/value。
 - `substrate.secrets.env` 包含 credentials，必须 `chmod 0600`。
-- App 只可把产品级 secret 渲染到 app-owned K8s Secret：`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`，以及未来显式启用的 OIDC/admin secrets。
+- App 只可把产品级 secret 渲染到 app-owned K8s Secret：`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`。OIDC/Keycloak deferred；当前 app 不消费 `OIDC_CLIENT_SECRET`，也不把 generated builtin auth metadata 或空 OIDC placeholders 导出到 app manifests/runtime；非 builtin `AUTH_MODE` 或非空 OIDC values 必须 fail closed 且不泄漏 value。
 - S3 raw credentials 和 `JUICEFS_META_URL` 只属于 substrate/CSI，不得注入 Web/API/Botified/sandbox containers。
 
 ### 3.2 `agentsmith-lite`
@@ -463,7 +463,7 @@ scripts/deploy/down.sh --env substrate.env [--dry-run]
 
 Known command status and gaps:
 
-- `--env`/`--secrets` 只表示 substrate contract；`--app-env`/`--app-secrets` 只表示 app-owned deploy/runtime/smoke overlay。`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`、`OIDC_CLIENT_SECRET` 仍来自 substrate secrets；`AGENTSMITH_LITE_SANDBOX_MODE`、`AGENTSMITH_LITE_MODEL_BASE_URL_*`、`SMOKE_*` 等来自 app env overlay，`AGENTSMITH_LITE_MODEL_API_KEY_*` 来自 app secrets overlay。raw `S3_*`/JuiceFS substrate secrets 不能进入 app overlay。
+- `--env`/`--secrets` 只表示 substrate contract；`--app-env`/`--app-secrets` 只表示 app-owned deploy/runtime/smoke overlay。`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD` 仍来自 substrate secrets；`AGENTSMITH_LITE_SANDBOX_MODE`、`AGENTSMITH_LITE_MODEL_BASE_URL_*`、`SMOKE_*` 等来自 app env overlay，`AGENTSMITH_LITE_MODEL_API_KEY_*` 来自 app secrets overlay。OIDC/Keycloak deferred；当前 app 不消费 `OIDC_CLIENT_SECRET`，可容忍 generated `AUTH_MODE=builtin_admin`、`OIDC_ISSUER_URL=`、`OIDC_CLIENT_ID=`、`OIDC_CLIENT_SECRET=`，但这些 key 都不会导出到 app runtime 或 `appManifestRenderer`；非 builtin `AUTH_MODE` 或非空 OIDC values 必须 fail closed 且不泄漏 value。raw `S3_*`/JuiceFS substrate secrets 不能进入 app overlay。
 - `scripts/deploy/preflight.sh` 是 app doctor static-only thin entry，复用 env/manifest/bundle checks；它不运行 smoke/e2e/visual/build/push/import/live K8s，也不替代 substrate doctor 和外部 K8s/JuiceFS evidence。
 - `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` 已作为本地 dev env 契约补齐：allowlist 限制可加载的 substrate contract 与 app overlay key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
 - `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker；`SMOKE_*` 只放在 app smoke overlay，不放在 substrate env。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。它们都不进入默认 gate，也不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file`、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
@@ -592,7 +592,7 @@ Deferred:
 - chat_sessions/chat_messages/chat_attachments；
 - audit/usage dashboard；
 - project file delete UI、版本化恢复、回收站；
-- OIDC。
+- OIDC/Keycloak auth 和 OIDC client secret consumption。
 
 ### P3：Botified Sandbox Agent Tasks
 

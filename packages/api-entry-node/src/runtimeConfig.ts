@@ -1,6 +1,18 @@
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 
+export type AuthMode = "builtin_admin";
 export type SandboxMode = "dry-run" | "live";
+
+export function parseAuthMode(value: string | undefined): AuthMode {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "builtin_admin";
+  }
+  if (trimmed === "builtin_admin") {
+    return "builtin_admin";
+  }
+  throw new Error("AUTH_MODE must be empty or builtin_admin");
+}
 
 export function parseSandboxMode(value: string | undefined): SandboxMode {
   const trimmed = value?.trim();

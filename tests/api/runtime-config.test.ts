@@ -2,12 +2,28 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   optionalRuntimeTickIntervalMs,
+  parseAuthMode,
   parseSandboxMode,
   parseSandboxNamespaceLimit
 } from "../../packages/api-entry-node/src/runtimeConfig.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 describe("runtime config", () => {
+  it("fails closed for deferred auth modes while allowing empty builtin admin defaults", () => {
+    assert.equal(parseAuthMode(undefined), "builtin_admin");
+    assert.equal(parseAuthMode(""), "builtin_admin");
+    assert.equal(parseAuthMode("   "), "builtin_admin");
+    assert.equal(parseAuthMode("builtin_admin"), "builtin_admin");
+    assert.equal(parseAuthMode(" builtin_admin "), "builtin_admin");
+
+    for (const value of ["oidc", "OIDC", "keycloak", "false", "0"]) {
+      assert.throws(
+        () => parseAuthMode(value),
+        /AUTH_MODE must be empty or builtin_admin/
+      );
+    }
+  });
+
   it("parses sandbox mode fail-closed except for empty dry-run defaults", () => {
     assert.equal(parseSandboxMode(undefined), "dry-run");
     assert.equal(parseSandboxMode(""), "dry-run");
