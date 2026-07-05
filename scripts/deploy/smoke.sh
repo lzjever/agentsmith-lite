@@ -6,6 +6,7 @@ base_url=
 endpoint_base_url=
 endpoint_model=
 endpoint_secret_ref=
+task_smoke=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base-url) base_url="$2"; shift 2 ;;
@@ -14,6 +15,7 @@ while [ "$#" -gt 0 ]; do
     --endpoint-base-url) endpoint_base_url="$2"; shift 2 ;;
     --endpoint-model) endpoint_model="$2"; shift 2 ;;
     --endpoint-secret-ref) endpoint_secret_ref="$2"; shift 2 ;;
+    --task-smoke) task_smoke=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -32,9 +34,13 @@ fi
 if [ -n "$endpoint_secret_ref" ]; then
   args+=(--endpoint-secret-ref "$endpoint_secret_ref")
 fi
+if [ "$task_smoke" = true ]; then
+  args+=(--task-smoke)
+fi
 
 BUILTIN_ADMIN_INITIAL_PASSWORD="$BUILTIN_ADMIN_INITIAL_PASSWORD" \
 SMOKE_ENDPOINT_BASE_URL="${SMOKE_ENDPOINT_BASE_URL:-}" \
 SMOKE_ENDPOINT_MODEL="${SMOKE_ENDPOINT_MODEL:-}" \
 SMOKE_ENDPOINT_SECRET_REF="${SMOKE_ENDPOINT_SECRET_REF:-}" \
+SMOKE_TASK="${SMOKE_TASK:-}" \
 node "${args[@]}"

@@ -21,7 +21,8 @@ describe("deploy app smoke", () => {
       "BUILTIN_ADMIN_INITIAL_PASSWORD=wrong-from-env",
       "SMOKE_ENDPOINT_BASE_URL=https://models.env.test/v1",
       "SMOKE_ENDPOINT_MODEL=env-model",
-      "SMOKE_ENDPOINT_SECRET_REF=secret/env"
+      "SMOKE_ENDPOINT_SECRET_REF=secret/env",
+      "SMOKE_TASK=true"
     ].join("\n"));
     writeFileSync(secretsFile, `BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}\n`);
     writeFileSync(fakeNode, `#!/usr/bin/env bash
@@ -29,8 +30,9 @@ describe("deploy app smoke", () => {
   printf 'args=%s\\n' "$*"
   printf 'admin_password=%s\\n' "$BUILTIN_ADMIN_INITIAL_PASSWORD"
   printf 'endpoint_base_url=%s\\n' "$SMOKE_ENDPOINT_BASE_URL"
+  printf 'task_smoke=%s\\n' "$SMOKE_TASK"
 } > "$FAKE_NODE_CALLS"
-printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"}}\\n'
+printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
 `);
     chmodSync(fakeNode, 0o755);
 
@@ -56,6 +58,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     assert.doesNotMatch(call, /e2e\/smoke\/lite-smoke\.mjs/);
     assert.match(call, new RegExp(`admin_password=${escapeRegExp(adminPassword)}`));
     assert.match(call, /endpoint_base_url=https:\/\/models\.env\.test\/v1/);
+    assert.match(call, /task_smoke=true/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
   });
@@ -171,13 +174,15 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         workspaceId: string;
         projectId: string;
         chat: { status: string };
+        task: { status: string };
       };
       assert.deepEqual(report, {
         status: "ok",
         baseUrl,
         workspaceId: "workspace_1",
         projectId: "project_1",
-        chat: { status: "completed" }
+        chat: { status: "completed" },
+        task: { status: "skipped" }
       });
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/remote-smoke/);
@@ -197,6 +202,7 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         "DELETE /api/projects/project_1/files",
         "GET /api/operator/sandbox/status"
       ]);
+      assert.equal(requests.some((request) => request.url?.includes("/tasks")), false);
       for (const request of requests.slice(3)) {
         assert.equal(request.cookie, "asl_session=smoke-session", `${request.method} ${request.url} missing session cookie`);
         assert.equal(request.csrf, "csrf-smoke", `${request.method} ${request.url} missing csrf token`);
@@ -262,7 +268,8 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         baseUrl,
         workspaceId: "workspace_skip",
         projectId: "project_skip",
-        chat: { status: "skipped" }
+        chat: { status: "skipped" },
+        task: { status: "skipped" }
       });
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
@@ -276,6 +283,241 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
         "DELETE /api/projects/project_skip/files",
         "GET /api/operator/sandbox/status"
       ]);
+      assert.equal(requests.some((request) => request.url?.includes("/tasks")), false);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs runs task create and cancel only when explicitly enabled", async () => {
+    const adminPassword = "task-admin-secret";
+    const requests: SmokeRequest[] = [];
+    const server = createServer(async (req, res) => {
+      const body = await readRequestBody(req);
+      requests.push({
+        method: req.method,
+        url: req.url,
+        cookie: req.headers.cookie,
+        csrf: req.headers["x-csrf-token"]?.toString(),
+        body
+      });
+      const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/api/health") {
+        res.end(JSON.stringify({ status: "ok", version: "test" }));
+      } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+        assert.deepEqual(parsedBody, { password: adminPassword });
+        res.end(JSON.stringify({ created: true }));
+      } else if (req.method === "POST" && req.url === "/api/auth/login") {
+        assert.deepEqual(parsedBody, {
+          email: "admin@agentsmith-lite.local",
+          password: adminPassword
+        });
+        res.setHeader("set-cookie", "asl_session=task-session; HttpOnly; Path=/");
+        res.end(JSON.stringify({ csrfToken: "csrf-task" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces") {
+        assert.deepEqual(parsedBody, { name: "Deploy Smoke" });
+        res.end(JSON.stringify({ id: "workspace_task", name: "Deploy Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces/workspace_task/projects") {
+        assert.deepEqual(parsedBody, { name: "API Smoke" });
+        res.end(JSON.stringify({ id: "project_task", workspaceId: "workspace_task", name: "API Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_task/endpoints") {
+        assert.deepEqual(parsedBody, {
+          name: "Deploy Smoke Endpoint",
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.task.test/v1",
+          model: "task-model",
+          apiKeySecretRef: "secret/task-smoke",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        });
+        res.end(JSON.stringify({
+          id: "endpoint_task",
+          projectId: "project_task",
+          baseUrl: "https://models.task.test/v1",
+          model: "task-model",
+          protocol: "openai_chat_completions",
+          hasCredentialRef: true
+        }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_task/chat") {
+        assert.deepEqual(parsedBody, {
+          endpointId: "endpoint_task",
+          messages: [{ role: "user", content: "deploy smoke" }]
+        });
+        res.end(JSON.stringify({
+          message: { role: "assistant", content: "ok" },
+          endpointSnapshot: {
+            id: "endpoint_task",
+            baseUrl: "https://models.task.test/v1",
+            model: "task-model",
+            protocol: "openai_chat_completions"
+          }
+        }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_task/files") {
+        assert.deepEqual(parsedBody, {
+          path: "files/deploy-smoke.txt",
+          content: "hello from deploy smoke\n"
+        });
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_task/files?path=files") {
+        res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_task/files/download?path=files%2Fdeploy-smoke.txt") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+      } else if (req.method === "DELETE" && req.url === "/api/projects/project_task/files") {
+        assert.deepEqual(parsedBody, { path: "files/deploy-smoke.txt" });
+        res.end(JSON.stringify({ deleted: true }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+        res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_task/tasks") {
+        assert.deepEqual(parsedBody, {
+          endpointId: "endpoint_task",
+          prompt: "deploy smoke task: cancel immediately; do not modify files"
+        });
+        assert.equal(JSON.stringify(parsedBody).includes("secret/task-smoke"), false);
+        res.end(JSON.stringify({
+          id: "task_smoke",
+          status: "running",
+          endpointId: "endpoint_task",
+          sandbox: {
+            resources: [
+              { kind: "Secret", metadata: { name: "asl-botified-task-smoke" }, stringData: { BOTIFIED_SERVICE_KEY: "task-service-key-secret" } }
+            ]
+          }
+        }));
+      } else if (req.method === "POST" && req.url === "/api/tasks/task_smoke/cancel") {
+        assert.equal(body, "");
+        res.end(JSON.stringify({ id: "task_smoke", status: "stopping" }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.task.test/v1",
+        "--endpoint-model",
+        "task-model",
+        "--endpoint-secret-ref",
+        "secret/task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword,
+        SMOKE_TASK: "true"
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, "");
+      const report = JSON.parse(result.stdout);
+      assert.deepEqual(report, {
+        status: "ok",
+        baseUrl,
+        workspaceId: "workspace_task",
+        projectId: "project_task",
+        chat: { status: "completed" },
+        task: {
+          status: "completed",
+          taskId: "task_smoke",
+          createStatus: "running",
+          cancelStatus: "stopping"
+        }
+      });
+      assert.notEqual(report.task.createStatus, 200);
+      assert.notEqual(report.task.cancelStatus, 200);
+      assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(result.stdout, /secret\/task-smoke/);
+      assert.doesNotMatch(result.stdout, /BOTIFIED_SERVICE_KEY|task-service-key-secret/);
+      assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+
+      assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
+        "GET /api/health",
+        "POST /api/auth/bootstrap",
+        "POST /api/auth/login",
+        "POST /api/workspaces",
+        "POST /api/workspaces/workspace_task/projects",
+        "POST /api/projects/project_task/endpoints",
+        "POST /api/projects/project_task/chat",
+        "POST /api/projects/project_task/files",
+        "GET /api/projects/project_task/files?path=files",
+        "GET /api/projects/project_task/files/download?path=files%2Fdeploy-smoke.txt",
+        "DELETE /api/projects/project_task/files",
+        "GET /api/operator/sandbox/status",
+        "POST /api/projects/project_task/tasks",
+        "POST /api/tasks/task_smoke/cancel"
+      ]);
+      const taskCreate = requests.find((request) => request.url === "/api/projects/project_task/tasks");
+      const taskCancel = requests.find((request) => request.url === "/api/tasks/task_smoke/cancel");
+      assert.ok(taskCreate);
+      assert.ok(taskCancel);
+      assert.equal(taskCreate.cookie, "asl_session=task-session");
+      assert.equal(taskCreate.csrf, "csrf-task");
+      assert.equal(taskCancel.cookie, "asl_session=task-session");
+      assert.equal(taskCancel.csrf, "csrf-task");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs rejects task smoke before HTTP when endpoint config is incomplete", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      res.statusCode = 500;
+      res.end("unexpected request");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret"
+      });
+
+      assert.equal(result.status, 2);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /task smoke requires endpoint smoke config/i);
+      assert.equal(requestCount, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs strictly parses SMOKE_TASK before HTTP", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      res.statusCode = 500;
+      res.end("unexpected request");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
+        SMOKE_TASK: "yes"
+      });
+
+      assert.equal(result.status, 2);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /SMOKE_TASK must be true, false, empty, or unset/);
+      assert.equal(requestCount, 0);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -296,6 +538,10 @@ function runNode(args: string[], env: Record<string, string>): Promise<{ status:
       cwd: process.cwd(),
       env: {
         ...process.env,
+        SMOKE_TASK: "",
+        SMOKE_ENDPOINT_BASE_URL: "",
+        SMOKE_ENDPOINT_MODEL: "",
+        SMOKE_ENDPOINT_SECRET_REF: "",
         ...env
       },
       stdio: ["ignore", "pipe", "pipe"]

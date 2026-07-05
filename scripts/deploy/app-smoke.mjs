@@ -5,6 +5,7 @@ const WORKSPACE_NAME = "Deploy Smoke";
 const PROJECT_NAME = "API Smoke";
 const FILE_PATH = "files/deploy-smoke.txt";
 const FILE_CONTENT = "hello from deploy smoke\n";
+const TASK_PROMPT = "deploy smoke task: cancel immediately; do not modify files";
 
 const sensitiveValues = new Set();
 
@@ -13,12 +14,19 @@ class UsageError extends Error {}
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   requireOption(args.baseUrl, "--base-url");
+  const taskSmoke = taskSmokeEnabled(args);
+
+  const endpointConfig = endpointSmokeConfig(args);
+  if (taskSmoke && !endpointConfig.complete) {
+    throw new UsageError(
+      "task smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
+    );
+  }
 
   const adminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD;
   requireOption(adminPassword, "BUILTIN_ADMIN_INITIAL_PASSWORD");
   sensitiveValues.add(adminPassword);
 
-  const endpointConfig = endpointSmokeConfig(args);
   if (endpointConfig.secretRef) {
     sensitiveValues.add(endpointConfig.secretRef);
   }
@@ -46,6 +54,7 @@ async function main() {
   const projectId = requireString(project.id, "project id");
 
   let chat = { status: "skipped" };
+  let endpointId;
   if (endpointConfig.complete) {
     const endpoint = await smoke.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/endpoints`, {
       auth: true,
@@ -59,7 +68,7 @@ async function main() {
         requestTimeoutSecs: 30
       }
     });
-    const endpointId = requireString(endpoint.id, "endpoint id");
+    endpointId = requireString(endpoint.id, "endpoint id");
     await smoke.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/chat`, {
       auth: true,
       body: {
@@ -104,13 +113,58 @@ async function main() {
     auth: true
   });
 
+  let task = { status: "skipped" };
+  if (taskSmoke) {
+    task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"));
+  }
+
   console.log(JSON.stringify({
     status: "ok",
     baseUrl: args.baseUrl,
     workspaceId,
     projectId,
-    chat
+    chat,
+    task
   }));
+}
+
+async function runTaskSmoke(smoke, projectId, endpointId) {
+  let taskId;
+  let createStatus;
+  let cancelAttempted = false;
+  try {
+    const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+      auth: true,
+      body: {
+        endpointId,
+        prompt: TASK_PROMPT
+      }
+    });
+    taskId = requireString(create.body.id, "task id");
+    createStatus = requireString(create.body.status, "task create status");
+
+    cancelAttempted = true;
+    const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      auth: true
+    });
+    return {
+      status: "completed",
+      taskId,
+      createStatus,
+      cancelStatus: requireString(cancel.body.status, "task cancel status")
+    };
+  } catch (error) {
+    if (taskId && !cancelAttempted) {
+      try {
+        await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+          auth: true
+        });
+      } catch {
+        // Preserve the original task smoke failure.
+      }
+    }
+    throw error;
+  }
 }
 
 class AppSmokeClient {
@@ -179,6 +233,8 @@ function parseArgs(argv) {
     } else if (arg === "--endpoint-secret-ref") {
       parsed.endpointSecretRef = requireValue(argv, index, arg);
       index += 1;
+    } else if (arg === "--task-smoke") {
+      parsed.taskSmoke = true;
     } else {
       throw new UsageError(`unknown argument: ${arg}`);
     }
@@ -196,6 +252,21 @@ function endpointSmokeConfig(args) {
     secretRef,
     complete: Boolean(baseUrl && model && secretRef)
   };
+}
+
+function taskSmokeEnabled(args) {
+  const envTaskSmoke = parseSmokeTaskEnv(process.env.SMOKE_TASK);
+  return Boolean(args.taskSmoke || envTaskSmoke);
+}
+
+function parseSmokeTaskEnv(value) {
+  if (value === undefined || value === "" || value === "false") {
+    return false;
+  }
+  if (value === "true") {
+    return true;
+  }
+  throw new UsageError("SMOKE_TASK must be true, false, empty, or unset");
 }
 
 function firstNonEmpty(...values) {
