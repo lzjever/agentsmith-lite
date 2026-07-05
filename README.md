@@ -43,8 +43,10 @@ scripts/build-offline-bundle.sh \
 scripts/deploy/import-images.sh --bundle dist/app-offline-bundle
 scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env --tag dev --out out/manifests --images-lock dist/app-offline-bundle/images.lock
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env --out out/manifests --bundle dist/app-offline-bundle
-scripts/deploy/smoke.sh --base-url http://127.0.0.1:3000
+scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env
 ```
+
+Deploy smoke is an API-only remote check. It reads `APP_PUBLIC_BASE_URL` from the env file unless `--base-url` is provided, bootstraps/logs in with `BUILTIN_ADMIN_INITIAL_PASSWORD` from the secrets file, then covers health, workspace/project creation, file upload/list/download/delete, and operator sandbox status. Endpoint/chat smoke is opt-in with `--endpoint-base-url`, `--endpoint-model`, and `--endpoint-secret-ref`, or the matching `SMOKE_ENDPOINT_BASE_URL`, `SMOKE_ENDPOINT_MODEL`, and `SMOKE_ENDPOINT_SECRET_REF` env values.
 
 Operator sandbox status and dry-run cleanup use the product API and require an authenticated admin session cookie:
 

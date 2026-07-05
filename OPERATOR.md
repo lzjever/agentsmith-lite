@@ -11,7 +11,7 @@ Required app product secrets:
 
 Substrate-only secrets such as `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `JUICEFS_META_URL` must not be injected into app server, sandbox pods, Botified env, or app-owned Secrets.
 
-App doctor/smoke owns app delivery checks: image metadata, schema bootstrap job, web/API readiness, sandbox RBAC shape, and Botified serve smoke. App doctor always runs static manifest/env checks; when the substrate env file sets `KUBECONFIG_PATH` or `KUBE_CONTEXT`, it also verifies deployed schema/API/PVC/RBAC facts. Substrate doctor owns Kubernetes/PostgreSQL/S3/JuiceFS/RWX substrate readiness.
+App doctor owns app delivery checks: image metadata, schema bootstrap job, web/API readiness, sandbox RBAC shape, and Botified serve smoke. Deploy smoke is API-only: it bootstraps/logs in with the configured built-in admin secret, checks product API health, workspace/project/file CRUD, optional endpoint/chat, and operator sandbox status. App doctor always runs static manifest/env checks; when the substrate env file sets `KUBECONFIG_PATH` or `KUBE_CONTEXT`, it also verifies deployed schema/API/PVC/RBAC facts. Substrate doctor owns Kubernetes/PostgreSQL/S3/JuiceFS/RWX substrate readiness.
 
 ## Sandbox Operator CLI
 
@@ -28,4 +28,4 @@ The formatted cleanup plan comes only from the product API. `kubectl` must not b
 
 ## Manual Gates
 
-`npm run e2e:operator-lifecycle` and `npm run visual:screenshot` are independent manual gates. They are useful before risky operator or UI changes, but they are not part of `npm test` or the default release gate.
+`npm run e2e:smoke`, `npm run e2e:operator-lifecycle`, and `npm run visual:screenshot` are independent manual gates. They are useful before risky runtime, operator, or UI changes, but they are not part of `npm test` or the default release gate.
