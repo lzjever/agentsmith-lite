@@ -617,6 +617,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         task: {
           status: "completed",
           taskId: "task_smoke",
+          runId: "run_task_smoke",
           createStatus: "running",
           artifactId: "artifact_task_smoke",
           artifactName: "agentsmith-lite-task-smoke.txt",
@@ -903,6 +904,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         task: {
           status: "completed",
           taskId: "task_smoke_reclaim_case",
+          runId: "run_smoke_reclaim_case",
           createStatus: "running",
           artifactId: "artifact_task_smoke_reclaim_case",
           artifactName: "agentsmith-lite-task-smoke.txt",
@@ -1242,6 +1244,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         assert.equal(JSON.stringify(parsedBody).includes("secret/mismatch-smoke"), false);
         res.end(JSON.stringify({
           id: "task_mismatch",
+          runId: "run_mismatch",
           status: "running",
           sandbox: {
             resources: [
@@ -1302,6 +1305,132 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         "GET /api/tasks/task_mismatch/artifacts/artifact_mismatch/download",
         "POST /api/tasks/task_mismatch/cancel"
       ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs rejects task smoke without runId and cancels without leaking secrets or artifacts", async () => {
+    const adminPassword = "missing-run-admin-secret";
+    const requests: SmokeRequest[] = [];
+    const server = createServer(async (req, res) => {
+      const body = await readRequestBody(req);
+      requests.push({
+        method: req.method,
+        url: req.url,
+        cookie: req.headers.cookie,
+        csrf: req.headers["x-csrf-token"]?.toString(),
+        body
+      });
+      const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/api/health") {
+        res.end(JSON.stringify({ status: "ok", version: "test" }));
+      } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+        assert.deepEqual(parsedBody, { password: adminPassword });
+        res.end(JSON.stringify({ created: true }));
+      } else if (req.method === "POST" && req.url === "/api/auth/login") {
+        res.setHeader("set-cookie", "asl_session=missing-run-session; HttpOnly; Path=/");
+        res.end(JSON.stringify({ csrfToken: "csrf-missing-run" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces") {
+        res.end(JSON.stringify({ id: "workspace_missing_run", name: "Deploy Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces/workspace_missing_run/projects") {
+        res.end(JSON.stringify({ id: "project_missing_run", workspaceId: "workspace_missing_run", name: "API Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_missing_run/endpoints") {
+        assert.deepEqual(parsedBody, {
+          name: "Deploy Smoke Endpoint",
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.missing-run.test/v1",
+          model: "missing-run-model",
+          apiKeySecretRef: "secret/missing-run-smoke",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        });
+        res.end(JSON.stringify({ id: "endpoint_missing_run" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_missing_run/chat") {
+        res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_missing_run/files") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_missing_run/files?path=files") {
+        res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_missing_run/files/download?path=files%2Fdeploy-smoke.txt") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+      } else if (req.method === "DELETE" && req.url === "/api/projects/project_missing_run/files") {
+        res.end(JSON.stringify({ deleted: true }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+        res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0 }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_missing_run/tasks") {
+        assert.equal(JSON.stringify(parsedBody).includes("secret/missing-run-smoke"), false);
+        res.end(JSON.stringify({
+          id: "task_missing_run",
+          status: "running",
+          sandbox: {
+            resources: [
+              { kind: "Secret", stringData: { BOTIFIED_SERVICE_KEY: "missing-run-service-key-secret" } }
+            ]
+          }
+        }));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_missing_run/events") {
+        res.end(JSON.stringify([{ id: "event_missing_run", kind: "turn_completed" }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_missing_run/artifacts") {
+        res.end(JSON.stringify([{
+          id: "artifact_missing_run",
+          taskId: "task_missing_run",
+          fileId: "file_missing_run",
+          name: "agentsmith-lite-task-smoke.txt",
+          bytes: 51,
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_missing_run/artifacts/artifact_missing_run/download") {
+        res.setHeader("content-type", "application/octet-stream");
+        res.end("runtime accepted\nAGENTSMITH_LITE_TASK_SMOKE_MARKER\n");
+      } else if (req.method === "POST" && req.url === "/api/tasks/task_missing_run/cancel") {
+        assert.equal(body, "");
+        res.end(JSON.stringify({ id: "task_missing_run", status: "stopping" }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.missing-run.test/v1",
+        "--endpoint-model",
+        "missing-run-model",
+        "--endpoint-secret-ref",
+        "secret/missing-run-smoke",
+        "--task-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /task run id missing from API response/);
+      assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(result.stderr, /secret\/missing-run-smoke/);
+      assert.doesNotMatch(result.stderr, /BOTIFIED_SERVICE_KEY|missing-run-service-key-secret/);
+      assert.doesNotMatch(result.stderr, /runtime accepted|AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+      assert.deepEqual(requests.filter((request) => (
+        request.url === "/api/projects/project_missing_run/tasks" ||
+        request.url?.startsWith("/api/tasks/task_missing_run")
+      )).map((request) => `${request.method} ${request.url}`), [
+        "POST /api/projects/project_missing_run/tasks",
+        "POST /api/tasks/task_missing_run/cancel"
+      ]);
+      assert.equal(requests.some((request) => request.url?.startsWith("/api/operator/sandbox/status?runId=")), false);
+      const cancel = requests.find((request) => request.url === "/api/tasks/task_missing_run/cancel");
+      assert.ok(cancel);
+      assert.equal(cancel.cookie, "asl_session=missing-run-session");
+      assert.equal(cancel.csrf, "csrf-missing-run");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

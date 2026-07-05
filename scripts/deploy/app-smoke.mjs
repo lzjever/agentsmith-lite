@@ -204,17 +204,16 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       }
     });
     taskId = requireString(create.body.id, "task id");
-    const runId = optionalString(create.body.runId);
+    const runId = requireString(create.body.runId, "task run id");
     createStatus = requireString(create.body.status, "task create status");
 
     const verified = await waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs);
-    const runScopedStatus = runId
-      ? await getRunScopedStatusSummary(smoke, runId, "task smoke run-scoped status")
-      : undefined;
+    const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task smoke run-scoped status");
     completed = true;
     return {
       status: "completed",
       taskId,
+      runId,
       createStatus,
       artifactId: verified.artifactId,
       artifactName: verified.artifactName,
@@ -223,7 +222,7 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       artifactBytes: verified.artifactBytes,
       artifactSha256: verified.artifactSha256,
       markerObserved: verified.markerObserved,
-      ...(runScopedStatus ? { runScopedStatus } : {})
+      runScopedStatus
     };
   } catch (error) {
     if (taskId && !completed) {
@@ -626,10 +625,6 @@ function requireString(value, name) {
     throw new Error(`${name} missing from API response`);
   }
   return value;
-}
-
-function optionalString(value) {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function requireNumber(value, name) {
