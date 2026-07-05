@@ -26,10 +26,11 @@ These are opt-in developer checks, not part of the default release path:
 
 ```bash
 npm run e2e:smoke
+npm run e2e:operator-lifecycle
 npm run visual:screenshot
 ```
 
-The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
+The operator lifecycle e2e and visual screenshot are independent manual gates; they are not run by `npm test` or the default release gate. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
 
 ## Deploy Skeleton
 
@@ -44,6 +45,15 @@ scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env --t
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env --out out/manifests --bundle dist/app-offline-bundle
 scripts/deploy/smoke.sh --base-url http://127.0.0.1:3000
 ```
+
+Operator sandbox status and dry-run cleanup use the product API and require an authenticated admin session cookie:
+
+```bash
+scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
+scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
+```
+
+Pass `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. These scripts do not bootstrap or log in; they only call `/api/operator/sandbox/status` and `/api/operator/sandbox/reap`.
 
 App deploy renders product config into app-owned Kubernetes resources: non-secret model base URLs named `AGENTSMITH_LITE_MODEL_BASE_URL_*` go into the ConfigMap, while `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, `BUILTIN_ADMIN_INITIAL_PASSWORD`, optional OIDC/admin secrets, and model API keys named `AGENTSMITH_LITE_MODEL_API_KEY_*` go into the Secret. S3 raw credentials and `JUICEFS_META_URL` stay with the substrate/CSI layer.
 

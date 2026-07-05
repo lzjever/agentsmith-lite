@@ -13,3 +13,19 @@ Substrate-only secrets such as `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `JUICEFS_ME
 
 App doctor/smoke owns app delivery checks: image metadata, schema bootstrap job, web/API readiness, sandbox RBAC shape, and Botified serve smoke. Substrate doctor owns Kubernetes/PostgreSQL/S3/JuiceFS/RWX substrate readiness.
 
+## Sandbox Operator CLI
+
+Sandbox lifecycle status and dry-run cleanup are API-backed. Use an admin session cookie file and CSRF token from an explicit login flow; the deploy scripts do not bootstrap or log in.
+
+```bash
+scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
+scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
+```
+
+Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh --dry-run` calls `POST /api/operator/sandbox/reap` with `{}` or `{ "runId": "..." }` when `--run-id` is provided. The cleanup script intentionally refuses apply mode in this release.
+
+The formatted cleanup plan comes only from the product API. `kubectl` must not be used to derive sandbox cleanup targets.
+
+## Manual Gates
+
+`npm run e2e:operator-lifecycle` and `npm run visual:screenshot` are independent manual gates. They are useful before risky operator or UI changes, but they are not part of `npm test` or the default release gate.

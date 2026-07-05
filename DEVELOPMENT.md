@@ -7,10 +7,11 @@ npm run typecheck
 npm test
 npm run check:forbidden-surfaces
 npm run e2e:smoke
+npm run e2e:operator-lifecycle
 npm run visual:screenshot
 ```
 
-`npm test` runs focused unit/service/API/boundary tests. Browser visual checks and the independent smoke are manual commands.
+`npm test` runs focused unit/service/API/boundary tests. The independent smoke, operator lifecycle e2e, and browser visual checks are manual commands; operator lifecycle and visual are not default release gates.
 
 ## Package Boundaries
 
@@ -25,4 +26,3 @@ npm run visual:screenshot
 - `packages/api-entry-node`: Node HTTP API and static Web serving.
 
 The Web UI under `src/web` must call only `/api/*`.
-

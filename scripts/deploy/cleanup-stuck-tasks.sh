@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")/../.."
 namespace=agentsmith
 dry_run=false
+base_url="${APP_PUBLIC_BASE_URL:-}"
+cookie_file=""
+csrf_token=""
+run_id=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --env) source "$2"; namespace="${KUBE_NAMESPACE:-agentsmith}"; shift 2 ;;
+    --env) source "$2"; namespace="${KUBE_NAMESPACE:-agentsmith}"; base_url="${APP_PUBLIC_BASE_URL:-${base_url}}"; shift 2 ;;
+    --base-url) base_url="$2"; shift 2 ;;
+    --cookie-file) cookie_file="$2"; shift 2 ;;
+    --csrf-token) csrf_token="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
+    --apply) echo "cleanup-stuck-tasks.sh only supports --dry-run in this release; use the product API when apply is enabled." >&2; exit 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[ "$dry_run" = true ] || { echo "P0 cleanup requires --dry-run until live reconciler wiring lands." >&2; exit 2; }
-echo "App-owned sandbox resources in namespace $namespace:"
-kubectl -n "$namespace" get pods,svc,configmap,secret,serviceaccount,networkpolicy -l agentsmith-lite/managed-by=agentsmith-lite || true
-echo
-echo "Product-level cleanup is explicit: call POST /api/operator/sandbox/reap with {\"apply\":true} after logging in as an admin."
+[ "$dry_run" = true ] || { echo "cleanup-stuck-tasks.sh requires --dry-run; apply mode is intentionally not wired in this script yet." >&2; exit 2; }
+[ -n "$base_url" ] || { echo "cleanup-stuck-tasks.sh --dry-run requires --base-url or APP_PUBLIC_BASE_URL plus operator sandbox API auth." >&2; exit 2; }
+[ -n "$cookie_file" ] || { echo "cleanup-stuck-tasks.sh --dry-run requires --cookie-file for operator sandbox API auth." >&2; exit 2; }
+[ -f "$cookie_file" ] || { echo "cookie file not found: $cookie_file" >&2; exit 2; }
+[ -n "$csrf_token" ] || { echo "cleanup-stuck-tasks.sh --dry-run requires --csrf-token for operator sandbox API auth." >&2; exit 2; }
+
+helper_args=(scripts/deploy/operator-sandbox.mjs reap --dry-run --base-url "$base_url" --cookie-file "$cookie_file" --csrf-token "$csrf_token")
+if [ -n "$run_id" ]; then
+  helper_args+=(--run-id "$run_id")
+fi
+node "${helper_args[@]}"

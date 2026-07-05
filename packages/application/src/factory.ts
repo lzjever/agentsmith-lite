@@ -7,7 +7,7 @@ import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
 import { RuntimeService } from "./runtimeService.js";
-import { SandboxLifecycleService } from "./sandboxLifecycleService.js";
+import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "./sandboxLifecycleService.js";
 import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
@@ -28,6 +28,7 @@ export interface CreateApplicationServicesInput {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
@@ -53,10 +54,11 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     modelCredentialResolver
   );
   const namespace = input.namespace ?? "agentsmith";
+  const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
     dataRoot: input.dataRoot,
     namespace,
-    ...(input.liveSandbox ? { port: input.liveSandbox.port } : {})
+    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {})
   });
   const taskConfig = {
     dataRoot: input.dataRoot,

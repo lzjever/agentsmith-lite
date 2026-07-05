@@ -29,6 +29,7 @@
     "dev": "npm run dev:api",
     "check:forbidden-surfaces": "scripts/check-forbidden-surfaces.sh",
     "e2e:smoke": "npm run build && node e2e/smoke/lite-smoke.mjs",
+    "e2e:operator-lifecycle": "npm run build && node e2e/operator-lifecycle/operator-lifecycle.mjs",
     "visual:screenshot": "npm run build && node scripts/visual/screenshot.mjs"
   },
   "devDependencies": {

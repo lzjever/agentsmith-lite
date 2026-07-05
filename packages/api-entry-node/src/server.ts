@@ -9,6 +9,7 @@ import {
   requireLiveSandboxBuiltinAdminPassword,
   requireLiveSandboxSessionSecret
 } from "../../application/src/factory.js";
+import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
 import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
@@ -30,6 +31,7 @@ export interface ApiServerOptions {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
@@ -65,6 +67,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
     ...(options.chatClient ? { chatClient: options.chatClient } : {}),
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
     ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
