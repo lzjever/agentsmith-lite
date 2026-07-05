@@ -49,6 +49,12 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /App doctor passed/);
+    const { report, text } = readDoctorReport();
+    assertDeployIdentityBase(report);
+    assert.equal(report.deployIdentity.validatedManifestImages.source, "none");
+    assert.equal("app" in report.deployIdentity.validatedManifestImages, false);
+    assert.equal("botifiedRunner" in report.deployIdentity.validatedManifestImages, false);
+    assertReportOmitsSensitiveInputs(text, fixture);
   });
 
   it("does not execute env or secrets files while loading deploy contract values", () => {
@@ -278,6 +284,14 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /App doctor passed/);
+    const { report, text } = readDoctorReport();
+    assertDeployIdentityBase(report);
+    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
+      source: "bundle",
+      app: appDigestRef,
+      botifiedRunner: runnerDigestRef
+    });
+    assertReportOmitsSensitiveInputs(text, fixture);
   });
 
   it("passes standalone --images-lock validation against rendered manifests", () => {
@@ -289,6 +303,34 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /App doctor passed/);
+    const { report, text } = readDoctorReport();
+    assertDeployIdentityBase(report);
+    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
+      source: "images-lock",
+      app: appDigestRef,
+      botifiedRunner: runnerDigestRef
+    });
+    assertReportOmitsSensitiveInputs(text, fixture);
+    assert.doesNotMatch(text, new RegExp(escapeRegExp(lockFile)));
+  });
+
+  it("reports bundle+images-lock when both image identity inputs validate the rendered manifests", () => {
+    const fixture = writeDoctorFixture();
+    const lockFile = path.join(fixture.tempDir, "standalone-images.lock");
+    writeFileSync(lockFile, `${appDigestRef}\n${runnerDigestRef}\n`);
+
+    const result = runDoctor(fixture, ["--bundle", fixture.bundleDir, "--images-lock", lockFile]);
+
+    assert.equal(result.status, 0, result.stderr);
+    const { report, text } = readDoctorReport();
+    assertDeployIdentityBase(report);
+    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
+      source: "bundle+images-lock",
+      app: appDigestRef,
+      botifiedRunner: runnerDigestRef
+    });
+    assertReportOmitsSensitiveInputs(text, fixture);
+    assert.doesNotMatch(text, new RegExp(escapeRegExp(lockFile)));
   });
 
   it("requires an existing --out path when validating a bundle or images.lock", () => {
@@ -627,6 +669,28 @@ function appendChecksumLine(bundleDir: string, relativePath: string, sha256: str
   writeFileSync(path.join(bundleDir, "checksums.txt"), `${readFileSync(path.join(bundleDir, "checksums.txt"), "utf8")}${sha256}  ${relativePath}\n`);
 }
 
+function readDoctorReport(): { report: AppDoctorReport; text: string } {
+  const text = readFileSync("out/app-doctor-report.json", "utf8");
+  return { report: JSON.parse(text) as AppDoctorReport, text };
+}
+
+function assertDeployIdentityBase(report: AppDoctorReport): void {
+  assert.equal(report.schema, "agentsmith-lite.app-doctor/v1");
+  assert.equal(report.deployIdentity.namespace, "agentsmith");
+  assert.deepEqual(report.deployIdentity.resources, {
+    deployment: "agentsmith-lite-api",
+    schemaJob: "agentsmith-lite-schema-bootstrap",
+    runnerImageConfigMap: "agentsmith-lite-config/BOTIFIED_RUNNER_IMAGE"
+  });
+}
+
+function assertReportOmitsSensitiveInputs(reportText: string, fixture: DoctorFixture): void {
+  assert.doesNotMatch(reportText, new RegExp(escapeRegExp(fixture.tempDir)));
+  assert.doesNotMatch(reportText, /app-session-secret-at-least-32-chars/);
+  assert.doesNotMatch(reportText, /admin-secret/);
+  assert.doesNotMatch(reportText, /postgres:\/\/app/);
+}
+
 function runDoctor(fixture: DoctorFixture, args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync("bash", [
     "scripts/deploy/doctor.sh",
@@ -725,6 +789,10 @@ function sha256File(file: string): string {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 interface DoctorFixture {
   tempDir: string;
   envFile: string;
@@ -746,4 +814,21 @@ interface DoctorFixtureOptions {
   postgresUrl?: string | undefined;
   appSessionSecret?: string | undefined;
   adminPassword: string | null;
+}
+
+interface AppDoctorReport {
+  schema: string;
+  deployIdentity: {
+    namespace: string;
+    resources: {
+      deployment: string;
+      schemaJob: string;
+      runnerImageConfigMap: string;
+    };
+    validatedManifestImages: {
+      source: string;
+      app?: string;
+      botifiedRunner?: string;
+    };
+  };
 }

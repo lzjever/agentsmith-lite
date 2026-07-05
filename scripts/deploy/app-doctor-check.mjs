@@ -17,6 +17,9 @@ main().catch((error) => {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.bundle && !args.images_lock) {
+    if (args.summary_json) {
+      writeSummary({ source: "none" });
+    }
     return;
   }
   if (!args.out) {
@@ -45,7 +48,18 @@ async function main() {
   const imageRefs = explicitRefs ?? bundleRefs;
   if (imageRefs) {
     validateAppManifestImagesAgainstLock(await readManifestText(args.out, outStat), imageRefs);
+    if (args.summary_json) {
+      writeSummary({
+        source: args.bundle && args.images_lock ? "bundle+images-lock" : args.bundle ? "bundle" : "images-lock",
+        app: imageRefs.app,
+        botifiedRunner: imageRefs.botifiedRunner
+      });
+    }
   }
+}
+
+function writeSummary(summary) {
+  process.stdout.write(`${JSON.stringify(summary)}\n`);
 }
 
 async function validateBundle(bundleDir) {
@@ -155,6 +169,8 @@ function parseArgs(argv) {
       }
       parsed[arg.slice(2).replace("-", "_")] = value;
       index += 1;
+    } else if (arg === "--summary-json") {
+      parsed.summary_json = true;
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
