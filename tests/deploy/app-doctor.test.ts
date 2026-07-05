@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -48,6 +48,130 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /App doctor passed/);
+  });
+
+  it("does not run K8s fact checks when the substrate env omits kube connection settings", () => {
+    const fixture = writeDoctorFixture();
+    const fakeKubectl = writeFakeKubectl(fixture.tempDir);
+
+    const result = runDoctor(fixture, [], {
+      PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
+      FAKE_KUBECTL_CALLS: fakeKubectl.callsFile
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(fakeKubectl.callsFile), false);
+  });
+
+  it("runs K8s deployment fact checks when kube connection settings are present", () => {
+    const fixture = writeDoctorFixture({
+      extraEnv: [
+        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+        "KUBE_CONTEXT=kind-agentsmith",
+        "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
+      ]
+    });
+    const fakeKubectl = writeFakeKubectl(fixture.tempDir);
+
+    const result = runDoctor(fixture, [], {
+      PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
+      FAKE_KUBECTL_CALLS: fakeKubectl.callsFile
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /App doctor passed/);
+
+    const calls = readFileSync(fakeKubectl.callsFile, "utf8").trim().split("\n");
+    assert.ok(
+      calls.some((call) =>
+        call.includes(
+          "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap"
+        )
+      ),
+      "schema bootstrap wait must run"
+    );
+    assert.ok(
+      calls.some((call) =>
+        call.includes("--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api")
+      ),
+      "API rollout status must run"
+    );
+    assert.ok(
+      calls.some((call) => call.includes("--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith get pvc agentsmith-lite-juicefs")),
+      "JuiceFS PVC lookup must run"
+    );
+
+    for (const resource of ["pods", "services", "secrets", "configmaps", "serviceaccounts", "networkpolicies"]) {
+      for (const verb of ["create", "get", "list", "delete"]) {
+        assert.ok(
+          calls.some(
+            (call) =>
+              call.includes(` auth can-i ${verb} ${resource} `) &&
+              call.includes("--as=system:serviceaccount:agentsmith:agentsmith-lite-api")
+          ),
+          `API service account must be checked for ${verb} ${resource}`
+        );
+      }
+    }
+
+    for (const resource of ["pods/exec", "persistentvolumes", "persistentvolumeclaims", "clusterroles"]) {
+      assert.ok(
+        calls.some(
+          (call) =>
+            call.includes(` auth can-i create ${resource} `) &&
+            call.includes("--as=system:serviceaccount:agentsmith:agentsmith-lite-api")
+        ),
+        `API service account must be checked against forbidden ${resource}`
+      );
+    }
+  });
+
+  it("fails K8s fact checks without leaking deploy secrets when a required allow is denied", () => {
+    const fixture = writeDoctorFixture({
+      extraEnv: [
+        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+        "KUBE_CONTEXT=kind-agentsmith",
+        "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
+      ],
+      postgresUrl: "postgres://DO_NOT_PRINT_APP_URL",
+      appSessionSecret: "DO_NOT_PRINT_APP_SESSION_SECRET",
+      adminPassword: "DO_NOT_PRINT_INITIAL_PASSWORD"
+    });
+    const fakeKubectl = writeFakeKubectl(fixture.tempDir);
+
+    const result = runDoctor(fixture, [], {
+      PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
+      FAKE_KUBECTL_CALLS: fakeKubectl.callsFile,
+      FAKE_KUBECTL_DENY_CHECKS: "create:pods"
+    });
+    const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
+    const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /create pods/i);
+    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_URL/);
+    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_APP_SESSION_SECRET/);
+    assert.doesNotMatch(diagnosticText, /DO_NOT_PRINT_INITIAL_PASSWORD/);
+  });
+
+  it("fails K8s fact checks when a forbidden API service account surface is allowed", () => {
+    const fixture = writeDoctorFixture({
+      extraEnv: [
+        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+        "KUBE_CONTEXT=kind-agentsmith",
+        "JUICEFS_PVC_NAME=agentsmith-lite-juicefs"
+      ]
+    });
+    const fakeKubectl = writeFakeKubectl(fixture.tempDir);
+
+    const result = runDoctor(fixture, [], {
+      PATH: `${fixture.tempDir}:${process.env.PATH ?? ""}`,
+      FAKE_KUBECTL_CALLS: fakeKubectl.callsFile,
+      FAKE_KUBECTL_ALLOW_FORBIDDEN_CHECKS: "create:persistentvolumes"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /persistentvolumes/i);
   });
 
   it("fails static rendered manifest checks for non-local public URLs when the app Ingress is missing", () => {
@@ -252,14 +376,15 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
       ...(options.publicBaseUrl ? [`APP_PUBLIC_BASE_URL=${options.publicBaseUrl}`] : []),
       ...(options.sandboxMode ? [`AGENTSMITH_LITE_SANDBOX_MODE=${options.sandboxMode}`] : []),
       ...(options.sandboxNamespaceLimit ? [`AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=${options.sandboxNamespaceLimit}`] : []),
+      ...(options.extraEnv ?? []),
       ""
     ].join("\n")
   );
   writeFileSync(
     secretsFile,
     [
-      "POSTGRES_APP_URL=postgres://app",
-      "APP_SESSION_SECRET=app-session-secret",
+      `POSTGRES_APP_URL=${options.postgresUrl ?? "postgres://app"}`,
+      `APP_SESSION_SECRET=${options.appSessionSecret ?? "app-session-secret"}`,
       ...(adminPassword === null ? [] : [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`]),
       ""
     ].join("\n")
@@ -382,11 +507,87 @@ images:
   writeFileSync(path.join(bundleDir, "checksums.txt"), `${checksums}\n`);
 }
 
-function runDoctor(fixture: DoctorFixture, args: string[]) {
+function runDoctor(fixture: DoctorFixture, args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", fixture.envFile, "--secrets", fixture.secretsFile, "--out", fixture.outDir, ...args], {
     cwd: process.cwd(),
-    encoding: "utf8"
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      KUBECONFIG_PATH: "",
+      KUBE_CONTEXT: "",
+      ...env
+    }
   });
+}
+
+function writeFakeKubectl(tempDir: string): { callsFile: string } {
+  const fakeKubectl = path.join(tempDir, "kubectl");
+  const callsFile = path.join(tempDir, "kubectl-calls.txt");
+  writeFileSync(
+    fakeKubectl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+
+if [ "$#" -lt 1 ]; then
+  exit 64
+fi
+
+joined=" $* "
+if [[ "$joined" == *" wait --for=condition=complete job/agentsmith-lite-schema-bootstrap "* ]]; then
+  exit 0
+fi
+if [[ "$joined" == *" rollout status deploy/agentsmith-lite-api "* ]]; then
+  exit 0
+fi
+if [[ "$joined" == *" get pvc agentsmith-lite-juicefs "* ]]; then
+  exit 0
+fi
+
+if [[ "$joined" == *" auth can-i "* ]]; then
+  found_can_i=0
+  verb=""
+  resource=""
+  for arg in "$@"; do
+    if [ "$found_can_i" = "1" ]; then
+      verb="$arg"
+      found_can_i=2
+      continue
+    fi
+    if [ "$found_can_i" = "2" ]; then
+      resource="$arg"
+      break
+    fi
+    if [ "$arg" = "can-i" ]; then
+      found_can_i=1
+    fi
+  done
+
+  check="$verb:$resource"
+  case " \${FAKE_KUBECTL_DENY_CHECKS:-} " in
+    *" $check "*) exit 1 ;;
+  esac
+  case " \${FAKE_KUBECTL_ALLOW_FORBIDDEN_CHECKS:-} " in
+    *" $check "*) exit 0 ;;
+  esac
+
+  case "$resource" in
+    pods|services|secrets|configmaps|serviceaccounts|networkpolicies)
+      case "$verb" in
+        create|get|list|delete) exit 0 ;;
+      esac
+      ;;
+    pods/exec|persistentvolumes|persistentvolumeclaims|clusterroles)
+      exit 1
+      ;;
+  esac
+fi
+
+exit 64
+`
+  );
+  chmodSync(fakeKubectl, 0o755);
+  return { callsFile };
 }
 
 function sha256File(file: string): string {
@@ -409,5 +610,8 @@ interface DoctorFixtureOptions {
   publicBaseUrl?: string | undefined;
   sandboxMode?: string | undefined;
   sandboxNamespaceLimit?: string | undefined;
+  extraEnv?: string[] | undefined;
+  postgresUrl?: string | undefined;
+  appSessionSecret?: string | undefined;
   adminPassword: string | null;
 }

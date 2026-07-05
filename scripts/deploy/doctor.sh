@@ -64,6 +64,74 @@ is_positive_safe_integer() {
   [[ "$value" < "9007199254740992" ]]
 }
 
+env_file_requests_k8s_fact_checks() {
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(KUBECONFIG_PATH|KUBE_CONTEXT)= ]]; then
+      return 0
+    fi
+  done < "$env_file"
+  return 1
+}
+
+run_kubectl_check() {
+  local description="$1"
+  shift
+  if ! kubectl "${k8s_kubectl_args[@]}" "$@" >/dev/null 2>&1; then
+    echo "K8s fact check failed: $description" >&2
+    exit 1
+  fi
+}
+
+run_kubectl_expect_denied() {
+  local description="$1"
+  shift
+  if kubectl "${k8s_kubectl_args[@]}" "$@" >/dev/null 2>&1; then
+    echo "K8s fact check failed: $description" >&2
+    exit 1
+  fi
+}
+
+run_k8s_fact_checks() {
+  local namespace="${KUBE_NAMESPACE:-agentsmith}"
+  local timeout="${APP_DOCTOR_K8S_TIMEOUT:-300s}"
+  local service_account="system:serviceaccount:${namespace}:agentsmith-lite-api"
+  local resource
+  local verb
+
+  command -v kubectl >/dev/null 2>&1 || {
+    echo "kubectl is required for K8s fact checks" >&2
+    exit 1
+  }
+  [ -n "${JUICEFS_PVC_NAME:-}" ] || {
+    echo "JUICEFS_PVC_NAME is required for K8s fact checks" >&2
+    exit 1
+  }
+
+  k8s_kubectl_args=()
+  if [ -n "${KUBECONFIG_PATH:-}" ]; then
+    k8s_kubectl_args+=(--kubeconfig "$KUBECONFIG_PATH")
+  fi
+  if [ -n "${KUBE_CONTEXT:-}" ]; then
+    k8s_kubectl_args+=(--context "$KUBE_CONTEXT")
+  fi
+  k8s_kubectl_args+=(--namespace "$namespace")
+
+  run_kubectl_check "schema bootstrap Job completed" wait --for=condition=complete job/agentsmith-lite-schema-bootstrap "--timeout=$timeout"
+  run_kubectl_check "API Deployment rollout completed" rollout status deploy/agentsmith-lite-api "--timeout=$timeout"
+  run_kubectl_check "JuiceFS PVC exists" get pvc "$JUICEFS_PVC_NAME"
+
+  for resource in pods services secrets configmaps serviceaccounts networkpolicies; do
+    for verb in create get list delete; do
+      run_kubectl_check "API service account can $verb $resource" auth can-i "$verb" "$resource" "--as=$service_account"
+    done
+  done
+
+  for resource in pods/exec persistentvolumes persistentvolumeclaims clusterroles; do
+    run_kubectl_expect_denied "API service account must not be allowed to create $resource" auth can-i create "$resource" "--as=$service_account"
+  done
+}
+
 sandbox_mode="${AGENTSMITH_LITE_SANDBOX_MODE:-dry-run}"
 case "$sandbox_mode" in
   ""|dry-run|live) ;;
@@ -131,6 +199,10 @@ if [ -n "$bundle" ] || [ -n "$images_lock" ]; then
   node scripts/deploy/app-doctor-check.mjs "${check_args[@]}"
 fi
 
+if env_file_requests_k8s_fact_checks && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
+  run_k8s_fact_checks
+fi
+
 mkdir -p out
 cat > out/app-doctor-report.json <<REPORT
 {
@@ -140,6 +212,7 @@ cat > out/app-doctor-report.json <<REPORT
     "schema_job": "expected agentsmith-lite-schema-bootstrap",
     "web_api_readiness": "expected agentsmith-lite-api deployment/service and ingress for non-local public URLs",
     "sandbox_rbac": "expected namespaced Role without exec subresource",
+    "k8s_facts": "when kube env is configured, checks schema job completion, API rollout, JuiceFS PVC, and API service account RBAC",
     "botified_smoke": "uses third_party/botified/PINNED_SOURCE.json and botified serve"
   },
   "secret_policy": "only product secrets are rendered to app-owned Kubernetes Secrets"
