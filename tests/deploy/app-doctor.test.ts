@@ -346,6 +346,64 @@ describe("deploy app doctor artifact checks", () => {
     }
   });
 
+  it("fails bundle validation for path escape, non-allowlisted, absolute, URL-like, duplicate, and malformed checksum entries", () => {
+    const cases: Array<{
+      name: string;
+      mutate: (fixture: DoctorFixture) => void;
+    }> = [
+      {
+        name: "path escape",
+        mutate: (fixture) => {
+          const outsideFile = path.join(fixture.tempDir, "outside.txt");
+          writeFileSync(outsideFile, "outside\n");
+          appendChecksumLine(fixture.bundleDir, "../outside.txt", sha256File(outsideFile));
+        }
+      },
+      {
+        name: "extra non-allowlisted entry",
+        mutate: (fixture) => {
+          writeFileSync(path.join(fixture.bundleDir, "extra.txt"), "extra\n");
+          appendChecksumLine(fixture.bundleDir, "extra.txt", sha256File(path.join(fixture.bundleDir, "extra.txt")));
+        }
+      },
+      {
+        name: "absolute path",
+        mutate: (fixture) => {
+          const absoluteFile = path.join(fixture.tempDir, "absolute.txt");
+          writeFileSync(absoluteFile, "absolute\n");
+          appendChecksumLine(fixture.bundleDir, absoluteFile, sha256File(absoluteFile));
+        }
+      },
+      {
+        name: "URL-like path",
+        mutate: (fixture) => {
+          const urlLikeFile = path.join(fixture.bundleDir, "https:/example.com/app.tar");
+          mkdirSync(path.dirname(urlLikeFile), { recursive: true });
+          writeFileSync(urlLikeFile, "url-like\n");
+          appendChecksumLine(fixture.bundleDir, "https://example.com/app.tar", sha256File(urlLikeFile));
+        }
+      },
+      {
+        name: "duplicate entry",
+        mutate: (fixture) => appendChecksumLine(fixture.bundleDir, "images/app.tar", sha256File(path.join(fixture.bundleDir, "images/app.tar")))
+      },
+      {
+        name: "malformed empty path",
+        mutate: (fixture) => appendChecksumLine(fixture.bundleDir, "", "0".repeat(64))
+      }
+    ];
+
+    for (const candidate of cases) {
+      const fixture = writeDoctorFixture();
+      candidate.mutate(fixture);
+
+      const result = runDoctor(fixture, ["--bundle", fixture.bundleDir]);
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, /checksums\.txt|allowlist|unsupported|invalid|duplicate/i, candidate.name);
+    }
+  });
+
   it("fails when bundle images.lock and explicit --images-lock disagree", () => {
     const fixture = writeDoctorFixture();
     const lockFile = path.join(fixture.tempDir, "standalone-images.lock");
@@ -559,6 +617,10 @@ images:
     .map((relativePath) => `${sha256File(path.join(bundleDir, relativePath))}  ${relativePath}`)
     .join("\n");
   writeFileSync(path.join(bundleDir, "checksums.txt"), `${checksums}\n`);
+}
+
+function appendChecksumLine(bundleDir: string, relativePath: string, sha256: string): void {
+  writeFileSync(path.join(bundleDir, "checksums.txt"), `${readFileSync(path.join(bundleDir, "checksums.txt"), "utf8")}${sha256}  ${relativePath}\n`);
 }
 
 function runDoctor(fixture: DoctorFixture, args: string[], env: NodeJS.ProcessEnv = {}) {

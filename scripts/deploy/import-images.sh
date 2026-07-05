@@ -66,12 +66,44 @@ require_nonempty_archive() {
   fi
 }
 
-require_checksum_entry() {
-  local relative_path="$1"
-  if ! awk -v file="$relative_path" '$2 == file { found = 1 } END { exit found ? 0 : 1 }' "$checksums_file"; then
-    echo "checksums.txt missing required entry: $relative_path" >&2
-    exit 1
-  fi
+validate_checksum_contract() {
+  awk '
+    BEGIN {
+      allowed["manifest.yaml"] = 1
+      allowed["images.lock"] = 1
+      allowed["images/app.tar"] = 1
+      allowed["images/botified-runner.tar"] = 1
+    }
+    /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      sha = substr(line, 1, 64)
+      separator = substr(line, 65, 2)
+      file = substr(line, 67)
+      if (sha !~ /^[0-9a-fA-F]{64}$/ || separator != "  " || file == "" || file ~ /[[:space:]]/) {
+        printf "checksums.txt line %d is invalid\n", NR > "/dev/stderr"
+        exit 1
+      }
+      if (!(file in allowed)) {
+        printf "checksums.txt contains unsupported entry: %s\n", file > "/dev/stderr"
+        exit 1
+      }
+      if (seen[file]) {
+        printf "checksums.txt contains duplicate entry: %s\n", file > "/dev/stderr"
+        exit 1
+      }
+      seen[file] = 1
+    }
+    END {
+      for (file in allowed) {
+        if (!seen[file]) {
+          printf "checksums.txt missing required entry: %s\n", file > "/dev/stderr"
+          exit 1
+        }
+      }
+    }
+  ' "$checksums_file"
 }
 
 validate_images_lock() {
@@ -88,10 +120,7 @@ require_file "$runner_archive"
 require_nonempty_archive "$app_archive"
 require_nonempty_archive "$runner_archive"
 
-require_checksum_entry "manifest.yaml"
-require_checksum_entry "images.lock"
-require_checksum_entry "images/app.tar"
-require_checksum_entry "images/botified-runner.tar"
+validate_checksum_contract
 
 if ! (cd "$bundle" && sha256sum -c checksums.txt >/dev/null); then
   echo "bundle checksum validation failed" >&2

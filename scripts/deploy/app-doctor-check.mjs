@@ -6,6 +6,7 @@ import { parseAppImagesLock, validateAppManifestImagesAgainstLock } from "../../
 
 const REQUIRED_BUNDLE_FILES = ["manifest.yaml", "images.lock", "checksums.txt", "images/app.tar", "images/botified-runner.tar"];
 const CHECKSUMMED_BUNDLE_FILES = ["manifest.yaml", "images.lock", "images/app.tar", "images/botified-runner.tar"];
+const CHECKSUMMED_BUNDLE_FILE_SET = new Set(CHECKSUMMED_BUNDLE_FILES);
 const IMAGE_ARCHIVES = ["images/app.tar", "images/botified-runner.tar"];
 
 main().catch((error) => {
@@ -110,7 +111,14 @@ function parseChecksums(text) {
     if (!match?.groups) {
       throw new Error(`app offline bundle checksums.txt line ${index + 1} is invalid`);
     }
-    checksums.set(match.groups.file, match.groups.sha.toLowerCase());
+    const file = match.groups.file;
+    if (!CHECKSUMMED_BUNDLE_FILE_SET.has(file)) {
+      throw new Error(`app offline bundle checksums.txt contains unsupported entry: ${file}`);
+    }
+    if (checksums.has(file)) {
+      throw new Error(`app offline bundle checksums.txt contains duplicate entry: ${file}`);
+    }
+    checksums.set(file, match.groups.sha.toLowerCase());
   }
   return checksums;
 }

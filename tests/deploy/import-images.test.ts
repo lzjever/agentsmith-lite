@@ -135,6 +135,76 @@ describe("deploy import images", () => {
       assert.equal(readCalls(callsFile).length, 0, candidate.name);
     }
   });
+
+  it("fails dry-run when checksums.txt includes a path escape without calling the runtime", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-checksum-escape-"));
+    const bundle = writeBundle(tempDir);
+    const outsideFile = path.join(tempDir, "outside.txt");
+    writeFileSync(outsideFile, "outside\n");
+    appendChecksumLine(bundle, "../outside.txt", sha256File(outsideFile));
+    const callsFile = path.join(tempDir, "runtime-calls.log");
+    const runtime = writeFakeRuntime(tempDir, callsFile);
+
+    const result = runImport(["--bundle", bundle, "--runtime", runtime, "--dry-run"]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /checksums\.txt|allowlist|unsupported|invalid/i);
+    assert.equal(readCalls(callsFile).length, 0);
+  });
+
+  it("fails dry-run for non-allowlisted, absolute, URL-like, duplicate, and malformed checksum entries", () => {
+    const cases: Array<{
+      name: string;
+      mutate: (bundle: string, tempDir: string) => void;
+    }> = [
+      {
+        name: "extra non-allowlisted entry",
+        mutate: (bundle) => {
+          writeFileSync(path.join(bundle, "extra.txt"), "extra\n");
+          appendChecksumLine(bundle, "extra.txt", sha256File(path.join(bundle, "extra.txt")));
+        }
+      },
+      {
+        name: "absolute path",
+        mutate: (bundle, tempDir) => {
+          const absoluteFile = path.join(tempDir, "absolute.txt");
+          writeFileSync(absoluteFile, "absolute\n");
+          appendChecksumLine(bundle, absoluteFile, sha256File(absoluteFile));
+        }
+      },
+      {
+        name: "URL-like path",
+        mutate: (bundle) => {
+          const urlLikeFile = path.join(bundle, "https:/example.com/app.tar");
+          mkdirSync(path.dirname(urlLikeFile), { recursive: true });
+          writeFileSync(urlLikeFile, "url-like\n");
+          appendChecksumLine(bundle, "https://example.com/app.tar", sha256File(urlLikeFile));
+        }
+      },
+      {
+        name: "duplicate entry",
+        mutate: (bundle) => appendChecksumLine(bundle, "images/app.tar", sha256File(path.join(bundle, "images/app.tar")))
+      },
+      {
+        name: "malformed empty path",
+        mutate: (bundle) => appendChecksumLine(bundle, "", "0".repeat(64))
+      }
+    ];
+
+    for (const candidate of cases) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-checksum-contract-"));
+      const bundle = writeBundle(tempDir);
+      candidate.mutate(bundle, tempDir);
+      const callsFile = path.join(tempDir, "runtime-calls.log");
+      const runtime = writeFakeRuntime(tempDir, callsFile);
+
+      const result = runImport(["--bundle", bundle, "--runtime", runtime, "--dry-run"]);
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, /checksums\.txt|allowlist|unsupported|invalid|duplicate/i, candidate.name);
+      assert.equal(readCalls(callsFile).length, 0, candidate.name);
+    }
+  });
 });
 
 function runImport(args: string[]) {
@@ -164,6 +234,10 @@ function writeChecksums(bundle: string): void {
   const files = ["manifest.yaml", "images.lock", "images/app.tar", "images/botified-runner.tar"];
   const lines = files.map((file) => `${sha256File(path.join(bundle, file))}  ${file}`);
   writeFileSync(path.join(bundle, "checksums.txt"), `${lines.join("\n")}\n`);
+}
+
+function appendChecksumLine(bundle: string, relativePath: string, sha256: string): void {
+  writeFileSync(path.join(bundle, "checksums.txt"), `${readFileSync(path.join(bundle, "checksums.txt"), "utf8")}${sha256}  ${relativePath}\n`);
 }
 
 function writeFakeRuntime(tempDir: string, callsFile: string): string {
