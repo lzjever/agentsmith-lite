@@ -411,6 +411,7 @@ scripts/install-offline.sh --cache dist/offline-cache --config config/substrates
 
 scripts/validate-env.sh --env out/substrate.env --secrets out/substrate.secrets.env
 scripts/validate-juicefs-contract.sh --env out/substrate.env --secrets out/substrate.secrets.env
+scripts/preflight.sh --env out/substrate.env --secrets out/substrate.secrets.env [--offline-cache dist/offline-cache] [--report out/doctor-report.json]
 scripts/doctor.sh --env out/substrate.env --secrets out/substrate.secrets.env [--offline-cache dist/offline-cache] [--report out/doctor-report.json] [--dry-run]
 scripts/test.sh
 ```
@@ -420,6 +421,7 @@ Important semantics:
 - `download-online.sh` without `--artifacts` writes a P0 contract skeleton only；它不是真实离线安装包。
 - 非 dry-run `install-online.sh` / `install-offline.sh` 必须使用 `cacheMode: p1-real`。
 - Existing-cloud 使用同一 env/secrets 格式；它验证管理员提供的服务，不创建云资源。
+- `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 substrate 静态诊断 thin wrapper；它不是第三个 repo，不是 external evidence，也不替代 live doctor、clean VM、offline VM、existing-cloud 验证。
 
 ### 7.2 App repo 当前命令
 
@@ -449,6 +451,7 @@ scripts/deploy/apply.sh [--env substrate.env] [--out out/manifests] [--images-lo
 scripts/deploy/status.sh --env substrate.env
 scripts/deploy/status.sh --env substrate.env --resources --base-url <url> --cookie-file <cookie-file> [--csrf-token <token>]
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run|--apply --cookie-file <cookie-file> [--csrf-token <token>] [--run-id <run-id>]
+scripts/deploy/preflight.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
 scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.env] [--app-secrets app.secrets.env] [--out out/manifests] [--bundle dist/app-offline-bundle] [--images-lock images.lock]
 scripts/deploy/smoke.sh --base-url <url> --secrets substrate.secrets.env [--app-env app.smoke.env] [--report out/smoke-report.json]
 scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env [--app-env app.smoke.env] --endpoint-base-url <url> --endpoint-model <model> --endpoint-secret-ref <secret-ref> [--task-smoke] [--task-reclaim-smoke] [--task-reclaim-reap-apply] [--report out/smoke-report.json]
@@ -458,6 +461,7 @@ scripts/deploy/down.sh --env substrate.env [--dry-run]
 Known command status and gaps:
 
 - `--env`/`--secrets` 只表示 substrate contract；`--app-env`/`--app-secrets` 只表示 app-owned deploy/runtime/smoke overlay。`POSTGRES_APP_URL`、`APP_SESSION_SECRET`、`BUILTIN_ADMIN_INITIAL_PASSWORD`、`OIDC_CLIENT_SECRET` 仍来自 substrate secrets；`AGENTSMITH_LITE_SANDBOX_MODE`、`AGENTSMITH_LITE_MODEL_BASE_URL_*`、`SMOKE_*` 等来自 app env overlay，`AGENTSMITH_LITE_MODEL_API_KEY_*` 来自 app secrets overlay。raw `S3_*`/JuiceFS substrate secrets 不能进入 app overlay。
+- `scripts/deploy/preflight.sh` 是 app doctor static-only thin entry，复用 env/manifest/bundle checks；它不运行 smoke/e2e/visual/build/push/import/live K8s，也不替代 substrate doctor 和外部 K8s/JuiceFS evidence。
 - `scripts/dev/up.sh --env/--secrets [--app-env/--app-secrets]` 已作为本地 dev env 契约补齐：allowlist 限制可加载的 substrate contract 与 app overlay key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
 - `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker；`SMOKE_*` 只放在 app smoke overlay，不放在 substrate env。`scripts/deploy/smoke.sh --task-reclaim-smoke` 是另一个手动 opt-in：创建独立 task，cancel 后对该 `runId` 调用 scoped reap dry-run；`--task-reclaim-reap-apply` 只在 reclaim smoke 开启时允许，并执行 scoped dry-run -> scoped apply -> final scoped dry-run。它们都不进入默认 gate，也不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file`、真实 cancel/reap 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
 - `scripts/deploy/operator-sandbox.mjs reap` 支持默认/显式 `--dry-run` 与显式 `--apply`；apply 通过 operator API 发送 `{ "apply": true }`，并由 deploy script 测试覆盖。

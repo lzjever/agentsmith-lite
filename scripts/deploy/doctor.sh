@@ -9,6 +9,7 @@ app_secrets_file=
 out=out/manifests
 bundle=
 images_lock=
+static_only=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --env) env_file="$2"; shift 2 ;;
@@ -18,6 +19,7 @@ while [ "$#" -gt 0 ]; do
     --out) out="$2"; shift 2 ;;
     --bundle) bundle="$2"; shift 2 ;;
     --images-lock) images_lock="$2"; shift 2 ;;
+    --static-only|--dry-run) static_only=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -223,6 +225,10 @@ fi
 
 if [ -n "$bundle" ] || [ -n "$images_lock" ]; then
   if [ ! -f dist/packages/sandbox-controller/src/appImageLock.js ]; then
+    if [ "$static_only" = true ]; then
+      echo "npm run build is required before static app bundle or images.lock validation" >&2
+      exit 1
+    fi
     npm run build >/dev/null
   fi
 
@@ -237,11 +243,16 @@ if [ -n "$bundle" ] || [ -n "$images_lock" ]; then
   node scripts/deploy/app-doctor-check.mjs "${check_args[@]}"
 fi
 
-if [ "$env_file_requested_k8s_fact_checks" = true ] && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
+if [ "$static_only" = false ] && [ "$env_file_requested_k8s_fact_checks" = true ] && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
   run_k8s_fact_checks
 fi
 
 mkdir -p out
+if [ "$static_only" = true ]; then
+  k8s_facts_report="skipped in static-only mode"
+else
+  k8s_facts_report="when kube env is configured, checks schema job completion, API rollout, JuiceFS PVC, and API service account RBAC"
+fi
 cat > out/app-doctor-report.json <<REPORT
 {
   "schema": "agentsmith-lite.app-doctor/v1",
@@ -250,7 +261,7 @@ cat > out/app-doctor-report.json <<REPORT
     "schema_job": "expected agentsmith-lite-schema-bootstrap",
     "web_api_readiness": "expected agentsmith-lite-api deployment/service and ingress for non-local public URLs",
     "sandbox_rbac": "expected namespaced Role without exec subresource",
-    "k8s_facts": "when kube env is configured, checks schema job completion, API rollout, JuiceFS PVC, and API service account RBAC",
+    "k8s_facts": "$k8s_facts_report",
     "botified_smoke": "uses third_party/botified/PINNED_SOURCE.json and botified serve"
   },
   "secret_policy": "only product secrets are rendered to app-owned Kubernetes Secrets"
