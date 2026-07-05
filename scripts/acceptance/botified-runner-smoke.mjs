@@ -168,7 +168,11 @@ async function main() {
       }
     }
 
-    console.log(JSON.stringify(report, null, 2));
+    const reportJson = `${JSON.stringify(report, null, 2)}\n`;
+    if (options.reportPath) {
+      await writeReport(options.reportPath, reportJson);
+    }
+    process.stdout.write(reportJson);
   } finally {
     if (containerName) {
       cleanupContainer({ runtime: options.runtime, containerName, redactor: activeRedactor });
@@ -199,6 +203,7 @@ function parseArgs(argv) {
     skipBuild: false,
     timeoutMs: 20_000,
     keepTemp: false,
+    reportPath: undefined,
     help: false
   };
 
@@ -242,6 +247,9 @@ function parseArgs(argv) {
       case "--keep-temp":
         options.keepTemp = true;
         break;
+      case "--report":
+        options.reportPath = resolveCliPath(nextValue(argv, ++index, "--report"));
+        break;
       case "-h":
       case "--help":
         options.help = true;
@@ -268,12 +276,18 @@ function resolveCliPath(value) {
 
 function usage() {
   return [
-    "usage: node scripts/acceptance/botified-runner-smoke.mjs [--binary PATH] [--timeout-secs N] [--keep-temp]",
-    "       node scripts/acceptance/botified-runner-smoke.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
+    "usage: node scripts/acceptance/botified-runner-smoke.mjs [--binary PATH] [--timeout-secs N] [--keep-temp] [--report PATH]",
+    "       node scripts/acceptance/botified-runner-smoke.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N] [--report PATH]",
     "",
     "Runs Botified runner acceptance with the vendored binary by default, or with a runner image/container when --container-image is provided.",
+    "When --report is provided and the smoke succeeds, writes the stdout JSON to that path.",
     "When it succeeds, container mode is runner-container-only evidence; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap."
   ].join("\n");
+}
+
+async function writeReport(reportPath, reportJson) {
+  await mkdir(path.dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, reportJson, "utf8");
 }
 
 async function requireReadableBuildOutput() {

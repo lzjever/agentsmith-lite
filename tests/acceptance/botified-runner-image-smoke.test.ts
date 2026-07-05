@@ -93,6 +93,27 @@ describe("Botified runner image acceptance", () => {
     assertNoSecretLeak(result.stdout, result.stderr);
   });
 
+  it("writes an opt-in report matching stdout without leaking secrets", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-report-"));
+    const callsFile = path.join(tempDir, "runtime-calls.jsonl");
+    const reportPath = path.join(tempDir, "nested", "report.json");
+    const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "success");
+
+    const result = runImageSmoke(fakeRuntime, ["--report", reportPath, "--timeout-secs", "3"], secretEnv());
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(reportPath), true);
+    const reportJson = readFileSync(reportPath, "utf8");
+    assert.equal(reportJson, result.stdout);
+    const report = JSON.parse(reportJson) as {
+      mode: string;
+      scope: string;
+    };
+    assert.equal(report.mode, "container-image");
+    assert.equal(report.scope, "runner-container-only");
+    assertNoSecretLeak(`${result.stdout}\n${reportJson}`, result.stderr);
+  });
+
   it("keeps a successful container smoke successful when workspace cleanup needs permission repair", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-cleanup-"));
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
