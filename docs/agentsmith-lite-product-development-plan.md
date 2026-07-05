@@ -76,7 +76,7 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 
 ### 2.3 External Acceptance Evidence
 
-以下验收或证据边界不能由本地 fake/stub 测试替代。Botified runner 已拆为已完成的本地 process acceptance 与仍需真实环境的 full external acceptance；真实环境证据必须保存 redacted evidence：
+以下验收或证据边界不能由本地 fake/stub 测试替代。Botified runner 已拆为已完成的本地 process acceptance、已实现入口但仍待真实运行归档的 runner image/container acceptance，以及仍需真实环境的 full external acceptance；真实环境证据必须保存 redacted evidence：
 
 | Evidence | 必须证明 |
 | --- | --- |
@@ -84,6 +84,7 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 | Disconnected VM offline install | 同一 offline cache 复制到断网 VM；关闭 egress/DNS 后执行 offline install；证明无公网下载。 |
 | Existing-cloud validation | 管理员提供同格式 env/secrets，doctor 通过真实 K8s/Postgres/S3/JuiceFS PVC 检查。 |
 | Botified runner local process acceptance | 已由 `npm run acceptance:botified-runner` 覆盖：本地 vendored Botified binary、mock-provider、bash marker、timeline/state/abort。这是本地 process 证据，不替代 full external acceptance。 |
+| Botified runner image/container acceptance | `npm run acceptance:botified-runner-image` 已作为手动命令/本地验收入口实现，并有 fake-runtime contract tests 覆盖 build/run/cleanup/secret 边界；真实 runner image/container acceptance 仍需在可拉取 base image 的 Docker 环境中运行并归档 redacted 输出。命令成功时才是 runner-container-only 证据，不证明 K8s/PVC/JuiceFS/product task API/`publish_file`/cancel-reap。 |
 | Full runner image/K8s/JuiceFS acceptance | 构建 runner image；在 K8s sandbox pod 中通过 PVC 挂载 JuiceFS 运行 Botified；真实调用 `/v1/messages` 或产品 task API；通过 bash 写 artifact 并产出 timeline/artifact。 |
 | Live sandbox task | App 部署到 K8s 后创建 task，sandbox pod 挂载 JuiceFS，Botified bash 写 artifact，API 能轮询 events、下载 artifact。 |
 | Resource reclaim | 长任务 cancel、TTL 过期、operator reap 能删除 app-owned pod/service/configmap/secret，并保留持久 project files。 |
@@ -599,6 +600,7 @@ Local evidence:
 - unit tests for manifest/RBAC/resource labels；
 - fake Botified client tests for task lifecycle；
 - `npm run acceptance:botified-runner` 证明本地 vendored Botified binary process、mock-provider、bash marker、timeline/state/abort；
+- `npm run acceptance:botified-runner-image` 已作为 runner image/container 手动验收入口实现，fake-runtime contract tests 覆盖 build/run/cleanup/secret 边界；真实 runner-container-only evidence 仍需在可拉取 base image 的 Docker 环境中运行并归档 redacted 输出；
 - API contract tests for events/artifacts/cancel/reap；
 - Dockerfile/static checks 只证明形状，不证明 runtime 可跑。
 
@@ -719,8 +721,8 @@ P5 不新增产品功能。任何新功能必须回到 Core/Deferred 分层重�
 | Substrate install | script control flow | clean host compatibility, no egress | clean VM + disconnected VM reports。 |
 | Product API | route/schema/service tests | real deployed ingress/session behavior | deploy smoke report。 |
 | UI boundary | static tests | visual usability | manual visual screenshot if UI changed。 |
-| Botified runtime | fake client/unit tests；`npm run acceptance:botified-runner` 覆盖本地 vendored binary process、mock-provider、bash marker、timeline/state/abort | runner image behavior、K8s pod/PVC/JuiceFS artifact | local process acceptance log + full external runner/live task reports。 |
-| Live sandbox | manifest tests、本地 runner process acceptance | pod scheduling, PVC mount, JuiceFS-backed bash artifact | full runner image/K8s/JuiceFS live task artifact smoke report。 |
+| Botified runtime | fake client/unit tests；`npm run acceptance:botified-runner` 覆盖本地 vendored binary process；`npm run acceptance:botified-runner-image` 入口和 fake-runtime contract tests 已实现 | successful runner-container-only command output、K8s pod/PVC/JuiceFS artifact、product task artifact、`publish_file`、cancel/reap | local process acceptance log + successful container acceptance log + full external runner/live task reports。 |
+| Live sandbox | manifest tests、本地 runner process/container acceptance | pod scheduling, PVC mount, JuiceFS-backed bash artifact | full runner image/K8s/JuiceFS live task artifact smoke report。 |
 | Cleanup/reap | unit/fake lifecycle | real K8s resource deletion | live cancel/TTL/reap report。 |
 | App offline bundle | bundle script validation | real disconnected import/deploy | disconnected app deploy report。 |
 
@@ -742,7 +744,8 @@ This checklist is for handoff, not a release gate bureaucracy.
 ## 12. Immediate Next Work
 
 1. Completed: `docs/migration-from-reference.md` migration ledger, `scripts/dev/up.sh --env/--secrets` allowlist/tests, and `npm run acceptance:botified-runner` local process acceptance.
-2. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
-3. Run real `scripts/deploy/smoke.sh --task-smoke` in self-hosted/existing-cloud/offline deploys and archive redacted artifact smoke reports.
-4. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
-5. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.
+2. Run `npm run acceptance:botified-runner-image` in a Docker environment that can pull base images, then archive redacted runner-container-only output.
+3. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
+4. Run real `scripts/deploy/smoke.sh --task-smoke` in self-hosted/existing-cloud/offline deploys and archive redacted artifact smoke reports.
+5. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
+6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.

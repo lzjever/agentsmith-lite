@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,7 +13,12 @@ const releaseSmokeMarker = "BOTIFIED_RELEASE_SMOKE_OUTPUT";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "../..");
 const defaultBinary = path.join(repoRoot, "third_party/botified/target/release/botified");
+const defaultContainerImage = "agentsmith-lite/botified-runner:acceptance";
+const botifiedRunnerDockerfile = path.join(repoRoot, "infra/docker/Dockerfile.botified-runner");
 const distClientPath = path.join(repoRoot, "dist/packages/ports/src/botified.js");
+const containerConfigPath = "/etc/botified/botified-runtime.yaml";
+const containerWorkspacePath = "/workspace";
+const containerNotCovered = ["k8s", "juicefs", "pvc", "product-task-api", "publish_file", "cancel-reap"];
 
 class Redactor {
   #values = [];
@@ -54,7 +59,11 @@ async function main() {
   }
 
   await requireReadableBuildOutput();
-  await requireExecutable(options.binaryPath);
+  if (options.mode === "local-process") {
+    await requireExecutable(options.binaryPath);
+  } else if (!options.skipBuild) {
+    buildContainerImage({ runtime: options.runtime, image: options.image, redactor: activeRedactor });
+  }
 
   const { FetchBotifiedRuntimeHttpClient } = await import(pathToFileURL(distClientPath).href);
   const client = new FetchBotifiedRuntimeHttpClient();
@@ -64,21 +73,48 @@ async function main() {
 
   const startedAt = Date.now();
   let childHandle;
+  let containerName;
   try {
     const port = await allocatePort();
     const baseUrl = `http://127.0.0.1:${port}`;
     const configPath = path.join(tempDir, "botified-runtime.yaml");
     const workDir = path.join(tempDir, "workspace");
     await mkdir(workDir, { recursive: true });
-    await writeFile(configPath, runtimeConfigYaml({ port, workDir, dataDir: path.join(tempDir, "state") }));
+    await chmod(workDir, 0o777);
 
-    childHandle = startBotified({
-      binaryPath: options.binaryPath,
-      configPath,
-      workDir,
-      serviceKey,
-      redactor: activeRedactor
-    });
+    if (options.mode === "local-process") {
+      await writeFile(configPath, runtimeConfigYaml({
+        host: "127.0.0.1",
+        port,
+        workDir,
+        dataDir: path.join(tempDir, "state")
+      }));
+      childHandle = startBotified({
+        binaryPath: options.binaryPath,
+        configPath,
+        workDir,
+        serviceKey,
+        redactor: activeRedactor
+      });
+    } else {
+      await writeFile(configPath, runtimeConfigYaml({
+        host: "0.0.0.0",
+        port,
+        workDir: containerWorkspacePath,
+        dataDir: `${containerWorkspacePath}/state`
+      }));
+      containerName = `agentsmith-lite-botified-runner-${randomBytes(8).toString("hex")}`;
+      childHandle = startBotifiedContainer({
+        runtime: options.runtime,
+        image: options.image,
+        containerName,
+        port,
+        configPath,
+        workDir,
+        serviceKey,
+        redactor: activeRedactor
+      });
+    }
 
     const deadline = Date.now() + options.timeoutMs;
     await waitForHealth({ client, baseUrl, serviceKey, childHandle, deadline });
@@ -96,10 +132,13 @@ async function main() {
     const abort = await client.abort(baseUrl, serviceKey);
     const finalState = await client.readState(baseUrl, serviceKey);
 
-    console.log(JSON.stringify({
+    const report = {
       status: "ok",
-      mode: "local-process",
-      binary: path.relative(repoRoot, options.binaryPath) || path.basename(options.binaryPath),
+      mode: options.mode,
+      scope: options.mode === "container-image" ? "runner-container-only" : "local-runner-process-only",
+      notCovered: options.mode === "container-image"
+        ? containerNotCovered
+        : ["runner-container-image", ...containerNotCovered],
       baseUrl,
       messageAccepted: posted.accepted,
       markerObserved: observed.markerObserved,
@@ -111,8 +150,26 @@ async function main() {
         queueLength: abort.queueLength
       },
       durationMs: Date.now() - startedAt
-    }, null, 2));
+    };
+    if (options.mode === "local-process") {
+      report.binary = path.relative(repoRoot, options.binaryPath) || path.basename(options.binaryPath);
+    } else {
+      report.image = options.image;
+      report.runtime = options.runtime;
+      const imageMetadata = inspectContainerImage({ runtime: options.runtime, image: options.image, redactor: activeRedactor });
+      if (imageMetadata.imageId) {
+        report.imageId = imageMetadata.imageId;
+      }
+      if (imageMetadata.repoDigests.length > 0) {
+        report.repoDigests = imageMetadata.repoDigests;
+      }
+    }
+
+    console.log(JSON.stringify(report, null, 2));
   } finally {
+    if (containerName) {
+      cleanupContainer({ runtime: options.runtime, containerName, redactor: activeRedactor });
+    }
     if (childHandle) {
       await stopChild(childHandle);
     }
@@ -124,7 +181,11 @@ async function main() {
 
 function parseArgs(argv) {
   const options = {
+    mode: "local-process",
     binaryPath: defaultBinary,
+    image: defaultContainerImage,
+    runtime: "docker",
+    skipBuild: false,
     timeoutMs: 20_000,
     keepTemp: false,
     help: false
@@ -135,6 +196,28 @@ function parseArgs(argv) {
     switch (arg) {
       case "--binary":
         options.binaryPath = resolveCliPath(nextValue(argv, ++index, "--binary"));
+        break;
+      case "--container-image":
+        options.mode = "container-image";
+        options.image = nextValue(argv, ++index, "--container-image");
+        break;
+      case "--mode": {
+        const mode = nextValue(argv, ++index, "--mode");
+        if (mode !== "local-process" && mode !== "container-image") {
+          throw new Error("--mode must be local-process or container-image");
+        }
+        options.mode = mode;
+        break;
+      }
+      case "--image":
+        options.mode = "container-image";
+        options.image = nextValue(argv, ++index, "--image");
+        break;
+      case "--runtime":
+        options.runtime = nextValue(argv, ++index, "--runtime");
+        break;
+      case "--skip-build":
+        options.skipBuild = true;
         break;
       case "--timeout-secs": {
         const raw = nextValue(argv, ++index, "--timeout-secs");
@@ -175,8 +258,10 @@ function resolveCliPath(value) {
 function usage() {
   return [
     "usage: node scripts/acceptance/botified-runner-smoke.mjs [--binary PATH] [--timeout-secs N] [--keep-temp]",
+    "       node scripts/acceptance/botified-runner-smoke.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
     "",
-    "Runs local Botified runner process acceptance with the vendored binary and --mock-provider."
+    "Runs Botified runner acceptance with the vendored binary by default, or with a runner image/container when --container-image is provided.",
+    "When it succeeds, container mode is runner-container-only evidence; it does not cover Kubernetes, PVC, JuiceFS, product task API, publish_file, or cancel/reap."
   ].join("\n");
 }
 
@@ -223,6 +308,31 @@ function startBotified({ binaryPath, configPath, workDir, serviceKey, redactor }
     stdio: ["ignore", "pipe", "pipe"]
   });
 
+  return createChildHandle(child, redactor);
+}
+
+function startBotifiedContainer({ runtime, image, containerName, port, configPath, workDir, serviceKey, redactor }) {
+  const args = [
+    "run",
+    "--name", containerName,
+    "-p", `127.0.0.1:${port}:${port}`,
+    "--mount", `type=bind,src=${configPath},dst=${containerConfigPath},ro`,
+    "--mount", `type=bind,src=${workDir},dst=${containerWorkspacePath}`,
+    "-e", "BOTIFIED_SERVICE_KEY",
+    "-e", "BOTIFIED_MOCK_PROVIDER=true",
+    "-e", `BOTIFIED_CONFIG_PATH=${containerConfigPath}`,
+    image
+  ];
+  const child = spawn(runtime, args, {
+    cwd: repoRoot,
+    env: botifiedChildEnv(serviceKey),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  return createChildHandle(child, redactor);
+}
+
+function createChildHandle(child, redactor) {
   const handle = {
     child,
     stdout: "",
@@ -255,13 +365,79 @@ function startBotified({ binaryPath, configPath, workDir, serviceKey, redactor }
   return handle;
 }
 
-function botifiedChildEnv(serviceKey, parentEnv = process.env) {
+function buildContainerImage({ runtime, image, redactor }) {
+  runRuntimeCommand({
+    runtime,
+    args: ["build", "-f", botifiedRunnerDockerfile, "-t", image, repoRoot],
+    env: runtimeToolEnv(),
+    redactor,
+    description: `build Botified runner image ${image}`
+  });
+}
+
+function inspectContainerImage({ runtime, image, redactor }) {
+  const result = runRuntimeCommand({
+    runtime,
+    args: ["image", "inspect", image, "--format", "{{.Id}}\n{{range .RepoDigests}}{{.}}\n{{end}}"],
+    env: runtimeToolEnv(),
+    redactor,
+    description: `inspect Botified runner image ${image}`,
+    allowFailure: true
+  });
+  if (result.status !== 0) {
+    return { imageId: undefined, repoDigests: [] };
+  }
+  const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const imageId = lines[0];
+  return { imageId, repoDigests: lines.slice(1) };
+}
+
+function cleanupContainer({ runtime, containerName, redactor }) {
+  runRuntimeCommand({
+    runtime,
+    args: ["rm", "-f", containerName],
+    env: runtimeToolEnv(),
+    redactor,
+    description: `cleanup Botified runner container ${containerName}`,
+    allowFailure: true
+  });
+}
+
+function runRuntimeCommand({ runtime, args, env, redactor, description, allowFailure = false }) {
+  const result = spawnSync(runtime, args, {
+    cwd: repoRoot,
+    env,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024
+  });
+  const status = result.status ?? 1;
+  if (!allowFailure && (result.error || status !== 0)) {
+    const output = [
+      result.error ? errorMessage(result.error) : "",
+      result.stdout ? `stdout: ${redactor.redact(result.stdout.trim())}` : "",
+      result.stderr ? `stderr: ${redactor.redact(result.stderr.trim())}` : ""
+    ].filter(Boolean).join("\n");
+    throw new Error(`failed to ${description} (${formatExit({ code: status, signal: result.signal })})${output ? `\n${output}` : ""}`);
+  }
+  return {
+    status,
+    stdout: result.stdout || "",
+    stderr: result.stderr || ""
+  };
+}
+
+function runtimeToolEnv(parentEnv = process.env) {
   const env = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"]) {
+  for (const key of ["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR"]) {
     if (typeof parentEnv[key] === "string" && parentEnv[key].length > 0) {
       env[key] = parentEnv[key];
     }
   }
+  return env;
+}
+
+function botifiedChildEnv(serviceKey, parentEnv = process.env) {
+  const env = runtimeToolEnv(parentEnv);
   env.BOTIFIED_SERVICE_KEY = serviceKey;
   return env;
 }
@@ -357,7 +533,7 @@ async function stopChild(childHandle) {
   }
 }
 
-function runtimeConfigYaml({ port, workDir, dataDir }) {
+function runtimeConfigYaml({ host, port, workDir, dataDir }) {
   return `version: 1
 
 providers:
@@ -378,7 +554,7 @@ tools:
   enabled: [bash]
 
 service:
-  host: 127.0.0.1
+  host: ${host}
   port: ${port}
   service_key_env: BOTIFIED_SERVICE_KEY
   max_queue_messages: 8

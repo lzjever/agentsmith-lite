@@ -36,12 +36,15 @@ These are opt-in developer checks, not part of the default release path:
 
 ```bash
 npm run acceptance:botified-runner
+npm run acceptance:botified-runner-image
 npm run e2e:smoke
 npm run e2e:operator-lifecycle
 npm run visual:screenshot
 ```
 
-`acceptance:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts the release-smoke trigger, observes bash output in timeline/state, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process acceptance only; real runner image, Kubernetes Pod/PVC, JuiceFS artifact smoke, and cleanup evidence still require an external environment.
+`acceptance:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts the release-smoke trigger, observes bash output in timeline/state, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process acceptance only; Kubernetes Pod/PVC, JuiceFS artifact smoke, and cleanup evidence still require an external environment.
+
+`acceptance:botified-runner-image` builds the Node output, builds `agentsmith-lite/botified-runner:acceptance` from `infra/docker/Dockerfile.botified-runner`, runs that runner container with the mock provider, and exercises `/healthz`, `/v1/messages`, `/v1/timeline`, `/v1/state`, and `/v1/abort` through a random loopback port. It requires Docker to pull the Dockerfile base images; if the registry or base images are unavailable, the command cannot be used as evidence. When it succeeds, this is runner-container-only acceptance; it does not cover Kubernetes, PVC, JuiceFS, product task API, `publish_file`, or cancel/reap evidence.
 
 The operator lifecycle e2e and visual screenshot are independent manual gates; they are not run by `npm test` or the default release gate. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
 
