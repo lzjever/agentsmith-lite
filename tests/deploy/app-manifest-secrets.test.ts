@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 import { renderAppManifests } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
 
 describe("app manifest rendering", () => {
@@ -150,6 +151,7 @@ describe("app manifest rendering", () => {
     const secretData = (secret as { stringData?: Record<string, string> } | undefined)?.stringData;
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
@@ -190,6 +192,34 @@ describe("app manifest rendering", () => {
     assert.equal(overrideConfigMapData?.AGENTSMITH_LITE_DATA_DIR, "/custom-data-root");
   });
 
+  it("renders the namespace sandbox limit default and operator override", () => {
+    const defaultManifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const defaultConfigMap = defaultManifests.find(
+      (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
+    );
+    const defaultConfigMapData = (defaultConfigMap as { data?: Record<string, string> } | undefined)?.data;
+    assert.equal(defaultConfigMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
+
+    const overrideManifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: "7"
+      },
+      secrets: {}
+    });
+    const overrideConfigMap = overrideManifests.find(
+      (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
+    );
+    const overrideConfigMapData = (overrideConfigMap as { data?: Record<string, string> } | undefined)?.data;
+    assert.equal(overrideConfigMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, "7");
+  });
+
   it("grants the API only namespace-scoped sandbox lifecycle resources", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -205,6 +235,7 @@ describe("app manifest rendering", () => {
     const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
     const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "dry-run");
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "agentsmith-lite/botified-runner:dev");
     assert.ok(
       role.rules.some(

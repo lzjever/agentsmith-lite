@@ -1,4 +1,5 @@
 import type { KubernetesResource } from "../../contracts/src/api.js";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 import type { AppImageRefs } from "./appImageLock.js";
 
 export interface AppManifestInput {
@@ -48,6 +49,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
+        AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
+          input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
         AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin",
         ...modelBaseUrlConfig

@@ -1,0 +1,1 @@
+export const DEFAULT_SANDBOX_NAMESPACE_LIMIT = 20;

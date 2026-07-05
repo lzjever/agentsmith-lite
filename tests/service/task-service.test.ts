@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices, type CreateApplicationServicesInput } from "../../packages/application/src/factory.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 import type { ModelCredential, ModelCredentialResolver } from "../../packages/openai-compatible-client/src/index.js";
 import {
   BotifiedHttpError,
@@ -16,6 +17,7 @@ import {
   type BotifiedUploadFileInput,
   type BotifiedUploadFileResult
 } from "../../packages/ports/src/botified.js";
+import type { PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 import type {
   KubernetesResourceRef,
   PodReadiness,
@@ -134,9 +136,11 @@ describe("task service Botified orchestration", () => {
       apiKey: "sk-real-model-key",
       baseUrl: "https://models.example.com/v1"
     });
-    const { services, userId, projectId, endpointId } = await setupTaskServices(botified, {
-      modelCredentialResolver: resolver
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: resolver,
+      sandboxNamespaceLimit: 1
     });
+    await store.sandboxRuns.put(activeSandboxRun({ namespace: "agentsmith", runId: "run-existing" }));
 
     const task = await services.tasks.createTask(userId, projectId, {
       prompt: "dry run",
@@ -266,6 +270,41 @@ describe("task service Botified orchestration", () => {
     assert.equal(Date.parse(sandboxRun.idleExpiresAt) - Date.parse(sandboxRun.createdAt), 30 * 60 * 1000);
     assert.equal(JSON.stringify(sandboxRun).includes("test-service-key"), false);
     assert.equal(JSON.stringify(sandboxRun).includes("sk-real-model-key"), false);
+  });
+
+  it("rejects live sandbox creation when the namespace active run limit is reached before applying resources", async () => {
+    const botified = new FakeBotifiedClient([]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const resolver = new FakeCredentialResolver({
+      apiKey: "sk-real-model-key",
+      baseUrl: "https://models.example.com/v1/"
+    });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      sandboxNamespaceLimit: 1,
+      modelCredentialResolver: resolver,
+      liveSandbox: {
+        port: livePort,
+        readinessTimeoutMs: 1000,
+        readinessPollMs: 10,
+        sleep: livePort.sleep
+      }
+    });
+    await store.sandboxRuns.put(activeSandboxRun({ namespace: "agentsmith", runId: "run-existing" }));
+
+    await assert.rejects(
+      () => services.tasks.createTask(userId, projectId, { prompt: "too many", endpointId }),
+      (error) => {
+        assert.ok(error instanceof ProductError);
+        assert.equal(error.statusCode, 409);
+        assert.match(error.message, /Namespace sandbox active run limit reached/);
+        return true;
+      }
+    );
+
+    assert.deepEqual(await store.listTasksForProject(projectId), []);
+    assert.deepEqual(livePort.appliedResources, []);
+    assert.deepEqual(resolver.calls, []);
+    assert.deepEqual(botified.postMessageCalls, []);
   });
 
   it("creates live Botified runtime directories under dataRoot before applying resources", async () => {
@@ -1166,6 +1205,7 @@ interface SetupOptions {
   dataRoot?: string;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: CreateApplicationServicesInput["liveSandbox"];
+  sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
 }
@@ -1182,6 +1222,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     botifiedClient: botified,
     botifiedServiceKeyFactory: options.serviceKeyFactory ?? (() => "test-service-key"),
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
@@ -1205,6 +1246,49 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     userId: user.id,
     projectId: project.id,
     endpointId: endpoint.id
+  };
+}
+
+function activeSandboxRun(input: { namespace: string; runId: string }): PersistedSandboxRunState {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    namespace: input.namespace,
+    workspaceId: "workspace-existing",
+    projectId: "project-existing",
+    taskId: "task-existing",
+    runId: input.runId,
+    phase: "running",
+    image: "agentsmith-lite/botified-runner:dev",
+    pvcName: "agentsmith-lite-files",
+    projectSubPath: "workspaces/workspace-existing/projects/project-existing",
+    botifiedPort: 3099,
+    resourceNames: {
+      pod: "asl-task-existing",
+      service: "asl-task-existing",
+      configMap: "asl-task-existing-config",
+      secret: "asl-botified-existing",
+      serviceAccount: "asl-task-existing",
+      networkPolicy: "asl-task-existing"
+    },
+    serviceKeySecretRef: {
+      name: "asl-botified-existing",
+      key: "BOTIFIED_SERVICE_KEY"
+    },
+    directories: {
+      taskHome: "/workspace/project/tasks/task-existing/home",
+      artifacts: "/workspace/project/tasks/task-existing/artifacts",
+      botified: "/workspace/project/tasks/task-existing/botified"
+    },
+    resourceLimits: {
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi"
+    },
+    fencingToken: 1,
+    cleanupStatus: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp
   };
 }
 

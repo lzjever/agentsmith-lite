@@ -5,10 +5,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 const appDigestRef = "agentsmith-lite/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const runnerDigestRef = "agentsmith-lite/botified-runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const otherAppDigestRef = "agentsmith-lite/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const defaultSandboxNamespaceLimit = String(DEFAULT_SANDBOX_NAMESPACE_LIMIT);
 
 describe("deploy app doctor artifact checks", () => {
   it("passes rendered local-default manifests without requiring an Ingress", () => {
@@ -85,6 +87,17 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live/);
+  });
+
+  it("fails when the namespace sandbox limit is invalid", () => {
+    for (const sandboxNamespaceLimit of ["0", "9007199254740992"]) {
+      const fixture = writeDoctorFixture({ sandboxNamespaceLimit });
+
+      const result = runDoctor(fixture, []);
+
+      assert.notEqual(result.status, 0, sandboxNamespaceLimit);
+      assert.match(result.stderr, /AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT must be a positive integer/, sandboxNamespaceLimit);
+    }
   });
 
   it("passes --bundle by using the bundle images.lock against rendered manifests", () => {
@@ -238,6 +251,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
       "KUBE_NAMESPACE=agentsmith",
       ...(options.publicBaseUrl ? [`APP_PUBLIC_BASE_URL=${options.publicBaseUrl}`] : []),
       ...(options.sandboxMode ? [`AGENTSMITH_LITE_SANDBOX_MODE=${options.sandboxMode}`] : []),
+      ...(options.sandboxNamespaceLimit ? [`AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=${options.sandboxNamespaceLimit}`] : []),
       ""
     ].join("\n")
   );
@@ -255,6 +269,7 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
     runnerImage: options.runnerImage ?? runnerDigestRef,
     adminPassword,
     sandboxMode: options.sandboxMode,
+    sandboxNamespaceLimit: options.sandboxNamespaceLimit,
     extraManifest: options.extraManifest,
     omitIngress: options.omitIngress
   });
@@ -295,6 +310,7 @@ metadata:
   name: agentsmith-lite-config
 data:
   AGENTSMITH_LITE_SANDBOX_MODE: ${options.sandboxMode ?? "dry-run"}
+  AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: ${options.sandboxNamespaceLimit ?? defaultSandboxNamespaceLimit}
   BOTIFIED_RUNNER_IMAGE: ${options.runnerImage}
 ---
 apiVersion: v1
@@ -392,5 +408,6 @@ interface DoctorFixtureOptions {
   omitIngress?: boolean | undefined;
   publicBaseUrl?: string | undefined;
   sandboxMode?: string | undefined;
+  sandboxNamespaceLimit?: string | undefined;
   adminPassword: string | null;
 }

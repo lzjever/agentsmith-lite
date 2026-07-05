@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { optionalRuntimeTickIntervalMs, parseSandboxMode } from "../../packages/api-entry-node/src/runtimeConfig.js";
+import {
+  optionalRuntimeTickIntervalMs,
+  parseSandboxMode,
+  parseSandboxNamespaceLimit
+} from "../../packages/api-entry-node/src/runtimeConfig.js";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 describe("runtime config", () => {
   it("parses sandbox mode fail-closed except for empty dry-run defaults", () => {
@@ -27,6 +32,20 @@ describe("runtime config", () => {
       assert.throws(
         () => optionalRuntimeTickIntervalMs(value),
         /AGENTSMITH_LITE_RUNTIME_TICK_MS must be a positive integer/
+      );
+    }
+  });
+
+  it("parses namespace sandbox limits with the product default and fail-closed invalid values", () => {
+    assert.equal(parseSandboxNamespaceLimit(undefined), DEFAULT_SANDBOX_NAMESPACE_LIMIT);
+    assert.equal(parseSandboxNamespaceLimit(""), DEFAULT_SANDBOX_NAMESPACE_LIMIT);
+    assert.equal(parseSandboxNamespaceLimit("   "), DEFAULT_SANDBOX_NAMESPACE_LIMIT);
+    assert.equal(parseSandboxNamespaceLimit(" 12 "), 12);
+
+    for (const value of ["0", "-1", "+1", "01", "20.5", "twenty", "Infinity", "9007199254740992"]) {
+      assert.throws(
+        () => parseSandboxNamespaceLimit(value),
+        /AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT must be a positive integer/
       );
     }
   });

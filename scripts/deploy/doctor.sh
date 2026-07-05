@@ -50,12 +50,33 @@ requires_app_ingress() {
   esac
 }
 
+is_positive_safe_integer() {
+  local value="$1"
+  case "$value" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  if [ "${#value}" -lt 16 ]; then
+    return 0
+  fi
+  if [ "${#value}" -gt 16 ]; then
+    return 1
+  fi
+  [[ "$value" < "9007199254740992" ]]
+}
+
 sandbox_mode="${AGENTSMITH_LITE_SANDBOX_MODE:-dry-run}"
 case "$sandbox_mode" in
   ""|dry-run|live) ;;
   *) echo "AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live" >&2; exit 1 ;;
 esac
 [ -n "$sandbox_mode" ] || sandbox_mode=dry-run
+sandbox_namespace_limit="${AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:-}"
+if [ -n "$sandbox_namespace_limit" ]; then
+  is_positive_safe_integer "$sandbox_namespace_limit" || {
+    echo "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT must be a positive integer" >&2
+    exit 1
+  }
+fi
 
 for required in POSTGRES_APP_URL APP_SESSION_SECRET BUILTIN_ADMIN_INITIAL_PASSWORD; do
   [ -n "${!required:-}" ] || { echo "$required is required for app deploy" >&2; exit 1; }

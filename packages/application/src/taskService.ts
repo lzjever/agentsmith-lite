@@ -7,7 +7,8 @@ import { isSecretLikeText, redactSecretLikeText } from "../../botified-runtime/s
 import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, AgentTaskStatus, CreateTaskInput, KubernetesResource, ModelEndpoint } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import { requireNonEmptyString } from "../../domain/src/validation.js";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
+import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, type ModelCredentialResolver } from "../../openai-compatible-client/src/index.js";
 import { BotifiedHttpError, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { PersistedSandboxRunState, ProductStore } from "../../ports/src/store.js";
@@ -58,6 +59,7 @@ export interface TaskServiceConfig {
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   liveSandbox?: TaskLiveSandboxConfig;
+  sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
   modelCredentialResolver?: ModelCredentialResolver;
@@ -136,6 +138,9 @@ export class TaskService {
     );
     if (active.length >= project.taskConcurrencyLimit) {
       throw new ProductError("Project concurrent task limit reached", 409);
+    }
+    if (this.config.liveSandbox) {
+      await this.requireNamespaceSandboxCapacity();
     }
 
     const liveCredential = this.config.liveSandbox ? this.resolveLiveModelCredential(endpoint) : null;
@@ -679,6 +684,23 @@ export class TaskService {
 
   private liveSandboxIdleTimeoutMs(): number {
     return resolveDurationMs(this.config.liveSandboxIdleTimeoutMs, DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS);
+  }
+
+  private liveSandboxNamespaceLimit(): number {
+    return requirePositiveInteger(
+      this.config.sandboxNamespaceLimit,
+      "sandbox.namespaceLimit",
+      DEFAULT_SANDBOX_NAMESPACE_LIMIT
+    );
+  }
+
+  private async requireNamespaceSandboxCapacity(): Promise<void> {
+    const limit = this.liveSandboxNamespaceLimit();
+    const activeRuns = await this.store.sandboxRuns.listActive();
+    const namespaceActiveRuns = activeRuns.filter((run) => run.namespace === this.config.namespace);
+    if (namespaceActiveRuns.length >= limit) {
+      throw new ProductError("Namespace sandbox active run limit reached", 409);
+    }
   }
 }
 
