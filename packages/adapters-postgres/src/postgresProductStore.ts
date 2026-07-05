@@ -235,6 +235,15 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(task);
   }
 
+  async listActiveTasks(): Promise<AgentTask[]> {
+    const rows = await this.queryRows<AgentTaskRow>(
+      `select * from agent_tasks
+       where status in ('queued', 'starting', 'running', 'stopping')
+       order by created_at, id`
+    );
+    return rows.map(mapTask);
+  }
+
   async listTasksForProject(projectId: string): Promise<AgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(
       `select * from agent_tasks where project_id = $1 order by created_at, id`,

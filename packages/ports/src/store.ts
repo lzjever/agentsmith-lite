@@ -141,6 +141,7 @@ export interface ProductStore {
 
   createTask(task: AgentTask): Promise<AgentTask>;
   updateTask(task: AgentTask): Promise<AgentTask>;
+  listActiveTasks(): Promise<AgentTask[]>;
   listTasksForProject(projectId: string): Promise<AgentTask[]>;
   findTask(id: string): Promise<AgentTask | null>;
   appendTaskEvents(events: AgentTaskEvent[]): Promise<void>;

@@ -6,6 +6,7 @@ import { AuthService } from "./authService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
+import { RuntimeService } from "./runtimeService.js";
 import { SandboxLifecycleService } from "./sandboxLifecycleService.js";
 import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
@@ -28,6 +29,7 @@ export interface CreateApplicationServicesInput {
   liveSandbox?: TaskLiveSandboxConfig;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
+  runtimeTickIntervalMs?: number;
 }
 
 export function createApplicationServices(input: CreateApplicationServicesInput) {
@@ -71,6 +73,9 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     input.botifiedClient ?? new DryRunBotifiedRuntimeHttpClient(),
     taskConfig
   );
+  const runtime = new RuntimeService(tasks, sandboxLifecycle, {
+    ...(input.runtimeTickIntervalMs !== undefined ? { tickIntervalMs: input.runtimeTickIntervalMs } : {})
+  });
 
   return {
     auth,
@@ -79,6 +84,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     chat,
     files,
     tasks,
+    runtime,
     sandboxLifecycle,
     dataRoot: input.dataRoot,
     projectAbsoluteRoot(projectRootPath: string): string {

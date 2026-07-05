@@ -126,6 +126,10 @@ export class InMemoryProductStore implements ProductStore {
     return clone(task);
   }
 
+  async listActiveTasks(): Promise<AgentTask[]> {
+    return [...this.tasks.values()].filter((task) => isActiveTaskStatus(task.status)).map(clone);
+  }
+
   async listTasksForProject(projectId: string): Promise<AgentTask[]> {
     return [...this.tasks.values()].filter((task) => task.projectId === projectId).map(clone);
   }
@@ -289,4 +293,8 @@ function publicUser(user: StoredUser): User {
 
 function clone<T>(value: T): T {
   return value === null || value === undefined ? value : structuredClone(value);
+}
+
+function isActiveTaskStatus(status: AgentTask["status"]): boolean {
+  return status === "queued" || status === "starting" || status === "running" || status === "stopping";
 }

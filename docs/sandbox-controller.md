@@ -2,7 +2,7 @@
 
 P0 renders one sandbox pod per active task in dry-run form and has a tested reconciler for run resource state plus a tested in-cluster Kubernetes port/action applier. TaskService also has an explicit live startup path: when live mode is configured, it persists run state, materializes the six per-run resources, applies them, waits for the Pod to become ready with a bounded poll loop, then posts the prompt to Botified.
 
-Background lease reconciliation, recycle loops, operator/watch behavior, and long-running cleanup controllers are still future slices. Cleanup/status in this slice is explicit and one-shot through the product API.
+Live mode also starts a P0 single-replica runtime tick. On startup and then each interval, it syncs active task Botified timelines through TaskService and runs `reapSandboxRunsOnce({ apply: true })`. This is a thin process-local loop, not a Kubernetes watch/operator, lease/queue framework, or governance control plane. Operator status/reap endpoints remain explicit diagnostics and manual convergence tools.
 
 ## Run State
 

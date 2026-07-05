@@ -84,6 +84,12 @@ export interface TaskArtifactDownload {
   bytes: Buffer;
 }
 
+export interface ActiveTaskSyncResult {
+  activeTaskCount: number;
+  syncedTaskIds: string[];
+  failedTaskIds: string[];
+}
+
 export class BotifiedTaskPortError extends ProductError {
   readonly code: string;
   readonly retryable: boolean;
@@ -237,6 +243,24 @@ export class TaskService {
   async listTasks(userId: string, projectId: string): Promise<AgentTask[]> {
     await this.workspaces.requireProjectForUser(userId, projectId);
     return this.store.listTasksForProject(projectId);
+  }
+
+  async syncActiveTasksOnce(): Promise<ActiveTaskSyncResult> {
+    const activeTasks = await this.store.listActiveTasks();
+    const result: ActiveTaskSyncResult = {
+      activeTaskCount: activeTasks.length,
+      syncedTaskIds: [],
+      failedTaskIds: []
+    };
+    for (const task of activeTasks) {
+      try {
+        await this.syncTaskTimeline(task);
+        result.syncedTaskIds.push(task.id);
+      } catch {
+        result.failedTaskIds.push(task.id);
+      }
+    }
+    return result;
   }
 
   async cancelTask(userId: string, taskId: string): Promise<AgentTask> {
@@ -772,7 +796,7 @@ function isTerminalTaskStatus(status: AgentTaskStatus): boolean {
 }
 
 function isActiveTaskStatus(status: AgentTaskStatus): boolean {
-  return status === "queued" || status === "starting" || status === "running";
+  return status === "queued" || status === "starting" || status === "running" || status === "stopping";
 }
 
 function cleanupPhaseForTaskStatus(status: AgentTaskStatus): PersistedSandboxRunState["phase"] {

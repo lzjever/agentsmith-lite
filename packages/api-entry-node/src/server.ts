@@ -28,6 +28,7 @@ export interface ApiServerOptions {
   liveSandbox?: TaskLiveSandboxConfig;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
+  runtimeTickIntervalMs?: number;
   store?: ProductStore;
 }
 
@@ -60,6 +61,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
     ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
+    ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
@@ -82,9 +84,15 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
   if (!address || typeof address === "string") {
     throw new Error("API server did not expose a TCP address");
   }
+  if (options.liveSandbox) {
+    services.runtime.startLoop();
+  }
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    close: () => new Promise((resolve, reject) => {
+      services.runtime.stopLoop();
+      server.close((error) => error ? reject(error) : resolve());
+    })
   };
 }
 

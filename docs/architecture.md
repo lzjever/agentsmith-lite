@@ -6,7 +6,7 @@ AgentSmith Lite is a clean app repo, not a release wrapper around the old system
 - Server-side services for auth, workspace/project records, endpoint config, a direct OpenAI-compatible Chat Completions adapter, path validation, and task state.
 - App-owned Postgres is the default product store. SQL migrations live in `infra/db/migrations/*.sql`, are applied with `POSTGRES_APP_URL npm run db:migrate`, and are recorded in the `agentsmith_migrations` ledger.
 - The Postgres-backed `ProductStore` covers product records, typed JSON document collections, fenced runtime leases, and typed sandbox run state backed by the existing JSON docs table. The in-memory adapter is only a tests/local fallback when `POSTGRES_APP_URL` is absent.
-- A sandbox controller package that renders namespaced sandbox manifests, reconciles the six lifecycle resources in tests, and includes a low-dependency in-cluster Kubernetes port/action applier used by TaskService live startup and explicit one-shot cleanup.
+- A sandbox controller package that renders namespaced sandbox manifests, reconciles the six lifecycle resources in tests, and includes a low-dependency in-cluster Kubernetes port/action applier used by TaskService live startup, the live runtime tick, and explicit one-shot cleanup.
 - A Botified runtime package that generates hardened per-task config, projects timeline events, and starts only `botified serve`.
 
 The Web UI is a presentation client. It does not call model providers, Botified services, Kubernetes, databases, object storage, or filesystem APIs directly.
@@ -15,4 +15,4 @@ Chat requests go from the browser to `/api/projects/{projectId}/chat`, then the 
 
 The API store factory is environment controlled: `POSTGRES_APP_URL` selects the real Postgres adapter, while unset local/test runs use memory. Live sandbox mode fails fast without `POSTGRES_APP_URL`; only local dry-run/test flows may use the in-memory fallback. Substrate-only metadata such as JuiceFS state is not read by product migrations or the app store.
 
-Sandbox lifecycle recovery is explicit rather than a hidden background controller. Admins can inspect `GET /api/operator/sandbox/status` and trigger one cleanup pass with `POST /api/operator/sandbox/reap`; the default reap behavior is dry-run unless `"apply": true` is provided.
+Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus reap. Admin operator status/reap endpoints remain explicit diagnostics and manual convergence tools, not governance gates or a Kubernetes watch/operator control plane.
