@@ -1,10 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
+import { parseAppImagesLock, validateAppManifestImagesAgainstLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { createAppDeployPlan, formatKubectlCommand } from "../../dist/packages/sandbox-controller/src/appDeployPlan.js";
 
 const args = parseArgs(process.argv.slice(2));
 const envFileValues = args.env ? await readEnvFile(args.env) : {};
 const env = { ...process.env, ...envFileValues };
+if (args.images_lock) {
+  const imageRefs = parseAppImagesLock(await readFile(args.images_lock, "utf8"));
+  validateAppManifestImagesAgainstLock(await readManifestText(args.out), imageRefs);
+}
 const plan = createAppDeployPlan({ out: args.out, timeout: args.timeout, env });
 
 if (args.dry_run) {
@@ -35,7 +41,7 @@ function parseArgs(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--env" || arg === "--out" || arg === "--timeout") {
+    if (arg === "--env" || arg === "--out" || arg === "--timeout" || arg === "--images-lock") {
       const value = argv[index + 1];
       if (!value) {
         throw new Error(`${arg} requires a value`);
@@ -50,6 +56,14 @@ function parseArgs(argv) {
   }
 
   return parsed;
+}
+
+async function readManifestText(out) {
+  const outStat = await stat(out);
+  if (outStat.isDirectory()) {
+    return readFile(path.join(out, "all.yaml"), "utf8");
+  }
+  return readFile(out, "utf8");
 }
 
 async function readEnvFile(file) {

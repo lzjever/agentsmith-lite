@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parseAppImagesLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { renderAppManifests } from "../../dist/packages/sandbox-controller/src/appManifestRenderer.js";
 
 const args = parseArgs(process.argv.slice(2));
@@ -11,7 +12,8 @@ const env = await readEnvFile(args.env);
 const secrets = args.secrets ? await readEnvFile(args.secrets) : {};
 const namespace = env.KUBE_NAMESPACE ?? "agentsmith";
 const tag = args.tag ?? "dev";
-const manifests = renderAppManifests({ namespace, imageTag: tag, env, secrets });
+const imageRefs = args.images_lock ? parseAppImagesLock(await readFile(args.images_lock, "utf8")) : undefined;
+const manifests = renderAppManifests({ namespace, imageTag: tag, env, secrets, imageRefs });
 await mkdir(args.out, { recursive: true });
 
 const documents = manifests.map(toYaml).join("---\n");
@@ -79,4 +81,3 @@ function scalar(value) {
   if (/^[A-Za-z0-9_.:/@-]+$/.test(text)) return text;
   return JSON.stringify(text);
 }
-

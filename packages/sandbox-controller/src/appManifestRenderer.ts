@@ -1,10 +1,12 @@
 import type { KubernetesResource } from "../../contracts/src/api.js";
+import type { AppImageRefs } from "./appImageLock.js";
 
 export interface AppManifestInput {
   namespace: string;
   imageTag: string;
   env: Record<string, string>;
   secrets: Record<string, string>;
+  imageRefs?: AppImageRefs;
 }
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
@@ -29,6 +31,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       appSecretData[key] = value;
     }
   }
+  const appImage = input.imageRefs?.app ?? `agentsmith-lite/app:${input.imageTag}`;
+  const runnerImage = input.imageRefs?.botifiedRunner ?? input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`;
 
   return [
     {
@@ -40,7 +44,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
-        BOTIFIED_RUNNER_IMAGE: input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`,
+        BOTIFIED_RUNNER_IMAGE: runnerImage,
         AUTH_MODE: input.env.AUTH_MODE ?? "builtin_admin",
         ...modelBaseUrlConfig
       }
@@ -66,7 +70,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
             containers: [
               {
                 name: "api",
-                image: `agentsmith-lite/app:${input.imageTag}`,
+                image: appImage,
                 ports: [{ containerPort: 3000 }],
                 envFrom: [
                   { configMapRef: { name: "agentsmith-lite-config" } },
@@ -116,7 +120,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
             containers: [
               {
                 name: "schema-bootstrap",
-                image: `agentsmith-lite/app:${input.imageTag}`,
+                image: appImage,
                 command: ["node", "scripts/db/apply-migrations.mjs"],
                 envFrom: [{ secretRef: { name: "agentsmith-lite-app-secrets" } }]
               }
