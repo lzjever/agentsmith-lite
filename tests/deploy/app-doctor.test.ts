@@ -17,7 +17,10 @@ describe("deploy app doctor artifact checks", () => {
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
     const outDir = path.join(tempDir, "manifests");
     writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
-    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
+    writeFileSync(
+      secretsFile,
+      "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\nBUILTIN_ADMIN_INITIAL_PASSWORD=admin-password\n"
+    );
 
     const render = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
       cwd: process.cwd(),
@@ -52,6 +55,36 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Ingress/i);
+  });
+
+  it("fails when the deploy package omits the built-in admin password", () => {
+    const fixture = writeDoctorFixture({ adminPassword: null });
+
+    const result = runDoctor(fixture, []);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /BUILTIN_ADMIN_INITIAL_PASSWORD is required/i);
+  });
+
+  it("fails when live sandbox deploy uses the default built-in admin password", () => {
+    const fixture = writeDoctorFixture({
+      sandboxMode: "live",
+      adminPassword: "admin-password"
+    });
+
+    const result = runDoctor(fixture, []);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /BUILTIN_ADMIN_INITIAL_PASSWORD must be non-default/i);
+  });
+
+  it("fails when sandbox mode has a typo", () => {
+    const fixture = writeDoctorFixture({ sandboxMode: "liv" });
+
+    const result = runDoctor(fixture, []);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live/);
   });
 
   it("passes --bundle by using the bundle images.lock against rendered manifests", () => {
@@ -198,11 +231,30 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
   const outDir = path.join(tempDir, "manifests");
   const bundleDir = path.join(tempDir, "bundle");
 
-  writeFileSync(envFile, `KUBE_NAMESPACE=agentsmith\n${options.publicBaseUrl ? `APP_PUBLIC_BASE_URL=${options.publicBaseUrl}\n` : ""}`);
-  writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
+  const adminPassword = options.adminPassword === undefined ? "admin-secret" : options.adminPassword;
+  writeFileSync(
+    envFile,
+    [
+      "KUBE_NAMESPACE=agentsmith",
+      ...(options.publicBaseUrl ? [`APP_PUBLIC_BASE_URL=${options.publicBaseUrl}`] : []),
+      ...(options.sandboxMode ? [`AGENTSMITH_LITE_SANDBOX_MODE=${options.sandboxMode}`] : []),
+      ""
+    ].join("\n")
+  );
+  writeFileSync(
+    secretsFile,
+    [
+      "POSTGRES_APP_URL=postgres://app",
+      "APP_SESSION_SECRET=app-session-secret",
+      ...(adminPassword === null ? [] : [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`]),
+      ""
+    ].join("\n")
+  );
   writeManifests(outDir, {
     appImage: options.appImage ?? appDigestRef,
     runnerImage: options.runnerImage ?? runnerDigestRef,
+    adminPassword,
+    sandboxMode: options.sandboxMode,
     extraManifest: options.extraManifest,
     omitIngress: options.omitIngress
   });
@@ -242,7 +294,16 @@ kind: ConfigMap
 metadata:
   name: agentsmith-lite-config
 data:
+  AGENTSMITH_LITE_SANDBOX_MODE: ${options.sandboxMode ?? "dry-run"}
   BOTIFIED_RUNNER_IMAGE: ${options.runnerImage}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentsmith-lite-app-secrets
+stringData:
+${options.adminPassword === null ? "" : `  BUILTIN_ADMIN_INITIAL_PASSWORD: ${options.adminPassword}
+`}
 ${options.omitIngress ? "" : `---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -330,4 +391,6 @@ interface DoctorFixtureOptions {
   extraManifest?: string | undefined;
   omitIngress?: boolean | undefined;
   publicBaseUrl?: string | undefined;
+  sandboxMode?: string | undefined;
+  adminPassword: string | null;
 }

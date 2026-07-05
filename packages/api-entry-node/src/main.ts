@@ -1,14 +1,15 @@
 import path from "node:path";
 import { FetchBotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import { SandboxKubernetesPort } from "../../sandbox-controller/src/kubernetesPort.js";
-import { optionalRuntimeTickIntervalMs } from "./runtimeConfig.js";
+import { optionalRuntimeTickIntervalMs, parseSandboxMode } from "./runtimeConfig.js";
 import { createApiServer } from "./server.js";
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const dataRoot = process.env.AGENTSMITH_LITE_DATA_DIR ?? path.resolve(".data");
 const builtinAdminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD ?? "admin-password";
 const sessionSecret = process.env.APP_SESSION_SECRET ?? "dev-session-secret";
-const liveSandboxEnabled = process.env.AGENTSMITH_LITE_SANDBOX_MODE === "live";
+const sandboxMode = parseSandboxMode(process.env.AGENTSMITH_LITE_SANDBOX_MODE);
+const liveSandboxEnabled = sandboxMode === "live";
 const runtimeTickIntervalMs = liveSandboxEnabled
   ? optionalRuntimeTickIntervalMs(process.env.AGENTSMITH_LITE_RUNTIME_TICK_MS)
   : undefined;

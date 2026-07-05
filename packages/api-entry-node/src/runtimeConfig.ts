@@ -1,3 +1,16 @@
+export type SandboxMode = "dry-run" | "live";
+
+export function parseSandboxMode(value: string | undefined): SandboxMode {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "dry-run";
+  }
+  if (trimmed === "dry-run" || trimmed === "live") {
+    return trimmed;
+  }
+  throw new Error("AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live");
+}
+
 export function optionalRuntimeTickIntervalMs(value: string | undefined): number | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {

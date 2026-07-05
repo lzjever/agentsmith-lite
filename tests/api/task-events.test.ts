@@ -207,7 +207,7 @@ describe("task events API", () => {
             createApiServer({
               port: 0,
               dataRoot,
-              builtinAdminPassword: "admin-password",
+              builtinAdminPassword: "production-admin-password",
               ...(sessionSecret !== undefined ? { sessionSecret } : {}),
               liveSandbox
             }),
@@ -218,11 +218,47 @@ describe("task events API", () => {
       api = await createApiServer({
         port: 0,
         dataRoot,
-        builtinAdminPassword: "admin-password",
+        builtinAdminPassword: "production-admin-password",
         sessionSecret: "production-session-secret",
         liveSandbox
       });
       assert.match(api.baseUrl, /^http:\/\/127\.0\.0\.1:/);
+    } finally {
+      if (previousPostgresUrl === undefined) {
+        delete process.env.POSTGRES_APP_URL;
+      } else {
+        process.env.POSTGRES_APP_URL = previousPostgresUrl;
+      }
+    }
+  });
+
+  it("fails fast when live sandbox mode would use the default admin password", async () => {
+    const previousPostgresUrl = process.env.POSTGRES_APP_URL;
+    process.env.POSTGRES_APP_URL = "postgresql://app:secret@db/app";
+    const liveSandbox = {
+      port: {
+        applyResource: async () => "applied" as const,
+        patchLabels: async () => "patched" as const,
+        deleteResource: async () => "deleted" as const,
+        getPodReadiness: async () => "ready" as const,
+        listManagedResources: async () => []
+      }
+    };
+
+    try {
+      for (const builtinAdminPassword of ["", "admin-password", " admin-password "]) {
+        await assert.rejects(
+          () =>
+            createApiServer({
+              port: 0,
+              dataRoot,
+              builtinAdminPassword,
+              sessionSecret: "production-session-secret",
+              liveSandbox
+            }),
+          /BUILTIN_ADMIN_INITIAL_PASSWORD must be set to a non-default value/
+        );
+      }
     } finally {
       if (previousPostgresUrl === undefined) {
         delete process.env.POSTGRES_APP_URL;

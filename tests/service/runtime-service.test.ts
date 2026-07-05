@@ -179,7 +179,7 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
   const services = createApplicationServices({
     store,
     dataRoot: path.join(tmpdir(), "agentsmith-lite-runtime-service"),
-    builtinAdminPassword: "admin-password",
+    builtinAdminPassword: "test-admin-password",
     sessionSecret: "test-session-secret",
     botifiedClient: botified,
     botifiedServiceKeyFactory: () => "test-service-key",
@@ -192,7 +192,7 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
       sleep: livePort.sleep
     }
   });
-  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const { user } = await services.auth.loginAfterBootstrap("test-admin-password");
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, {

@@ -12,6 +12,7 @@ import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInpu
 import { WorkspaceService } from "./workspaceService.js";
 
 export const DEFAULT_SESSION_SECRET = "dev-session-secret";
+export const DEFAULT_BUILTIN_ADMIN_PASSWORD = "admin-password";
 
 export interface CreateApplicationServicesInput {
   store: ProductStore;
@@ -36,10 +37,13 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const workspaces = new WorkspaceService(input.store);
   const endpoints = new EndpointService(input.store, workspaces);
   const files = new FileService();
+  const builtinAdminPassword = input.liveSandbox
+    ? requireLiveSandboxBuiltinAdminPassword(input.builtinAdminPassword)
+    : input.builtinAdminPassword;
   const sessionSecret = input.liveSandbox
     ? requireLiveSandboxSessionSecret(input.sessionSecret)
     : input.sessionSecret ?? DEFAULT_SESSION_SECRET;
-  const auth = new AuthService(input.store, input.builtinAdminPassword, sessionSecret);
+  const auth = new AuthService(input.store, builtinAdminPassword, sessionSecret);
   const modelCredentialResolver = input.modelCredentialResolver ?? new EnvModelCredentialResolver();
   const chat = new ChatService(
     endpoints,
@@ -108,6 +112,14 @@ export function requireLiveSandboxSessionSecret(sessionSecret: string | undefine
   const trimmed = sessionSecret?.trim();
   if (!trimmed || trimmed === DEFAULT_SESSION_SECRET) {
     throw new Error("APP_SESSION_SECRET must be set to a non-default value when AGENTSMITH_LITE_SANDBOX_MODE=live");
+  }
+  return trimmed;
+}
+
+export function requireLiveSandboxBuiltinAdminPassword(builtinAdminPassword: string | undefined): string {
+  const trimmed = builtinAdminPassword?.trim();
+  if (!trimmed || trimmed === DEFAULT_BUILTIN_ADMIN_PASSWORD) {
+    throw new Error("BUILTIN_ADMIN_INITIAL_PASSWORD must be set to a non-default value when AGENTSMITH_LITE_SANDBOX_MODE=live");
   }
   return trimmed;
 }

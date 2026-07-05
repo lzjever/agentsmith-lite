@@ -1173,10 +1173,11 @@ interface SetupOptions {
 async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory: SetupOptions | (() => string | undefined) = {}) {
   const options: SetupOptions = typeof optionsOrFactory === "function" ? { serviceKeyFactory: optionsOrFactory } : optionsOrFactory;
   const store = createInMemoryProductStore();
+  const builtinAdminPassword = options.liveSandbox ? "test-admin-password" : "admin-password";
   const services = createApplicationServices({
     store,
     dataRoot: options.dataRoot ?? path.join(tmpdir(), "agentsmith-lite-task-service"),
-    builtinAdminPassword: "admin-password",
+    builtinAdminPassword,
     sessionSecret: "test-session-secret",
     botifiedClient: botified,
     botifiedServiceKeyFactory: options.serviceKeyFactory ?? (() => "test-service-key"),
@@ -1185,7 +1186,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   });
-  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const { user } = await services.auth.loginAfterBootstrap(builtinAdminPassword);
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, {

@@ -50,9 +50,20 @@ requires_app_ingress() {
   esac
 }
 
-for required in POSTGRES_APP_URL APP_SESSION_SECRET; do
+sandbox_mode="${AGENTSMITH_LITE_SANDBOX_MODE:-dry-run}"
+case "$sandbox_mode" in
+  ""|dry-run|live) ;;
+  *) echo "AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live" >&2; exit 1 ;;
+esac
+[ -n "$sandbox_mode" ] || sandbox_mode=dry-run
+
+for required in POSTGRES_APP_URL APP_SESSION_SECRET BUILTIN_ADMIN_INITIAL_PASSWORD; do
   [ -n "${!required:-}" ] || { echo "$required is required for app deploy" >&2; exit 1; }
 done
+if [ "$sandbox_mode" = "live" ] && [ "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" = "admin-password" ]; then
+  echo "BUILTIN_ADMIN_INITIAL_PASSWORD must be non-default when AGENTSMITH_LITE_SANDBOX_MODE=live" >&2
+  exit 1
+fi
 
 [ -f third_party/botified/PINNED_SOURCE.json ] || { echo "Botified vendored source pin is missing" >&2; exit 1; }
 [ -d infra/db/migrations ] || { echo "schema migration bundle is missing" >&2; exit 1; }
@@ -64,6 +75,14 @@ fi
 
 if [ -d "$out" ]; then
   rg -q 'kind: Deployment' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
+  rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*[^[:space:]]' "$out" || {
+    echo "rendered app Secret missing non-empty BUILTIN_ADMIN_INITIAL_PASSWORD" >&2
+    exit 1
+  }
+  if [ "$sandbox_mode" = "live" ] && rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*"?admin-password"?[[:space:]]*$' "$out"; then
+    echo "rendered app Secret uses the default BUILTIN_ADMIN_INITIAL_PASSWORD in live mode" >&2
+    exit 1
+  fi
   if requires_app_ingress "${APP_PUBLIC_BASE_URL:-}"; then
     rg -q 'kind: Ingress' "$out" || { echo "rendered app Ingress missing" >&2; exit 1; }
   fi

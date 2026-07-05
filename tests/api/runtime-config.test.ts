@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { optionalRuntimeTickIntervalMs } from "../../packages/api-entry-node/src/runtimeConfig.js";
+import { optionalRuntimeTickIntervalMs, parseSandboxMode } from "../../packages/api-entry-node/src/runtimeConfig.js";
 
 describe("runtime config", () => {
+  it("parses sandbox mode fail-closed except for empty dry-run defaults", () => {
+    assert.equal(parseSandboxMode(undefined), "dry-run");
+    assert.equal(parseSandboxMode(""), "dry-run");
+    assert.equal(parseSandboxMode("   "), "dry-run");
+    assert.equal(parseSandboxMode("dry-run"), "dry-run");
+    assert.equal(parseSandboxMode(" live "), "live");
+
+    for (const value of ["liv", "LIVE", "dryrun", "false", "0"]) {
+      assert.throws(
+        () => parseSandboxMode(value),
+        /AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live/
+      );
+    }
+  });
+
   it("parses only strict positive integer tick intervals", () => {
     assert.equal(optionalRuntimeTickIntervalMs(undefined), undefined);
     assert.equal(optionalRuntimeTickIntervalMs(""), undefined);

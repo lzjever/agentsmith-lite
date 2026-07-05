@@ -4,7 +4,11 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
-import { createApplicationServices, requireLiveSandboxSessionSecret } from "../../application/src/factory.js";
+import {
+  createApplicationServices,
+  requireLiveSandboxBuiltinAdminPassword,
+  requireLiveSandboxSessionSecret
+} from "../../application/src/factory.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
 import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint, UploadProjectFileInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
@@ -42,6 +46,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     throw new Error("POSTGRES_APP_URL is required when AGENTSMITH_LITE_SANDBOX_MODE=live");
   }
   if (options.liveSandbox) {
+    requireLiveSandboxBuiltinAdminPassword(options.builtinAdminPassword);
     requireLiveSandboxSessionSecret(options.sessionSecret);
   }
   await mkdir(options.dataRoot, { recursive: true });
