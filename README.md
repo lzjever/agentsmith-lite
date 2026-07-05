@@ -35,10 +35,13 @@ Only allowlisted product API variables are exported to the dev server, such as `
 These are opt-in developer checks, not part of the default release path:
 
 ```bash
+npm run acceptance:botified-runner
 npm run e2e:smoke
 npm run e2e:operator-lifecycle
 npm run visual:screenshot
 ```
+
+`acceptance:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts the release-smoke trigger, observes bash output in timeline/state, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process acceptance only; real runner image, Kubernetes Pod/PVC, JuiceFS artifact smoke, and cleanup evidence still require an external environment.
 
 The operator lifecycle e2e and visual screenshot are independent manual gates; they are not run by `npm test` or the default release gate. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
 
