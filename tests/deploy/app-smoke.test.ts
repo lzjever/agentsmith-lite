@@ -7,6 +7,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+const appSmokeNotCovered = [
+  "external-k8s-observation",
+  "sandbox-pod-pvc-mount",
+  "juicefs-backend",
+  "runner-image-digest",
+  "independent-k8s-resource-deletion-observation",
+  "full-external-evidence"
+];
+
 describe("deploy app smoke", () => {
   it("smoke.sh dispatches to the API-only app smoke with env base URL and contract admin secret", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-"));
@@ -265,6 +274,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl: string;
         workspaceId: string;
         projectId: string;
+        evidenceScope: EvidenceScope;
         chat: { status: string };
         task: { status: string };
       };
@@ -274,6 +284,18 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl,
         workspaceId: "workspace_1",
         projectId: "project_1",
+        evidenceScope: {
+          scope: "product-api-only",
+          covered: [
+            "product-api-health",
+            "builtin-admin-auth",
+            "workspace-project-api",
+            "project-file-api-crud",
+            "operator-sandbox-status-api",
+            "endpoint-chat-api"
+          ],
+          notCovered: appSmokeNotCovered
+        },
         chat: { status: "completed" },
         task: { status: "skipped" }
       });
@@ -284,6 +306,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
       assert.doesNotMatch(readFileSync(reportPath, "utf8"), new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(readFileSync(reportPath, "utf8"), /secret\/remote-smoke/);
       assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+      assertLightEvidenceDoesNotClaimExternal(report.evidenceScope);
 
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
@@ -366,9 +389,21 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl,
         workspaceId: "workspace_skip",
         projectId: "project_skip",
+        evidenceScope: {
+          scope: "product-api-only",
+          covered: [
+            "product-api-health",
+            "builtin-admin-auth",
+            "workspace-project-api",
+            "project-file-api-crud",
+            "operator-sandbox-status-api"
+          ],
+          notCovered: appSmokeNotCovered
+        },
         chat: { status: "skipped" },
         task: { status: "skipped" }
       });
+      assertLightEvidenceDoesNotClaimExternal(JSON.parse(result.stdout).evidenceScope);
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
         "POST /api/auth/bootstrap",
@@ -557,19 +592,39 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl,
         workspaceId: "workspace_task",
         projectId: "project_task",
+        evidenceScope: {
+          scope: "product-api-only",
+          covered: [
+            "product-api-health",
+            "builtin-admin-auth",
+            "workspace-project-api",
+            "project-file-api-crud",
+            "operator-sandbox-status-api",
+            "endpoint-chat-api",
+            "task-api-create-events-artifact-download-marker"
+          ],
+          notCovered: appSmokeNotCovered
+        },
         chat: { status: "completed" },
         task: {
           status: "completed",
           taskId: "task_smoke",
           createStatus: "running",
           artifactId: "artifact_task_smoke",
-          artifactName: "agentsmith-lite-task-smoke.txt"
+          artifactName: "agentsmith-lite-task-smoke.txt",
+          eventCount: 2,
+          eventKinds: ["turn_started", "turn_completed"],
+          artifactBytes: 51,
+          artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
+          markerObserved: true
         }
       });
       assert.notEqual(report.task.createStatus, 200);
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/task-smoke/);
       assert.doesNotMatch(result.stdout, /BOTIFIED_SERVICE_KEY|task-service-key-secret/);
+      assert.doesNotMatch(result.stdout, /runtime accepted/);
+      assert.doesNotMatch(result.stdout, /AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
       assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
 
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
@@ -799,13 +854,32 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl,
         workspaceId: "workspace_reclaim",
         projectId: "project_reclaim",
+        evidenceScope: {
+          scope: "product-api-only",
+          covered: [
+            "product-api-health",
+            "builtin-admin-auth",
+            "workspace-project-api",
+            "project-file-api-crud",
+            "operator-sandbox-status-api",
+            "endpoint-chat-api",
+            "task-api-create-events-artifact-download-marker",
+            "task-api-cancel-scoped-reap-dry-run"
+          ],
+          notCovered: appSmokeNotCovered
+        },
         chat: { status: "completed" },
         task: {
           status: "completed",
           taskId: "task_smoke_reclaim_case",
           createStatus: "running",
           artifactId: "artifact_task_smoke_reclaim_case",
-          artifactName: "agentsmith-lite-task-smoke.txt"
+          artifactName: "agentsmith-lite-task-smoke.txt",
+          eventCount: 2,
+          eventKinds: ["turn_started", "turn_completed"],
+          artifactBytes: 51,
+          artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
+          markerObserved: true
         },
         taskReclaim: {
           status: "completed",
@@ -813,6 +887,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           runId: "run_reclaim",
           createStatus: "running",
           cancelStatus: "stopping",
+          reapScope: {
+            scopedToRunId: true,
+            applyEnabled: false
+          },
           reap: {
             dryRun: {
               dryRun: true,
@@ -827,6 +905,8 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
       assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
       assert.doesNotMatch(result.stdout, /secret\/reclaim-smoke/);
       assert.doesNotMatch(result.stdout, /BOTIFIED_SERVICE_KEY|reclaim-service-key-secret/);
+      assert.doesNotMatch(result.stdout, /runtime accepted/);
+      assert.doesNotMatch(result.stdout, /AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
       assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
         "POST /api/auth/bootstrap",
@@ -975,6 +1055,21 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         baseUrl,
         workspaceId: "workspace_apply",
         projectId: "project_apply",
+        evidenceScope: {
+          scope: "product-api-only",
+          covered: [
+            "product-api-health",
+            "builtin-admin-auth",
+            "workspace-project-api",
+            "project-file-api-crud",
+            "operator-sandbox-status-api",
+            "endpoint-chat-api",
+            "task-api-cancel-scoped-reap-dry-run",
+            "task-api-cancel-scoped-reap-apply",
+            "task-api-cancel-scoped-reap-final-dry-run"
+          ],
+          notCovered: appSmokeNotCovered
+        },
         chat: { status: "completed" },
         task: { status: "skipped" },
         taskReclaim: {
@@ -983,6 +1078,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           runId: "run_reclaim_apply",
           createStatus: "running",
           cancelStatus: "stopping",
+          reapScope: {
+            scopedToRunId: true,
+            applyEnabled: true
+          },
           reap: {
             dryRun: {
               dryRun: true,
@@ -1305,6 +1404,21 @@ interface SmokeRequest {
   cookie: string | undefined;
   csrf: string | undefined;
   body: string;
+}
+
+interface EvidenceScope {
+  scope: string;
+  covered: string[];
+  notCovered: string[];
+}
+
+function assertLightEvidenceDoesNotClaimExternal(evidenceScope: EvidenceScope): void {
+  assert.equal(evidenceScope.scope, "product-api-only");
+  assert.deepEqual(evidenceScope.notCovered, appSmokeNotCovered);
+  assert.equal(
+    evidenceScope.covered.some((item) => /k8s|juicefs|full-external|external-evidence/i.test(item)),
+    false
+  );
 }
 
 function runNode(args: string[], env: Record<string, string>): Promise<{ status: number | null; stdout: string; stderr: string }> {

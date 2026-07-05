@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -26,6 +27,14 @@ const TASK_RECLAIM_PROMPT = [
   "The smoke harness will cancel this task and then run scoped sandbox reap checks."
 ].join("\n");
 const TERMINAL_EVENT_KINDS = new Set(["turn_completed", "turn_failed", "runtime_error"]);
+const EVIDENCE_NOT_COVERED = [
+  "external-k8s-observation",
+  "sandbox-pod-pvc-mount",
+  "juicefs-backend",
+  "runner-image-digest",
+  "independent-k8s-resource-deletion-observation",
+  "full-external-evidence"
+];
 
 const sensitiveValues = new Set();
 
@@ -156,6 +165,12 @@ async function main() {
     baseUrl: args.baseUrl,
     workspaceId,
     projectId,
+    evidenceScope: buildEvidenceScope({
+      endpointSmoke: endpointConfig.complete,
+      taskSmoke,
+      taskReclaimSmoke,
+      taskReclaimReapApply
+    }),
     chat,
     task
   };
@@ -198,7 +213,12 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       taskId,
       createStatus,
       artifactId: verified.artifactId,
-      artifactName: verified.artifactName
+      artifactName: verified.artifactName,
+      eventCount: verified.eventCount,
+      eventKinds: verified.eventKinds,
+      artifactBytes: verified.artifactBytes,
+      artifactSha256: verified.artifactSha256,
+      markerObserved: verified.markerObserved
     };
   } catch (error) {
     if (taskId && !completed) {
@@ -216,11 +236,13 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
 
 async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
   const deadline = Date.now() + (timeoutSecs * 1000);
+  const observedEvents = createObservedTaskEventSummary();
   while (Date.now() <= deadline) {
     const encodedTaskId = encodeURIComponent(taskId);
     const events = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/events`, {
       auth: true
     }), "task events");
+    recordObservedTaskEvents(observedEvents, events);
     const artifacts = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/artifacts`, {
       auth: true
     }), "task artifacts");
@@ -239,9 +261,15 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
       if (!content.includes(TASK_MARKER)) {
         throw new Error(`artifact ${artifactId} did not contain task smoke marker`);
       }
+      const eventSummary = finalizeObservedTaskEventSummary(observedEvents);
       return {
         artifactId,
-        artifactName: name
+        artifactName: name,
+        eventCount: eventSummary.eventCount,
+        eventKinds: eventSummary.eventKinds,
+        artifactBytes: Buffer.byteLength(content, "utf8"),
+        artifactSha256: sha256Hex(content),
+        markerObserved: true
       };
     }
 
@@ -289,6 +317,10 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
     runId,
     createStatus,
     cancelStatus,
+    reapScope: {
+      scopedToRunId: true,
+      applyEnabled: Boolean(reapApply)
+    },
     reap
   };
 }
@@ -319,6 +351,82 @@ function summarizeReapResult(result, expectedDryRun, context) {
       requireString(runId, `${context} stored run id`)
     )
   };
+}
+
+function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskReclaimReapApply }) {
+  const covered = [
+    "product-api-health",
+    "builtin-admin-auth",
+    "workspace-project-api",
+    "project-file-api-crud",
+    "operator-sandbox-status-api"
+  ];
+  if (endpointSmoke) {
+    covered.push("endpoint-chat-api");
+  }
+  if (taskSmoke) {
+    covered.push("task-api-create-events-artifact-download-marker");
+  }
+  if (taskReclaimSmoke) {
+    covered.push("task-api-cancel-scoped-reap-dry-run");
+    if (taskReclaimReapApply) {
+      covered.push("task-api-cancel-scoped-reap-apply");
+      covered.push("task-api-cancel-scoped-reap-final-dry-run");
+    }
+  }
+  return {
+    scope: "product-api-only",
+    covered,
+    notCovered: [...EVIDENCE_NOT_COVERED]
+  };
+}
+
+function createObservedTaskEventSummary() {
+  return {
+    eventKeys: new Set(),
+    eventKinds: [],
+    eventKindSet: new Set(),
+    fallbackIndex: 0
+  };
+}
+
+function recordObservedTaskEvents(summary, events) {
+  for (const event of events) {
+    const identity = stringRecordField(event, "id") ?? stringRecordField(event, "cursor");
+    const eventKey = identity ?? `fallback:${summary.fallbackIndex}`;
+    if (!identity) {
+      summary.fallbackIndex += 1;
+    }
+    if (summary.eventKeys.has(eventKey)) {
+      continue;
+    }
+    summary.eventKeys.add(eventKey);
+
+    const kind = stringRecordField(event, "kind");
+    if (kind && !summary.eventKindSet.has(kind)) {
+      summary.eventKindSet.add(kind);
+      summary.eventKinds.push(kind);
+    }
+  }
+}
+
+function finalizeObservedTaskEventSummary(summary) {
+  return {
+    eventCount: summary.eventKeys.size,
+    eventKinds: [...summary.eventKinds]
+  };
+}
+
+function stringRecordField(value, field) {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const fieldValue = value[field];
+  return typeof fieldValue === "string" && fieldValue.length > 0 ? fieldValue : undefined;
+}
+
+function sha256Hex(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 class AppSmokeClient {
