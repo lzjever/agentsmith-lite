@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -10,6 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const releaseSmokeTrigger = "BOTIFIED_RELEASE_SMOKE_BASH";
 const releaseSmokeMarker = "BOTIFIED_RELEASE_SMOKE_OUTPUT";
+const releaseSmokeArtifactFilename = "botified-release-smoke.txt";
+const releaseSmokeArtifactSha256 = sha256Text(`${releaseSmokeMarker}\n`);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "../..");
 const defaultBinary = path.join(repoRoot, "third_party/botified/target/release/botified");
@@ -18,7 +20,7 @@ const botifiedRunnerDockerfile = path.join(repoRoot, "infra/docker/Dockerfile.bo
 const distClientPath = path.join(repoRoot, "dist/packages/ports/src/botified.js");
 const containerConfigPath = "/etc/botified/botified-runtime.yaml";
 const containerWorkspacePath = "/workspace";
-const containerNotCovered = ["k8s", "juicefs", "pvc", "product-task-api", "publish_file", "cancel-reap"];
+const containerNotCovered = ["k8s", "juicefs", "pvc", "product-task-api", "cancel-reap"];
 
 class Redactor {
   #values = [];
@@ -122,7 +124,7 @@ async function main() {
     const posted = await client.postMessage(
       baseUrl,
       serviceKey,
-      `Run the local Botified release smoke: ${releaseSmokeTrigger}`
+      `Run the local Botified release smoke: ${releaseSmokeTrigger}. Write ${releaseSmokeArtifactFilename} with exactly ${releaseSmokeMarker} on one line, then publish_file it.`
     );
     if (posted.accepted !== true) {
       throw new Error("Botified did not accept the smoke message");
@@ -142,6 +144,7 @@ async function main() {
       baseUrl,
       messageAccepted: posted.accepted,
       markerObserved: observed.markerObserved,
+      publishedArtifact: observed.publishedArtifact,
       finalState: finalState.state ?? observed.finalState ?? "unknown",
       activeItemCount: Array.isArray(finalState.activeItems) ? finalState.activeItems.length : observed.activeItemCount,
       eventsObserved: observed.eventsObserved,
@@ -269,7 +272,7 @@ function usage() {
     "       node scripts/acceptance/botified-runner-smoke.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
     "",
     "Runs Botified runner acceptance with the vendored binary by default, or with a runner image/container when --container-image is provided.",
-    "When it succeeds, container mode is runner-container-only evidence; it does not cover Kubernetes, PVC, JuiceFS, product task API, publish_file, or cancel/reap."
+    "When it succeeds, container mode is runner-container-only evidence; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap."
   ].join("\n");
 }
 
@@ -574,9 +577,11 @@ async function waitForHealth({ client, baseUrl, serviceKey, childHandle, deadlin
 async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, deadline, cursor }) {
   let timelineCursor = cursor;
   let markerObserved = false;
+  let publishedArtifact;
   let eventsObserved = 0;
   let finalState = "unknown";
   let activeItemCount = 0;
+  let lastArtifactError;
 
   while (Date.now() < deadline) {
     assertChildStillRunning(childHandle, "during release smoke");
@@ -590,19 +595,127 @@ async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, d
     activeItemCount = Array.isArray(state.activeItems) ? state.activeItems.length : activeItemCount;
     eventsObserved += timeline.events.length;
     markerObserved ||= timeline.events.some((event) => JSON.stringify(event).includes(releaseSmokeMarker));
+    for (const event of timeline.events) {
+      publishedArtifact = extractPublishedArtifact(event) ?? publishedArtifact;
+    }
     timelineCursor = timeline.nextCursor ?? timelineCursor;
 
-    if (markerObserved && hasIdleEvidence(state)) {
-      return { markerObserved, eventsObserved, finalState, activeItemCount };
+    if (markerObserved && publishedArtifact && hasIdleEvidence(state)) {
+      try {
+        const verifiedArtifact = await verifyPublishedArtifact({
+          client,
+          baseUrl,
+          serviceKey,
+          artifact: publishedArtifact
+        });
+        return {
+          markerObserved,
+          publishedArtifact: verifiedArtifact,
+          eventsObserved,
+          finalState,
+          activeItemCount
+        };
+      } catch (error) {
+        lastArtifactError = error;
+      }
     }
 
     await sleep(150);
   }
 
   throw new Error([
-    `timed out waiting for ${releaseSmokeMarker}; markerObserved=${markerObserved} finalState=${finalState} activeItemCount=${activeItemCount}`,
+    `timed out waiting for ${releaseSmokeMarker} and file.published; markerObserved=${markerObserved} filePublishedObserved=${Boolean(publishedArtifact)} finalState=${finalState} activeItemCount=${activeItemCount}`,
+    lastArtifactError ? `artifact verification error: ${errorMessage(lastArtifactError)}` : "",
     childHandle.redactedOutput()
   ].filter(Boolean).join("\n"));
+}
+
+async function verifyPublishedArtifact({ client, baseUrl, serviceKey, artifact }) {
+  if (!artifact.fileId) {
+    throw new Error("file.published did not include file_id");
+  }
+  if (artifact.filename !== releaseSmokeArtifactFilename) {
+    throw new Error(`file.published filename mismatch: expected ${releaseSmokeArtifactFilename}, got ${artifact.filename || "<missing>"}`);
+  }
+  if (artifact.bytes !== Buffer.byteLength(`${releaseSmokeMarker}\n`)) {
+    throw new Error(`file.published size mismatch: expected ${Buffer.byteLength(`${releaseSmokeMarker}\n`)}, got ${artifact.bytes}`);
+  }
+  if (artifact.sha256 !== releaseSmokeArtifactSha256) {
+    throw new Error(`file.published sha256 mismatch for ${artifact.fileId}`);
+  }
+
+  const downloaded = await client.downloadFile(baseUrl, serviceKey, artifact.fileId);
+  const downloadedBytes = downloaded.sizeBytes;
+  const downloadedSha256 = downloaded.sha256 ?? sha256Bytes(downloaded.bytes);
+  const downloadedFilename = downloaded.filename ?? "";
+  const downloadedText = Buffer.from(downloaded.bytes).toString("utf8");
+  const markerMatched = downloadedText === `${releaseSmokeMarker}\n`;
+
+  if (!markerMatched) {
+    throw new Error(`downloaded artifact content mismatch for ${artifact.fileId}`);
+  }
+  if (downloadedFilename !== releaseSmokeArtifactFilename) {
+    throw new Error(`downloaded artifact filename mismatch: expected ${releaseSmokeArtifactFilename}, got ${downloadedFilename || "<missing>"}`);
+  }
+  if (downloadedBytes !== artifact.bytes) {
+    throw new Error(`downloaded artifact size mismatch: expected ${artifact.bytes}, got ${downloadedBytes}`);
+  }
+  if (downloadedSha256 !== artifact.sha256) {
+    throw new Error(`downloaded artifact sha256 mismatch for ${artifact.fileId}`);
+  }
+
+  return {
+    eventObserved: true,
+    fileId: artifact.fileId,
+    filename: artifact.filename,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    markerMatched,
+    downloadedBytes,
+    downloadedSha256,
+    downloadedFilename
+  };
+}
+
+function extractPublishedArtifact(event) {
+  const record = asRecord(event);
+  if (!record || record.type !== "file.published") {
+    return undefined;
+  }
+
+  const payload = asRecord(record.data) ?? asRecord(record.payload) ?? record;
+  const fileId = stringField(payload, "file_id") ?? stringField(payload, "id");
+  const filename = stringField(payload, "filename") ?? stringField(payload, "name");
+  const bytes = numberField(payload, "size_bytes") ?? numberField(payload, "bytes");
+  const sha256 = stringField(payload, "sha256");
+  return {
+    fileId,
+    filename,
+    bytes,
+    sha256
+  };
+}
+
+function asRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+function stringField(record, key) {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberField(record, key) {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function sha256Text(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function hasIdleEvidence(state) {

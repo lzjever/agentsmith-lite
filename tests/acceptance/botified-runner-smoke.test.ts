@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +12,10 @@ const botifiedTextApiKey = "DO_NOT_PRINT_BOTIFIED_TEXT_API_KEY";
 const configuredModelApiKey = "DO_NOT_PRINT_CONFIGURED_MODEL_API_KEY";
 const s3SecretKey = "DO_NOT_PRINT_S3_SECRET_KEY";
 const juicefsMetaUrl = "redis://DO_NOT_PRINT_JUICEFS_META_URL";
+const downloadToken = "DO_NOT_PRINT_DOWNLOAD_TOKEN";
+const artifactFilename = "botified-release-smoke.txt";
+const artifactContent = "BOTIFIED_RELEASE_SMOKE_OUTPUT\n";
+const artifactSha256 = createHash("sha256").update(artifactContent).digest("hex");
 
 describe("Botified runner local acceptance", () => {
   it("entrypoint keeps production args by default", () => {
@@ -62,7 +67,7 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     assert.equal(readFileSync(callsFile, "utf8").trim(), "serve --config /tmp/runtime.yaml --mock-provider");
   });
 
-  it("smoke script observes mock bash output, state, and abort without leaking secrets", () => {
+  it("smoke script observes mock bash output, published artifact download, state, and abort without leaking secrets", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-smoke-"));
     const fakeBinary = writeFakeBotifiedBinary(tempDir);
 
@@ -79,14 +84,36 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     const report = JSON.parse(result.stdout) as {
       status: string;
       mode: string;
+      notCovered: string[];
       markerObserved: boolean;
+      publishedArtifact: {
+        eventObserved: boolean;
+        fileId: string;
+        filename: string;
+        bytes: number;
+        sha256: string;
+        markerMatched: boolean;
+        downloadedBytes: number;
+        downloadedSha256: string;
+        downloadedFilename: string;
+      };
       finalState: string;
       abort: { aborted: boolean };
       eventsObserved: number;
     };
     assert.equal(report.status, "ok");
     assert.equal(report.mode, "local-process");
+    assert.deepEqual(report.notCovered, ["runner-container-image", "k8s", "juicefs", "pvc", "product-task-api", "cancel-reap"]);
     assert.equal(report.markerObserved, true);
+    assert.equal(report.publishedArtifact.eventObserved, true);
+    assert.equal(report.publishedArtifact.fileId, "file_release_smoke");
+    assert.equal(report.publishedArtifact.filename, artifactFilename);
+    assert.equal(report.publishedArtifact.bytes, Buffer.byteLength(artifactContent));
+    assert.equal(report.publishedArtifact.sha256, artifactSha256);
+    assert.equal(report.publishedArtifact.markerMatched, true);
+    assert.equal(report.publishedArtifact.downloadedBytes, Buffer.byteLength(artifactContent));
+    assert.equal(report.publishedArtifact.downloadedSha256, artifactSha256);
+    assert.equal(report.publishedArtifact.downloadedFilename, artifactFilename);
     assert.equal(report.finalState, "idle");
     assert.equal(report.abort.aborted, true);
     assert.ok(report.eventsObserved >= 1);
@@ -161,6 +188,10 @@ const port = Number(rawConfig.match(/\\n  port: (\\d+)\\n/)?.[1]);
 const serviceKey = process.env.BOTIFIED_SERVICE_KEY;
 let messageAccepted = false;
 let outputReady = false;
+const artifactFileId = "file_release_smoke";
+const artifactFilename = "botified-release-smoke.txt";
+const artifactContent = "BOTIFIED_RELEASE_SMOKE_OUTPUT\\n";
+const artifactSha256 = ${JSON.stringify(artifactSha256)};
 
 function authorized(req) {
   return req.headers.authorization === "Bearer " + serviceKey;
@@ -213,12 +244,32 @@ const server = http.createServer((req, res) => {
     const events = outputReady
       ? [
         { type: "tool_call", tool: "bash", id: "release_smoke_bash" },
-        { type: "tool_output", text: "BOTIFIED_RELEASE_SMOKE_OUTPUT" }
+        { type: "tool_output", text: "BOTIFIED_RELEASE_SMOKE_OUTPUT" },
+        {
+          type: "file.published",
+          data: {
+            file_id: artifactFileId,
+            filename: artifactFilename,
+            mime_type: "text/plain",
+            size_bytes: Buffer.byteLength(artifactContent),
+            sha256: artifactSha256,
+            download_url: "http://127.0.0.1:" + port + "/v1/files/" + artifactFileId + "?token=DO_NOT_PRINT_DOWNLOAD_TOKEN",
+            source: "published",
+            description: "release smoke artifact"
+          }
+        }
       ]
       : [];
     res.setHeader("content-type", "application/x-ndjson");
     res.setHeader("x-botified-next-cursor", outputReady ? "cursor-2" : "cursor-1");
     res.end(events.map((event) => JSON.stringify(event)).join("\\n") + (events.length > 0 ? "\\n" : ""));
+    return;
+  }
+  if (req.method === "GET" && req.url === "/v1/files/" + artifactFileId) {
+    res.setHeader("content-type", "text/plain");
+    res.setHeader("content-disposition", 'attachment; filename="' + artifactFilename + '"');
+    res.setHeader("x-botified-sha256", artifactSha256);
+    res.end(artifactContent);
     return;
   }
   if (req.method === "POST" && req.url === "/v1/abort") {
@@ -244,6 +295,7 @@ function assertNoSecretLeak(stdout: string, stderr: string): void {
   assert.doesNotMatch(text, new RegExp(configuredModelApiKey));
   assert.doesNotMatch(text, new RegExp(s3SecretKey));
   assert.doesNotMatch(text, new RegExp(escapeRegExp(juicefsMetaUrl)));
+  assert.doesNotMatch(text, new RegExp(downloadToken));
 }
 
 function escapeRegExp(value: string): string {

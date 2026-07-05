@@ -581,7 +581,9 @@ struct DevelopmentMockProvider;
 
 const RELEASE_SMOKE_TRIGGER: &str = "BOTIFIED_RELEASE_SMOKE_BASH";
 const RELEASE_SMOKE_TOOL_CALL_ID: &str = "release_smoke_bash";
+const RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID: &str = "release_smoke_publish_file";
 const RELEASE_SMOKE_OUTPUT_MARKER: &str = "BOTIFIED_RELEASE_SMOKE_OUTPUT";
+const RELEASE_SMOKE_ARTIFACT_FILENAME: &str = "botified-release-smoke.txt";
 
 #[async_trait]
 impl Provider for DevelopmentMockProvider {
@@ -591,8 +593,25 @@ impl Provider for DevelopmentMockProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderResponse, ProviderError> {
         let messages = request.transcript_messages();
-        if pending_release_smoke_tool_result(&messages) {
+        if pending_release_smoke_tool_result(&messages, RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID) {
             return Ok(ProviderResponse::text("release smoke bash complete"));
+        }
+        if pending_release_smoke_tool_result(&messages, RELEASE_SMOKE_TOOL_CALL_ID)
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == botified::PUBLISH_FILE_TOOL_NAME)
+        {
+            return Ok(ProviderResponse::tool_calls(vec![botified::ToolCall::new(
+                RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID,
+                botified::PUBLISH_FILE_TOOL_NAME,
+                serde_json::json!({
+                    "path": RELEASE_SMOKE_ARTIFACT_FILENAME,
+                    "filename": RELEASE_SMOKE_ARTIFACT_FILENAME,
+                    "mime_type": "text/plain",
+                    "description": "release smoke artifact"
+                }),
+            )]));
         }
 
         let text = latest_user_text(&messages).unwrap_or("message received");
@@ -603,7 +622,9 @@ impl Provider for DevelopmentMockProvider {
                 RELEASE_SMOKE_TOOL_CALL_ID,
                 "bash",
                 serde_json::json!({
-                    "command": format!("sleep 1; printf '{RELEASE_SMOKE_OUTPUT_MARKER}\\n'"),
+                    "command": format!(
+                        "sleep 1; printf '%s\\n' '{RELEASE_SMOKE_OUTPUT_MARKER}' > {RELEASE_SMOKE_ARTIFACT_FILENAME}; printf '%s\\n' '{RELEASE_SMOKE_OUTPUT_MARKER}'"
+                    ),
                     "timeout_secs": 5
                 }),
             )]));
@@ -628,11 +649,11 @@ fn latest_user_text(messages: &[botified::Message]) -> Option<&str> {
     })
 }
 
-fn pending_release_smoke_tool_result(messages: &[botified::Message]) -> bool {
+fn pending_release_smoke_tool_result(messages: &[botified::Message], tool_call_id: &str) -> bool {
     for message in messages.iter().rev() {
         match message {
             botified::Message::ToolResult(result)
-                if result.tool_call_id == RELEASE_SMOKE_TOOL_CALL_ID =>
+                if result.tool_call_id == tool_call_id && !result.is_error =>
             {
                 return true;
             }
