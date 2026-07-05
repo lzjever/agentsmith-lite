@@ -1,6 +1,6 @@
 # API Contract
 
-The generated snapshot is `packages/contracts/api-contract.snapshot.json`.
+The checked-in snapshot is `packages/contracts/api-contract.snapshot.json`. It is the contract for public AgentSmith Lite product API routes plus admin-only operator API routes used by deployment/operator scripts. It excludes static web assets and private upstream Botified, OpenAI-compatible provider, Kubernetes, and Postgres surfaces.
 
 Current product API routes:
 
@@ -25,9 +25,15 @@ Current product API routes:
 - `POST /api/projects/{projectId}/tasks`
 - `GET /api/tasks/{taskId}/events`
 - `GET /api/tasks/{taskId}/artifacts`
+- `GET /api/tasks/{taskId}/artifacts/{artifactId}/download`
 - `POST /api/tasks/{taskId}/cancel`
 
-Mutating routes require the session cookie and `x-csrf-token`.
+Current operator API routes:
+
+- `GET /api/operator/sandbox/status`
+- `POST /api/operator/sandbox/reap`
+
+Operator routes are admin-only. Mutating routes require the session cookie and `x-csrf-token`.
 
 Endpoint create requests accept `apiKeySecretRef` values in `secret/<slug>` form, where the slug uses lowercase letters, digits, and hyphens only. Endpoint `baseUrl` must be HTTPS and must not include credentials, query, or hash. The server stores the ref, but endpoint create/list responses, dashboard responses, and chat `endpointSnapshot` responses do not expose `apiKeySecretRef`; public endpoint payloads expose only `hasCredentialRef`.
 

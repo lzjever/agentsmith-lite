@@ -1,6 +1,6 @@
 {
   "schema": "agentsmith-lite.api-contract/v1",
-  "surface": "product-api-only",
+  "surface": "product-and-operator-api",
   "routes": [
     "GET /api/health",
     "GET /api/bootstrap",
@@ -21,7 +21,12 @@
     "POST /api/projects/{projectId}/files/validate",
     "GET /api/projects/{projectId}/tasks",
     "POST /api/projects/{projectId}/tasks",
-    "POST /api/tasks/{taskId}/cancel"
+    "GET /api/tasks/{taskId}/events",
+    "GET /api/tasks/{taskId}/artifacts",
+    "GET /api/tasks/{taskId}/artifacts/{artifactId}/download",
+    "POST /api/tasks/{taskId}/cancel",
+    "GET /api/operator/sandbox/status",
+    "POST /api/operator/sandbox/reap"
   ],
-  "clientBoundary": "web and future TUI clients call only these product API routes"
+  "clientBoundary": "web and future TUI clients call these product API routes; operator scripts call the admin-only operator API routes in this same snapshot"
 }

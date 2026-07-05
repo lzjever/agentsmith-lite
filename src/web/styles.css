@@ -71,6 +71,26 @@ h2 {
   font-weight: 700;
 }
 
+.status-message {
+  margin: -8px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #eef6ff;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.status-message[data-tone="success"] {
+  background: #e8f4f2;
+  color: var(--teal);
+}
+
+.status-message[data-tone="error"] {
+  background: #fff1f2;
+  color: var(--rose);
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -89,7 +109,26 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.section-title h2 {
+  min-width: 0;
+  margin: 0;
+}
+
+.section-title button {
+  flex: 0 0 auto;
+}
+
+.section-title .metric {
+  margin: 0;
+}
+
+.section-title + .metric {
+  margin-top: 0;
 }
 
 label {
@@ -100,12 +139,21 @@ label {
   font-weight: 650;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 10px 12px;
   font: inherit;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+textarea {
+  min-height: 104px;
+  resize: vertical;
 }
 
 button {
@@ -122,6 +170,28 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
+}
+
+.secondary-button {
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.danger-button {
+  background: var(--rose);
+}
+
+.stacked-form {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .metric {
@@ -143,9 +213,15 @@ button:disabled {
   padding: 12px;
 }
 
+.item.selected {
+  border-left-color: var(--teal);
+  background: #f2fbf9;
+}
+
 .item h3 {
   margin-bottom: 4px;
   font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
 .item p {
@@ -153,6 +229,31 @@ button:disabled {
   color: var(--muted);
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.item-actions button {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 14px;
+}
+
+.reply {
+  min-height: 54px;
+  border-left: 4px solid var(--teal);
+  border-radius: 6px;
+  padding: 12px;
+  background: #f2fbf9;
+  color: var(--ink);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .download-link {
@@ -181,5 +282,10 @@ button:disabled {
 
   .dashboard {
     grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
   }
 }

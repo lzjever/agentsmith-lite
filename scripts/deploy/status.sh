@@ -28,5 +28,12 @@ if [ "$resources" = true ]; then
   fi
   node "${helper_args[@]}"
 else
-  kubectl -n "$namespace" get deploy,svc,ingress,job -l agentsmith-lite/managed-by=agentsmith-lite
+  kubectl_args=()
+  if [ -n "${KUBECONFIG_PATH:-}" ]; then
+    kubectl_args+=(--kubeconfig "$KUBECONFIG_PATH")
+  fi
+  if [ -n "${KUBE_CONTEXT:-}" ]; then
+    kubectl_args+=(--context "$KUBE_CONTEXT")
+  fi
+  kubectl "${kubectl_args[@]}" -n "$namespace" get deploy,svc,ingress,job -l agentsmith-lite/managed-by=agentsmith-lite
 fi

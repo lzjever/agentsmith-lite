@@ -1,14 +1,29 @@
 const state = {
   csrfToken: null,
   workspaceId: null,
-  projectId: null
+  projectId: null,
+  endpointId: null,
+  selectedTaskId: null,
+  endpoints: [],
+  tasks: [],
+  taskEvents: new Map(),
+  taskEventErrors: new Map()
 };
+
+const cancellableTaskStatuses = new Set(["starting", "running", "stopping"]);
 
 const healthEl = document.querySelector("#health");
 const loginEl = document.querySelector("#login");
 const dashboardEl = document.querySelector("#dashboard");
+const statusMessageEl = document.querySelector("#status-message");
 const loginForm = document.querySelector("#login-form");
 const seedButton = document.querySelector("#seed");
+const endpointForm = document.querySelector("#endpoint-form");
+const chatForm = document.querySelector("#chat-form");
+const taskForm = document.querySelector("#task-form");
+const chatEndpointSelect = document.querySelector("#chat-endpoint");
+const taskEndpointSelect = document.querySelector("#task-endpoint");
+const chatReplyEl = document.querySelector("#chat-reply");
 const uploadFileButton = document.querySelector("#upload-file");
 
 await refreshHealth();
@@ -17,51 +32,177 @@ await refreshDashboard();
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(loginForm);
-  await api("/api/auth/bootstrap", {
-    method: "POST",
-    body: {
-      password: String(form.get("password"))
-    }
-  });
-  const login = await api("/api/auth/login", {
-    method: "POST",
-    body: {
-      email: String(form.get("email")),
-      password: String(form.get("password"))
-    }
-  });
-  state.csrfToken = login.csrfToken;
-  await refreshDashboard();
+  try {
+    await api("/api/auth/bootstrap", {
+      method: "POST",
+      body: {
+        password: String(form.get("password"))
+      }
+    });
+    const login = await api("/api/auth/login", {
+      method: "POST",
+      body: {
+        email: String(form.get("email")),
+        password: String(form.get("password"))
+      }
+    });
+    state.csrfToken = login.csrfToken;
+    setStatus("Signed in.", "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
 });
 
 seedButton.addEventListener("click", async () => {
-  const workspace = await api("/api/workspaces", {
-    method: "POST",
-    csrf: state.csrfToken,
-    body: { name: "Demo Workspace" }
-  });
-  const project = await api(`/api/workspaces/${workspace.id}/projects`, {
-    method: "POST",
-    csrf: state.csrfToken,
-    body: { name: "Sandbox Project" }
-  });
-  state.workspaceId = workspace.id;
-  state.projectId = project.id;
-  await refreshDashboard();
+  try {
+    const workspace = await api("/api/workspaces", {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: { name: "Demo Workspace" }
+    });
+    const project = await api(`/api/workspaces/${workspace.id}/projects`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: { name: "Sandbox Project" }
+    });
+    state.workspaceId = workspace.id;
+    state.projectId = project.id;
+    setStatus("Demo project created.", "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
+});
+
+endpointForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.projectId) {
+    setStatus("Create a project first.", "error");
+    return;
+  }
+
+  const form = new FormData(endpointForm);
+  try {
+    const endpoint = await api(`/api/projects/${state.projectId}/endpoints`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: {
+        name: formString(form, "name"),
+        protocol: "openai_chat_completions",
+        baseUrl: formString(form, "baseUrl"),
+        model: formString(form, "model"),
+        apiKeySecretRef: formString(form, "secretRef"),
+        capabilities: ["text"],
+        requestTimeoutSecs: parseTimeout(form.get("requestTimeoutSecs"))
+      }
+    });
+    state.endpointId = endpoint.id;
+    endpointForm.reset();
+    setStatus("Endpoint created.", "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
+});
+
+chatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.projectId) {
+    setStatus("Create a project first.", "error");
+    return;
+  }
+
+  const form = new FormData(chatForm);
+  const endpointId = formString(form, "endpointId") || state.endpointId;
+  const message = formString(form, "message");
+  if (!endpointId || !message) {
+    setStatus("Pick an endpoint and enter a message.", "error");
+    return;
+  }
+
+  try {
+    chatReplyEl.classList.remove("hidden");
+    chatReplyEl.textContent = "Sending...";
+    const chat = await api(`/api/projects/${state.projectId}/chat`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: {
+        endpointId,
+        messages: [{ role: "user", content: message }]
+      }
+    });
+    state.endpointId = endpointId;
+    chatReplyEl.textContent = chat.message?.content ?? "";
+    chatForm.reset();
+    syncEndpointSelects();
+    setStatus("Assistant reply received.", "success");
+  } catch (error) {
+    chatReplyEl.textContent = "";
+    chatReplyEl.classList.add("hidden");
+    setStatus(errorMessage(error), "error");
+  }
+});
+
+taskForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.projectId) {
+    setStatus("Create a project first.", "error");
+    return;
+  }
+
+  const form = new FormData(taskForm);
+  const endpointId = formString(form, "endpointId") || state.endpointId;
+  const prompt = formString(form, "prompt");
+  if (!endpointId || !prompt) {
+    setStatus("Pick an endpoint and enter a task prompt.", "error");
+    return;
+  }
+
+  try {
+    const task = await api(`/api/projects/${state.projectId}/tasks`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: { prompt, endpointId }
+    });
+    state.endpointId = endpointId;
+    state.selectedTaskId = task.id;
+    taskForm.reset();
+    syncEndpointSelects();
+    setStatus(`Task ${task.status}.`, "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
+});
+
+chatEndpointSelect.addEventListener("change", () => {
+  state.endpointId = chatEndpointSelect.value || null;
+  syncEndpointSelects();
+});
+
+taskEndpointSelect.addEventListener("change", () => {
+  state.endpointId = taskEndpointSelect.value || null;
+  syncEndpointSelects();
 });
 
 uploadFileButton.addEventListener("click", async () => {
   if (!state.projectId) return;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  await api(`/api/projects/${state.projectId}/files`, {
-    method: "POST",
-    csrf: state.csrfToken,
-    body: {
-      path: `files/demo-${stamp}.txt`,
-      content: `Created ${stamp}`
-    }
-  });
-  await refreshDashboard();
+  try {
+    await api(`/api/projects/${state.projectId}/files`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: {
+        path: `files/demo-${stamp}.txt`,
+        content: `Created ${stamp}`
+      }
+    });
+    setStatus("Demo file uploaded.", "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
 });
 
 async function refreshHealth() {
@@ -76,36 +217,194 @@ async function refreshDashboard() {
     dashboardEl.classList.add("hidden");
     return;
   }
+  if (!response.ok) {
+    setStatus(await response.text(), "error");
+    return;
+  }
+
   const dashboard = await response.json();
+  const current = renderDashboard(dashboard);
   loginEl.classList.add("hidden");
   dashboardEl.classList.remove("hidden");
-  renderDashboard(dashboard);
+
   await Promise.all([
     refreshProjectFiles(),
-    refreshTaskArtifacts(dashboard.tasks)
+    refreshTaskEvents(current.tasks),
+    refreshTaskArtifacts(current.tasks)
   ]);
 }
 
 function renderDashboard(data) {
-  const workspaces = document.querySelector("#workspaces");
-  const endpoints = document.querySelector("#endpoints");
-  const tasks = document.querySelector("#tasks");
-  const projects = data.workspaces.flatMap((workspace) => workspace.projects);
+  const projects = data.workspaces.flatMap((workspace) =>
+    workspace.projects.map((project) => ({ ...project, workspaceName: workspace.name }))
+  );
   if (!state.projectId || !projects.some((project) => project.id === state.projectId)) {
     state.projectId = projects[0]?.id ?? null;
   }
-  workspaces.replaceChildren(...data.workspaces.map((workspace) => item(
+  const currentProject = projects.find((project) => project.id === state.projectId) ?? null;
+  state.workspaceId = currentProject?.workspaceId ?? null;
+  state.endpoints = data.endpoints.filter((endpoint) => endpoint.projectId === state.projectId);
+  state.tasks = data.tasks.filter((task) => task.projectId === state.projectId);
+
+  if (!state.endpointId || !state.endpoints.some((endpoint) => endpoint.id === state.endpointId)) {
+    state.endpointId = state.endpoints[0]?.id ?? null;
+  }
+  if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
+    state.selectedTaskId = state.tasks[0]?.id ?? null;
+  }
+
+  renderWorkspaces(data.workspaces, currentProject);
+  renderEndpoints(state.endpoints);
+  renderTasks(state.tasks);
+  renderTimeline(state.tasks);
+  syncEndpointSelects();
+  syncWorkflowControls(Boolean(currentProject), state.endpoints.length > 0);
+
+  return { project: currentProject, endpoints: state.endpoints, tasks: state.tasks };
+}
+
+function renderWorkspaces(workspaces, currentProject) {
+  const workspacesEl = document.querySelector("#workspaces");
+  const currentProjectEl = document.querySelector("#current-project");
+  currentProjectEl.textContent = currentProject
+    ? `${currentProject.workspaceName} / ${currentProject.name}`
+    : "No project";
+  workspacesEl.replaceChildren(...(workspaces.length > 0 ? workspaces.map((workspace) => item(
     workspace.name,
     `${workspace.projects.length} project${workspace.projects.length === 1 ? "" : "s"}`
-  )));
-  endpoints.replaceChildren(...data.endpoints.map((endpoint) => item(
-    endpoint.name,
-    `${endpoint.model} · ${endpoint.baseUrl}`
-  )));
-  tasks.replaceChildren(...data.tasks.map((task) => item(
-    task.prompt,
-    `${task.status} · ${task.sandbox.resources.length} rendered resources`
-  )));
+  )) : [item("No workspace", "Create demo project")]));
+}
+
+function renderEndpoints(endpoints) {
+  const endpointsEl = document.querySelector("#endpoints");
+  const endpointCountEl = document.querySelector("#endpoints-count");
+  endpointCountEl.textContent = `${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"}`;
+  endpointsEl.replaceChildren(...(endpoints.length > 0 ? endpoints.map((endpoint) => {
+    const node = item(
+      endpoint.name,
+      [
+        endpoint.model,
+        endpoint.baseUrl,
+        endpoint.capabilities.join(", "),
+        `${endpoint.requestTimeoutSecs}s timeout`
+      ].join(" · ")
+    );
+    if (endpoint.id === state.endpointId) {
+      node.classList.add("selected");
+    }
+    return node;
+  }) : [item("No endpoints", "Create an endpoint for this project")]));
+}
+
+function renderTasks(tasks) {
+  const tasksEl = document.querySelector("#tasks");
+  const tasksCountEl = document.querySelector("#tasks-count");
+  tasksCountEl.textContent = `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+  tasksEl.replaceChildren(...(tasks.length > 0 ? tasks.map((task) => taskItem(task, tasks)) : [
+    item("No tasks", "Create a task from a prompt")
+  ]));
+}
+
+function taskItem(task, tasks) {
+  const events = state.taskEvents.get(task.id) ?? [];
+  const lastEvent = events.at(-1);
+  const detail = [
+    task.status,
+    `${events.length} event${events.length === 1 ? "" : "s"}`,
+    lastEvent ? `last ${displayKind(lastEvent.kind)}` : "no timeline yet"
+  ].join(" · ");
+  const node = item(shortText(task.prompt, 96), detail);
+  node.classList.add(`status-${task.status}`);
+  if (task.id === state.selectedTaskId) {
+    node.classList.add("selected");
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+
+  const timelineButton = document.createElement("button");
+  timelineButton.type = "button";
+  timelineButton.className = "secondary-button";
+  timelineButton.textContent = "Timeline";
+  timelineButton.addEventListener("click", () => {
+    state.selectedTaskId = task.id;
+    renderTasks(tasks);
+    renderTimeline(tasks);
+  });
+  actions.append(timelineButton);
+
+  if (cancellableTaskStatuses.has(task.status)) {
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "danger-button";
+    cancelButton.textContent = "Cancel";
+    cancelButton.addEventListener("click", () => cancelTask(task.id));
+    actions.append(cancelButton);
+  }
+
+  node.append(actions);
+  return node;
+}
+
+async function cancelTask(taskId) {
+  try {
+    const task = await api(`/api/tasks/${taskId}/cancel`, {
+      method: "POST",
+      csrf: state.csrfToken,
+      body: {}
+    });
+    state.selectedTaskId = task.id;
+    setStatus(`Task ${task.status}.`, "success");
+    await refreshDashboard();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
+}
+
+async function refreshTaskEvents(tasks) {
+  const timelineCountEl = document.querySelector("#timeline-count");
+  if (tasks.length === 0) {
+    state.taskEventErrors.clear();
+    timelineCountEl.textContent = "0 events";
+    renderTimeline(tasks);
+    return;
+  }
+
+  await Promise.all(tasks.map(async (task) => {
+    try {
+      const events = await api(`/api/tasks/${task.id}/events`);
+      state.taskEvents.set(task.id, Array.isArray(events) ? events : []);
+      state.taskEventErrors.delete(task.id);
+    } catch (error) {
+      state.taskEventErrors.set(task.id, errorMessage(error));
+    }
+  }));
+  renderTasks(tasks);
+  renderTimeline(tasks);
+}
+
+function renderTimeline(tasks) {
+  const timelineEl = document.querySelector("#timeline");
+  const timelineCountEl = document.querySelector("#timeline-count");
+  const task = tasks.find((candidate) => candidate.id === state.selectedTaskId) ?? tasks[0] ?? null;
+  if (!task) {
+    timelineCountEl.textContent = "0 events";
+    timelineEl.replaceChildren(item("No task selected", "Create a task first"));
+    return;
+  }
+
+  state.selectedTaskId = task.id;
+  const events = state.taskEvents.get(task.id) ?? [];
+  const error = state.taskEventErrors.get(task.id);
+  timelineCountEl.textContent = `${task.status} · ${events.length} event${events.length === 1 ? "" : "s"}`;
+  if (error) {
+    timelineEl.replaceChildren(item(shortText(task.prompt, 80), `Timeline unavailable: ${error}`));
+    return;
+  }
+  timelineEl.replaceChildren(...(events.length > 0 ? events.slice(-8).map((event, index) => item(
+    `#${index + 1} ${displayKind(event.kind)}`,
+    timelineDetail(event)
+  )) : [item(shortText(task.prompt, 80), "Waiting for events")]));
 }
 
 async function refreshProjectFiles() {
@@ -117,12 +416,17 @@ async function refreshProjectFiles() {
     files.replaceChildren(item("No project", "Create a demo project first"));
     return;
   }
-  const listed = await api(`/api/projects/${state.projectId}/files?path=files`);
-  filesCount.textContent = `${listed.entries.length} entr${listed.entries.length === 1 ? "y" : "ies"}`;
-  files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) => item(
-    entry.path,
-    entry.type === "file" ? `${entry.size} bytes` : "directory"
-  )) : [item("files/", "0 entries")]));
+  try {
+    const listed = await api(`/api/projects/${state.projectId}/files?path=files`);
+    filesCount.textContent = `${listed.entries.length} entr${listed.entries.length === 1 ? "y" : "ies"}`;
+    files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) => item(
+      entry.path,
+      entry.type === "file" ? `${entry.size} bytes` : "directory"
+    )) : [item("files/", "0 entries")]));
+  } catch (error) {
+    filesCount.textContent = "Unavailable";
+    files.replaceChildren(item("Files unavailable", errorMessage(error)));
+  }
 }
 
 async function refreshTaskArtifacts(tasks) {
@@ -134,10 +438,20 @@ async function refreshTaskArtifacts(tasks) {
     return;
   }
 
-  const groups = await Promise.all(tasks.map(async (task) => ({
-    task,
-    artifacts: await api(`/api/tasks/${task.id}/artifacts`)
-  })));
+  const groups = await Promise.all(tasks.map(async (task) => {
+    try {
+      return {
+        task,
+        artifacts: await api(`/api/tasks/${task.id}/artifacts`)
+      };
+    } catch (error) {
+      return {
+        task,
+        artifacts: [],
+        error: errorMessage(error)
+      };
+    }
+  }));
   const rows = groups.flatMap((group) => group.artifacts.map((artifact) => ({
     task: group.task,
     artifact
@@ -146,6 +460,34 @@ async function refreshTaskArtifacts(tasks) {
   artifactsEl.replaceChildren(...(rows.length > 0 ? rows.map(({ task, artifact }) =>
     artifactItem(task, artifact)
   ) : [item("No artifacts", "0 files")]));
+}
+
+function syncEndpointSelects() {
+  const endpointOptions = state.endpoints.map((endpoint) => {
+    const option = document.createElement("option");
+    option.value = endpoint.id;
+    option.textContent = `${endpoint.name} · ${endpoint.model}`;
+    return option;
+  });
+  for (const select of [chatEndpointSelect, taskEndpointSelect]) {
+    select.replaceChildren(...endpointOptions.map((option) => option.cloneNode(true)));
+    if (state.endpointId) {
+      select.value = state.endpointId;
+    }
+  }
+}
+
+function syncWorkflowControls(hasProject, hasEndpoint) {
+  setFormDisabled(endpointForm, !hasProject);
+  setFormDisabled(chatForm, !hasProject || !hasEndpoint);
+  setFormDisabled(taskForm, !hasProject || !hasEndpoint);
+  uploadFileButton.disabled = !hasProject;
+}
+
+function setFormDisabled(form, disabled) {
+  form.querySelectorAll("input, textarea, select, button").forEach((control) => {
+    control.disabled = disabled;
+  });
 }
 
 function item(title, detail) {
@@ -170,6 +512,48 @@ function artifactItem(task, artifact) {
   return node;
 }
 
+function formString(form, name) {
+  return String(form.get(name) ?? "").trim();
+}
+
+function parseTimeout(input) {
+  const timeout = Number(input);
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    return 30;
+  }
+  return Math.round(timeout);
+}
+
+function timelineDetail(event) {
+  const payload = summarizePayload(event.payload);
+  return payload || "No payload";
+}
+
+function summarizePayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  for (const key of ["text", "message", "name", "status"]) {
+    if (typeof payload[key] === "string" && payload[key].trim()) {
+      return shortText(payload[key], 140);
+    }
+  }
+  const json = JSON.stringify(payload);
+  return json && json !== "{}" ? shortText(json, 140) : "";
+}
+
+function displayKind(kind) {
+  return String(kind ?? "event").replaceAll("_", " ");
+}
+
+function shortText(input, maxLength) {
+  const text = String(input ?? "").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) {
     return `${bytes} bytes`;
@@ -179,6 +563,16 @@ function formatBytes(bytes) {
     return `${kib.toFixed(1)} KiB`;
   }
   return `${(kib / 1024).toFixed(1)} MiB`;
+}
+
+function setStatus(message, tone = "info") {
+  statusMessageEl.textContent = message;
+  statusMessageEl.dataset.tone = tone;
+  statusMessageEl.classList.toggle("hidden", !message);
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function api(path, options = {}) {

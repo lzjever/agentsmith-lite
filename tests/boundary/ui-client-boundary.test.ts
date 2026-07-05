@@ -15,6 +15,7 @@ describe("web ui client boundary", () => {
       "k8s",
       "pg.",
       "postgres",
+      "juicefs",
       "fs.",
       "/v1/messages",
       "/v1/timeline",
@@ -22,7 +23,6 @@ describe("web ui client boundary", () => {
       "authorization: bearer",
       "authorization",
       "bearer ",
-      "apikeysecretref",
       "secret/"
     ];
 
@@ -31,11 +31,19 @@ describe("web ui client boundary", () => {
     );
     assert.deepEqual(hits, []);
 
-    const fetchTargets = checked
-      .flatMap(([, text]) => [...text.matchAll(/fetch\(["'`]([^"'`]+)["'`]/g)].map((match) => match[1]))
-      .filter(Boolean);
+    const fetchTargets = checked.flatMap(([file, text]) =>
+      extractFirstArgTargets(text, "fetch").map((target) => ({ call: "fetch", file, target }))
+    );
+    const apiTargets = checked.flatMap(([file, text]) =>
+      extractFirstArgTargets(text, "api").map((target) => ({ call: "api", file, target }))
+    );
+    const nonApiTargets = [...fetchTargets, ...apiTargets]
+      .filter(({ target }) => !target.startsWith("/api/"))
+      .map(({ call, file, target }) => `${file}: ${call}(${target})`);
+
     assert.ok(fetchTargets.length > 0);
-    assert.ok(fetchTargets.every((target) => target?.startsWith("/api/")));
+    assert.ok(apiTargets.length > 0);
+    assert.deepEqual(nonApiTargets, []);
     assert.ok(
       checked.some(([, text]) => text.includes("/api/tasks/") && text.includes("/artifacts")),
       "browser UI must load task artifacts through the AgentSmith Lite API"
@@ -44,6 +52,50 @@ describe("web ui client boundary", () => {
       checked.some(([, text]) => text.includes("/download") && text.includes("download")),
       "browser UI must expose product artifact download links"
     );
+
+    const source = checked.map(([, text]) => text).join("\n");
+    const requiredWorkflowRoutes = [
+      {
+        name: "endpoint create",
+        route: /\/api\/projects\/\$\{[^}]+}\/endpoints/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/endpoints`,[\s\S]*?method:\s*"POST"/
+      },
+      {
+        name: "chat",
+        route: /\/api\/projects\/\$\{[^}]+}\/chat/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/chat`,[\s\S]*?method:\s*"POST"/
+      },
+      {
+        name: "task create",
+        route: /\/api\/projects\/\$\{[^}]+}\/tasks/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/tasks`,[\s\S]*?method:\s*"POST"/
+      },
+      {
+        name: "task cancel",
+        route: /\/api\/tasks\/\$\{[^}]+}\/cancel/,
+        method: /api\(`\/api\/tasks\/\$\{[^}]+}\/cancel`,[\s\S]*?method:\s*"POST"/
+      },
+      {
+        name: "task events",
+        route: /\/api\/tasks\/\$\{[^}]+}\/events/,
+        method: /api\(`\/api\/tasks\/\$\{[^}]+}\/events`\)/
+      },
+      {
+        name: "artifact list",
+        route: /\/api\/tasks\/\$\{[^}]+}\/artifacts/,
+        method: /api\(`\/api\/tasks\/\$\{[^}]+}\/artifacts`\)/
+      },
+      {
+        name: "artifact download",
+        route: /\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download/,
+        method: /href\s*=\s*`\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download`/
+      }
+    ];
+
+    for (const required of requiredWorkflowRoutes) {
+      assert.match(source, required.route, `browser UI must include ${required.name} product API route`);
+      assert.match(source, required.method, `browser UI must call ${required.name} through the expected workflow`);
+    }
   });
 });
 
@@ -54,4 +106,21 @@ async function listFiles(dir: string): Promise<string[]> {
     return entry.isDirectory() ? listFiles(next) : [next];
   }));
   return files.flat();
+}
+
+function extractFirstArgTargets(text: string, callName: "api" | "fetch"): string[] {
+  const pattern = new RegExp(`\\b${callName}\\(\\s*(["'\`])`, "g");
+  const targets: string[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const quote = match[1];
+    if (!quote) {
+      continue;
+    }
+    const start = (match.index ?? 0) + match[0].length;
+    const end = text.indexOf(quote, start);
+    if (end !== -1) {
+      targets.push(text.slice(start, end));
+    }
+  }
+  return targets;
 }

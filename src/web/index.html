@@ -15,6 +15,7 @@
         </div>
         <div id="health" class="health">Checking</div>
       </section>
+      <p id="status-message" class="status-message hidden"></p>
 
       <section id="login" class="panel">
         <h2>Admin Login</h2>
@@ -37,15 +38,78 @@
             <h2>Workspaces</h2>
             <button id="seed">Create Demo</button>
           </div>
+          <p id="current-project" class="metric">No project</p>
           <div id="workspaces" class="list"></div>
         </div>
         <div class="panel">
-          <h2>Endpoints</h2>
+          <div class="section-title">
+            <h2>Endpoints</h2>
+            <p id="endpoints-count" class="metric">0 endpoints</p>
+          </div>
+          <form id="endpoint-form" class="stacked-form">
+            <div class="form-grid">
+              <label>
+                Name
+                <input name="name" required />
+              </label>
+              <label>
+                Model
+                <input name="model" required />
+              </label>
+            </div>
+            <label>
+              Base URL
+              <input name="baseUrl" type="url" required />
+            </label>
+            <div class="form-grid">
+              <label>
+                Secret ref
+                <input name="secretRef" autocomplete="off" required />
+              </label>
+              <label>
+                Timeout seconds
+                <input name="requestTimeoutSecs" type="number" min="1" value="30" required />
+              </label>
+            </div>
+            <button type="submit">Create endpoint</button>
+          </form>
           <div id="endpoints" class="list"></div>
         </div>
         <div class="panel">
-          <h2>Tasks & Resources</h2>
+          <h2>Chat</h2>
+          <form id="chat-form" class="stacked-form">
+            <label>
+              Endpoint
+              <select id="chat-endpoint" name="endpointId"></select>
+            </label>
+            <label>
+              Message
+              <textarea name="message" rows="4" required></textarea>
+            </label>
+            <button type="submit">Send</button>
+          </form>
+          <div id="chat-reply" class="reply hidden"></div>
+        </div>
+        <div class="panel">
+          <h2>Tasks</h2>
+          <form id="task-form" class="stacked-form">
+            <label>
+              Endpoint
+              <select id="task-endpoint" name="endpointId"></select>
+            </label>
+            <label>
+              Prompt
+              <textarea name="prompt" rows="4" required></textarea>
+            </label>
+            <button type="submit">Create task</button>
+          </form>
+          <p id="tasks-count" class="metric">0 tasks</p>
           <div id="tasks" class="list"></div>
+        </div>
+        <div class="panel">
+          <h2>Task Timeline</h2>
+          <p id="timeline-count" class="metric">0 events</p>
+          <div id="timeline" class="list"></div>
         </div>
         <div class="panel">
           <h2>Artifacts</h2>

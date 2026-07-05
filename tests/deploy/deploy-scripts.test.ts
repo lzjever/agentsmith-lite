@@ -154,7 +154,12 @@ OUT
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-status-"));
     const envFile = path.join(tempDir, "deploy.env");
     const fakeKubectl = path.join(tempDir, "kubectl");
-    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith-preview\n");
+    writeFileSync(envFile, [
+      "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+      "KUBE_CONTEXT=kind-agentsmith",
+      "KUBE_NAMESPACE=agentsmith-preview",
+      ""
+    ].join("\n"));
     writeFileSync(fakeKubectl, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n");
     chmodSync(fakeKubectl, 0o755);
 
@@ -169,6 +174,7 @@ OUT
 
     assert.equal(result.status, 0, result.stderr);
     const args = result.stdout.trim().split("\n");
+    assert.deepEqual(args.slice(0, 4), ["--kubeconfig", "/tmp/agentsmith.kubeconfig", "--context", "kind-agentsmith"]);
     const getIndex = args.indexOf("get");
     assert.notEqual(getIndex, -1, result.stdout);
     assert.equal(args[getIndex + 1]?.includes("ingress"), true, result.stdout);
@@ -244,7 +250,12 @@ if [ "$1" = "delete" ]; then exit 19; fi
   it("down.sh dry-run deletes Ingress with the app-owned label scope", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-down-"));
     const envFile = path.join(tempDir, "deploy.env");
-    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith-preview\n");
+    writeFileSync(envFile, [
+      "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+      "KUBE_CONTEXT=kind-agentsmith",
+      "KUBE_NAMESPACE=agentsmith-preview",
+      ""
+    ].join("\n"));
 
     const result = spawnSync("bash", ["scripts/deploy/down.sh", "--env", envFile, "--dry-run"], {
       cwd: process.cwd(),
@@ -252,7 +263,7 @@ if [ "$1" = "delete" ]; then exit 19; fi
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /kubectl/);
+    assert.match(result.stdout, /kubectl --kubeconfig \/tmp\/agentsmith\.kubeconfig --context kind-agentsmith/);
     assert.match(result.stdout, /agentsmith-preview/);
     assert.match(result.stdout, /delete/);
     assert.match(result.stdout, /ingress/);

@@ -12,7 +12,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-command=(kubectl -n "$namespace" delete deploy,svc,ingress,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
+kubectl_args=()
+if [ -n "${KUBECONFIG_PATH:-}" ]; then
+  kubectl_args+=(--kubeconfig "$KUBECONFIG_PATH")
+fi
+if [ -n "${KUBE_CONTEXT:-}" ]; then
+  kubectl_args+=(--context "$KUBE_CONTEXT")
+fi
+
+command=(kubectl "${kubectl_args[@]}" -n "$namespace" delete deploy,svc,ingress,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
 if [ "$dry_run" = true ]; then
   printf '%q ' "${command[@]}"
   echo
