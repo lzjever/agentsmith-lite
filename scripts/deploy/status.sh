@@ -13,7 +13,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$resources" = true ]; then
-  kubectl -n "$namespace" get pods,svc,configmap,secret,serviceaccount,networkpolicy -l agentsmith-lite/managed-by=agentsmith-lite
+  kubectl -n "$namespace" get pods,svc,ingress,configmap,secret,serviceaccount,networkpolicy -l agentsmith-lite/managed-by=agentsmith-lite
 else
-  kubectl -n "$namespace" get deploy,svc,job -l agentsmith-lite/managed-by=agentsmith-lite
+  kubectl -n "$namespace" get deploy,svc,ingress,job -l agentsmith-lite/managed-by=agentsmith-lite
 fi

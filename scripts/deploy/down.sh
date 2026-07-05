@@ -12,11 +12,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-command=(kubectl -n "$namespace" delete deploy,svc,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
+command=(kubectl -n "$namespace" delete deploy,svc,ingress,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
 if [ "$dry_run" = true ]; then
   printf '%q ' "${command[@]}"
   echo
 else
   "${command[@]}"
 fi
-

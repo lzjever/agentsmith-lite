@@ -4,6 +4,106 @@ import { describe, it } from "node:test";
 import { renderAppManifests } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
 
 describe("app manifest rendering", () => {
+  it("renders an Ingress from the public HTTPS URL with class, TLS, labels, and namespace", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        APP_PUBLIC_BASE_URL: "https://agentsmith.example.com/app",
+        APP_INGRESS_CLASS: "nginx",
+        APP_TLS_SECRET_NAME: "agentsmith-lite-tls"
+      },
+      secrets: {}
+    });
+
+    const ingress = manifests.find((manifest) => manifest.kind === "Ingress" && manifest.metadata.name === "agentsmith-lite-api") as
+      | IngressResource
+      | undefined;
+
+    assert.ok(ingress, "app Ingress should be rendered for non-local public HTTPS URLs");
+    assert.equal(ingress.apiVersion, "networking.k8s.io/v1");
+    assert.equal(ingress.metadata.namespace, "agentsmith");
+    assert.equal(ingress.metadata.labels["app.kubernetes.io/name"], "agentsmith-lite");
+    assert.equal(ingress.metadata.labels["app.kubernetes.io/part-of"], "agentsmith-lite");
+    assert.equal(ingress.metadata.labels["app.kubernetes.io/managed-by"], "agentsmith-lite");
+    assert.equal(ingress.metadata.labels["agentsmith-lite/managed-by"], "agentsmith-lite");
+    assert.equal(ingress.metadata.labels["app.kubernetes.io/component"], "api");
+    assert.equal(ingress.spec.ingressClassName, "nginx");
+    assert.deepEqual(ingress.spec.tls, [{ hosts: ["agentsmith.example.com"], secretName: "agentsmith-lite-tls" }]);
+    assert.deepEqual(ingress.spec.rules, [
+      {
+        host: "agentsmith.example.com",
+        http: {
+          paths: [
+            {
+              path: "/app",
+              pathType: "Prefix",
+              backend: {
+                service: {
+                  name: "agentsmith-lite-api",
+                  port: {
+                    name: "http"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+  });
+
+  it("omits optional Ingress fields when unset and skips local public URLs", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        APP_PUBLIC_BASE_URL: "https://agentsmith.example.com",
+        APP_INGRESS_CLASS: "",
+        APP_TLS_SECRET_NAME: ""
+      },
+      secrets: {}
+    });
+    const ingress = manifests.find((manifest) => manifest.kind === "Ingress" && manifest.metadata.name === "agentsmith-lite-api") as
+      | IngressResource
+      | undefined;
+
+    assert.ok(ingress, "non-local public URL should render an Ingress");
+    assert.equal(ingress.spec.rules[0]?.http.paths[0]?.path, "/");
+    assert.equal(ingress.spec.ingressClassName, undefined);
+    assert.equal(ingress.spec.tls, undefined);
+
+    for (const publicUrl of [undefined, "http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"]) {
+      const localManifests = renderAppManifests({
+        namespace: "agentsmith",
+        imageTag: "dev",
+        env: publicUrl === undefined ? {} : { APP_PUBLIC_BASE_URL: publicUrl },
+        secrets: {}
+      });
+
+      assert.equal(
+        localManifests.some((manifest) => manifest.kind === "Ingress"),
+        false,
+        `${publicUrl ?? "default public URL"} should not render an Ingress`
+      );
+    }
+  });
+
+  it("rejects non-http public base URLs", () => {
+    assert.throws(
+      () =>
+        renderAppManifests({
+          namespace: "agentsmith",
+          imageTag: "dev",
+          env: {
+            APP_PUBLIC_BASE_URL: "ftp://agentsmith.example.com"
+          },
+          secrets: {}
+        }),
+      /APP_PUBLIC_BASE_URL must be an http or https URL/
+    );
+  });
+
   it("renders only app-owned secrets and leaves raw S3/JuiceFS credentials to the substrate", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -184,5 +284,40 @@ interface JobResource {
         }>;
       };
     };
+  };
+}
+
+interface IngressResource {
+  apiVersion: string;
+  kind: "Ingress";
+  metadata: {
+    name: string;
+    namespace?: string;
+    labels: Record<string, string>;
+  };
+  spec: {
+    ingressClassName?: string;
+    tls?: Array<{
+      hosts: string[];
+      secretName: string;
+    }>;
+    rules: Array<{
+      host: string;
+      http: {
+        paths: Array<{
+          path: string;
+          pathType: string;
+          backend: {
+            service: {
+              name: string;
+              port: {
+                name?: string;
+                number?: number;
+              };
+            };
+          };
+        }>;
+      };
+    }>;
   };
 }

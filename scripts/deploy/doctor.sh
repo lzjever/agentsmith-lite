@@ -24,6 +24,32 @@ done
 source "$env_file"
 source "$secrets_file"
 
+requires_app_ingress() {
+  local url="${1:-http://localhost:3000}"
+  local authority
+  local host
+
+  case "$url" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+
+  authority="${url#*://}"
+  authority="${authority%%/*}"
+  if [[ "$authority" == \[*\]* ]]; then
+    host="${authority%%]*}"
+    host="${host#\[}"
+  else
+    host="${authority%%:*}"
+  fi
+  host="${host,,}"
+
+  case "$host" in
+    localhost|127.0.0.1|::1) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 for required in POSTGRES_APP_URL APP_SESSION_SECRET; do
   [ -n "${!required:-}" ] || { echo "$required is required for app deploy" >&2; exit 1; }
 done
@@ -38,6 +64,9 @@ fi
 
 if [ -d "$out" ]; then
   rg -q 'kind: Deployment' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
+  if requires_app_ingress "${APP_PUBLIC_BASE_URL:-}"; then
+    rg -q 'kind: Ingress' "$out" || { echo "rendered app Ingress missing" >&2; exit 1; }
+  fi
   rg -q 'agentsmith-lite-schema-bootstrap' "$out" || { echo "schema bootstrap Job missing" >&2; exit 1; }
   rg -q 'kind: Role' "$out" || { echo "sandbox RBAC Role missing" >&2; exit 1; }
   if rg -q 'watch|pods/(exec|log|attach|portforward)|persistentvolumes|persistentvolumeclaims' "$out"; then
@@ -69,7 +98,7 @@ cat > out/app-doctor-report.json <<REPORT
   "checks": {
     "app_images": "offline bundle, images.lock, and rendered manifests are checked when provided",
     "schema_job": "expected agentsmith-lite-schema-bootstrap",
-    "web_api_readiness": "expected agentsmith-lite-api deployment/service",
+    "web_api_readiness": "expected agentsmith-lite-api deployment/service and ingress for non-local public URLs",
     "sandbox_rbac": "expected namespaced Role without exec subresource",
     "botified_smoke": "uses third_party/botified/PINNED_SOURCE.json and botified serve"
   },

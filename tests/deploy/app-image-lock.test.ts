@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -108,6 +108,47 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, new RegExp(escapeRegExp(runnerDigestRef)));
     assert.doesNotMatch(manifest, /agentsmith-lite\/app:dev/);
     assert.doesNotMatch(manifest, /agentsmith-lite\/botified-runner:dev/);
+  });
+
+  it("render.sh writes an app Ingress manifest into per-resource output and all.yaml", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-ingress-render-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(
+      envFile,
+      [
+        "KUBE_NAMESPACE=agentsmith-preview",
+        "APP_PUBLIC_BASE_URL=https://agentsmith.example.com/app",
+        "APP_INGRESS_CLASS=nginx",
+        "APP_TLS_SECRET_NAME=agentsmith-lite-tls",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
+
+    const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const files = readdirSync(outDir);
+    const ingressFile = files.find((file) => /-ingress-agentsmith-lite-api\.yaml$/.test(file));
+    assert.ok(ingressFile, `expected per-resource Ingress manifest in ${files.join(", ")}`);
+
+    const allManifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
+    const ingressManifest = readFileSync(path.join(outDir, ingressFile), "utf8");
+    for (const manifest of [allManifest, ingressManifest]) {
+      assert.match(manifest, /kind: Ingress/);
+      assert.match(manifest, /namespace: agentsmith-preview/);
+      assert.match(manifest, /host: agentsmith\.example\.com/);
+      assert.match(manifest, /path: \/app/);
+      assert.match(manifest, /ingressClassName: nginx/);
+      assert.match(manifest, /secretName: agentsmith-lite-tls/);
+      assert.match(manifest, /name: agentsmith-lite-api/);
+      assert.match(manifest, /name: http/);
+    }
   });
 });
 

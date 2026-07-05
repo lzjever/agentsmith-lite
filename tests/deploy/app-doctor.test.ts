@@ -11,6 +11,49 @@ const runnerDigestRef = "agentsmith-lite/botified-runner@sha256:bbbbbbbbbbbbbbbb
 const otherAppDigestRef = "agentsmith-lite/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 describe("deploy app doctor artifact checks", () => {
+  it("passes rendered local-default manifests without requiring an Ingress", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-doctor-local-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
+
+    const render = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(render.status, 0, render.stderr);
+    assert.doesNotMatch(readFileSync(path.join(outDir, "all.yaml"), "utf8"), /kind: Ingress/);
+
+    const doctor = spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(doctor.status, 0, doctor.stderr);
+    assert.match(doctor.stdout, /App doctor passed/);
+  });
+
+  it("passes static rendered manifest checks when the app Ingress is present", () => {
+    const fixture = writeDoctorFixture();
+
+    const result = runDoctor(fixture, []);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /App doctor passed/);
+  });
+
+  it("fails static rendered manifest checks for non-local public URLs when the app Ingress is missing", () => {
+    const fixture = writeDoctorFixture({ omitIngress: true, publicBaseUrl: "https://agentsmith.example.com" });
+
+    const result = runDoctor(fixture, []);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Ingress/i);
+  });
+
   it("passes --bundle by using the bundle images.lock against rendered manifests", () => {
     const fixture = writeDoctorFixture();
 
@@ -155,12 +198,13 @@ function writeDoctorFixture(options: Partial<DoctorFixtureOptions> = {}): Doctor
   const outDir = path.join(tempDir, "manifests");
   const bundleDir = path.join(tempDir, "bundle");
 
-  writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+  writeFileSync(envFile, `KUBE_NAMESPACE=agentsmith\n${options.publicBaseUrl ? `APP_PUBLIC_BASE_URL=${options.publicBaseUrl}\n` : ""}`);
   writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret\n");
   writeManifests(outDir, {
     appImage: options.appImage ?? appDigestRef,
     runnerImage: options.runnerImage ?? runnerDigestRef,
-    extraManifest: options.extraManifest
+    extraManifest: options.extraManifest,
+    omitIngress: options.omitIngress
   });
   writeBundle(bundleDir, appDigestRef, runnerDigestRef);
 
@@ -199,6 +243,24 @@ metadata:
   name: agentsmith-lite-config
 data:
   BOTIFIED_RUNNER_IMAGE: ${options.runnerImage}
+${options.omitIngress ? "" : `---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentsmith-lite-api
+spec:
+  rules:
+    - host: agentsmith.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentsmith-lite-api
+                port:
+                  name: http
+`}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -266,4 +328,6 @@ interface DoctorFixtureOptions {
   appImage: string;
   runnerImage: string;
   extraManifest?: string | undefined;
+  omitIngress?: boolean | undefined;
+  publicBaseUrl?: string | undefined;
 }

@@ -10,6 +10,7 @@ export interface AppManifestInput {
 }
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
+  const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
     "app.kubernetes.io/part-of": "agentsmith-lite",
@@ -33,6 +34,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   }
   const appImage = input.imageRefs?.app ?? `agentsmith-lite/app:${input.imageTag}`;
   const runnerImage = input.imageRefs?.botifiedRunner ?? input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`;
+  const ingress = renderAppIngress(input, publicBaseUrl, apiLabels);
 
   return [
     {
@@ -40,7 +42,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       kind: "ConfigMap",
       metadata: { name: "agentsmith-lite-config", namespace: input.namespace, labels },
       data: {
-        APP_PUBLIC_BASE_URL: input.env.APP_PUBLIC_BASE_URL ?? "http://localhost:3000",
+        APP_PUBLIC_BASE_URL: publicBaseUrl,
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
         KUBE_NAMESPACE: input.namespace,
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
@@ -105,6 +107,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         ports: [{ name: "http", port: 80, targetPort: 3000 }]
       }
     },
+    ...(ingress ? [ingress] : []),
     {
       apiVersion: "batch/v1",
       kind: "Job",
@@ -189,4 +192,62 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     }
   ];
+}
+
+function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels: Record<string, string>): KubernetesResource | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(publicBaseUrl);
+  } catch {
+    throw new Error("APP_PUBLIC_BASE_URL must be an http or https URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("APP_PUBLIC_BASE_URL must be an http or https URL");
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    return undefined;
+  }
+
+  const ingressClassName = input.env.APP_INGRESS_CLASS?.trim();
+  const tlsSecretName = input.env.APP_TLS_SECRET_NAME?.trim();
+  const spec: Record<string, unknown> = {
+    rules: [
+      {
+        host: parsed.hostname,
+        http: {
+          paths: [
+            {
+              path: parsed.pathname || "/",
+              pathType: "Prefix",
+              backend: {
+                service: {
+                  name: "agentsmith-lite-api",
+                  port: {
+                    name: "http"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  };
+
+  if (ingressClassName) {
+    spec.ingressClassName = ingressClassName;
+  }
+  if (parsed.protocol === "https:" && tlsSecretName) {
+    spec.tls = [{ hosts: [parsed.hostname], secretName: tlsSecretName }];
+  }
+
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "Ingress",
+    metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels },
+    spec
+  };
 }
