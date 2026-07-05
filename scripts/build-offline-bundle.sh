@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+repo_root="$(pwd)"
 
 app_image=
 runner_image=
@@ -27,60 +28,22 @@ done
 
 read_images_lock() {
   local lock_file="$1"
-  local app_seen=0
-  local runner_seen=0
-  local line=
-  local line_number=0
+  local parsed=
 
   if [ ! -f "$lock_file" ]; then
     echo "--images-lock file does not exist: $lock_file" >&2
     exit 2
   fi
+  if [ ! -f "$repo_root/dist/packages/sandbox-controller/src/appImageLock.js" ]; then
+    (cd "$repo_root" && npm run build >/dev/null)
+  fi
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    line_number=$((line_number + 1))
-    if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
-      continue
-    fi
-    if [[ "$line" =~ [[:space:]] ]]; then
-      echo "images.lock line $line_number must contain a single image ref" >&2
-      exit 2
-    fi
-
-    if [[ "$line" =~ ^agentsmith-lite/app@sha256:[0-9a-fA-F]{64}$ ]]; then
-      if [ "$app_seen" -ne 0 ]; then
-        echo "images.lock contains duplicate agentsmith-lite/app ref" >&2
-        exit 2
-      fi
-      app_seen=1
-      app_image="$line"
-    elif [[ "$line" =~ ^agentsmith-lite/botified-runner@sha256:[0-9a-fA-F]{64}$ ]]; then
-      if [ "$runner_seen" -ne 0 ]; then
-        echo "images.lock contains duplicate agentsmith-lite/botified-runner ref" >&2
-        exit 2
-      fi
-      runner_seen=1
-      runner_image="$line"
-    elif [[ "$line" =~ ^agentsmith-lite/(app|botified-runner): ]]; then
-      echo "images.lock ref must be digest-pinned, not a mutable tag: $line" >&2
-      exit 2
-    elif [[ "$line" =~ ^agentsmith-lite/(app|botified-runner)@ ]]; then
-      echo "images.lock ref has an invalid sha256 digest: $line" >&2
-      exit 2
-    else
-      echo "images.lock contains unsupported image ref: $line" >&2
-      exit 2
-    fi
-  done < "$lock_file"
-
-  if [ "$app_seen" -eq 0 ]; then
-    echo "images.lock missing agentsmith-lite/app digest ref" >&2
+  if ! parsed="$(node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file")"; then
     exit 2
   fi
-  if [ "$runner_seen" -eq 0 ]; then
-    echo "images.lock missing agentsmith-lite/botified-runner digest ref" >&2
-    exit 2
-  fi
+
+  app_image="$(printf '%s\n' "$parsed" | sed -n '1p')"
+  runner_image="$(printf '%s\n' "$parsed" | sed -n '2p')"
 }
 
 if [ -n "$images_lock" ]; then

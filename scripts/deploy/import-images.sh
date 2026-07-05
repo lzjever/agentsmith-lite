@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 
 bundle=
 runtime="${CONTAINER_RUNTIME:-docker}"
@@ -73,53 +75,10 @@ require_checksum_entry() {
 }
 
 validate_images_lock() {
-  local app_seen=0
-  local runner_seen=0
-  local line=
-  local line_number=0
-
-  while IFS= read -r line || [ -n "$line" ]; do
-    line_number=$((line_number + 1))
-    if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
-      continue
-    fi
-    if [[ "$line" =~ [[:space:]] ]]; then
-      echo "images.lock line $line_number must contain a single image ref" >&2
-      exit 1
-    fi
-
-    if [[ "$line" =~ ^agentsmith-lite/app@sha256:[0-9a-fA-F]{64}$ ]]; then
-      if [ "$app_seen" -ne 0 ]; then
-        echo "images.lock contains duplicate agentsmith-lite/app ref" >&2
-        exit 1
-      fi
-      app_seen=1
-    elif [[ "$line" =~ ^agentsmith-lite/botified-runner@sha256:[0-9a-fA-F]{64}$ ]]; then
-      if [ "$runner_seen" -ne 0 ]; then
-        echo "images.lock contains duplicate agentsmith-lite/botified-runner ref" >&2
-        exit 1
-      fi
-      runner_seen=1
-    elif [[ "$line" =~ ^agentsmith-lite/(app|botified-runner): ]]; then
-      echo "images.lock ref must be digest-pinned, not a mutable tag: $line" >&2
-      exit 1
-    elif [[ "$line" =~ ^agentsmith-lite/(app|botified-runner)@ ]]; then
-      echo "images.lock ref has an invalid sha256 digest: $line" >&2
-      exit 1
-    else
-      echo "images.lock contains unsupported image ref: $line" >&2
-      exit 1
-    fi
-  done < "$lock_file"
-
-  if [ "$app_seen" -eq 0 ]; then
-    echo "images.lock missing agentsmith-lite/app digest ref" >&2
-    exit 1
+  if [ ! -f "$repo_root/dist/packages/sandbox-controller/src/appImageLock.js" ]; then
+    (cd "$repo_root" && npm run build >/dev/null)
   fi
-  if [ "$runner_seen" -eq 0 ]; then
-    echo "images.lock missing agentsmith-lite/botified-runner digest ref" >&2
-    exit 1
-  fi
+  node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file" >/dev/null
 }
 
 require_file "$checksums_file"

@@ -68,7 +68,7 @@ describe("build offline bundle", () => {
     const lockFile = path.join(tempDir, "images.lock");
     const callsFile = path.join(tempDir, "runtime-calls.log");
     const runtime = writeFakeRuntime(tempDir, callsFile, "write");
-    writeFileSync(lockFile, `# release image refs\n${appDigestRef}\n\n${runnerDigestRef}\n`);
+    writeFileSync(lockFile, `# release image refs\n  ${appDigestRef}  \n   \n\t${runnerDigestRef}\t\n`);
 
     const result = runBundle(["--images-lock", lockFile, "--runtime", runtime, "--output", outputDir]);
 
@@ -81,6 +81,7 @@ describe("build offline bundle", () => {
       app: appDigestRef,
       botifiedRunner: runnerDigestRef
     });
+    assert.equal(readFileSync(path.join(outputDir, "images.lock"), "utf8"), `${appDigestRef}\n${runnerDigestRef}\n`);
   });
 
   it("fails closed when --images-lock is mixed with explicit image arguments or contains invalid refs", () => {

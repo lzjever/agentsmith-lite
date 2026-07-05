@@ -41,6 +41,23 @@ describe("deploy import images", () => {
     assert.equal(readCalls(callsFile).length, 0);
   });
 
+  it("accepts a bundle images.lock with comments, blank lines, and surrounding whitespace during dry-run", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-lock-whitespace-"));
+    const bundle = writeBundle(tempDir);
+    writeBundleFile(bundle, "images.lock", `# release image refs\n  ${appDigestRef}  \n   \n\t${runnerDigestRef}\t\n`);
+    const callsFile = path.join(tempDir, "runtime-calls.log");
+    const runtime = writeFakeRuntime(tempDir, callsFile);
+
+    const result = runImport(["--bundle", bundle, "--runtime", runtime, "--dry-run"]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split("\n"), [
+      `image load -i ${path.join(bundle, "images/app.tar")}`,
+      `image load -i ${path.join(bundle, "images/botified-runner.tar")}`
+    ]);
+    assert.equal(readCalls(callsFile).length, 0);
+  });
+
   it("fails closed for missing bundle metadata, invalid lock contents, checksum mismatches, and missing archives", () => {
     const cases: Array<{
       name: string;
