@@ -10,7 +10,7 @@ import { newId, nowIso } from "../../domain/src/ids.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, type ModelCredentialResolver } from "../../openai-compatible-client/src/index.js";
-import { BotifiedHttpError, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
+import { BotifiedHttpError, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult } from "../../ports/src/botified.js";
 import type { PersistedSandboxRunState, ProductStore } from "../../ports/src/store.js";
 import {
   applySandboxReconcileActionsToKubernetes,
@@ -78,7 +78,7 @@ interface BotifiedTaskRuntimeState {
   lastSyncedAt?: string;
 }
 
-type BotifiedOperation = "send message" | "read timeline" | "download file" | "abort";
+type BotifiedOperation = "send message" | "read state" | "read timeline" | "download file" | "abort";
 
 export interface TaskArtifactDownload {
   artifact: AgentTaskArtifact;
@@ -269,8 +269,8 @@ export class TaskService {
 
   async cancelTask(userId: string, taskId: string): Promise<AgentTask> {
     const task = await this.requireTaskForUser(userId, taskId);
-    const state = await this.readRuntimeState(task.id);
     const serviceKey = this.serviceKeyForTask(task);
+    const state = await this.readRuntimeState(task, serviceKey);
     await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
     const updated = { ...task, status: "stopping" as const, updatedAt: nowIso() };
     const saved = await this.store.updateTask(updated);
@@ -338,8 +338,8 @@ export class TaskService {
   }
 
   private async syncTaskTimeline(task: AgentTask): Promise<AgentTask> {
-    const state = await this.readRuntimeState(task.id);
     const serviceKey = this.serviceKeyForTask(task);
+    const state = await this.readRuntimeState(task, serviceKey);
     const existing = await this.store.listTaskEvents(task.id);
     const existingCursors = new Set(existing.map((event) => event.cursor));
     const timeline = await this.callBotified("read timeline", () =>
@@ -371,7 +371,13 @@ export class TaskService {
       await this.store.appendTaskEvents(projection.events);
     }
 
-    const nextCursor = safeRuntimeCursor(timeline.nextCursor) ?? safeRuntimeCursor(projection.nextCursor) ?? state.timelineCursor;
+    const timelineCursor = safeRuntimeCursor(timeline.nextCursor);
+    const projectionCursor = safeRuntimeCursor(projection.nextCursor);
+    const resetStateCursor =
+      timeline.status === "reset" && timelineCursor === undefined && projectionCursor === undefined
+        ? await this.bestEffortReadSafeStateCursor(state.baseUrl, serviceKey)
+        : undefined;
+    const nextCursor = timelineCursor ?? projectionCursor ?? resetStateCursor ?? state.timelineCursor;
     await this.writeRuntimeState(task.id, {
       ...state,
       ...(nextCursor !== undefined ? { timelineCursor: nextCursor } : {}),
@@ -402,10 +408,10 @@ export class TaskService {
     return this.store.updateTask({ ...task, status, updatedAt: nowIso() });
   }
 
-  private async readRuntimeState(taskId: string): Promise<BotifiedTaskRuntimeState> {
-    const document = await this.store.jsonDocs.get("sandbox_runtime_state", taskId);
+  private async readRuntimeState(task: AgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {
+    const document = await this.store.jsonDocs.get("sandbox_runtime_state", task.id);
     if (!document) {
-      throw new ProductError("Task runtime state not found", 409);
+      return this.rebuildRuntimeStateFromBotified(task, serviceKey);
     }
     const baseUrl = stringDocumentField(document, "botifiedBaseUrl");
     const state: BotifiedTaskRuntimeState = { baseUrl };
@@ -418,6 +424,36 @@ export class TaskService {
       state.lastSyncedAt = lastSyncedAt;
     }
     return state;
+  }
+
+  private async rebuildRuntimeStateFromBotified(task: AgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {
+    const run = await this.store.sandboxRuns.get(task.runId);
+    if (!run || run.taskId !== task.id || !Number.isFinite(run.botifiedPort) || run.botifiedPort <= 0) {
+      throw new ProductError("Task runtime state not found", 409);
+    }
+    const baseUrl = this.botifiedBaseUrlForTask(task.id, run.botifiedPort, run.namespace);
+    const snapshot = await this.callBotified("read state", () => this.botified.readState(baseUrl, serviceKey));
+    const state = this.runtimeStateFromBotifiedSnapshot(baseUrl, snapshot);
+    await this.writeRuntimeState(task.id, state);
+    return state;
+  }
+
+  private runtimeStateFromBotifiedSnapshot(baseUrl: string, snapshot: BotifiedRuntimeStateResult): BotifiedTaskRuntimeState {
+    const state: BotifiedTaskRuntimeState = { baseUrl };
+    const timelineCursor = safeRuntimeCursor(snapshot.timelineCursor);
+    if (timelineCursor !== undefined) {
+      state.timelineCursor = timelineCursor;
+    }
+    return state;
+  }
+
+  private async bestEffortReadSafeStateCursor(baseUrl: string, serviceKey: string): Promise<string | undefined> {
+    try {
+      const snapshot = await this.botified.readState(baseUrl, serviceKey);
+      return safeRuntimeCursor(snapshot.timelineCursor);
+    } catch {
+      return undefined;
+    }
   }
 
   private async writeRuntimeState(taskId: string, state: BotifiedTaskRuntimeState): Promise<void> {
@@ -450,8 +486,8 @@ export class TaskService {
     return this.config.botifiedServiceKeyFactory?.(input) ?? createBotifiedServiceKey(this.config.botifiedServiceKeySecret, input);
   }
 
-  private botifiedBaseUrlForTask(taskId: string, port: number): string {
-    const input = { namespace: this.config.namespace, taskId, port };
+  private botifiedBaseUrlForTask(taskId: string, port: number, namespace = this.config.namespace): string {
+    const input = { namespace, taskId, port };
     return (this.config.botifiedBaseUrlForTask ?? defaultBotifiedBaseUrlForTask)(input);
   }
 

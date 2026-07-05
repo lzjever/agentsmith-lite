@@ -234,6 +234,10 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
   }
 
+  async readState() {
+    return { snapshot: {}, state: "running" };
+  }
+
   async readTimeline(baseUrl: string, serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
     this.readTimelineCalls.push({ baseUrl, serviceKey, cursor });
     const next = this.timelineReads.shift();

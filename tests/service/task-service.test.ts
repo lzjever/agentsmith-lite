@@ -12,6 +12,7 @@ import {
   BotifiedHttpError,
   type BotifiedAbortResult,
   type BotifiedPostMessageResult,
+  type BotifiedRuntimeStateResult,
   type BotifiedRuntimeHttpClient,
   type BotifiedTimelineReadResult,
   type BotifiedUploadFileInput,
@@ -809,6 +810,181 @@ describe("task service Botified orchestration", () => {
     assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "timeline:old:1"]);
   });
 
+  it("rebuilds missing live runtime state from Botified state before syncing timeline artifacts", async () => {
+    const artifactBytes = new TextEncoder().encode("rebuilt state artifact");
+    const botified = new FakeBotifiedClient([
+      { status: "ok", events: [], nextCursor: "timeline:main:0" },
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "timeline:main:1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "rebuilt_file_1",
+              filename: "rebuilt.txt",
+              size_bytes: artifactBytes.byteLength
+            }
+          }
+        ],
+        nextCursor: "timeline:main:1"
+      }
+    ], {
+      downloads: {
+        rebuilt_file_1: artifactBytes
+      },
+      stateReads: [
+        {
+          snapshot: {
+            state: "running",
+            timeline_cursor: "timeline:main:0",
+            active_items: [{ id: "service", type: "service_status", status: "running" }]
+          },
+          state: "running",
+          timelineCursor: "timeline:main:0",
+          activeItems: [{ id: "service", type: "service_status", status: "running" }]
+        }
+      ]
+    });
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "recover state", endpointId });
+    await store.jsonDocs.delete("sandbox_runtime_state", task.id);
+
+    const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+    const runtimeState = await store.jsonDocs.get("sandbox_runtime_state", task.id);
+
+    assert.deepEqual(botified.readStateCalls, [
+      {
+        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        serviceKey: "test-service-key"
+      }
+    ]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "timeline:main:0"]);
+    assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [
+      ["rebuilt_file_1", "rebuilt.txt", artifactBytes.byteLength]
+    ]);
+    assert.equal(runtimeState?.timelineCursor, "timeline:main:1");
+    assert.equal(JSON.stringify(runtimeState).includes("test-service-key"), false);
+  });
+
+  it("keeps the projected tail cursor after reset instead of jumping to the Botified state checkpoint", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "timeline:old:1",
+            seq: 1,
+            session_id: "s1",
+            type: "assistant_message.completed",
+            payload: { text: "still running" }
+          }
+        ],
+        nextCursor: "timeline:old:1"
+      },
+      {
+        status: "reset",
+        reason: "stale_cursor",
+        historyBoundary: "timeline:new:0",
+        events: [
+          {
+            cursor: "timeline:new:1",
+            seq: 1,
+            session_id: "s1",
+            type: "assistant_message.completed",
+            payload: { text: "new window" }
+          }
+        ]
+      }
+    ], {
+      stateReads: [
+        {
+          snapshot: {
+            state: "running",
+            timeline_cursor: "timeline:new:5",
+            active_items: [{ id: "service", type: "service_status", status: "running" }]
+          },
+          state: "running",
+          timelineCursor: "timeline:new:5",
+          activeItems: [{ id: "service", type: "service_status", status: "running" }]
+        }
+      ]
+    });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "stale cursor", endpointId });
+
+    await services.tasks.listTaskEvents(userId, task.id);
+
+    const runtimeState = await store.jsonDocs.get("sandbox_runtime_state", task.id);
+    assert.equal(runtimeState?.timelineCursor, "timeline:new:1");
+    assert.deepEqual(botified.readStateCalls, []);
+    assert.deepEqual((await store.listTaskEvents(task.id)).map((event) => event.cursor), [
+      "timeline:old:1",
+      "timeline:new:1"
+    ]);
+  });
+
+  it("does not persist secret-like Botified state cursors when reset has no safe tail cursor", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "timeline:old:1",
+            seq: 1,
+            session_id: "s1",
+            type: "assistant_message.completed",
+            payload: { text: "still running" }
+          }
+        ],
+        nextCursor: "timeline:old:1"
+      },
+      {
+        status: "reset",
+        reason: "stale_cursor",
+        historyBoundary: "timeline:new:0",
+        events: []
+      }
+    ], {
+      stateReads: [
+        {
+          snapshot: {
+            state: "running",
+            timeline_cursor: "cursor-bsk_state_secret"
+          },
+          state: "running",
+          timelineCursor: "cursor-bsk_state_secret"
+        }
+      ]
+    });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "secret state cursor", endpointId });
+
+    await services.tasks.listTaskEvents(userId, task.id);
+
+    const runtimeState = await store.jsonDocs.get("sandbox_runtime_state", task.id);
+    assert.equal(runtimeState?.timelineCursor, "timeline:old:1");
+    assert.deepEqual(botified.readStateCalls, [
+      {
+        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        serviceKey: "test-service-key"
+      }
+    ]);
+    assert.doesNotMatch(JSON.stringify(runtimeState), /bsk_state_secret/);
+  });
+
   it("retries terminal live cleanup when the first run-state write loses its fence", async () => {
     const botified = new FakeBotifiedClient([
       {
@@ -1303,6 +1479,7 @@ async function assertMissing(candidate: string): Promise<void> {
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
+  readonly readStateCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
   readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
   readonly abortCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
@@ -1315,6 +1492,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       postResult?: BotifiedPostMessageResult;
       postError?: Error;
       abortError?: Error;
+      stateReads?: BotifiedRuntimeStateResult[];
       downloads?: Record<string, Uint8Array>;
       downloadFailures?: Record<string, Error[]>;
     } = {}
@@ -1331,6 +1509,11 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       throw this.options.postError;
     }
     return this.options.postResult ?? { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
+  }
+
+  async readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult> {
+    this.readStateCalls.push({ baseUrl, serviceKey });
+    return this.options.stateReads?.shift() ?? { snapshot: {}, state: "running" };
   }
 
   async readTimeline(baseUrl: string, serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {

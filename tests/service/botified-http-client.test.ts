@@ -80,6 +80,32 @@ describe("Botified HTTP client", () => {
     });
   });
 
+  it("reads runtime state with bearer auth and parses the bootstrap cursor", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
+      assert.equal(String(input), "http://botified.local/v1/state");
+      assert.equal(init.method, "GET");
+      assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
+      return jsonResponse({
+        session_id: "session_1",
+        state: "running",
+        timeline_cursor: "timeline:main:4",
+        active_items: [{ id: "service", type: "service_status", status: "running" }]
+      });
+    });
+
+    assert.deepEqual(await client.readState("http://botified.local", "service-secret"), {
+      snapshot: {
+        session_id: "session_1",
+        state: "running",
+        timeline_cursor: "timeline:main:4",
+        active_items: [{ id: "service", type: "service_status", status: "running" }]
+      },
+      state: "running",
+      timelineCursor: "timeline:main:4",
+      activeItems: [{ id: "service", type: "service_status", status: "running" }]
+    });
+  });
+
   it("turns stale timeline cursors into a structured reset result from the tail page", async () => {
     const urls: string[] = [];
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
@@ -223,6 +249,35 @@ describe("Botified HTTP client", () => {
         assert.equal(httpError.retryable, true);
         assert.equal(httpError.timelineCursor, "timeline:main:4");
         assert.equal(httpError.message, "timeline write failed");
+        return true;
+      }
+    );
+  });
+
+  it("raises structured HTTP errors for runtime state reads", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async () =>
+      jsonResponse(
+        {
+          ok: false,
+          error: {
+            code: "unauthorized",
+            message: "missing bearer",
+            retryable: false
+          }
+        },
+        { status: 401 }
+      )
+    );
+
+    await assert.rejects(
+      client.readState("http://botified.local", "service-secret"),
+      (error: unknown) => {
+        assert.equal(error instanceof BotifiedHttpError, true);
+        const httpError = error as BotifiedHttpError;
+        assert.equal(httpError.status, 401);
+        assert.equal(httpError.code, "unauthorized");
+        assert.equal(httpError.retryable, false);
+        assert.equal(httpError.message, "missing bearer");
         return true;
       }
     );

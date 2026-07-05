@@ -1,5 +1,6 @@
 export interface BotifiedRuntimeHttpClient {
   health(baseUrl: string, serviceKey?: string): Promise<{ status: "ok" }>;
+  readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult>;
   postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult>;
   readTimeline(
     baseUrl: string,
@@ -17,6 +18,13 @@ export interface BotifiedPostMessageResult {
   kind?: string;
   messageId?: string;
   cursor?: string;
+}
+
+export interface BotifiedRuntimeStateResult {
+  snapshot: unknown;
+  state?: string;
+  timelineCursor?: string;
+  activeItems?: unknown[];
 }
 
 export interface BotifiedReadTimelineOptions {
@@ -127,6 +135,30 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       });
     }
     return { status: "ok" };
+  }
+
+  async readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult> {
+    const body = await this.requestJson(baseUrl, "/v1/state", {
+      method: "GET",
+      serviceKey
+    });
+    const record = asRecord(body);
+    const result: BotifiedRuntimeStateResult = {
+      snapshot: body
+    };
+    const state = stringField(record, "state");
+    const timelineCursor = stringField(record, "timeline_cursor");
+    const activeItems = arrayFieldOrUndefined(record, "active_items");
+    if (state !== undefined) {
+      result.state = state;
+    }
+    if (timelineCursor !== undefined) {
+      result.timelineCursor = timelineCursor;
+    }
+    if (activeItems !== undefined) {
+      result.activeItems = activeItems;
+    }
+    return result;
   }
 
   async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
@@ -367,6 +399,10 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { status: "ok" };
   }
 
+  async readState(): Promise<BotifiedRuntimeStateResult> {
+    return { snapshot: {}, state: "idle" };
+  }
+
   async postMessage(): Promise<BotifiedPostMessageResult> {
     return { accepted: true, cursor: "dry-run" };
   }
@@ -533,4 +569,9 @@ function boolField(record: Record<string, unknown> | undefined, key: string): bo
 function arrayField(record: Record<string, unknown> | undefined, key: string): unknown[] {
   const value = record?.[key];
   return Array.isArray(value) ? value : [];
+}
+
+function arrayFieldOrUndefined(record: Record<string, unknown> | undefined, key: string): unknown[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) ? value : undefined;
 }
