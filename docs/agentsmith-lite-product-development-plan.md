@@ -133,6 +133,7 @@ agentsmith-lite-substrates/
     substrates.self-hosted.example.yaml
     substrates.existing-cloud.example.yaml
     offline-artifacts.example.env
+    offline-cache-manifest.example.yaml
   schemas/
     substrate.env.v1.schema.json
     substrate.secrets.env.v1.schema.json
@@ -154,7 +155,7 @@ agentsmith-lite-substrates/
     quotas/
     ingress-dev/
   out/                # generated, gitignored
-  dist/offline-cache/ # generated, gitignored except examples
+  dist/offline-cache/ # generated, gitignored
 ```
 
 Required outputs:
