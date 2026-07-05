@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -197,7 +197,8 @@ OUT
       env: {
         ...process.env,
         PATH: `${tempDir}:${process.env.PATH ?? ""}`,
-        FAKE_NODE_CALLS: callsFile
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
       }
     });
 
@@ -295,7 +296,8 @@ if [ "$1" = "delete" ]; then exit 19; fi
         ...process.env,
         PATH: `${tempDir}:${process.env.PATH ?? ""}`,
         FAKE_NODE_CALLS: callsFile,
-        FAKE_KUBECTL_CALLS: kubectlCalls
+        FAKE_KUBECTL_CALLS: kubectlCalls,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
       }
     });
 
@@ -357,7 +359,8 @@ if [ "$1" = "delete" ]; then exit 19; fi
         ...process.env,
         PATH: `${tempDir}:${process.env.PATH ?? ""}`,
         FAKE_NODE_CALLS: callsFile,
-        FAKE_KUBECTL_CALLS: kubectlCalls
+        FAKE_KUBECTL_CALLS: kubectlCalls,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
       }
     });
 
@@ -394,10 +397,84 @@ if [ "$1" = "delete" ]; then exit 19; fi
     assert.match(result.stdout, /ingress/);
     assert.match(result.stdout, /-l agentsmith-lite\/managed-by=agentsmith-lite/);
   });
+
+  it("status.sh, cleanup-stuck-tasks.sh, and down.sh do not execute env file commands", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-deploy-no-source-"));
+    const cookieFile = path.join(tempDir, "cookie.txt");
+    const fakeKubectl = path.join(tempDir, "kubectl");
+    const fakeNode = path.join(tempDir, "node");
+    const nodeCalls = path.join(tempDir, "node-calls.txt");
+    writeFileSync(cookieFile, "asl_session=test-session\n");
+    writeFileSync(fakeKubectl, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_NODE_CALLS"
+printf 'ok\\n'
+`);
+    chmodSync(fakeKubectl, 0o755);
+    chmodSync(fakeNode, 0o755);
+
+    const statusMarker = path.join(tempDir, "status-marker");
+    const statusEnv = writeMaliciousEnv(tempDir, "status.env", statusMarker, "APP_PUBLIC_BASE_URL=http://operator.example.test");
+    const status = spawnSync("bash", ["scripts/deploy/status.sh", "--env", statusEnv], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(existsSync(statusMarker), false);
+
+    const cleanupMarker = path.join(tempDir, "cleanup-marker");
+    const cleanupEnv = writeMaliciousEnv(tempDir, "cleanup.env", cleanupMarker, "APP_PUBLIC_BASE_URL=http://operator.example.test");
+    const cleanup = spawnSync("bash", [
+      "scripts/deploy/cleanup-stuck-tasks.sh",
+      "--env",
+      cleanupEnv,
+      "--dry-run",
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-test"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: nodeCalls,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+    assert.equal(existsSync(cleanupMarker), false);
+
+    const downMarker = path.join(tempDir, "down-marker");
+    const downEnv = writeMaliciousEnv(tempDir, "down.env", downMarker, "KUBE_NAMESPACE=agentsmith-preview");
+    const down = spawnSync("bash", ["scripts/deploy/down.sh", "--env", downEnv, "--dry-run"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+    assert.equal(down.status, 0, down.stderr);
+    assert.equal(existsSync(downMarker), false);
+  });
 });
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function writeMaliciousEnv(tempDir: string, name: string, marker: string, extraLine: string): string {
+  const envFile = path.join(tempDir, name);
+  writeFileSync(envFile, [extraLine, `APP_INGRESS_CLASS=$(touch ${marker})`, ""].join("\n"));
+  return envFile;
 }
 
 function runNode(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {

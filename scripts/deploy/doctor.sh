@@ -21,8 +21,36 @@ done
 [ -n "$env_file" ] || { echo "--env is required" >&2; exit 2; }
 [ -n "$secrets_file" ] || { echo "--secrets is required" >&2; exit 2; }
 
-source "$env_file"
-source "$secrets_file"
+env_file_requested_k8s_fact_checks=false
+
+unset_substrate_only_env() {
+  local name
+  while IFS= read -r name; do
+    if [ -n "$name" ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v S3_ || true)
+  while IFS= read -r name; do
+    if [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v JUICEFS_ || true)
+}
+
+load_contract_env() {
+  local assignments assignment
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs export --env "$env_file" --secrets "$secrets_file")"
+  while IFS= read -r assignment; do
+    [ -n "$assignment" ] || continue
+    case "$assignment" in
+      KUBECONFIG_PATH=*|KUBE_CONTEXT=*) env_file_requested_k8s_fact_checks=true ;;
+    esac
+    export "$assignment"
+  done <<< "$assignments"
+}
+
+load_contract_env
+unset_substrate_only_env
 
 requires_app_ingress() {
   local url="${1:-http://localhost:3000}"
@@ -62,16 +90,6 @@ is_positive_safe_integer() {
     return 1
   fi
   [[ "$value" < "9007199254740992" ]]
-}
-
-env_file_requests_k8s_fact_checks() {
-  local line
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(KUBECONFIG_PATH|KUBE_CONTEXT)= ]]; then
-      return 0
-    fi
-  done < "$env_file"
-  return 1
 }
 
 run_kubectl_check() {
@@ -208,7 +226,7 @@ if [ -n "$bundle" ] || [ -n "$images_lock" ]; then
   node scripts/deploy/app-doctor-check.mjs "${check_args[@]}"
 fi
 
-if env_file_requests_k8s_fact_checks && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
+if [ "$env_file_requested_k8s_fact_checks" = true ] && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
   run_k8s_fact_checks
 fi
 

@@ -51,6 +51,23 @@ describe("deploy app doctor artifact checks", () => {
     assert.match(result.stdout, /App doctor passed/);
   });
 
+  it("does not execute env or secrets files while loading deploy contract values", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-doctor-no-source-"));
+    const envMarker = path.join(tempDir, "env-marker");
+    const secretMarker = path.join(tempDir, "secret-marker");
+    const fixture = writeDoctorFixture({
+      extraEnv: [`APP_INGRESS_CLASS=$(touch ${envMarker})`]
+    });
+    writeFileSync(fixture.secretsFile, `${readFileSync(fixture.secretsFile, "utf8")}OIDC_CLIENT_SECRET=$(touch ${secretMarker})\n`);
+
+    const result = runDoctor(fixture, []);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /App doctor passed/);
+    assert.equal(existsSync(envMarker), false);
+    assert.equal(existsSync(secretMarker), false);
+  });
+
   it("does not run K8s fact checks when the substrate env omits kube connection settings", () => {
     const fixture = writeDoctorFixture();
     const fakeKubectl = writeFakeKubectl(fixture.tempDir);

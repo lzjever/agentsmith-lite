@@ -3,6 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 base_url=
+env_file=
+secrets_file=
 endpoint_base_url=
 endpoint_model=
 endpoint_secret_ref=
@@ -12,8 +14,8 @@ task_reclaim_reap_apply=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base-url) base_url="$2"; shift 2 ;;
-    --env) source "$2"; [ -n "$base_url" ] || base_url="${APP_PUBLIC_BASE_URL:-}"; shift 2 ;;
-    --secrets) source "$2"; shift 2 ;;
+    --env) env_file="$2"; shift 2 ;;
+    --secrets) secrets_file="$2"; shift 2 ;;
     --endpoint-base-url) endpoint_base_url="$2"; shift 2 ;;
     --endpoint-model) endpoint_model="$2"; shift 2 ;;
     --endpoint-secret-ref) endpoint_secret_ref="$2"; shift 2 ;;
@@ -23,6 +25,40 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+unset_substrate_only_env() {
+  local name
+  while IFS= read -r name; do
+    if [ -n "$name" ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v S3_ || true)
+  while IFS= read -r name; do
+    if [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v JUICEFS_ || true)
+}
+
+load_contract_env() {
+  local args=(export --profile smoke)
+  local assignments assignment
+  if [ -n "$env_file" ]; then
+    args+=(--env "$env_file")
+  fi
+  if [ -n "$secrets_file" ]; then
+    args+=(--secrets "$secrets_file")
+  fi
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs "${args[@]}")"
+  while IFS= read -r assignment; do
+    if [ -n "$assignment" ]; then
+      export "$assignment"
+    fi
+  done <<< "$assignments"
+}
+
+load_contract_env
+unset_substrate_only_env
 
 base_url="${base_url:-${APP_PUBLIC_BASE_URL:-}}"
 [ -n "$base_url" ] || { echo "smoke.sh requires --base-url or APP_PUBLIC_BASE_URL" >&2; exit 2; }

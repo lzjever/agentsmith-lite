@@ -29,56 +29,37 @@ done
 unset_substrate_only_env() {
   local name
   while IFS= read -r name; do
-    [ -n "$name" ] && unset "$name"
+    if [ -n "$name" ]; then
+      unset "$name"
+    fi
   done < <(compgen -v S3_ || true)
   while IFS= read -r name; do
-    [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ] && unset "$name"
+    if [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ]; then
+      unset "$name"
+    fi
   done < <(compgen -v JUICEFS_ || true)
 }
 
-export_if_set() {
-  local name="$1"
-  if [ "${!name+x}" = x ]; then
-    export "$name"
+load_contract_env() {
+  local args=(export)
+  local assignments assignment
+  if [ -n "$env_file" ]; then
+    args+=(--env "$env_file")
   fi
+  if [ -n "$secrets_file" ]; then
+    args+=(--secrets "$secrets_file")
+  fi
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs "${args[@]}")"
+  while IFS= read -r assignment; do
+    if [ -n "$assignment" ]; then
+      export "$assignment"
+    fi
+  done <<< "$assignments"
 }
 
-export_allowed_product_env() {
-  local name
-  for name in \
-    POSTGRES_APP_URL \
-    APP_SESSION_SECRET \
-    BUILTIN_ADMIN_INITIAL_PASSWORD \
-    APP_PUBLIC_BASE_URL \
-    KUBE_NAMESPACE \
-    KUBECONFIG_PATH \
-    KUBE_CONTEXT \
-    JUICEFS_PVC_NAME \
-    BOTIFIED_RUNNER_IMAGE \
-    AGENTSMITH_LITE_SANDBOX_MODE \
-    AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT \
-    AGENTSMITH_LITE_RUNTIME_TICK_MS; do
-    export_if_set "$name"
-  done
-  while IFS= read -r name; do
-    [ -n "$name" ] && export "$name"
-  done < <(compgen -v AGENTSMITH_LITE_MODEL_BASE_URL_ || true)
-  while IFS= read -r name; do
-    [ -n "$name" ] && export "$name"
-  done < <(compgen -v AGENTSMITH_LITE_MODEL_API_KEY_ || true)
-}
-
-if [ -n "$env_file" ]; then
-  # shellcheck disable=SC1090
-  source "$env_file"
-fi
-if [ -n "$secrets_file" ]; then
-  # shellcheck disable=SC1090
-  source "$secrets_file"
-fi
+load_contract_env
 
 unset_substrate_only_env
-export_allowed_product_env
 
 export AGENTSMITH_LITE_DATA_DIR="${AGENTSMITH_LITE_DATA_DIR:-.data}"
 export BUILTIN_ADMIN_INITIAL_PASSWORD="${BUILTIN_ADMIN_INITIAL_PASSWORD:-admin-password}"

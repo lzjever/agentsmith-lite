@@ -118,14 +118,14 @@ describe("deploy app images.lock", () => {
     writeFileSync(
       envFile,
       [
-        "KUBE_NAMESPACE=agentsmith-preview",
-        "APP_PUBLIC_BASE_URL=https://agentsmith.example.com/app",
-        "APP_INGRESS_CLASS=nginx",
-        "APP_TLS_SECRET_NAME=agentsmith-lite-tls",
+        "export KUBE_NAMESPACE='agentsmith-preview'",
+        "APP_PUBLIC_BASE_URL=\"https://agentsmith.example.com/app\"",
+        "export APP_INGRESS_CLASS='nginx'",
+        "APP_TLS_SECRET_NAME=\"agentsmith-lite-tls\"",
         ""
       ].join("\n")
     );
-    writeFileSync(secretsFile, "POSTGRES_APP_URL=postgres://app\nAPP_SESSION_SECRET=app-session-secret-at-least-32-chars\n");
+    writeFileSync(secretsFile, "export POSTGRES_APP_URL='postgres://app'\nAPP_SESSION_SECRET=\"app-session-secret-at-least-32-chars\"\n");
 
     const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
       cwd: process.cwd(),
@@ -150,10 +150,97 @@ describe("deploy app images.lock", () => {
       assert.match(manifest, /name: http/);
     }
   });
+
+  it("render.sh accepts generated substrate env/secrets files and keeps substrate-only values out of manifests", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-generated-substrate-render-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeGeneratedSubstrateFiles(envFile, secretsFile);
+
+    const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
+    assert.match(manifest, /namespace: agentsmith-preview/);
+    assert.match(manifest, /AUTH_MODE: oidc/);
+    assert.match(manifest, /JUICEFS_PVC_NAME: agentsmith-lite-files/);
+    assert.match(manifest, /kind: Ingress/);
+    assert.match(manifest, /ingressClassName: nginx/);
+    assert.match(manifest, /secretName: agentsmith-lite-tls/);
+    assert.match(manifest, /POSTGRES_APP_URL: postgresql:\/\/app:secret@db\/agentsmith/);
+    assert.match(manifest, /OIDC_CLIENT_SECRET: oidc-client-secret-from-substrate/);
+    assert.doesNotMatch(manifest + result.stdout + result.stderr, /DO_NOT_PRINT/);
+  });
+
+  it("render.sh fails closed on unknown env typos without leaking values", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-render-env-typo-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(envFile, "KUBE_NAMESPCE=DO_NOT_PRINT_NAMESPACE_TYPO\n");
+
+    const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /KUBE_NAMESPCE/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_NAMESPACE_TYPO/);
+  });
 });
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): void {
+  writeFileSync(
+    envFile,
+    [
+      "SUBSTRATE_SCHEMA_VERSION=DO_NOT_PRINT_SCHEMA_VERSION_ENV",
+      "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+      "KUBE_CONTEXT=kind-agentsmith",
+      "KUBE_NAMESPACE=agentsmith-preview",
+      "S3_ENDPOINT=DO_NOT_PRINT_S3_ENDPOINT",
+      "S3_REGION=DO_NOT_PRINT_S3_REGION",
+      "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
+      "S3_FORCE_PATH_STYLE=DO_NOT_PRINT_S3_FORCE_PATH_STYLE",
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL",
+      "OIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID",
+      "JUICEFS_VOLUME_NAME=DO_NOT_PRINT_JUICEFS_VOLUME_NAME",
+      "JUICEFS_BUCKET=DO_NOT_PRINT_JUICEFS_BUCKET",
+      "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
+      "JUICEFS_CSI_DRIVER=DO_NOT_PRINT_JUICEFS_CSI_DRIVER",
+      "JUICEFS_STORAGE_CLASS=DO_NOT_PRINT_JUICEFS_STORAGE_CLASS",
+      "JUICEFS_PVC_NAME=agentsmith-lite-files",
+      "JUICEFS_MOUNT_ROOT=DO_NOT_PRINT_JUICEFS_MOUNT_ROOT",
+      "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
+      "APP_INGRESS_CLASS=nginx",
+      "APP_TLS_SECRET_NAME=agentsmith-lite-tls",
+      "REGISTRY_URL=DO_NOT_PRINT_REGISTRY_URL",
+      "IMAGE_PULL_SECRET_NAME=DO_NOT_PRINT_IMAGE_PULL_SECRET_NAME",
+      ""
+    ].join("\n")
+  );
+  writeFileSync(
+    secretsFile,
+    [
+      "SUBSTRATE_SCHEMA_VERSION=DO_NOT_PRINT_SCHEMA_VERSION_SECRETS",
+      "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
+      "APP_SESSION_SECRET=app-session-secret-at-least-32-chars",
+      "S3_ACCESS_KEY=DO_NOT_PRINT_S3_ACCESS_KEY",
+      "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
+      "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
+      "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
+      "OIDC_CLIENT_SECRET=oidc-client-secret-from-substrate",
+      ""
+    ].join("\n")
+  );
 }
 
 interface ConfigMapResource {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -43,7 +43,6 @@ describe("dev/up.sh", () => {
       "JUICEFS_STORAGE_CLASS=DO_NOT_EXPORT_JUICEFS_STORAGE_CLASS",
       "JUICEFS_MOUNT_ROOT=DO_NOT_EXPORT_JUICEFS_MOUNT_ROOT",
       "JUICEFS_PVC_NAME=custom-files-pvc",
-      "UNRELATED_SUBSTRATE_VALUE=DO_NOT_EXPORT_UNRELATED",
       ""
     ].join("\n"));
     writeFileSync(substrateSecrets, [
@@ -84,7 +83,57 @@ describe("dev/up.sh", () => {
     assert.equal(env.JUICEFS_STORAGE_CLASS, undefined);
     assert.equal(env.JUICEFS_MOUNT_ROOT, undefined);
     assert.equal(env.JUICEFS_ACCESS_KEY, undefined);
-    assert.equal(env.UNRELATED_SUBSTRATE_VALUE, undefined);
+  });
+
+  it("fails closed for unknown substrate keys without printing their values", () => {
+    const fixture = createFixture();
+    const substrateEnv = path.join(fixture.tempDir, "substrate.env");
+    writeFileSync(substrateEnv, "UNRELATED_SUBSTRATE_VALUE=DO_NOT_PRINT_UNRELATED\n");
+
+    const result = runDevUp(["--env", substrateEnv], fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /UNRELATED_SUBSTRATE_VALUE/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_UNRELATED/);
+  });
+
+  it("does not execute malicious env/secrets values, preserves PATH, and strips raw substrate-only values", () => {
+    const fixture = createFixture();
+    const substrateEnv = path.join(fixture.tempDir, "substrate.env");
+    const substrateSecrets = path.join(fixture.tempDir, "substrate.secrets.env");
+    const envMarker = path.join(fixture.tempDir, "env-marker");
+    const secretMarker = path.join(fixture.tempDir, "secret-marker");
+    const substrateMarker = path.join(fixture.tempDir, "substrate-marker");
+    writeFileSync(substrateEnv, [
+      `APP_PUBLIC_BASE_URL=$(touch ${envMarker})`,
+      `S3_ACCESS_KEY=$(touch ${substrateMarker})`,
+      "JUICEFS_META_URL=DO_NOT_EXPORT_JUICEFS_META",
+      ""
+    ].join("\n"));
+    writeFileSync(substrateSecrets, [
+      `AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=\`touch ${secretMarker}\``,
+      "S3_SECRET_KEY=DO_NOT_EXPORT_S3_SECRET",
+      ""
+    ].join("\n"));
+
+    const result = runDevUp(["--env", substrateEnv, "--secrets", substrateSecrets], fixture, {
+      S3_ENDPOINT: "DO_NOT_EXPORT_PARENT_S3_ENDPOINT",
+      JUICEFS_META_URL: "DO_NOT_EXPORT_PARENT_JUICEFS_META"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(fixture.argsFile, "utf8").trim(), "run dev");
+    assert.equal(existsSync(envMarker), false);
+    assert.equal(existsSync(secretMarker), false);
+    assert.equal(existsSync(substrateMarker), false);
+    const env = readCapturedEnv(fixture.envFile);
+    assert.equal(env.APP_PUBLIC_BASE_URL, `$(touch ${envMarker})`);
+    assert.equal(env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, `\`touch ${secretMarker}\``);
+    assert.equal(env.S3_ACCESS_KEY, undefined);
+    assert.equal(env.S3_SECRET_KEY, undefined);
+    assert.equal(env.S3_ENDPOINT, undefined);
+    assert.equal(env.JUICEFS_META_URL, undefined);
+    assert.match(env.PATH ?? "", new RegExp(`^${escapeRegExp(path.join(fixture.tempDir, "bin"))}:`));
   });
 
   it("fails closed for unknown arguments without printing following secret-looking values", () => {
@@ -137,14 +186,16 @@ env | sort > "$FAKE_NPM_ENV_FILE"
   return { tempDir, argsFile, envFile };
 }
 
-function runDevUp(args: string[], fixture: Fixture) {
+function runDevUp(args: string[], fixture: Fixture, extraEnv: NodeJS.ProcessEnv = {}) {
   return spawnSync("bash", ["scripts/dev/up.sh", ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
       PATH: `${path.join(fixture.tempDir, "bin")}:/usr/bin:/bin`,
       FAKE_NPM_ARGS_FILE: fixture.argsFile,
-      FAKE_NPM_ENV_FILE: fixture.envFile
+      FAKE_NPM_ENV_FILE: fixture.envFile,
+      AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath,
+      ...extraEnv
     }
   });
 }
@@ -156,4 +207,8 @@ function readCapturedEnv(file: string): Record<string, string> {
       return [line.slice(0, equals), line.slice(equals + 1)];
     })
   );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

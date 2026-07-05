@@ -4,13 +4,40 @@ cd "$(dirname "$0")/../.."
 
 namespace=agentsmith
 dry_run=false
+env_file=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --env) source "$2"; namespace="${KUBE_NAMESPACE:-agentsmith}"; shift 2 ;;
+    --env) env_file="$2"; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+unset_substrate_only_env() {
+  local name
+  while IFS= read -r name; do
+    if [ -n "$name" ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v S3_ || true)
+  while IFS= read -r name; do
+    if [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v JUICEFS_ || true)
+}
+
+if [ -n "$env_file" ]; then
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs export --env "$env_file")"
+  while IFS= read -r assignment; do
+    if [ -n "$assignment" ]; then
+      export "$assignment"
+    fi
+  done <<< "$assignments"
+fi
+unset_substrate_only_env
+
+namespace="${KUBE_NAMESPACE:-agentsmith}"
 
 kubectl_args=()
 if [ -n "${KUBECONFIG_PATH:-}" ]; then

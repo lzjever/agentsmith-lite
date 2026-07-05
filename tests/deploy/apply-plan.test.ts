@@ -145,9 +145,9 @@ describe("deploy apply plan", () => {
     writeFileSync(
       envFile,
       [
-        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
-        "KUBE_CONTEXT=kind-agentsmith",
-        "KUBE_NAMESPACE=agentsmith",
+        "export KUBECONFIG_PATH='/tmp/agentsmith.kubeconfig'",
+        "KUBE_CONTEXT=\"kind-agentsmith\"",
+        "export KUBE_NAMESPACE='agentsmith'",
         ""
       ].join("\n")
     );
@@ -183,9 +183,9 @@ describe("deploy apply plan", () => {
     writeFileSync(
       envFile,
       [
-        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
-        "KUBE_CONTEXT=kind-agentsmith",
-        "KUBE_NAMESPACE=agentsmith",
+        "export KUBECONFIG_PATH='/tmp/agentsmith.kubeconfig'",
+        "KUBE_CONTEXT=\"kind-agentsmith\"",
+        "export KUBE_NAMESPACE='agentsmith'",
         ""
       ].join("\n")
     );
@@ -242,5 +242,20 @@ describe("deploy apply plan", () => {
     assert.match(result.stderr, /images\.lock|manifest.*lock|does not match/i);
     assert.doesNotMatch(result.stderr, /kubectl should not run/);
     assert.equal(result.stdout, "");
+  });
+
+  it("apply.sh fails closed on unknown env typos without leaking values", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-plan-env-typo-"));
+    const envFile = path.join(tempDir, "deploy.env");
+    writeFileSync(envFile, "KUBE_NAMESPCE=DO_NOT_PRINT_NAMESPACE_TYPO\n");
+
+    const result = spawnSync("bash", ["scripts/deploy/apply.sh", "--env", envFile, "--out", "out/manifests", "--dry-run"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /KUBE_NAMESPCE/);
+    assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_NAMESPACE_TYPO/);
   });
 });

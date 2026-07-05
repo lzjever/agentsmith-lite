@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,17 +8,19 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 describe("deploy app smoke", () => {
-  it("smoke.sh dispatches to the API-only app smoke with env base URL and sourced admin secret", () => {
+  it("smoke.sh dispatches to the API-only app smoke with env base URL and contract admin secret", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-"));
     const envFile = path.join(tempDir, "substrate.env");
     const secretsFile = path.join(tempDir, "substrate.secrets.env");
     const fakeNode = path.join(tempDir, "node");
     const callsFile = path.join(tempDir, "node-calls.txt");
     const adminPassword = "admin-secret-from-file";
+    const envMarker = path.join(tempDir, "env-marker");
+    const secretMarker = path.join(tempDir, "secret-marker");
 
     writeFileSync(envFile, [
       "APP_PUBLIC_BASE_URL=http://deploy.example.test",
-      "BUILTIN_ADMIN_INITIAL_PASSWORD=wrong-from-env",
+      `APP_INGRESS_CLASS=$(touch ${envMarker})`,
       "SMOKE_ENDPOINT_BASE_URL=https://models.env.test/v1",
       "SMOKE_ENDPOINT_MODEL=env-model",
       "SMOKE_ENDPOINT_SECRET_REF=secret/env",
@@ -27,7 +29,7 @@ describe("deploy app smoke", () => {
       "SMOKE_TASK_RECLAIM_REAP_APPLY=true",
       "SMOKE_TASK_TIMEOUT_SECS=12"
     ].join("\n"));
-    writeFileSync(secretsFile, `BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}\n`);
+    writeFileSync(secretsFile, [`BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}`, `OIDC_CLIENT_SECRET=$(touch ${secretMarker})`, ""].join("\n"));
     writeFileSync(fakeNode, `#!/usr/bin/env bash
 {
   printf 'args=%s\\n' "$*"
@@ -56,11 +58,14 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       env: {
         ...process.env,
         PATH: `${tempDir}:${process.env.PATH ?? ""}`,
-        FAKE_NODE_CALLS: callsFile
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
       }
     });
 
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(envMarker), false);
+    assert.equal(existsSync(secretMarker), false);
     const call = readFileSync(callsFile, "utf8");
     assert.match(call, /args=scripts\/deploy\/app-smoke\.mjs --base-url http:\/\/deploy\.example\.test --task-reclaim-smoke --task-reclaim-reap-apply/);
     assert.doesNotMatch(call, /e2e\/smoke\/lite-smoke\.mjs/);

@@ -2,14 +2,14 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseAppImagesLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { renderAppManifests } from "../../dist/packages/sandbox-controller/src/appManifestRenderer.js";
+import { readContractFiles } from "./env-contract.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.env || !args.out) {
   throw new Error("usage: render.sh --env substrate.env [--secrets substrate.secrets.env] --tag dev --out out/manifests");
 }
 
-const env = await readEnvFile(args.env);
-const secrets = args.secrets ? await readEnvFile(args.secrets) : {};
+const { env, secrets } = await readContractFiles({ envFile: args.env, secretsFile: args.secrets });
 const namespace = env.KUBE_NAMESPACE ?? "agentsmith";
 const tag = args.tag ?? "dev";
 const imageRefs = args.images_lock ? parseAppImagesLock(await readFile(args.images_lock, "utf8")) : undefined;
@@ -36,19 +36,6 @@ function parseArgs(argv) {
     }
   }
   return parsed;
-}
-
-async function readEnvFile(file) {
-  const text = await readFile(file, "utf8");
-  const values = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const equals = trimmed.indexOf("=");
-    if (equals === -1) continue;
-    values[trimmed.slice(0, equals)] = trimmed.slice(equals + 1).replace(/^"|"$/g, "");
-  }
-  return values;
 }
 
 function toYaml(value, indent = 0) {

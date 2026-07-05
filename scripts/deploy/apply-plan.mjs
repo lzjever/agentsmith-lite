@@ -3,10 +3,11 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseAppImagesLock, validateAppManifestImagesAgainstLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { createAppDeployPlan, formatKubectlCommand } from "../../dist/packages/sandbox-controller/src/appDeployPlan.js";
+import { readContractFiles } from "./env-contract.mjs";
 
 const args = parseArgs(process.argv.slice(2));
-const envFileValues = args.env ? await readEnvFile(args.env) : {};
-const env = { ...process.env, ...envFileValues };
+const contract = args.env ? await readContractFiles({ envFile: args.env }) : { env: {} };
+const env = { ...process.env, ...contract.env };
 if (args.images_lock) {
   const imageRefs = parseAppImagesLock(await readFile(args.images_lock, "utf8"));
   validateAppManifestImagesAgainstLock(await readManifestText(args.out), imageRefs);
@@ -64,27 +65,4 @@ async function readManifestText(out) {
     return readFile(path.join(out, "all.yaml"), "utf8");
   }
   return readFile(out, "utf8");
-}
-
-async function readEnvFile(file) {
-  const text = await readFile(file, "utf8");
-  const values = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const assignment = trimmed.startsWith("export ") ? trimmed.slice("export ".length).trim() : trimmed;
-    const equals = assignment.indexOf("=");
-    if (equals === -1) continue;
-    const key = assignment.slice(0, equals).trim();
-    const rawValue = assignment.slice(equals + 1).trim();
-    values[key] = stripMatchingQuotes(rawValue);
-  }
-  return values;
-}
-
-function stripMatchingQuotes(value) {
-  if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
