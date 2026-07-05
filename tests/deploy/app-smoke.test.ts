@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 
 const appSmokeNotCovered = [
   "external-k8s-observation",
-  "sandbox-pod-pvc-mount",
+  "sandbox-pod-pvc-volume-mount-spec-observed",
   "juicefs-backend",
   "runner-image-digest",
   "independent-k8s-resource-deletion-observation",
@@ -806,8 +806,12 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
       assert.equal(readFileSync(reportPath, "utf8"), result.stdout);
       assert.equal(report.evidenceScope.scope, "product-api-plus-k8s-readonly");
       assert.equal(report.evidenceScope.covered.includes("external-k8s-observation"), true);
+      assert.equal(report.evidenceScope.covered.includes("sandbox-pod-pvc-volume-mount-spec-observed"), true);
+      assert.equal(report.evidenceScope.covered.includes("sandbox-pod-pvc-mount"), false);
       assert.equal(report.evidenceScope.covered.includes("runner-image-digest"), true);
       assert.equal(report.evidenceScope.notCovered.includes("external-k8s-observation"), false);
+      assert.equal(report.evidenceScope.notCovered.includes("sandbox-pod-pvc-volume-mount-spec-observed"), false);
+      assert.equal(report.evidenceScope.notCovered.includes("sandbox-pod-pvc-mount"), false);
       assert.equal(report.evidenceScope.notCovered.includes("runner-image-digest"), false);
       assert.equal(report.evidenceScope.notCovered.includes("juicefs-backend"), true);
       assert.equal(report.evidenceScope.notCovered.includes("full-external-evidence"), true);

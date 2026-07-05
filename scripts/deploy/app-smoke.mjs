@@ -30,7 +30,7 @@ const TASK_RECLAIM_PROMPT = [
 const TERMINAL_EVENT_KINDS = new Set(["turn_completed", "turn_failed", "runtime_error"]);
 const EVIDENCE_NOT_COVERED = [
   "external-k8s-observation",
-  "sandbox-pod-pvc-mount",
+  "sandbox-pod-pvc-volume-mount-spec-observed",
   "juicefs-backend",
   "runner-image-digest",
   "independent-k8s-resource-deletion-observation",
@@ -788,7 +788,7 @@ function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskRe
   }
   if (k8sEvidence) {
     covered.push("external-k8s-observation");
-    covered.push("sandbox-pod-pvc-mount");
+    covered.push("sandbox-pod-pvc-volume-mount-spec-observed");
     covered.push("runner-image-digest");
     if (taskReclaimSmoke && taskReclaimReapApply) {
       covered.push("independent-k8s-resource-deletion-observation");
