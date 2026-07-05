@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -41,6 +42,24 @@ const RUNNER_CONTAINER_NAME = "botified-runner";
 const PROJECT_FILES_VOLUME_NAME = "project-files";
 const PROJECT_FILES_MOUNT_PATH = "/workspace/project";
 const DIGEST_PINNED_IMAGE_PATTERN = /@sha256:[0-9a-f]{64}$/i;
+const DIGEST_EVIDENCE_PATTERN = /sha256:[0-9a-f]{64}/i;
+const K8S_RUN_ID_LABEL = "agentsmith-lite/run-id";
+const K8S_NAME_ONLY_RESOURCE_KINDS = [
+  ["Secret", "secrets"],
+  ["ConfigMap", "configmaps"],
+  ["Service", "services"],
+  ["NetworkPolicy", "networkpolicies"]
+];
+const FORBIDDEN_KUBECTL_COMMANDS = new Set([
+  "exec",
+  "logs",
+  "attach",
+  "port-forward",
+  "apply",
+  "delete",
+  "patch",
+  "create"
+]);
 
 const sensitiveValues = new Set();
 
@@ -52,9 +71,13 @@ async function main() {
   const taskSmoke = taskSmokeEnabled(args);
   const taskReclaimSmoke = taskReclaimSmokeEnabled(args);
   const taskReclaimReapApply = taskReclaimReapApplyEnabled(args);
+  const k8sEvidence = Boolean(args.k8sEvidence);
 
   if (taskReclaimReapApply && !taskReclaimSmoke) {
     throw new UsageError("task reclaim reap apply requires task reclaim smoke");
+  }
+  if (k8sEvidence && !taskSmoke && !taskReclaimSmoke) {
+    throw new UsageError("k8s evidence requires task smoke or task reclaim smoke");
   }
 
   const endpointConfig = endpointSmokeConfig(args);
@@ -81,6 +104,9 @@ async function main() {
     sensitiveValues.add(endpointConfig.baseUrl);
   }
   addSensitiveEnvValues(["BOTIFIED_RUNNER_IMAGE", "JUICEFS_PVC_NAME"]);
+  addSensitiveEnvValuesByPrefix(["S3_", "JUICEFS_"]);
+
+  const k8sObserver = k8sEvidence ? createK8sEvidenceObserver() : undefined;
 
   const smoke = new AppSmokeClient(args.baseUrl);
   const health = await smoke.requestJson("GET", "/api/health");
@@ -167,6 +193,11 @@ async function main() {
   let task = { status: "skipped" };
   if (taskSmoke) {
     task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
+    if (k8sObserver) {
+      task.k8sEvidence = await k8sObserver.observeRun(task.runId, "task smoke k8s evidence", {
+        expectedSandboxContract: task.sandboxContract
+      });
+    }
   }
 
   const report = {
@@ -179,7 +210,8 @@ async function main() {
       endpointSmoke: endpointConfig.complete,
       taskSmoke,
       taskReclaimSmoke,
-      taskReclaimReapApply
+      taskReclaimReapApply,
+      k8sEvidence
     }),
     chat,
     task
@@ -190,7 +222,8 @@ async function main() {
       smoke,
       projectId,
       requireString(endpointId, "endpoint id"),
-      taskReclaimReapApply
+      taskReclaimReapApply,
+      k8sObserver
     );
   }
 
@@ -302,7 +335,7 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
   throw new Error(`task smoke timed out after ${timeoutSecs} seconds waiting for verified artifact`);
 }
 
-async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
+async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply, k8sObserver) {
   let taskId;
   let cancelAttempted = false;
   try {
@@ -324,13 +357,31 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
     });
     const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
     const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task reclaim run-scoped status");
+    const k8sEvidence = k8sObserver
+      ? {
+          beforeReap: await k8sObserver.observeRun(runId, "task reclaim before reap k8s evidence", {
+            expectedSandboxContract: sandboxContract
+          })
+        }
+      : undefined;
 
     const reap = {
       dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
     };
+    if (k8sObserver) {
+      k8sEvidence.afterDryRun = await k8sObserver.observeRun(runId, "task reclaim after dry-run k8s evidence", {
+        expectedSandboxContract: sandboxContract
+      });
+    }
     if (reapApply) {
       reap.apply = await runScopedReap(smoke, runId, true, "task reclaim apply reap");
       reap.finalDryRun = await runScopedReap(smoke, runId, false, "task reclaim final dry-run reap");
+      if (k8sObserver) {
+        k8sEvidence.afterApply = await k8sObserver.observeRun(runId, "task reclaim after apply k8s evidence", {
+          allowNoPods: true
+        });
+        k8sEvidence.reclaimScopedResult = summarizeK8sReclaimScopedResult(k8sEvidence.beforeReap, k8sEvidence.afterApply);
+      }
     }
 
     return {
@@ -345,7 +396,8 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
         applyEnabled: Boolean(reapApply)
       },
       runScopedStatus,
-      reap
+      reap,
+      ...(k8sEvidence ? { k8sEvidence } : {})
     };
   } catch (error) {
     if (taskId && !cancelAttempted) {
@@ -472,6 +524,233 @@ function summarizeSandboxContract(taskCreateBody, context) {
   };
 }
 
+function createK8sEvidenceObserver() {
+  const namespace = firstNonEmpty(process.env.KUBE_NAMESPACE);
+  requireOption(namespace, "KUBE_NAMESPACE");
+  const kubectlBin = firstNonEmpty(process.env.KUBECTL_BIN) ?? "kubectl";
+  const baseArgs = [];
+  const kubeconfig = firstNonEmpty(process.env.KUBECONFIG_PATH);
+  if (kubeconfig) {
+    baseArgs.push("--kubeconfig", kubeconfig);
+  }
+  const context = firstNonEmpty(process.env.KUBE_CONTEXT);
+  if (context) {
+    baseArgs.push("--context", context);
+  }
+  return new K8sEvidenceObserver({ kubectlBin, baseArgs, namespace });
+}
+
+class K8sEvidenceObserver {
+  constructor({ kubectlBin, baseArgs, namespace }) {
+    this.kubectlBin = kubectlBin;
+    this.baseArgs = baseArgs;
+    this.namespace = namespace;
+  }
+
+  async observeRun(runId, context, options = {}) {
+    const selector = `${K8S_RUN_ID_LABEL}=${runId}`;
+    const podList = await this.kubectlJson([
+      "get",
+      "pods",
+      "-n",
+      this.namespace,
+      "-l",
+      selector,
+      "-o",
+      "json"
+    ], context);
+    const pods = summarizeK8sPods(podList, runId, context, options.expectedSandboxContract);
+    if (!options.allowNoPods && pods.length === 0) {
+      throw new Error(`${context} did not observe any Pods for runId`);
+    }
+
+    const resources = {
+      Pod: {
+        count: pods.length,
+        names: pods.map((pod) => pod.name)
+      }
+    };
+    for (const [kind, resource] of K8S_NAME_ONLY_RESOURCE_KINDS) {
+      const names = await this.kubectlNames([
+        "get",
+        resource,
+        "-n",
+        this.namespace,
+        "-l",
+        selector,
+        "-o",
+        "name"
+      ], context);
+      resources[kind] = {
+        count: names.length,
+        names
+      };
+    }
+
+    return {
+      status: "observed",
+      runId,
+      namespace: this.namespace,
+      pods,
+      resources
+    };
+  }
+
+  async kubectlJson(args, context) {
+    const stdout = await this.runKubectl(args, context);
+    try {
+      return JSON.parse(stdout || "{}");
+    } catch {
+      throw new Error(`${context} returned invalid kubectl JSON`);
+    }
+  }
+
+  async kubectlNames(args, context) {
+    const stdout = await this.runKubectl(args, context);
+    return stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  }
+
+  async runKubectl(args, context) {
+    validateReadOnlyKubectlGetArgs(args, context);
+    const fullArgs = [...this.baseArgs, ...args];
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.kubectlBin, fullArgs, {
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const stdout = [];
+      const stderr = [];
+      child.stdout.on("data", (chunk) => stdout.push(chunk));
+      child.stderr.on("data", (chunk) => stderr.push(chunk));
+      child.on("error", (error) => {
+        if (error && error.code === "ENOENT") {
+          reject(new Error(`${context} requires kubectl`));
+        } else {
+          reject(error);
+        }
+      });
+      child.on("close", (status) => {
+        const out = Buffer.concat(stdout).toString("utf8");
+        const err = Buffer.concat(stderr).toString("utf8");
+        if (status !== 0) {
+          reject(new Error(`${context} kubectl get failed with exit ${status}: ${redact(err || out)}`));
+          return;
+        }
+        resolve(out);
+      });
+    });
+  }
+}
+
+function validateReadOnlyKubectlGetArgs(args, context) {
+  if (args[0] !== "get") {
+    throw new Error(`${context} attempted non-get kubectl evidence command`);
+  }
+  for (const arg of args) {
+    if (FORBIDDEN_KUBECTL_COMMANDS.has(arg)) {
+      throw new Error(`${context} attempted forbidden kubectl evidence command ${arg}`);
+    }
+  }
+}
+
+function summarizeK8sPods(podList, runId, context, expectedSandboxContract) {
+  const items = requireArray(podList?.items, `${context} pod list items`);
+  return items.map((pod) => summarizeK8sPod(pod, runId, context, expectedSandboxContract));
+}
+
+function summarizeK8sPod(pod, runId, context, expectedSandboxContract) {
+  const name = requireString(pod?.metadata?.name, `${context} pod name`);
+  const observedRunId = requireString(pod?.metadata?.labels?.[K8S_RUN_ID_LABEL], `${context} pod ${name} run-id label`);
+  if (observedRunId !== runId) {
+    throw new Error(`${context} pod ${name} run-id label mismatch`);
+  }
+
+  const specContainers = requireArray(pod?.spec?.containers, `${context} pod ${name} containers`);
+  const specRunner = specContainers.find((container) => isRecord(container) && container.name === RUNNER_CONTAINER_NAME);
+  if (!specRunner) {
+    throw new Error(`${context} pod ${name} missing ${RUNNER_CONTAINER_NAME} container`);
+  }
+  const statusContainers = Array.isArray(pod?.status?.containerStatuses) ? pod.status.containerStatuses : [];
+  const statusRunner = statusContainers.find((container) => isRecord(container) && container.name === RUNNER_CONTAINER_NAME);
+  const runnerImage = requireString(
+    stringRecordField(statusRunner, "image") ?? stringRecordField(specRunner, "image"),
+    `${context} pod ${name} ${RUNNER_CONTAINER_NAME} image`
+  );
+  const runnerImageID = requireString(
+    stringRecordField(statusRunner, "imageID"),
+    `${context} pod ${name} ${RUNNER_CONTAINER_NAME} imageID`
+  );
+  if (!DIGEST_PINNED_IMAGE_PATTERN.test(runnerImage)) {
+    throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} image must be digest pinned`);
+  }
+  if (!DIGEST_EVIDENCE_PATTERN.test(runnerImageID)) {
+    throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} imageID must include digest evidence`);
+  }
+
+  const volumes = requireArray(pod?.spec?.volumes, `${context} pod ${name} volumes`);
+  const projectVolume = volumes.find((volume) => isRecord(volume) && volume.name === PROJECT_FILES_VOLUME_NAME);
+  if (!projectVolume || !isRecord(projectVolume.persistentVolumeClaim)) {
+    throw new Error(`${context} pod ${name} missing ${PROJECT_FILES_VOLUME_NAME} PVC volume`);
+  }
+  const pvcClaimName = requireString(
+    projectVolume.persistentVolumeClaim.claimName,
+    `${context} pod ${name} ${PROJECT_FILES_VOLUME_NAME} PVC claimName`
+  );
+  const volumeMounts = requireArray(specRunner.volumeMounts, `${context} pod ${name} ${RUNNER_CONTAINER_NAME} volumeMounts`);
+  const projectMount = volumeMounts.find((mount) => isRecord(mount) && mount.name === PROJECT_FILES_VOLUME_NAME);
+  if (!projectMount) {
+    throw new Error(`${context} pod ${name} ${RUNNER_CONTAINER_NAME} missing ${PROJECT_FILES_VOLUME_NAME} mount`);
+  }
+  const mountPath = requireString(projectMount.mountPath, `${context} pod ${name} ${PROJECT_FILES_VOLUME_NAME} mountPath`);
+  const subPath = requireString(projectMount.subPath, `${context} pod ${name} ${PROJECT_FILES_VOLUME_NAME} subPath`);
+
+  const summary = {
+    name,
+    phase: requireString(pod?.status?.phase, `${context} pod ${name} phase`),
+    ready: Boolean(statusRunner?.ready),
+    runnerImage,
+    runnerImageID,
+    pvcClaimName,
+    mountPath,
+    subPath
+  };
+  if (expectedSandboxContract) {
+    assertK8sPodMatchesSandboxContract(summary, expectedSandboxContract, context);
+  }
+  return summary;
+}
+
+function assertK8sPodMatchesSandboxContract(podSummary, expected, context) {
+  if (podSummary.runnerImage !== expected.runnerImage) {
+    throw new Error(`${context} pod ${podSummary.name} ${RUNNER_CONTAINER_NAME} image does not match sandbox contract`);
+  }
+  if (podSummary.pvcClaimName !== expected.pvcClaimName) {
+    throw new Error(`${context} pod ${podSummary.name} ${PROJECT_FILES_VOLUME_NAME} PVC claimName does not match sandbox contract`);
+  }
+  if (podSummary.mountPath !== expected.mountPath) {
+    throw new Error(`${context} pod ${podSummary.name} ${PROJECT_FILES_VOLUME_NAME} mountPath does not match sandbox contract`);
+  }
+  if (podSummary.subPath !== expected.subPath) {
+    throw new Error(`${context} pod ${podSummary.name} ${PROJECT_FILES_VOLUME_NAME} subPath does not match sandbox contract`);
+  }
+}
+
+function summarizeK8sReclaimScopedResult(before, after) {
+  const beforeCount = totalK8sResourceCount(before);
+  const afterCount = totalK8sResourceCount(after);
+  return {
+    beforeResourceCount: beforeCount,
+    afterResourceCount: afterCount,
+    resourceCountDelta: afterCount - beforeCount,
+    cleared: afterCount === 0,
+    reduced: afterCount < beforeCount
+  };
+}
+
+function totalK8sResourceCount(evidence) {
+  return Object.values(evidence.resources).reduce((total, resource) => total + resource.count, 0);
+}
+
 function isSafeRelativeSubPath(value) {
   return (
     value.length > 0 &&
@@ -482,7 +761,7 @@ function isSafeRelativeSubPath(value) {
   );
 }
 
-function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskReclaimReapApply }) {
+function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskReclaimReapApply, k8sEvidence }) {
   const covered = [
     "product-api-health",
     "builtin-admin-auth",
@@ -506,10 +785,19 @@ function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskRe
       covered.push("task-api-cancel-scoped-reap-final-dry-run");
     }
   }
+  if (k8sEvidence) {
+    covered.push("external-k8s-observation");
+    covered.push("sandbox-pod-pvc-mount");
+    covered.push("runner-image-digest");
+    if (taskReclaimSmoke && taskReclaimReapApply) {
+      covered.push("independent-k8s-resource-deletion-observation");
+    }
+  }
+  const notCovered = EVIDENCE_NOT_COVERED.filter((item) => !covered.includes(item));
   return {
-    scope: "product-api-only",
+    scope: k8sEvidence ? "product-api-plus-k8s-readonly" : "product-api-only",
     covered,
-    notCovered: [...EVIDENCE_NOT_COVERED]
+    notCovered
   };
 }
 
@@ -650,6 +938,8 @@ function parseArgs(argv) {
       parsed.taskReclaimSmoke = true;
     } else if (arg === "--task-reclaim-reap-apply") {
       parsed.taskReclaimReapApply = true;
+    } else if (arg === "--k8s-evidence") {
+      parsed.k8sEvidence = true;
     } else if (arg === "--report") {
       parsed.report = requireValue(argv, index, arg);
       index += 1;
@@ -695,6 +985,17 @@ function addSensitiveEnvValues(names) {
   for (const name of names) {
     const value = process.env[name];
     if (typeof value === "string" && value.length > 0) {
+      sensitiveValues.add(value);
+    }
+  }
+}
+
+function addSensitiveEnvValuesByPrefix(prefixes) {
+  for (const [name, value] of Object.entries(process.env)) {
+    if (typeof value !== "string" || value.length === 0) {
+      continue;
+    }
+    if (prefixes.some((prefix) => name.startsWith(prefix))) {
       sensitiveValues.add(value);
     }
   }

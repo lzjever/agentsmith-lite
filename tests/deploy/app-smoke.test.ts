@@ -97,8 +97,67 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
     assert.match(call, /task_reclaim_smoke=true/);
     assert.match(call, /task_reclaim_reap_apply=true/);
     assert.match(call, /task_timeout=12/);
+    assert.doesNotMatch(call, /--k8s-evidence/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
+  });
+
+  it("smoke.sh forwards explicit k8s evidence without making it default", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-smoke-sh-k8s-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const fakeNode = path.join(tempDir, "node");
+    const callsFile = path.join(tempDir, "node-calls.txt");
+
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://deploy.example.test\nAUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\n");
+    writeFileSync(secretsFile, "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-file\nOIDC_CLIENT_SECRET=\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+printf 'args=%s\\n' "$*" > "$FAKE_NODE_CALLS"
+printf '{"status":"ok","profile":"full","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
+`);
+    chmodSync(fakeNode, 0o755);
+
+    const withoutFlag = spawnSync("bash", [
+      "scripts/deploy/smoke.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--task-smoke"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+    assert.equal(withoutFlag.status, 0, withoutFlag.stderr);
+    assert.doesNotMatch(readFileSync(callsFile, "utf8"), /--k8s-evidence/);
+
+    const withFlag = spawnSync("bash", [
+      "scripts/deploy/smoke.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--task-smoke",
+      "--k8s-evidence"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+
+    assert.equal(withFlag.status, 0, withFlag.stderr);
+    assert.match(readFileSync(callsFile, "utf8"), /--task-smoke --k8s-evidence/);
   });
 
   it("smoke.sh forwards a report path override to app-smoke", () => {
@@ -690,6 +749,299 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
       }
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs appends scoped read-only k8s evidence to task smoke", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-k8s-evidence-"));
+    const reportPath = path.join(tempDir, "reports", "smoke-report.json");
+    const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
+    const fakeKubectl = writeFakeKubectl(tempDir, {
+      runId: "run_k8s_task",
+      podName: "asl-task-k8s",
+      resourcePrefix: "asl-k8s"
+    });
+    const server = await startTaskSmokeServer({
+      adminPassword: "k8s-admin-secret",
+      endpointBaseUrl: "https://models.k8s.test/v1",
+      endpointModel: "k8s-model",
+      endpointSecretRef: "secret/k8s-smoke",
+      workspaceId: "workspace_k8s",
+      projectId: "project_k8s",
+      endpointId: "endpoint_k8s",
+      taskId: "task_k8s",
+      runId: "run_k8s_task",
+      subPath: "workspaces/workspace_k8s/projects/project_k8s"
+    });
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        server.baseUrl,
+        "--endpoint-base-url",
+        "https://models.k8s.test/v1",
+        "--endpoint-model",
+        "k8s-model",
+        "--endpoint-secret-ref",
+        "secret/k8s-smoke",
+        "--task-smoke",
+        "--k8s-evidence",
+        "--report",
+        reportPath
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "k8s-admin-secret",
+        KUBECTL_BIN: fakeKubectl,
+        FAKE_KUBECTL_CALLS: kubectlCalls,
+        KUBECONFIG_PATH: "/tmp/k8s-evidence.kubeconfig",
+        KUBE_CONTEXT: "kind-agentsmith",
+        KUBE_NAMESPACE: "agentsmith-preview",
+        S3_SECRET_KEY: "s3-raw-secret-value",
+        JUICEFS_SECRET_KEY: "juicefs-raw-secret-value"
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, "");
+      const report = JSON.parse(result.stdout);
+      assert.equal(readFileSync(reportPath, "utf8"), result.stdout);
+      assert.equal(report.evidenceScope.scope, "product-api-plus-k8s-readonly");
+      assert.equal(report.evidenceScope.covered.includes("external-k8s-observation"), true);
+      assert.equal(report.evidenceScope.covered.includes("runner-image-digest"), true);
+      assert.equal(report.evidenceScope.notCovered.includes("external-k8s-observation"), false);
+      assert.equal(report.evidenceScope.notCovered.includes("runner-image-digest"), false);
+      assert.equal(report.evidenceScope.notCovered.includes("juicefs-backend"), true);
+      assert.equal(report.evidenceScope.notCovered.includes("full-external-evidence"), true);
+      assert.deepEqual(report.task.k8sEvidence, {
+        status: "observed",
+        runId: "run_k8s_task",
+        namespace: "agentsmith-preview",
+        pods: [{
+          name: "asl-task-k8s",
+          phase: "Running",
+          ready: true,
+          runnerImage: defaultSandboxRunnerImage,
+          runnerImageID: "docker-pullable://registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          pvcClaimName: defaultSandboxPvcClaimName,
+          mountPath: "/workspace/project",
+          subPath: "workspaces/workspace_k8s/projects/project_k8s"
+        }],
+        resources: {
+          Pod: { count: 1, names: ["asl-task-k8s"] },
+          Secret: { count: 1, names: ["secret/asl-k8s-secret"] },
+          ConfigMap: { count: 1, names: ["configmap/asl-k8s-config"] },
+          Service: { count: 1, names: ["service/asl-k8s-service"] },
+          NetworkPolicy: { count: 1, names: ["networkpolicy/asl-k8s-network"] }
+        }
+      });
+
+      const calls = readFileSync(kubectlCalls, "utf8").trim().split("\n");
+      assert.equal(calls.length, 5);
+      for (const call of calls) {
+        assert.match(call, /^--kubeconfig \/tmp\/k8s-evidence\.kubeconfig --context kind-agentsmith get /);
+        assert.match(call, / -n agentsmith-preview /);
+        assert.match(call, / -l agentsmith-lite\/run-id=run_k8s_task /);
+        assert.doesNotMatch(call, /\b(exec|logs|attach|port-forward|apply|delete|patch|create)\b/);
+        assert.doesNotMatch(call, /secret\/k8s-smoke|k8s-admin-secret|s3-raw-secret-value|juicefs-raw-secret-value/);
+      }
+      assert.match(calls[0] ?? "", / get pods .* -o json$/);
+      for (const call of calls.slice(1)) {
+        assert.match(call, / -o name$/);
+      }
+      assert.doesNotMatch(result.stdout + readFileSync(reportPath, "utf8") + result.stderr, /secret\/k8s-smoke|k8s-admin-secret|s3-raw-secret-value|juicefs-raw-secret-value/);
+      assert.doesNotMatch(result.stdout + readFileSync(reportPath, "utf8"), /runtime accepted|AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+      assert.equal(server.requests.some((request) => request.url === "/api/tasks/task_k8s/cancel"), false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("app-smoke.mjs fails usage for k8s evidence without a task run to observe", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      res.statusCode = 500;
+      res.end("unexpected request");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--k8s-evidence"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
+        KUBE_NAMESPACE: "agentsmith-preview"
+      });
+
+      assert.equal(result.status, 2);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /k8s evidence requires task smoke or task reclaim smoke/);
+      assert.equal(requestCount, 0);
+
+      const missingNamespace = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.k8s-missing-namespace.test/v1",
+        "--endpoint-model",
+        "missing-namespace-model",
+        "--endpoint-secret-ref",
+        "secret/missing-namespace-smoke",
+        "--task-smoke",
+        "--k8s-evidence"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret"
+      });
+      assert.equal(missingNamespace.status, 2);
+      assert.equal(missingNamespace.stdout, "");
+      assert.match(missingNamespace.stderr, /KUBE_NAMESPACE is required/);
+      assert.doesNotMatch(missingNamespace.stderr, /secret\/missing-namespace-smoke/);
+      assert.equal(requestCount, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs fails closed when k8s evidence observes unsafe task pod state", async () => {
+    const cases: Array<{
+      name: string;
+      fakeKubectl: FakeKubectlOptions;
+      expectedMessage: RegExp;
+      leakPatterns: RegExp[];
+    }> = [
+      {
+        name: "non-digest-runner",
+        fakeKubectl: {
+          runId: "run_k8s_bad_image",
+          podName: "asl-task-bad-image",
+          resourcePrefix: "asl-bad-image",
+          runnerImage: "agentsmith-lite/botified-runner:dev",
+          runnerImageID: "docker://runner-without-digest"
+        },
+        expectedMessage: /k8s evidence observed botified-runner image must be digest pinned/,
+        leakPatterns: [/bad-image-admin-secret/, /secret\/bad-image-smoke/, /bad-image-s3-secret/, /bad-image-juicefs-secret/]
+      },
+      {
+        name: "run-id-label-mismatch",
+        fakeKubectl: {
+          runId: "run_k8s_label",
+          podName: "asl-task-label",
+          resourcePrefix: "asl-label",
+          observedRunId: "run_other"
+        },
+        expectedMessage: /k8s evidence pod asl-task-label run-id label mismatch/,
+        leakPatterns: [/label-admin-secret/, /secret\/label-smoke/, /label-s3-secret/, /label-juicefs-secret/]
+      },
+      {
+        name: "pvc-claim-drift",
+        fakeKubectl: {
+          runId: "run_k8s_pvc",
+          podName: "asl-task-pvc",
+          resourcePrefix: "asl-pvc",
+          pvcClaimName: "agentsmith-lite-drift-files"
+        },
+        expectedMessage: /k8s evidence pod asl-task-pvc project-files PVC claimName does not match sandbox contract/,
+        leakPatterns: [
+          /pvc-admin-secret/,
+          /secret\/pvc-smoke/,
+          /pvc-s3-secret/,
+          /pvc-juicefs-secret/,
+          /runtime accepted/,
+          /AGENTSMITH_LITE_TASK_SMOKE_MARKER/
+        ]
+      },
+      {
+        name: "mount-path-drift",
+        fakeKubectl: {
+          runId: "run_k8s_mount",
+          podName: "asl-task-mount",
+          resourcePrefix: "asl-mount",
+          mountPath: "/workspace/other"
+        },
+        expectedMessage: /k8s evidence pod asl-task-mount project-files mountPath does not match sandbox contract/,
+        leakPatterns: [
+          /mount-admin-secret/,
+          /secret\/mount-smoke/,
+          /mount-s3-secret/,
+          /mount-juicefs-secret/,
+          /runtime accepted/,
+          /AGENTSMITH_LITE_TASK_SMOKE_MARKER/
+        ]
+      },
+      {
+        name: "subpath-drift",
+        fakeKubectl: {
+          runId: "run_k8s_subpath",
+          podName: "asl-task-subpath",
+          resourcePrefix: "asl-subpath",
+          subPath: "workspaces/workspace_subpath_drift/projects/project_subpath_drift/other"
+        },
+        expectedMessage: /k8s evidence pod asl-task-subpath project-files subPath does not match sandbox contract/,
+        leakPatterns: [
+          /subpath-admin-secret/,
+          /secret\/subpath-smoke/,
+          /subpath-s3-secret/,
+          /subpath-juicefs-secret/,
+          /runtime accepted/,
+          /AGENTSMITH_LITE_TASK_SMOKE_MARKER/
+        ]
+      }
+    ];
+
+    for (const testCase of cases) {
+      const leakSlug = k8sDriftSecretSlug(testCase.name);
+      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-k8s-${testCase.name}-`));
+      const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
+      const fakeKubectl = writeFakeKubectl(tempDir, testCase.fakeKubectl);
+      const server = await startTaskSmokeServer({
+        adminPassword: `${leakSlug}-admin-secret`,
+        endpointBaseUrl: `https://models.${testCase.name}.test/v1`,
+        endpointModel: `${testCase.name}-model`,
+        endpointSecretRef: `secret/${leakSlug}-smoke`,
+        workspaceId: `workspace_${testCase.name.replaceAll("-", "_")}`,
+        projectId: `project_${testCase.name.replaceAll("-", "_")}`,
+        endpointId: `endpoint_${testCase.name.replaceAll("-", "_")}`,
+        taskId: `task_${testCase.name.replaceAll("-", "_")}`,
+        runId: testCase.fakeKubectl.runId,
+        subPath: `workspaces/workspace_${testCase.name.replaceAll("-", "_")}/projects/project_${testCase.name.replaceAll("-", "_")}`
+      });
+
+      try {
+        const result = await runNode([
+          "scripts/deploy/app-smoke.mjs",
+          "--base-url",
+          server.baseUrl,
+          "--endpoint-base-url",
+          `https://models.${testCase.name}.test/v1`,
+          "--endpoint-model",
+          `${testCase.name}-model`,
+          "--endpoint-secret-ref",
+          `secret/${leakSlug}-smoke`,
+          "--task-smoke",
+          "--k8s-evidence"
+        ], {
+          BUILTIN_ADMIN_INITIAL_PASSWORD: `${leakSlug}-admin-secret`,
+          KUBECTL_BIN: fakeKubectl,
+          FAKE_KUBECTL_CALLS: kubectlCalls,
+          KUBE_NAMESPACE: "agentsmith-preview",
+          S3_SECRET_KEY: `${leakSlug}-s3-secret`,
+          JUICEFS_SECRET_KEY: `${leakSlug}-juicefs-secret`
+        });
+
+        assert.equal(result.status, 1, result.stderr);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, testCase.expectedMessage);
+        for (const pattern of testCase.leakPatterns) {
+          assert.doesNotMatch(result.stderr, pattern);
+        }
+        assert.doesNotMatch(result.stderr, /runtime accepted|AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+      } finally {
+        await server.close();
+      }
     }
   });
 
@@ -1895,6 +2247,18 @@ interface EvidenceScope {
   notCovered: string[];
 }
 
+interface FakeKubectlOptions {
+  runId: string;
+  podName: string;
+  resourcePrefix: string;
+  observedRunId?: string;
+  runnerImage?: string;
+  runnerImageID?: string;
+  pvcClaimName?: string;
+  mountPath?: string;
+  subPath?: string;
+}
+
 function assertLightEvidenceDoesNotClaimExternal(evidenceScope: EvidenceScope): void {
   assert.equal(evidenceScope.scope, "product-api-only");
   assert.deepEqual(evidenceScope.notCovered, appSmokeNotCovered);
@@ -1919,6 +2283,12 @@ function runNode(args: string[], env: Record<string, string>): Promise<{ status:
         BOTIFIED_RUNNER_IMAGE: "",
         JUICEFS_PVC_NAME: "",
         AGENTSMITH_LITE_SANDBOX_MODE: "",
+        KUBECTL_BIN: "",
+        KUBECONFIG_PATH: "",
+        KUBE_CONTEXT: "",
+        KUBE_NAMESPACE: "",
+        S3_SECRET_KEY: "",
+        JUICEFS_SECRET_KEY: "",
         ...env
       },
       stdio: ["ignore", "pipe", "pipe"]
@@ -1949,6 +2319,216 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function k8sDriftSecretSlug(name: string): string {
+  if (name === "non-digest-runner") {
+    return "bad-image";
+  }
+  if (name === "run-id-label-mismatch") {
+    return "label";
+  }
+  if (name === "pvc-claim-drift") {
+    return "pvc";
+  }
+  if (name === "mount-path-drift") {
+    return "mount";
+  }
+  if (name === "subpath-drift") {
+    return "subpath";
+  }
+  return name;
+}
+
+function writeFakeKubectl(tempDir: string, options: FakeKubectlOptions): string {
+  const fakeKubectl = path.join(tempDir, "kubectl");
+  const runnerImage = options.runnerImage ?? defaultSandboxRunnerImage;
+  const runnerImageID = options.runnerImageID ?? "docker-pullable://registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+  const observedRunId = options.observedRunId ?? options.runId;
+  const pvcClaimName = options.pvcClaimName ?? defaultSandboxPvcClaimName;
+  const mountPath = options.mountPath ?? "/workspace/project";
+  const subPath = options.subPath ?? "workspaces/workspace_k8s/projects/project_k8s";
+  writeFileSync(fakeKubectl, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+for arg in "$@"; do
+  case "$arg" in
+    exec|logs|attach|port-forward|apply|delete|patch|create)
+      exit 88
+      ;;
+  esac
+done
+resource=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = "get" ]; then
+    resource="$arg"
+    break
+  fi
+  previous="$arg"
+done
+has_namespace=false
+has_label=false
+has_output=false
+output_value=
+previous=
+for arg in "$@"; do
+  if [ "$previous" = "-n" ] && [ "$arg" = "agentsmith-preview" ]; then
+    has_namespace=true
+  fi
+  if [ "$previous" = "-l" ] && [ "$arg" = "agentsmith-lite/run-id=${options.runId}" ]; then
+    has_label=true
+  fi
+  if [ "$previous" = "-o" ]; then
+    has_output=true
+    output_value="$arg"
+  fi
+  previous="$arg"
+done
+if [ "$has_namespace" != true ] || [ "$has_label" != true ] || [ "$has_output" != true ]; then
+  exit 64
+fi
+case "$resource:$output_value" in
+  pods:json|pod:json)
+    cat <<'JSON'
+{"items":[{"metadata":{"name":"${options.podName}","labels":{"agentsmith-lite/run-id":"${observedRunId}"}},"status":{"phase":"Running","containerStatuses":[{"name":"botified-runner","ready":true,"image":"${runnerImage}","imageID":"${runnerImageID}"}]},"spec":{"containers":[{"name":"botified-runner","image":"${runnerImage}","volumeMounts":[{"name":"project-files","mountPath":"${mountPath}","subPath":"${subPath}"},{"name":"botified-config","mountPath":"/etc/botified","readOnly":true}]}],"volumes":[{"name":"project-files","persistentVolumeClaim":{"claimName":"${pvcClaimName}"}},{"name":"botified-config","configMap":{"name":"${options.resourcePrefix}-config"}}]}}]}
+JSON
+    ;;
+  secrets:name|secret:name)
+    printf 'secret/${options.resourcePrefix}-secret\\n'
+    ;;
+  configmaps:name|configmap:name)
+    printf 'configmap/${options.resourcePrefix}-config\\n'
+    ;;
+  services:name|service:name)
+    printf 'service/${options.resourcePrefix}-service\\n'
+    ;;
+  networkpolicies:name|networkpolicy:name)
+    printf 'networkpolicy/${options.resourcePrefix}-network\\n'
+    ;;
+  *)
+    exit 65
+    ;;
+esac
+`);
+  chmodSync(fakeKubectl, 0o755);
+  return fakeKubectl;
+}
+
+async function startTaskSmokeServer(options: {
+  adminPassword: string;
+  endpointBaseUrl: string;
+  endpointModel: string;
+  endpointSecretRef: string;
+  workspaceId: string;
+  projectId: string;
+  endpointId: string;
+  taskId: string;
+  runId: string;
+  subPath: string;
+}): Promise<{
+  baseUrl: string;
+  requests: SmokeRequest[];
+  close: () => Promise<void>;
+}> {
+  const requests: SmokeRequest[] = [];
+  const server = createServer(async (req, res) => {
+    const body = await readRequestBody(req);
+    requests.push({
+      method: req.method,
+      url: req.url,
+      cookie: req.headers.cookie,
+      csrf: req.headers["x-csrf-token"]?.toString(),
+      body
+    });
+    const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/api/health") {
+      res.end(JSON.stringify({ status: "ok", version: "test" }));
+    } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+      assert.deepEqual(parsedBody, { password: options.adminPassword });
+      res.end(JSON.stringify({ created: true }));
+    } else if (req.method === "POST" && req.url === "/api/auth/login") {
+      res.setHeader("set-cookie", "asl_session=k8s-session; HttpOnly; Path=/");
+      res.end(JSON.stringify({ csrfToken: "csrf-k8s" }));
+    } else if (req.method === "POST" && req.url === "/api/workspaces") {
+      res.end(JSON.stringify({ id: options.workspaceId, name: "Deploy Smoke" }));
+    } else if (req.method === "POST" && req.url === `/api/workspaces/${options.workspaceId}/projects`) {
+      res.end(JSON.stringify({ id: options.projectId, workspaceId: options.workspaceId, name: "API Smoke" }));
+    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/endpoints`) {
+      assert.deepEqual(parsedBody, {
+        name: "Deploy Smoke Endpoint",
+        protocol: "openai_chat_completions",
+        baseUrl: options.endpointBaseUrl,
+        model: options.endpointModel,
+        apiKeySecretRef: options.endpointSecretRef,
+        capabilities: ["text"],
+        requestTimeoutSecs: 30
+      });
+      res.end(JSON.stringify({ id: options.endpointId }));
+    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/chat`) {
+      res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/files`) {
+      res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+    } else if (req.method === "GET" && req.url === `/api/projects/${options.projectId}/files?path=files`) {
+      res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+    } else if (req.method === "GET" && req.url === `/api/projects/${options.projectId}/files/download?path=files%2Fdeploy-smoke.txt`) {
+      res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+    } else if (req.method === "DELETE" && req.url === `/api/projects/${options.projectId}/files`) {
+      res.end(JSON.stringify({ deleted: true }));
+    } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+      res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+    } else if (req.method === "GET" && req.url === `/api/operator/sandbox/status?runId=${options.runId}`) {
+      res.end(JSON.stringify(statusResponse(options.runId, {
+        activeTaskCount: 1,
+        runCounts: { total: 1, active: 1, running: 1 },
+        observedResourceCounts: { Pod: 1, Secret: 1 },
+        cleanupTargetCount: 2
+      })));
+    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/tasks`) {
+      assert.equal(parsedBody.endpointId, options.endpointId);
+      assert.equal(JSON.stringify(parsedBody).includes(options.endpointSecretRef), false);
+      res.end(JSON.stringify({
+        id: options.taskId,
+        runId: options.runId,
+        status: "running",
+        endpointId: options.endpointId,
+        sandbox: {
+          resources: sandboxResources({
+            taskId: options.taskId,
+            runId: options.runId,
+            subPath: options.subPath
+          })
+        }
+      }));
+    } else if (req.method === "GET" && req.url === `/api/tasks/${options.taskId}/events`) {
+      res.end(JSON.stringify([{ id: `event_${options.taskId}`, taskId: options.taskId, kind: "turn_completed" }]));
+    } else if (req.method === "GET" && req.url === `/api/tasks/${options.taskId}/artifacts`) {
+      res.end(JSON.stringify([{
+        id: `artifact_${options.taskId}`,
+        taskId: options.taskId,
+        fileId: `file_${options.taskId}`,
+        name: "agentsmith-lite-task-smoke.txt",
+        bytes: 51,
+        createdAt: "2026-01-01T00:00:01.000Z"
+      }]));
+    } else if (req.method === "GET" && req.url === `/api/tasks/${options.taskId}/artifacts/artifact_${options.taskId}/download`) {
+      res.setHeader("content-type", "application/octet-stream");
+      res.end("runtime accepted\nAGENTSMITH_LITE_TASK_SMOKE_MARKER\n");
+    } else if (req.method === "POST" && req.url === `/api/tasks/${options.taskId}/cancel`) {
+      res.end(JSON.stringify({ id: options.taskId, runId: options.runId, status: "stopping" }));
+    } else {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    requests,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  };
 }
 
 interface SandboxResourceOptions {

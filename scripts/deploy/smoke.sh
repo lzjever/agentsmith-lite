@@ -14,6 +14,7 @@ report_path=out/smoke-report.json
 task_smoke=false
 task_reclaim_smoke=false
 task_reclaim_reap_apply=false
+k8s_evidence=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base-url) base_url="$2"; shift 2 ;;
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
     --task-smoke) task_smoke=true; shift ;;
     --task-reclaim-smoke) task_reclaim_smoke=true; shift ;;
     --task-reclaim-reap-apply) task_reclaim_reap_apply=true; shift ;;
+    --k8s-evidence) k8s_evidence=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -94,6 +96,9 @@ if [ "$task_reclaim_smoke" = true ]; then
 fi
 if [ "$task_reclaim_reap_apply" = true ]; then
   args+=(--task-reclaim-reap-apply)
+fi
+if [ "$k8s_evidence" = true ]; then
+  args+=(--k8s-evidence)
 fi
 
 BUILTIN_ADMIN_INITIAL_PASSWORD="$BUILTIN_ADMIN_INITIAL_PASSWORD" \
