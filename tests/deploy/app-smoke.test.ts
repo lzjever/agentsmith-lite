@@ -23,6 +23,8 @@ describe("deploy app smoke", () => {
       "SMOKE_ENDPOINT_MODEL=env-model",
       "SMOKE_ENDPOINT_SECRET_REF=secret/env",
       "SMOKE_TASK=true",
+      "SMOKE_TASK_RECLAIM=true",
+      "SMOKE_TASK_RECLAIM_REAP_APPLY=true",
       "SMOKE_TASK_TIMEOUT_SECS=12"
     ].join("\n"));
     writeFileSync(secretsFile, `BUILTIN_ADMIN_INITIAL_PASSWORD=${adminPassword}\n`);
@@ -32,6 +34,8 @@ describe("deploy app smoke", () => {
   printf 'admin_password=%s\\n' "$BUILTIN_ADMIN_INITIAL_PASSWORD"
   printf 'endpoint_base_url=%s\\n' "$SMOKE_ENDPOINT_BASE_URL"
   printf 'task_smoke=%s\\n' "$SMOKE_TASK"
+  printf 'task_reclaim_smoke=%s\\n' "$SMOKE_TASK_RECLAIM"
+  printf 'task_reclaim_reap_apply=%s\\n' "$SMOKE_TASK_RECLAIM_REAP_APPLY"
   printf 'task_timeout=%s\\n' "$SMOKE_TASK_TIMEOUT_SECS"
 } > "$FAKE_NODE_CALLS"
 printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"workspace_1","projectId":"project_1","chat":{"status":"skipped"},"task":{"status":"skipped"}}\\n'
@@ -43,7 +47,9 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       "--env",
       envFile,
       "--secrets",
-      secretsFile
+      secretsFile,
+      "--task-reclaim-smoke",
+      "--task-reclaim-reap-apply"
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -56,11 +62,13 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
 
     assert.equal(result.status, 0, result.stderr);
     const call = readFileSync(callsFile, "utf8");
-    assert.match(call, /args=scripts\/deploy\/app-smoke\.mjs --base-url http:\/\/deploy\.example\.test/);
+    assert.match(call, /args=scripts\/deploy\/app-smoke\.mjs --base-url http:\/\/deploy\.example\.test --task-reclaim-smoke --task-reclaim-reap-apply/);
     assert.doesNotMatch(call, /e2e\/smoke\/lite-smoke\.mjs/);
     assert.match(call, new RegExp(`admin_password=${escapeRegExp(adminPassword)}`));
     assert.match(call, /endpoint_base_url=https:\/\/models\.env\.test\/v1/);
     assert.match(call, /task_smoke=true/);
+    assert.match(call, /task_reclaim_smoke=true/);
+    assert.match(call, /task_reclaim_reap_apply=true/);
     assert.match(call, /task_timeout=12/);
     assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
     assert.doesNotMatch(result.stderr, new RegExp(escapeRegExp(adminPassword)));
@@ -510,6 +518,415 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
     }
   });
 
+  it("app-smoke.mjs appends task reclaim smoke as a separate task with scoped dry-run reap", async () => {
+    const adminPassword = "reclaim-admin-secret";
+    const requests: SmokeRequest[] = [];
+    let taskCreates = 0;
+    let eventPolls = 0;
+    let artifactPolls = 0;
+    const server = createServer(async (req, res) => {
+      const body = await readRequestBody(req);
+      requests.push({
+        method: req.method,
+        url: req.url,
+        cookie: req.headers.cookie,
+        csrf: req.headers["x-csrf-token"]?.toString(),
+        body
+      });
+      const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/api/health") {
+        res.end(JSON.stringify({ status: "ok", version: "test" }));
+      } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+        assert.deepEqual(parsedBody, { password: adminPassword });
+        res.end(JSON.stringify({ created: true }));
+      } else if (req.method === "POST" && req.url === "/api/auth/login") {
+        assert.deepEqual(parsedBody, {
+          email: "admin@agentsmith-lite.local",
+          password: adminPassword
+        });
+        res.setHeader("set-cookie", "asl_session=reclaim-session; HttpOnly; Path=/");
+        res.end(JSON.stringify({ csrfToken: "csrf-reclaim" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces") {
+        assert.deepEqual(parsedBody, { name: "Deploy Smoke" });
+        res.end(JSON.stringify({ id: "workspace_reclaim", name: "Deploy Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces/workspace_reclaim/projects") {
+        assert.deepEqual(parsedBody, { name: "API Smoke" });
+        res.end(JSON.stringify({ id: "project_reclaim", workspaceId: "workspace_reclaim", name: "API Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_reclaim/endpoints") {
+        assert.deepEqual(parsedBody, {
+          name: "Deploy Smoke Endpoint",
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.reclaim.test/v1",
+          model: "reclaim-model",
+          apiKeySecretRef: "secret/reclaim-smoke",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        });
+        res.end(JSON.stringify({ id: "endpoint_reclaim" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_reclaim/chat") {
+        assert.deepEqual(parsedBody, {
+          endpointId: "endpoint_reclaim",
+          messages: [{ role: "user", content: "deploy smoke" }]
+        });
+        res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_reclaim/files") {
+        assert.deepEqual(parsedBody, {
+          path: "files/deploy-smoke.txt",
+          content: "hello from deploy smoke\n"
+        });
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_reclaim/files?path=files") {
+        res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_reclaim/files/download?path=files%2Fdeploy-smoke.txt") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+      } else if (req.method === "DELETE" && req.url === "/api/projects/project_reclaim/files") {
+        assert.deepEqual(parsedBody, { path: "files/deploy-smoke.txt" });
+        res.end(JSON.stringify({ deleted: true }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+        res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_reclaim/tasks") {
+        taskCreates += 1;
+        assert.equal(parsedBody.endpointId, "endpoint_reclaim");
+        assert.equal(typeof parsedBody.prompt, "string");
+        assert.equal(JSON.stringify(parsedBody).includes("secret/reclaim-smoke"), false);
+        if (taskCreates === 1) {
+          assert.match(parsedBody.prompt as string, /publish_file/);
+          assert.match(parsedBody.prompt as string, /AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+          res.end(JSON.stringify({
+            id: "task_smoke_reclaim_case",
+            runId: "run_smoke_reclaim_case",
+            status: "running",
+            endpointId: "endpoint_reclaim"
+          }));
+        } else {
+          assert.match(parsedBody.prompt as string, /reclaim/i);
+          assert.doesNotMatch(parsedBody.prompt as string, /publish_file/);
+          res.end(JSON.stringify({
+            id: "task_reclaim",
+            runId: "run_reclaim",
+            status: "running",
+            endpointId: "endpoint_reclaim",
+            sandbox: {
+              resources: [
+                { kind: "Secret", metadata: { name: "asl-botified-task-reclaim" }, stringData: { BOTIFIED_SERVICE_KEY: "reclaim-service-key-secret" } }
+              ]
+            }
+          }));
+        }
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke_reclaim_case/events") {
+        eventPolls += 1;
+        res.end(JSON.stringify(eventPolls === 1 ? [{
+          id: "event_started",
+          taskId: "task_smoke_reclaim_case",
+          kind: "turn_started",
+          cursor: "c1",
+          botifiedSeq: 1,
+          botifiedType: "cycle.started",
+          sessionId: "session_1",
+          payload: {},
+          createdAt: "2026-01-01T00:00:00.000Z"
+        }] : [{
+          id: "event_completed",
+          taskId: "task_smoke_reclaim_case",
+          kind: "turn_completed",
+          cursor: "c2",
+          botifiedSeq: 2,
+          botifiedType: "cycle.completed",
+          sessionId: "session_1",
+          payload: {},
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke_reclaim_case/artifacts") {
+        artifactPolls += 1;
+        res.end(JSON.stringify(artifactPolls === 1 ? [] : [{
+          id: "artifact_task_smoke_reclaim_case",
+          taskId: "task_smoke_reclaim_case",
+          fileId: "file_task_smoke_reclaim_case",
+          name: "agentsmith-lite-task-smoke.txt",
+          bytes: 49,
+          createdAt: "2026-01-01T00:00:01.000Z"
+        }]));
+      } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke_reclaim_case/artifacts/artifact_task_smoke_reclaim_case/download") {
+        res.setHeader("content-type", "application/octet-stream");
+        res.end("runtime accepted\nAGENTSMITH_LITE_TASK_SMOKE_MARKER\n");
+      } else if (req.method === "POST" && req.url === "/api/tasks/task_reclaim/cancel") {
+        assert.equal(body, "");
+        res.end(JSON.stringify({ id: "task_reclaim", runId: "run_reclaim", status: "stopping" }));
+      } else if (req.method === "POST" && req.url === "/api/operator/sandbox/reap") {
+        assert.deepEqual(parsedBody, { runId: "run_reclaim" });
+        res.end(JSON.stringify({
+          namespace: "agentsmith",
+          activeTaskCount: 1,
+          runCounts: {},
+          observedResourceCounts: { Pod: 1, Secret: 1 },
+          cleanupPlan: {
+            targets: [
+              { type: "delete_resource", source: "kubernetes", runId: "run_reclaim", kind: "Pod", name: "asl-task-task_reclaim" },
+              { type: "store_run_state", source: "store", runId: "run_reclaim", reason: "cleanup_complete", phase: "stopping", cleanupStatus: "cleaned" }
+            ],
+            recentFailures: []
+          },
+          recentCleanupFailures: [],
+          actionSummary: [
+            { type: "delete_resource", runId: "run_reclaim", kind: "Pod", name: "asl-task-task_reclaim" },
+            { type: "store_run_state", runId: "run_reclaim", reason: "cleanup_complete" }
+          ],
+          errors: [],
+          dryRun: true,
+          storedRunIds: []
+        }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.reclaim.test/v1",
+        "--endpoint-model",
+        "reclaim-model",
+        "--endpoint-secret-ref",
+        "secret/reclaim-smoke",
+        "--task-smoke",
+        "--task-reclaim-smoke"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, "");
+      const report = JSON.parse(result.stdout);
+      assert.deepEqual(report, {
+        status: "ok",
+        baseUrl,
+        workspaceId: "workspace_reclaim",
+        projectId: "project_reclaim",
+        chat: { status: "completed" },
+        task: {
+          status: "completed",
+          taskId: "task_smoke_reclaim_case",
+          createStatus: "running",
+          artifactId: "artifact_task_smoke_reclaim_case",
+          artifactName: "agentsmith-lite-task-smoke.txt"
+        },
+        taskReclaim: {
+          status: "completed",
+          taskId: "task_reclaim",
+          runId: "run_reclaim",
+          createStatus: "running",
+          cancelStatus: "stopping",
+          reap: {
+            dryRun: {
+              dryRun: true,
+              actionCount: 2,
+              cleanupTargetCount: 2,
+              errorCount: 0,
+              storedRunIds: []
+            }
+          }
+        }
+      });
+      assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(result.stdout, /secret\/reclaim-smoke/);
+      assert.doesNotMatch(result.stdout, /BOTIFIED_SERVICE_KEY|reclaim-service-key-secret/);
+      assert.deepEqual(requests.map((request) => `${request.method} ${request.url}`), [
+        "GET /api/health",
+        "POST /api/auth/bootstrap",
+        "POST /api/auth/login",
+        "POST /api/workspaces",
+        "POST /api/workspaces/workspace_reclaim/projects",
+        "POST /api/projects/project_reclaim/endpoints",
+        "POST /api/projects/project_reclaim/chat",
+        "POST /api/projects/project_reclaim/files",
+        "GET /api/projects/project_reclaim/files?path=files",
+        "GET /api/projects/project_reclaim/files/download?path=files%2Fdeploy-smoke.txt",
+        "DELETE /api/projects/project_reclaim/files",
+        "GET /api/operator/sandbox/status",
+        "POST /api/projects/project_reclaim/tasks",
+        "GET /api/tasks/task_smoke_reclaim_case/events",
+        "GET /api/tasks/task_smoke_reclaim_case/artifacts",
+        "GET /api/tasks/task_smoke_reclaim_case/events",
+        "GET /api/tasks/task_smoke_reclaim_case/artifacts",
+        "GET /api/tasks/task_smoke_reclaim_case/artifacts/artifact_task_smoke_reclaim_case/download",
+        "POST /api/projects/project_reclaim/tasks",
+        "POST /api/tasks/task_reclaim/cancel",
+        "POST /api/operator/sandbox/reap"
+      ]);
+      assert.equal(taskCreates, 2);
+      const reapRequests = requests.filter((request) => request.url === "/api/operator/sandbox/reap");
+      assert.equal(reapRequests.length, 1);
+      const reapRequest = reapRequests[0];
+      assert.ok(reapRequest);
+      assert.deepEqual(JSON.parse(reapRequest.body), { runId: "run_reclaim" });
+      for (const request of requests.filter((candidate) => candidate.url?.startsWith("/api/tasks/") || candidate.url === "/api/operator/sandbox/reap")) {
+        assert.equal(request.cookie, "asl_session=reclaim-session", `${request.method} ${request.url} missing session cookie`);
+        assert.equal(request.csrf, "csrf-reclaim", `${request.method} ${request.url} missing csrf token`);
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs can opt in to scoped reclaim reap apply without any unscoped apply", async () => {
+    const adminPassword = "apply-admin-secret";
+    const requests: SmokeRequest[] = [];
+    let reapCalls = 0;
+    const server = createServer(async (req, res) => {
+      const body = await readRequestBody(req);
+      requests.push({
+        method: req.method,
+        url: req.url,
+        cookie: req.headers.cookie,
+        csrf: req.headers["x-csrf-token"]?.toString(),
+        body
+      });
+      const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/api/health") {
+        res.end(JSON.stringify({ status: "ok", version: "test" }));
+      } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+        res.end(JSON.stringify({ created: true }));
+      } else if (req.method === "POST" && req.url === "/api/auth/login") {
+        res.setHeader("set-cookie", "asl_session=apply-session; HttpOnly; Path=/");
+        res.end(JSON.stringify({ csrfToken: "csrf-apply" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces") {
+        res.end(JSON.stringify({ id: "workspace_apply", name: "Deploy Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/workspaces/workspace_apply/projects") {
+        res.end(JSON.stringify({ id: "project_apply", workspaceId: "workspace_apply", name: "API Smoke" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_apply/endpoints") {
+        assert.deepEqual(parsedBody, {
+          name: "Deploy Smoke Endpoint",
+          protocol: "openai_chat_completions",
+          baseUrl: "https://models.apply.test/v1",
+          model: "apply-model",
+          apiKeySecretRef: "secret/apply-smoke",
+          capabilities: ["text"],
+          requestTimeoutSecs: 30
+        });
+        res.end(JSON.stringify({ id: "endpoint_apply" }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_apply/chat") {
+        res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_apply/files") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_apply/files?path=files") {
+        res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+      } else if (req.method === "GET" && req.url === "/api/projects/project_apply/files/download?path=files%2Fdeploy-smoke.txt") {
+        res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+      } else if (req.method === "DELETE" && req.url === "/api/projects/project_apply/files") {
+        res.end(JSON.stringify({ deleted: true }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+        res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "POST" && req.url === "/api/projects/project_apply/tasks") {
+        assert.equal(parsedBody.endpointId, "endpoint_apply");
+        res.end(JSON.stringify({
+          id: "task_reclaim_apply",
+          runId: "run_reclaim_apply",
+          status: "running",
+          endpointId: "endpoint_apply"
+        }));
+      } else if (req.method === "POST" && req.url === "/api/tasks/task_reclaim_apply/cancel") {
+        assert.equal(body, "");
+        res.end(JSON.stringify({ id: "task_reclaim_apply", runId: "run_reclaim_apply", status: "stopping" }));
+      } else if (req.method === "POST" && req.url === "/api/operator/sandbox/reap") {
+        reapCalls += 1;
+        if (reapCalls === 1) {
+          assert.deepEqual(parsedBody, { runId: "run_reclaim_apply" });
+          res.end(JSON.stringify(reapResponse(true, 2, 2, [])));
+        } else if (reapCalls === 2) {
+          assert.deepEqual(parsedBody, { runId: "run_reclaim_apply", apply: true });
+          res.end(JSON.stringify(reapResponse(false, 3, 1, ["run_reclaim_apply"])));
+        } else {
+          assert.deepEqual(parsedBody, { runId: "run_reclaim_apply" });
+          res.end(JSON.stringify(reapResponse(true, 0, 0, [])));
+        }
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/app-smoke.mjs",
+        "--base-url",
+        baseUrl,
+        "--endpoint-base-url",
+        "https://models.apply.test/v1",
+        "--endpoint-model",
+        "apply-model",
+        "--endpoint-secret-ref",
+        "secret/apply-smoke",
+        "--task-reclaim-smoke",
+        "--task-reclaim-reap-apply"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.deepEqual(report, {
+        status: "ok",
+        baseUrl,
+        workspaceId: "workspace_apply",
+        projectId: "project_apply",
+        chat: { status: "completed" },
+        task: { status: "skipped" },
+        taskReclaim: {
+          status: "completed",
+          taskId: "task_reclaim_apply",
+          runId: "run_reclaim_apply",
+          createStatus: "running",
+          cancelStatus: "stopping",
+          reap: {
+            dryRun: {
+              dryRun: true,
+              actionCount: 2,
+              cleanupTargetCount: 2,
+              errorCount: 0,
+              storedRunIds: []
+            },
+            apply: {
+              dryRun: false,
+              actionCount: 3,
+              cleanupTargetCount: 1,
+              errorCount: 0,
+              storedRunIds: ["run_reclaim_apply"]
+            },
+            finalDryRun: {
+              dryRun: true,
+              actionCount: 0,
+              cleanupTargetCount: 0,
+              errorCount: 0,
+              storedRunIds: []
+            }
+          }
+        }
+      });
+      assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(adminPassword)));
+      assert.doesNotMatch(result.stdout, /secret\/apply-smoke/);
+      assert.equal(reapCalls, 3);
+      assert.deepEqual(requests.filter((request) => request.url === "/api/operator/sandbox/reap").map((request) => JSON.parse(request.body)), [
+        { runId: "run_reclaim_apply" },
+        { runId: "run_reclaim_apply", apply: true },
+        { runId: "run_reclaim_apply" }
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("app-smoke.mjs cancels best-effort when task artifact verification fails without leaking secrets", async () => {
     const adminPassword = "mismatch-admin-secret";
     const requests: SmokeRequest[] = [];
@@ -724,6 +1141,64 @@ printf '{"status":"ok","baseUrl":"http://deploy.example.test","workspaceId":"wor
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
+
+  it("app-smoke.mjs validates task reclaim smoke options before HTTP", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      res.statusCode = 500;
+      res.end("unexpected request");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const cases: Array<{
+        args?: string[];
+        env?: Record<string, string>;
+        message: RegExp;
+      }> = [
+        {
+          env: { SMOKE_TASK_RECLAIM: "yes" },
+          message: /SMOKE_TASK_RECLAIM must be true, false, empty, or unset/
+        },
+        {
+          env: { SMOKE_TASK_RECLAIM_REAP_APPLY: "yes" },
+          message: /SMOKE_TASK_RECLAIM_REAP_APPLY must be true, false, empty, or unset/
+        },
+        {
+          env: { SMOKE_TASK_RECLAIM_REAP_APPLY: "true" },
+          message: /task reclaim reap apply requires task reclaim smoke/
+        },
+        {
+          args: ["--task-reclaim-reap-apply"],
+          message: /task reclaim reap apply requires task reclaim smoke/
+        },
+        {
+          args: ["--task-reclaim-smoke"],
+          message: /task reclaim smoke requires endpoint smoke config/
+        }
+      ];
+      for (const testCase of cases) {
+        const result = await runNode([
+          "scripts/deploy/app-smoke.mjs",
+          "--base-url",
+          baseUrl,
+          ...(testCase.args ?? [])
+        ], {
+          BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
+          ...(testCase.env ?? {})
+        });
+
+        assert.equal(result.status, 2, result.stderr);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, testCase.message);
+      }
+      assert.equal(requestCount, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
 });
 
 interface SmokeRequest {
@@ -741,6 +1216,8 @@ function runNode(args: string[], env: Record<string, string>): Promise<{ status:
       env: {
         ...process.env,
         SMOKE_TASK: "",
+        SMOKE_TASK_RECLAIM: "",
+        SMOKE_TASK_RECLAIM_REAP_APPLY: "",
         SMOKE_ENDPOINT_BASE_URL: "",
         SMOKE_ENDPOINT_MODEL: "",
         SMOKE_ENDPOINT_SECRET_REF: "",
@@ -774,4 +1251,33 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function reapResponse(dryRun: boolean, actionCount: number, cleanupTargetCount: number, storedRunIds: string[]) {
+  return {
+    namespace: "agentsmith",
+    activeTaskCount: 1,
+    runCounts: {},
+    observedResourceCounts: {},
+    cleanupPlan: {
+      targets: Array.from({ length: cleanupTargetCount }, (_value, index) => ({
+        type: "store_run_state",
+        source: "store",
+        runId: "run_reclaim_apply",
+        reason: `reason_${index}`,
+        phase: "stopping",
+        cleanupStatus: "cleaned"
+      })),
+      recentFailures: []
+    },
+    recentCleanupFailures: [],
+    actionSummary: Array.from({ length: actionCount }, (_value, index) => ({
+      type: "store_run_state",
+      runId: "run_reclaim_apply",
+      reason: `reason_${index}`
+    })),
+    errors: [],
+    dryRun,
+    storedRunIds
+  };
 }

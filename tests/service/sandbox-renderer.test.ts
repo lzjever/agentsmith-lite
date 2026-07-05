@@ -26,7 +26,9 @@ describe("sandbox manifest renderer", () => {
     const serviceAccount = rendered.resources.find((resource) => resource.kind === "ServiceAccount") as
       | ServiceAccountResource
       | undefined;
-    const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy");
+    const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy") as
+      | NetworkPolicyResource
+      | undefined;
     const secret = rendered.resources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
 
     assert.deepEqual(rendered.resources.map((resource) => resource.kind), [
@@ -89,6 +91,27 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
+    const dnsEgress = networkPolicy.spec.egress.find(
+      (rule) => hasNamespaceSelectorDestination(rule) && hasPort(rule, "UDP", 53)
+    );
+    const externalModelEgress = networkPolicy.spec.egress.find(
+      (rule) => hasUnscopedDestination(rule) && hasPort(rule, "TCP", 443)
+    );
+    assert.ok(dnsEgress, "NetworkPolicy should preserve DNS UDP/53 egress");
+    assert.deepEqual(dnsEgress.ports, [{ protocol: "UDP", port: 53 }]);
+    assert.ok(externalModelEgress, "NetworkPolicy should allow external TCP/443 model endpoint egress");
+    assert.deepEqual(externalModelEgress.ports, [{ protocol: "TCP", port: 443 }]);
+    assert.ok(
+      networkPolicy.spec.egress.every(
+        (rule) =>
+          Array.isArray(rule.ports) &&
+          rule.ports.length > 0 &&
+          rule.ports.every(
+            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 443)
+          )
+      ),
+      "NetworkPolicy egress should stay limited to DNS and TCP/443"
+    );
     assert.deepEqual(secret?.stringData, {
       BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
       MODEL_API_KEY: "<redacted-model-api-key>"
@@ -136,4 +159,36 @@ interface ServiceAccountResource extends KubernetesResource {
 
 interface SecretResource extends KubernetesResource {
   stringData: Record<string, string>;
+}
+
+interface NetworkPolicyResource extends KubernetesResource {
+  spec: {
+    egress: NetworkPolicyEgressRule[];
+  };
+}
+
+interface NetworkPolicyEgressRule {
+  to?: Array<{
+    namespaceSelector?: Record<string, unknown>;
+    podSelector?: Record<string, unknown>;
+    ipBlock?: Record<string, unknown>;
+  }>;
+  ports?: Array<{ protocol: string; port: number }>;
+}
+
+function hasPort(rule: NetworkPolicyEgressRule, protocol: string, port: number): boolean {
+  return rule.ports?.some((candidate) => candidate.protocol === protocol && candidate.port === port) ?? false;
+}
+
+function hasNamespaceSelectorDestination(rule: NetworkPolicyEgressRule): boolean {
+  return (
+    rule.to?.some(
+      (destination) =>
+        destination.namespaceSelector !== undefined && Object.keys(destination.namespaceSelector).length === 0
+    ) ?? false
+  );
+}
+
+function hasUnscopedDestination(rule: NetworkPolicyEgressRule): boolean {
+  return rule.to === undefined || rule.to.length === 0;
 }

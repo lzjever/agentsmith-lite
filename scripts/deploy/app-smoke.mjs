@@ -16,6 +16,12 @@ const TASK_PROMPT = [
   "Then use the Botified publish_file tool to publish that file with filename agentsmith-lite-task-smoke.txt.",
   "Keep the response brief and do not include credentials or endpoint secret references."
 ].join("\n");
+const TASK_RECLAIM_PROMPT = [
+  "Deploy smoke task reclaim acceptance test.",
+  "Use bash in the current task home/cwd to run a long sleep, for example: sleep 600.",
+  "Do not publish files, do not create artifacts, and do not include credentials or endpoint secret references.",
+  "The smoke harness will cancel this task and then run scoped sandbox reap checks."
+].join("\n");
 const TERMINAL_EVENT_KINDS = new Set(["turn_completed", "turn_failed", "runtime_error"]);
 
 const sensitiveValues = new Set();
@@ -26,11 +32,22 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   requireOption(args.baseUrl, "--base-url");
   const taskSmoke = taskSmokeEnabled(args);
+  const taskReclaimSmoke = taskReclaimSmokeEnabled(args);
+  const taskReclaimReapApply = taskReclaimReapApplyEnabled(args);
+
+  if (taskReclaimReapApply && !taskReclaimSmoke) {
+    throw new UsageError("task reclaim reap apply requires task reclaim smoke");
+  }
 
   const endpointConfig = endpointSmokeConfig(args);
   if (taskSmoke && !endpointConfig.complete) {
     throw new UsageError(
       "task smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
+    );
+  }
+  if (taskReclaimSmoke && !endpointConfig.complete) {
+    throw new UsageError(
+      "task reclaim smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
     );
   }
   const taskTimeoutSecs = taskSmoke ? taskSmokeTimeoutSecs() : DEFAULT_TASK_TIMEOUT_SECS;
@@ -130,14 +147,25 @@ async function main() {
     task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
   }
 
-  console.log(JSON.stringify({
+  const report = {
     status: "ok",
     baseUrl: args.baseUrl,
     workspaceId,
     projectId,
     chat,
     task
-  }));
+  };
+
+  if (taskReclaimSmoke) {
+    report.taskReclaim = await runTaskReclaimSmoke(
+      smoke,
+      projectId,
+      requireString(endpointId, "endpoint id"),
+      taskReclaimReapApply
+    );
+  }
+
+  console.log(JSON.stringify(report));
 }
 
 async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
@@ -222,6 +250,69 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
   throw new Error(`task smoke timed out after ${timeoutSecs} seconds waiting for verified artifact`);
 }
 
+async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
+  const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+    auth: true,
+    body: {
+      endpointId,
+      prompt: TASK_RECLAIM_PROMPT
+    }
+  });
+  const taskId = requireString(create.body.id, "task reclaim task id");
+  const runId = requireString(create.body.runId, "task reclaim run id");
+  const createStatus = requireString(create.body.status, "task reclaim create status");
+
+  const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    auth: true
+  });
+  const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
+
+  const reap = {
+    dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
+  };
+  if (reapApply) {
+    reap.apply = await runScopedReap(smoke, runId, true, "task reclaim apply reap");
+    reap.finalDryRun = await runScopedReap(smoke, runId, false, "task reclaim final dry-run reap");
+  }
+
+  return {
+    status: "completed",
+    taskId,
+    runId,
+    createStatus,
+    cancelStatus,
+    reap
+  };
+}
+
+async function runScopedReap(smoke, runId, apply, context) {
+  const result = await smoke.requestJson("POST", "/api/operator/sandbox/reap", {
+    auth: true,
+    body: apply ? { runId, apply: true } : { runId }
+  });
+  return summarizeReapResult(result, apply ? false : true, context);
+}
+
+function summarizeReapResult(result, expectedDryRun, context) {
+  const dryRun = requireBoolean(result?.dryRun, `${context} dryRun`);
+  if (dryRun !== expectedDryRun) {
+    throw new Error(`${context} returned dryRun=${dryRun}, expected ${expectedDryRun}`);
+  }
+  const errors = requireArray(result?.errors, `${context} errors`);
+  if (errors.length > 0) {
+    throw new Error(`${context} reported ${errors.length} error(s)`);
+  }
+  return {
+    dryRun,
+    actionCount: requireArray(result?.actionSummary, `${context} action summary`).length,
+    cleanupTargetCount: requireArray(result?.cleanupPlan?.targets, `${context} cleanup targets`).length,
+    errorCount: errors.length,
+    storedRunIds: requireArray(result?.storedRunIds, `${context} stored run ids`).map((runId) =>
+      requireString(runId, `${context} stored run id`)
+    )
+  };
+}
+
 class AppSmokeClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl;
@@ -303,6 +394,10 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--task-smoke") {
       parsed.taskSmoke = true;
+    } else if (arg === "--task-reclaim-smoke") {
+      parsed.taskReclaimSmoke = true;
+    } else if (arg === "--task-reclaim-reap-apply") {
+      parsed.taskReclaimReapApply = true;
     } else {
       throw new UsageError(`unknown argument: ${arg}`);
     }
@@ -323,22 +418,33 @@ function endpointSmokeConfig(args) {
 }
 
 function taskSmokeEnabled(args) {
-  const envTaskSmoke = parseSmokeTaskEnv(process.env.SMOKE_TASK);
+  const envTaskSmoke = parseSmokeBooleanEnv("SMOKE_TASK");
   return Boolean(args.taskSmoke || envTaskSmoke);
+}
+
+function taskReclaimSmokeEnabled(args) {
+  const envTaskReclaimSmoke = parseSmokeBooleanEnv("SMOKE_TASK_RECLAIM");
+  return Boolean(args.taskReclaimSmoke || envTaskReclaimSmoke);
+}
+
+function taskReclaimReapApplyEnabled(args) {
+  const envTaskReclaimReapApply = parseSmokeBooleanEnv("SMOKE_TASK_RECLAIM_REAP_APPLY");
+  return Boolean(args.taskReclaimReapApply || envTaskReclaimReapApply);
 }
 
 function taskSmokeTimeoutSecs() {
   return parsePositiveIntegerEnv("SMOKE_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
 }
 
-function parseSmokeTaskEnv(value) {
+function parseSmokeBooleanEnv(name) {
+  const value = process.env[name];
   if (value === undefined || value === "" || value === "false") {
     return false;
   }
   if (value === "true") {
     return true;
   }
-  throw new UsageError("SMOKE_TASK must be true, false, empty, or unset");
+  throw new UsageError(`${name} must be true, false, empty, or unset`);
 }
 
 function firstNonEmpty(...values) {
@@ -373,6 +479,13 @@ function requireString(value, name) {
 
 function requireArray(value, name) {
   if (!Array.isArray(value)) {
+    throw new Error(`${name} missing from API response`);
+  }
+  return value;
+}
+
+function requireBoolean(value, name) {
+  if (typeof value !== "boolean") {
     throw new Error(`${name} missing from API response`);
   }
   return value;

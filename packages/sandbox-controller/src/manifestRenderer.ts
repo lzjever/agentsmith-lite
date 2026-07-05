@@ -242,7 +242,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               {
                 protocol: "UDP",
                 port: 53
-              },
+              }
+            ]
+          },
+          {
+            ports: [
               {
                 protocol: "TCP",
                 port: 443
