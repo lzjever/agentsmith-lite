@@ -140,6 +140,7 @@ agentsmith-lite-substrates/
     substrates-config.v1.schema.json
   scripts/
     download-online.sh
+    prepare-offline-cache.sh
     install-online.sh
     install-offline.sh
     doctor.sh
@@ -165,7 +166,8 @@ Required outputs:
 | `out/substrate.env` | install/validate scripts | app deploy/dev scripts | non-secret config only。 |
 | `out/substrate.secrets.env` | install/validate scripts 或管理员 | app deploy scripts consume product-secret subset | `0600`；不在日志打印 raw value。 |
 | `out/kubeconfig` | self-hosted install | operator scripts | 只在 self-hosted 模式产生。 |
-| `dist/offline-cache/manifest.yaml` | `download-online.sh` | `install-offline.sh`, `doctor.sh` | 标记 `cacheMode: p1-real` 才能作为真实离线安装证据。 |
+| `out/artifacts/offline-artifacts.env` | `prepare-offline-cache.sh` | `download-online.sh --artifacts` | generated/uncommitted 本地 lock；不进 git。 |
+| `dist/offline-cache/manifest.yaml` | `prepare-offline-cache.sh` or `download-online.sh --artifacts` | `install-offline.sh`, `doctor.sh` | 标记 `cacheMode: p1-real` 才能作为真实离线安装证据。 |
 | `dist/offline-cache/images/oci/*.tar` | `download-online.sh --artifacts` | `install-offline.sh` | 只允许 substrate-owned images。 |
 | `out/doctor-report.json` | `doctor.sh` | operator/developer | 事实报告，不是治理 ledger。 |
 
@@ -407,6 +409,7 @@ Core resource policy:
 ### 7.1 Substrates repo 当前命令
 
 ```bash
+scripts/prepare-offline-cache.sh --artifacts-dir out/artifacts --output dist/offline-cache [--force]
 scripts/download-online.sh --output dist/offline-cache [--force] [--contract-only]
 scripts/download-online.sh --artifacts config/offline-artifacts.env --output dist/offline-cache --force
 
@@ -423,6 +426,7 @@ scripts/test.sh
 Important semantics:
 
 - `download-online.sh` without `--artifacts` writes a P0 contract skeleton only；它不是真实离线安装包。
+- `prepare-offline-cache.sh` 是一键下载/导出依赖并委托 `download-online.sh` 生成 p1-real cache；它不是 live install，也不提交 file:// lock/cache。
 - 非 dry-run `install-online.sh` / `install-offline.sh` 必须使用 `cacheMode: p1-real`。
 - Existing-cloud 使用同一 env/secrets 格式；它验证管理员提供的服务，不创建云资源。
 - `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 substrate 静态诊断 thin wrapper；它不是第三个 repo，不是 external evidence，也不替代 live doctor、clean VM、offline VM、existing-cloud 验证。
