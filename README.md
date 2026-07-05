@@ -64,14 +64,15 @@ scripts/deploy/smoke.sh --env substrate.env --secrets substrate.secrets.env
 
 Deploy smoke is an API-only remote check. It reads `APP_PUBLIC_BASE_URL` from the env file unless `--base-url` is provided, bootstraps/logs in with `BUILTIN_ADMIN_INITIAL_PASSWORD` from the secrets file, then covers health, workspace/project creation, file upload/list/download/delete, and operator sandbox status. Endpoint/chat smoke is opt-in with `--endpoint-base-url`, `--endpoint-model`, and `--endpoint-secret-ref`, or the matching `SMOKE_ENDPOINT_BASE_URL`, `SMOKE_ENDPOINT_MODEL`, and `SMOKE_ENDPOINT_SECRET_REF` env values. Task artifact smoke stays off by default; enable the Botified `publish_file` artifact smoke explicitly with `--task-smoke` or `SMOKE_TASK=true`, and only with complete endpoint smoke config. On success it creates a task, polls `/events` and `/artifacts`, downloads the artifact, and verifies the marker content. It is still an opt-in acceptance check, not a default gate.
 
-Operator sandbox status and dry-run cleanup use the product API and require an authenticated admin session cookie:
+Operator sandbox status and cleanup use the product API and require an authenticated admin session cookie:
 
 ```bash
 scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
+scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --apply --cookie-file admin.cookie --csrf-token <csrf> [--run-id <run-id>]
 ```
 
-Pass `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. These scripts do not bootstrap or log in; they only call `/api/operator/sandbox/status` and `/api/operator/sandbox/reap`.
+Pass `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. Cleanup defaults to dry-run unless `--apply` is passed; `--dry-run` and `--apply` cannot be combined. These scripts do not bootstrap or log in; they only call `/api/operator/sandbox/status` and `/api/operator/sandbox/reap`.
 
 App deploy renders product config into app-owned Kubernetes resources: non-secret model base URLs named `AGENTSMITH_LITE_MODEL_BASE_URL_*` go into the ConfigMap, while `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, `BUILTIN_ADMIN_INITIAL_PASSWORD`, optional OIDC/admin secrets, and model API keys named `AGENTSMITH_LITE_MODEL_API_KEY_*` go into the Secret. S3 raw credentials and `JUICEFS_META_URL` stay with the substrate/CSI layer.
 

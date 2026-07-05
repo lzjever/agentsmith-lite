@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -68,6 +68,30 @@ describe("Botified runner image acceptance", () => {
     assertNoSecretLeak(result.stdout, result.stderr);
   });
 
+  it("keeps a successful container smoke successful when workspace cleanup needs permission repair", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-cleanup-"));
+    const callsFile = path.join(tempDir, "runtime-calls.jsonl");
+    const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "success-permission-trap");
+
+    const result = runImageSmoke(fakeRuntime, ["--timeout-secs", "3"], secretEnv());
+
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout) as {
+      status: string;
+      markerObserved: boolean;
+      abort: { aborted: boolean };
+    };
+    assert.equal(report.status, "ok");
+    assert.equal(report.markerObserved, true);
+    assert.equal(report.abort.aborted, true);
+
+    const run = findCall(readCalls(callsFile), "run");
+    assert.equal(run.createdWorkspacePermissionTrap, true);
+    assert.equal(typeof run.workspaceMountSrc, "string");
+    assert.equal(existsSync(run.workspaceMountSrc as string), false);
+    assertNoSecretLeak(result.stdout, result.stderr);
+  });
+
   it("cleans up the container after a health timeout", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-timeout-"));
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
@@ -115,7 +139,11 @@ function runImageSmoke(
   });
 }
 
-function writeFakeRuntime(tempDir: string, callsFile: string, mode: "success" | "no-health" | "start-failure"): string {
+function writeFakeRuntime(
+  tempDir: string,
+  callsFile: string,
+  mode: "success" | "success-permission-trap" | "no-health" | "start-failure"
+): string {
   const runtimePath = path.join(tempDir, "fake-docker");
   writeFileSync(runtimePath, `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -187,12 +215,21 @@ const containerPort = Number(portMatch?.[2]);
 const mountArgs = argv.flatMap((arg, index) => arg === "--mount" ? [argv[index + 1] || ""] : []);
 const configMount = mountArgs.find((arg) => arg.includes("dst=/etc/botified/botified-runtime.yaml")) || "";
 const configPath = configMount.match(/(?:^|,)src=([^,]+),dst=\\/etc\\/botified\\/botified-runtime\\.yaml/)?.[1];
+const workspaceMount = mountArgs.find((arg) => arg.includes("dst=/workspace")) || "";
+const workspaceMountSrc = workspaceMount.match(/(?:^|,)src=([^,]+),dst=\\/workspace(?:,|$)/)?.[1];
 const rawConfig = configPath ? fs.readFileSync(configPath, "utf8") : "";
 const configHost = rawConfig.match(/\\n  host: ([^\\n]+)\\n/)?.[1];
 const configPort = Number(rawConfig.match(/\\n  port: (\\d+)\\n/)?.[1]);
 const sawMockProvider = argv.some((arg, index) => arg === "-e" && argv[index + 1] === "BOTIFIED_MOCK_PROVIDER=true");
 const sawServiceKeyValueInArgv = argv.some((arg) => arg.includes("BOTIFIED_SERVICE_KEY="));
-record({ configHost, configPort, containerPort, sawMockProvider, sawServiceKeyValueInArgv });
+let createdWorkspacePermissionTrap = false;
+if (mode === "success-permission-trap" && workspaceMountSrc) {
+  const stateDir = workspaceMountSrc + "/state";
+  fs.mkdirSync(stateDir + "/tasks", { recursive: true });
+  fs.chmodSync(stateDir, 0o500);
+  createdWorkspacePermissionTrap = true;
+}
+record({ configHost, configPort, containerPort, sawMockProvider, sawServiceKeyValueInArgv, workspaceMountSrc, createdWorkspacePermissionTrap });
 
 if (!hostPort || configPort !== containerPort || !sawMockProvider || sawServiceKeyValueInArgv) {
   console.error("unexpected run args " + argv.join(" "));
@@ -296,6 +333,8 @@ function readCalls(callsFile: string): Array<{
   sawMockProvider?: boolean;
   sawServiceKeyValueInArgv?: boolean;
   sawForbiddenSecretEnv?: boolean;
+  workspaceMountSrc?: string;
+  createdWorkspacePermissionTrap?: boolean;
 }> {
   return readFileSync(callsFile, "utf8")
     .trim()
@@ -308,6 +347,8 @@ function readCalls(callsFile: string): Array<{
       sawMockProvider?: boolean;
       sawServiceKeyValueInArgv?: boolean;
       sawForbiddenSecretEnv?: boolean;
+      workspaceMountSrc?: string;
+      createdWorkspacePermissionTrap?: boolean;
     });
 }
 

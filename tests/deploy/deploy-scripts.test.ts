@@ -29,7 +29,8 @@ describe("deploy status/down scripts", () => {
         body
       });
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(operatorSandboxResponse(req.url === "/api/operator/sandbox/reap")));
+      const applyCleanup = body ? JSON.parse(body).apply === true : false;
+      res.end(JSON.stringify(operatorSandboxResponse(req.url === "/api/operator/sandbox/reap" && !applyCleanup)));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -50,6 +51,20 @@ describe("deploy status/down scripts", () => {
       assert.match(status.stdout, /Recent cleanup failures:/);
       assert.match(status.stdout, /previous cleanup failed/);
 
+      const defaultReap = await runNode([
+        "scripts/deploy/operator-sandbox.mjs",
+        "reap",
+        "--base-url",
+        baseUrl,
+        "--cookie-file",
+        cookieFile,
+        "--csrf-token",
+        "csrf-default"
+      ]);
+      assert.equal(defaultReap.status, 0, defaultReap.stderr);
+      assert.match(defaultReap.stdout, /Sandbox cleanup dry-run/);
+      assert.match(defaultReap.stdout, /Dry-run: true/);
+
       const reap = await runNode([
         "scripts/deploy/operator-sandbox.mjs",
         "reap",
@@ -68,19 +83,67 @@ describe("deploy status/down scripts", () => {
       assert.match(reap.stdout, /Dry-run: true/);
       assert.match(reap.stdout, /would store run run1/);
       assert.match(reap.stdout, /would retain artifacts for run1/);
+
+      const apply = await runNode([
+        "scripts/deploy/operator-sandbox.mjs",
+        "reap",
+        "--apply",
+        "--base-url",
+        baseUrl,
+        "--cookie-file",
+        cookieFile,
+        "--csrf-token",
+        "csrf-apply",
+        "--run-id",
+        "run1"
+      ]);
+      assert.equal(apply.status, 0, apply.stderr);
+      assert.match(apply.stdout, /Sandbox cleanup apply/);
+      assert.match(apply.stdout, /Dry-run: false/);
+      assert.match(apply.stdout, /would store run run1/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
 
     assert.deepEqual(requests.map((request) => [request.method, request.url]), [
       ["GET", "/api/operator/sandbox/status"],
+      ["POST", "/api/operator/sandbox/reap"],
+      ["POST", "/api/operator/sandbox/reap"],
       ["POST", "/api/operator/sandbox/reap"]
     ]);
     assert.equal(requests[0]?.cookie, "asl_session=test-session");
     assert.equal(requests[0]?.body, "");
     assert.equal(requests[1]?.cookie, "asl_session=test-session");
-    assert.equal(requests[1]?.csrf, "csrf-test");
-    assert.deepEqual(JSON.parse(requests[1]?.body ?? ""), { runId: "run1" });
+    assert.equal(requests[1]?.csrf, "csrf-default");
+    assert.deepEqual(JSON.parse(requests[1]?.body ?? ""), {});
+    assert.equal(requests[2]?.cookie, "asl_session=test-session");
+    assert.equal(requests[2]?.csrf, "csrf-test");
+    assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), { runId: "run1" });
+    assert.equal(requests[3]?.cookie, "asl_session=test-session");
+    assert.equal(requests[3]?.csrf, "csrf-apply");
+    assert.deepEqual(JSON.parse(requests[3]?.body ?? ""), { apply: true, runId: "run1" });
+  });
+
+  it("operator-sandbox.mjs rejects reap dry-run and apply together", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-helper-flags-"));
+    const cookieFile = path.join(tempDir, "cookie.txt");
+    writeFileSync(cookieFile, "asl_session=test-session\n");
+
+    const result = await runNode([
+      "scripts/deploy/operator-sandbox.mjs",
+      "reap",
+      "--dry-run",
+      "--apply",
+      "--base-url",
+      "http://127.0.0.1:1",
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-test"
+    ]);
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /--dry-run and --apply cannot be used together/);
   });
 
   it("status.sh --resources requires API auth instead of falling back to kubectl-only status", () => {
@@ -247,6 +310,68 @@ if [ "$1" = "delete" ]; then exit 19; fi
     assert.throws(() => readFileSync(kubectlCalls, "utf8"), /ENOENT/);
   });
 
+  it("cleanup-stuck-tasks.sh --apply calls the operator sandbox API helper without kubectl delete", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-cleanup-apply-api-"));
+    const envFile = path.join(tempDir, "deploy.env");
+    const cookieFile = path.join(tempDir, "cookie.txt");
+    const fakeNode = path.join(tempDir, "node");
+    const fakeKubectl = path.join(tempDir, "kubectl");
+    const callsFile = path.join(tempDir, "node-calls.txt");
+    const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
+    writeFileSync(envFile, "APP_PUBLIC_BASE_URL=http://operator.example.test\n");
+    writeFileSync(cookieFile, "asl_session=test-session\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+printf '%s\\n' "$*" > "$FAKE_NODE_CALLS"
+cat <<'OUT'
+Sandbox cleanup apply
+Dry-run: false
+Cleanup targets:
+- would delete Pod/asl-task-1
+- would store run run1 as cleaned
+Runtime directories:
+- would delete runtime dir home for run1
+OUT
+`);
+    writeFileSync(fakeKubectl, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+if [ "$1" = "delete" ]; then exit 19; fi
+`);
+    chmodSync(fakeNode, 0o755);
+    chmodSync(fakeKubectl, 0o755);
+
+    const result = spawnSync("bash", [
+      "scripts/deploy/cleanup-stuck-tasks.sh",
+      "--env",
+      envFile,
+      "--apply",
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-test",
+      "--run-id",
+      "run1"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: callsFile,
+        FAKE_KUBECTL_CALLS: kubectlCalls
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const helperArgs = readFileSync(callsFile, "utf8");
+    assert.match(helperArgs, /scripts\/deploy\/operator-sandbox\.mjs reap/);
+    assert.match(helperArgs, /--apply/);
+    assert.doesNotMatch(helperArgs, /--dry-run/);
+    assert.match(helperArgs, /--run-id run1/);
+    assert.match(result.stdout, /Sandbox cleanup apply/);
+    assert.match(result.stdout, /would delete Pod\/asl-task-1/);
+    assert.throws(() => readFileSync(kubectlCalls, "utf8"), /ENOENT/);
+  });
+
   it("down.sh dry-run deletes Ingress with the app-owned label scope", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-down-"));
     const envFile = path.join(tempDir, "deploy.env");
@@ -380,6 +505,7 @@ function operatorSandboxResponse(dryRun: boolean) {
     ],
     actionSummary: [],
     errors: [],
-    ...(dryRun ? { dryRun: true, storedRunIds: [] } : {})
+    dryRun,
+    storedRunIds: []
   };
 }

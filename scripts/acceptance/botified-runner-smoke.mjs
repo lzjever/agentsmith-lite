@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -79,15 +79,15 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${port}`;
     const configPath = path.join(tempDir, "botified-runtime.yaml");
     const workDir = path.join(tempDir, "workspace");
-    await mkdir(workDir, { recursive: true });
-    await chmod(workDir, 0o777);
+    const hostDataDir = options.mode === "container-image" ? path.join(workDir, "state") : path.join(tempDir, "state");
+    await prepareSmokeWorkspace({ workDir, dataDir: hostDataDir });
 
     if (options.mode === "local-process") {
       await writeFile(configPath, runtimeConfigYaml({
         host: "127.0.0.1",
         port,
         workDir,
-        dataDir: path.join(tempDir, "state")
+        dataDir: hostDataDir
       }));
       childHandle = startBotified({
         binaryPath: options.binaryPath,
@@ -174,7 +174,15 @@ async function main() {
       await stopChild(childHandle);
     }
     if (!options.keepTemp) {
-      await rm(tempDir, { recursive: true, force: true });
+      if (options.mode === "container-image") {
+        repairContainerTempDirPermissions({
+          runtime: options.runtime,
+          image: options.image,
+          tempDir,
+          redactor: activeRedactor
+        });
+      }
+      await cleanupTempDir(tempDir, activeRedactor);
     }
   }
 }
@@ -403,6 +411,103 @@ function cleanupContainer({ runtime, containerName, redactor }) {
   });
 }
 
+async function prepareSmokeWorkspace({ workDir, dataDir }) {
+  const writableDirs = [
+    dataDir,
+    path.join(dataDir, "tasks"),
+    path.join(dataDir, "files"),
+    path.join(dataDir, "files", "objects"),
+    path.join(dataDir, "files", "metadata"),
+    path.join(dataDir, "files", "tmp"),
+    path.join(dataDir, "files", "corrupt"),
+    path.join(dataDir, "timelines"),
+    path.join(dataDir, "timelines", "thread_local"),
+    path.join(dataDir, "timelines", "thread_local", "segments")
+  ];
+  await mkdir(workDir, { recursive: true });
+  await chmod(workDir, 0o777);
+  for (const dir of writableDirs) {
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o777);
+  }
+}
+
+function repairContainerTempDirPermissions({ runtime, image, tempDir, redactor }) {
+  runRuntimeCommand({
+    runtime,
+    args: [
+      "run",
+      "--rm",
+      "--entrypoint", "sh",
+      "--user", "0:0",
+      "--mount", `type=bind,src=${tempDir},dst=/cleanup`,
+      image,
+      "-c", containerPermissionRepairCommand()
+    ],
+    env: runtimeToolEnv(),
+    redactor,
+    description: `repair temporary workspace permissions ${tempDir}`,
+    allowFailure: true
+  });
+}
+
+async function cleanupTempDir(tempDir, redactor) {
+  const firstError = await tryRemoveTempDir(tempDir);
+  if (!firstError) {
+    return;
+  }
+
+  let repairError;
+  try {
+    await makeTreeRemovable(tempDir);
+  } catch (error) {
+    repairError = error;
+  }
+
+  const secondError = await tryRemoveTempDir(tempDir);
+  if (!secondError) {
+    return;
+  }
+
+  const repairDetail = repairError ? `; permission repair failed: ${errorMessage(repairError)}` : "";
+  console.warn(redactor.redact(`warning: failed to remove temporary workspace ${tempDir}: ${errorMessage(secondError)}${repairDetail}`));
+}
+
+async function tryRemoveTempDir(tempDir) {
+  try {
+    await rm(tempDir, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+async function makeTreeRemovable(targetPath) {
+  let stat;
+  try {
+    stat = await lstat(targetPath);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  if (stat.isSymbolicLink()) {
+    return;
+  }
+
+  if (!stat.isDirectory()) {
+    await chmod(targetPath, 0o600);
+    return;
+  }
+
+  await chmod(targetPath, 0o700);
+  const entries = await readdir(targetPath, { withFileTypes: true });
+  await Promise.all(entries.map((entry) => makeTreeRemovable(path.join(targetPath, entry.name))));
+  await chmod(targetPath, 0o700);
+}
+
 function runRuntimeCommand({ runtime, args, env, redactor, description, allowFailure = false }) {
   const result = spawnSync(runtime, args, {
     cwd: repoRoot,
@@ -610,6 +715,19 @@ function formatError(error) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isNotFoundError(error) {
+  return typeof error === "object" && error !== null && error.code === "ENOENT";
+}
+
+function containerPermissionRepairCommand() {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const gid = typeof process.getgid === "function" ? process.getgid() : undefined;
+  if (Number.isInteger(uid) && Number.isInteger(gid)) {
+    return `if chown -R ${uid}:${gid} /cleanup 2>/dev/null; then chmod -R u+rwX /cleanup; else chmod -R a+rwX /cleanup; fi`;
+  }
+  return "chmod -R a+rwX /cleanup";
 }
 
 function collectSensitiveEnvValues(env) {

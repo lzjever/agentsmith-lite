@@ -455,7 +455,7 @@ Known command status and gaps:
 
 - `scripts/dev/up.sh --env/--secrets` 已作为本地 dev env 契约补齐：allowlist 限制可加载的本地 env/secrets key，并有测试覆盖。它只证明本地 API/dev 启动契约，不证明真实 substrate readiness，也不替代 clean/offline/existing-cloud evidence。
 - `npm run acceptance:botified-runner` 已覆盖本地 vendored Botified process：mock-provider、bash marker、timeline/state/abort。`scripts/deploy/smoke.sh --task-smoke` 覆盖产品 API 的 task artifact path：需要 endpoint config，创建 task，轮询 `/events` 和 `/artifacts`，下载 artifact，并校验 marker。二者都不替代 full external acceptance；runner image、sandbox pod、JuiceFS mount、Botified `publish_file` 在真实集群中的证据仍归入 P3/P4 External Acceptance Evidence。
-- `scripts/deploy/operator-sandbox.mjs reap` 当前脚本层只支持 `--dry-run`。如果需要脚本直接执行 cleanup apply，需要补齐并测试；否则文档应说明 apply 通过 operator API 完成。
+- `scripts/deploy/operator-sandbox.mjs reap` 支持默认/显式 `--dry-run` 与显式 `--apply`；apply 通过 operator API 发送 `{ "apply": true }`，并由 deploy script 测试覆盖。
 - `scripts/build-images.sh --tag` 只产生 mutable tag。生产/离线验收必须后续解析并记录 digest。
 
 ### 7.3 Manual gates

@@ -15,14 +15,15 @@ App doctor owns app delivery checks: image metadata, schema bootstrap job, web/A
 
 ## Sandbox Operator CLI
 
-Sandbox lifecycle status and dry-run cleanup are API-backed. Use an admin session cookie file and CSRF token from an explicit login flow; the deploy scripts do not bootstrap or log in.
+Sandbox lifecycle status and cleanup are API-backed. Use an admin session cookie file and CSRF token from an explicit login flow; the deploy scripts do not bootstrap or log in.
 
 ```bash
 scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
 scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
+scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --apply --cookie-file admin.cookie --csrf-token <csrf> [--run-id <run-id>]
 ```
 
-Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh --dry-run` calls `POST /api/operator/sandbox/reap` with `{}` or `{ "runId": "..." }` when `--run-id` is provided. The cleanup script intentionally refuses apply mode in this release.
+Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the env file. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh` calls `POST /api/operator/sandbox/reap`. Dry-run sends `{}` or `{ "runId": "..." }`; apply sends `{ "apply": true }` plus `runId` when `--run-id` is provided. `--dry-run` and `--apply` cannot be combined.
 
 The formatted cleanup plan comes only from the product API. `kubectl` must not be used to derive sandbox cleanup targets.
 

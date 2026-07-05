@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 
-const args = parseArgs(process.argv.slice(2));
+class UsageError extends Error {}
 
 try {
+  const args = parseArgs(process.argv.slice(2));
   if (args.command === "status") {
     requireOption(args.baseUrl, "--base-url");
     requireOption(args.cookieFile, "--cookie-file");
@@ -13,14 +14,17 @@ try {
     requireOption(args.baseUrl, "--base-url");
     requireOption(args.cookieFile, "--cookie-file");
     requireOption(args.csrfToken, "--csrf-token");
-    if (!args.dryRun) {
-      throw new UsageError("operator-sandbox.mjs reap only supports --dry-run");
+    if (args.dryRun && args.apply) {
+      throw new UsageError("--dry-run and --apply cannot be used together");
     }
-    const body = args.runId ? { runId: args.runId } : {};
+    const body = {
+      ...(args.apply ? { apply: true } : {}),
+      ...(args.runId ? { runId: args.runId } : {})
+    };
     const result = await requestJson("POST", "/api/operator/sandbox/reap", args, body);
     printReap(result);
   } else {
-    throw new UsageError("usage: operator-sandbox.mjs <status|reap> --base-url <url> --cookie-file <file> [--csrf-token <token>] [--dry-run] [--run-id <id>]");
+    throw new UsageError("usage: operator-sandbox.mjs <status|reap> --base-url <url> --cookie-file <file> [--csrf-token <token>] [--dry-run|--apply] [--run-id <id>]");
   }
 } catch (error) {
   console.error(error instanceof UsageError ? error.message : `operator sandbox API request failed: ${errorMessage(error)}`);
@@ -47,6 +51,8 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
+    } else if (arg === "--apply") {
+      parsed.apply = true;
     } else {
       throw new UsageError(`unknown argument: ${arg}`);
     }
@@ -223,5 +229,3 @@ function joinUrl(baseUrl, pathname) {
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-
-class UsageError extends Error {}
