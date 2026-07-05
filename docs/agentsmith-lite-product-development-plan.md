@@ -30,6 +30,7 @@ AgentSmith Lite 是从原 `agentsmith-project` 大幅简化出来的云端智能
 | 决策 | 说明 |
 | --- | --- |
 | 两个 repo | `agentsmith-lite` 和 `agentsmith-lite-substrates`。不再拆出 AFSCP、ASBCP、runner、release-kit 等产品 repo。 |
+| 外部依赖准备 | 不拆第三个 repo。外部依赖准备、离线缓存、lock/report 生成和 preflight/doctor 静态诊断都归入 `agentsmith-lite-substrates`；`dist/`、`offline-cache/`、`out/` 等为 generated artifacts，可发布到制品库/对象存储，但不进 git。 |
 | LLM 接口 | 只兼容 OpenAI-compatible Chat Completions/Responses 风格接口。移除 LLMUP。 |
 | Agent runtime | 使用 Botified。移除 Codex 作为 agent 核心的设计。 |
 | 文件系统 | 只支持 JuiceFS CSI 作为云端/私有化文件系统 provider。移除 JVS、WebDAV、远程/本地挂载。 |
@@ -107,6 +108,7 @@ Owned by substrates repo:
 - namespace、quota、StorageClass、PVC、dev ingress 基础资源；
 - p1-real offline cache download/validate/import；
 - `substrate.env`、`substrate.secrets.env`、`kubeconfig`、`doctor-report.json`；
+- generated offline cache、artifact lock、checksums、diagnostic reports；这些可由制品库/对象存储承载，但不作为 tracked git 内容；
 - existing-cloud 模式的环境校验。
 
 Not owned:
@@ -170,6 +172,8 @@ Required outputs:
 | `dist/offline-cache/manifest.yaml` | `prepare-offline-cache.sh` or `download-online.sh --artifacts` | `install-offline.sh`, `doctor.sh` | 标记 `cacheMode: p1-real` 才能作为真实离线安装证据。 |
 | `dist/offline-cache/images/oci/*.tar` | `download-online.sh --artifacts` | `install-offline.sh` | 只允许 substrate-owned images。 |
 | `out/doctor-report.json` | `doctor.sh` | operator/developer | 事实报告，不是治理 ledger。 |
+
+Generated artifact policy：`dist/offline-cache/`、`out/artifacts/`、`out/doctor-report.json` 和同类 lock/checksum/report 均不进 git；需要跨环境复用或留存时发布到制品库/对象存储，并通过 manifest/checksum/digest 校验。
 
 Secret boundary:
 
@@ -426,10 +430,10 @@ scripts/test.sh
 Important semantics:
 
 - `download-online.sh` without `--artifacts` writes a P0 contract skeleton only；它不是真实离线安装包。
-- `prepare-offline-cache.sh` 是一键下载/导出依赖并委托 `download-online.sh` 生成 p1-real cache；它不是 live install，也不提交 file:// lock/cache。
+- `prepare-offline-cache.sh` 是 `agentsmith-lite-substrates` 内的一键下载/导出依赖入口，并委托 `download-online.sh` 生成 p1-real cache；它不是第三个 repo，不是 live install，也不提交 file:// lock/cache。
 - 非 dry-run `install-online.sh` / `install-offline.sh` 必须使用 `cacheMode: p1-real`。
 - Existing-cloud 使用同一 env/secrets 格式；它验证管理员提供的服务，不创建云资源。
-- `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 substrate 静态诊断 thin wrapper；它不是第三个 repo，不是 external evidence，也不替代 live doctor、clean VM、offline VM、existing-cloud 验证。
+- `scripts/preflight.sh` 只是 `scripts/doctor.sh --dry-run` 的 substrate 静态合同诊断 thin wrapper；它不是第三个 repo，不是 external evidence，也不替代 live doctor、clean VM、offline VM、existing-cloud 验证。
 
 ### 7.2 App repo 当前命令
 
@@ -530,7 +534,7 @@ Deliverables:
 
 - `download-online.sh` 支持 p1-real artifact lock；
 - `install-online.sh` 和 `install-offline.sh` 非 dry-run 支持 p1-real；
-- `doctor.sh` 检查 env split、Postgres、S3 probe、JuiceFS CSI、PVC Bound、RWX smoke；
+- `doctor.sh` 检查 env split、Postgres、S3 probe、JuiceFS CSI、PVC Bound、RWX smoke；Postgres live 检查不依赖宿主机 `psql`，而是在集群内启动临时 Job，使用 digest-pinned postgres image 执行 read-only `select 1`；
 - allowlist 拒绝 app-owned images 和未知 OCI archives；
 - `out/substrate.env`、`out/substrate.secrets.env`、`out/doctor-report.json`；
 - docs：offline install、existing-cloud、env schema。
@@ -541,7 +545,7 @@ Local evidence:
 - `download-online.sh --contract-only` 只证明 skeleton contract；
 - `download-online.sh --artifacts file://fixtures` 可证明 lock/checksum/allowlist 逻辑；
 - `install-*.sh --dry-run` 只证明 env/cache validation；
-- fake `kubectl/psql` tests 只证明 doctor control flow 和 redaction。
+- fake `kubectl/probe` tests 只证明 doctor control flow、probe invocation 和 redaction。
 
 External Acceptance Evidence:
 
