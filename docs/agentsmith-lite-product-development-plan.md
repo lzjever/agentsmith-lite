@@ -8,7 +8,7 @@
 
 本计划不是“已完成报告”。它是给开发团队继续收敛实现、补齐真实验收证据的产品研发计划。当前审计发现，上一版计划有三个根因问题：
 
-1. **范围分层混乱**：把 Lite 核心目标、未来增强项、参考系统遗留能力混进同一个 P0/P2 范围，导致 chat persistence、audit/usage、workspace/project 全量 CRUD、endpoint edit、file delete UI 等未实现或非核心能力被误写为 MVP。
+1. **范围分层混乱**：把 Lite 核心目标、未来增强项、参考系统遗留能力混进同一个 P0/P2 范围，导致 chat persistence、audit/usage、workspace/project 全量 CRUD、endpoint edit、project file delete UI 等未实现或非核心能力被误写为 MVP；同时曾把已经实现的 server-side project file delete API/core smoke 和 UI 删除能力混在一起。
 2. **证明层级混淆**：本地 unit/contract/fake smoke 只能证明代码路径、接口边界和安全限制，不能证明 clean VM、断网 VM、真实云 K8s、真实 Botified bash artifact 已经可用。计划必须把这些外部验收列为 redacted evidence，而不是用本地测试替代。
 3. **命令契约与证明边界曾经混在一起**：`scripts/dev/up.sh --env/--secrets` 加 `--app-env/--app-secrets` 的本地 dev env 契约已补齐并测试；但它只证明本地开发启动契约，真实 clean/offline/existing-cloud、runner image/K8s/JuiceFS evidence 仍不能由本地命令替代。
 
@@ -47,7 +47,7 @@ MVP/Core 是开发团队必须优先完成并证明的闭环：
 | 范围 | Core 内容 |
 | --- | --- |
 | 部署模型 | 自建 substrates 或 existing-cloud 使用同一 `substrate.env` + `substrate.secrets.env` 契约。 |
-| API | 内建 admin/session、workspace/project 最小 create/list/select、endpoint create/list/use、chat smoke、task create/cancel/events/artifacts、project file list/upload/download。 |
+| API | 内建 admin/session、workspace/project 最小 create/list/select、endpoint create/list/use、chat smoke、task create/cancel/events/artifacts、project file list/upload/download/delete。 |
 | Runtime | Botified vendored/pinned，构建 runner image，sandbox pod 运行 Botified，支持 bash 写文件并发布 artifact。 |
 | Sandbox | 每个任务一个 sandbox pod；挂载 JuiceFS PVC；最小 RBAC；无 `pods/exec`；TTL/lease/reap/status。 |
 | Files | 服务端负责路径安全、权限、上传、下载、artifact 投影。UI 只通过 API 展示和触发。 |
@@ -65,7 +65,7 @@ Core 中的“chat”不是长期对话产品。MVP 只要求服务端可以通�
 | chat persistence、chat attachments、conversation UI | 不属于云端沙箱 agent 平台的首个闭环。 |
 | workspace/project 全量 CRUD、membership/group/template UI | 会把权限产品化提前，拖慢 sandbox runtime。Core 只保留最小所有者/admin 模型。 |
 | endpoint edit/delete、多 provider abstraction、模型路由 UI | Core 先支持 create/list/use；编辑删除后续再做。 |
-| project file delete UI、文件版本、save/restore、回收站 | 删除策略涉及数据安全，MVP 不抢跑。artifact 下载和项目文件下载优先。 |
+| project file delete UI、文件版本、save/restore、回收站 | Server-side file delete API 和 core smoke 已属于 Core；UI 删除流程、版本化恢复和回收站后置，避免把数据恢复语义过早产品化。 |
 | audit/usage dashboard | 可先保留 server logs/task events/resource counters；产品化报表后置。 |
 | OIDC/Keycloak、组织级 RBAC | 内建 admin 先完成私有化闭环。 |
 | TUI 产品面 | 未来 TUI 只能作为 API client，不承载业务逻辑。 |
@@ -229,13 +229,16 @@ agentsmith-lite/
   infra/
     db/migrations/
     docker/
-    k8s/
   third_party/botified/
     PINNED_SOURCE.json
   scripts/
+    acceptance/
     dev/
     deploy/
     db/
+    visual/
+    build-images.sh
+    build-offline-bundle.sh
   e2e/
     smoke/
     operator-lifecycle/
@@ -251,7 +254,7 @@ Required outputs:
 | `dist/` | `npm run build` | tests/dev/docker | compiled server packages and web assets。 |
 | `agentsmith-lite/app@sha256:*` | image build/push | deploy/offline bundle | 生产/离线验收必须 digest-pinned。 |
 | `agentsmith-lite/botified-runner@sha256:*` | image build/push | sandbox pods/offline bundle | 必须来自 pinned Botified source 或等价批准来源。 |
-| `out/manifests/` | `scripts/deploy/render.sh` | apply/doctor | namespace-scoped app resources only。 |
+| `out/manifests/` | `scripts/deploy/render.sh` via `packages/sandbox-controller/src/appManifestRenderer.ts` | apply/doctor | generated namespace-scoped app resources only；no tracked static K8s manifest directory is required。 |
 | `dist/app-offline-bundle/` | `scripts/build-offline-bundle.sh` | disconnected app deploy | app images only，不包含 substrate cache。 |
 | `out/app-doctor-report.json` | `scripts/deploy/doctor.sh` | operator/developer | 事实报告，不是 release gate ledger。 |
 | `out/smoke-report.json` | smoke scripts | operator/developer | 轻量或 full smoke 结果，需标明 profile。 |
@@ -277,7 +280,7 @@ Reference decision table:
 | `.reference/agentsmith/packages/application` | modify | `packages/application` | 业务逻辑服务端完成；删除 governance/JVS/runner-release paths。 |
 | `.reference/agentsmith/packages/api-entry-node` | modify | `packages/api-entry-node` | 保留 Node API；删除 Keycloak hard dependency、AFSCP、ASBCP、LLMUP。 |
 | `.reference/agentsmith/src` | modify | `src/web` | 静态 API client；删除 file versioning、mount、WebDAV、terminal。 |
-| `.reference/agentsmith/infra/deploy` | mine | `infra/k8s`, `scripts/deploy` | 只复制 namespace-scoped app manifest ideas。 |
+| `.reference/agentsmith/infra/deploy` | mine | `packages/sandbox-controller/src/appManifestRenderer.ts`, `scripts/deploy`, generated `out/manifests` | 只借鉴 namespace-scoped app manifest ideas；当前 repo 使用 renderer 生成 manifests，不维护 tracked static manifest directory。 |
 | `.reference/agentsmith/e2e` | selective | `e2e/smoke` | 保留少量行为 smoke；删除 story/gate/release matrix。 |
 | `.reference/agentsmith-release-kit` | mine | substrates scripts | 只取小型 redaction/offline helper ideas；不复制 evidence system。 |
 | `.reference/agentsmith-sandbox-control-plane` | mine | `packages/sandbox-controller` | 保留 sandbox 状态机/RBAC 思路；不保留第三控制平面。 |
@@ -344,7 +347,7 @@ Core tables:
 | endpoints | `model_endpoints` | OpenAI-compatible fields；secret value 只存 secret ref 或 server-side secret。 |
 | files | `project_files` 可选索引；实际内容在 JuiceFS | 服务端负责 path safety。 |
 | tasks | `tasks`, `task_events`, `task_artifacts` | task lifecycle 和 Botified timeline projection。 |
-| sandbox | `sandbox_runs`, `sandbox_leases` | pod identity、TTL、cleanup status。 |
+| sandbox | `postgres_json_docs` collection `sandbox_run_state` + `runtime_leases` | pod identity、TTL、cleanup status；没有 dedicated `sandbox_runs` 或 `sandbox_leases` table/migration。 |
 
 Deferred records:
 
@@ -352,7 +355,7 @@ Deferred records:
 - `audit_events`、`usage_events` 的产品化报表；
 - membership/group/template/RBAC 扩展；
 - endpoint edit history；
-- file delete/recycle/versioning metadata。
+- file recycle/versioning metadata and UI delete workflow state。
 
 ### 6.3 Files 与 artifacts
 
@@ -360,9 +363,9 @@ Core 文件规则：
 
 - 项目文件位于 JuiceFS PVC 的 project-scoped 目录。
 - API 对所有 path 做 normalization，禁止 traversal、absolute path、symlink escape。
-- Project files Core：list、upload、download。
+- Project files Core：list、upload、download、server-side delete API。Delete rejects the `files/` root and does not imply recycle/version restore semantics。
 - Task artifacts Core：从 Botified timeline 或 runtime marker 投影；支持 list/download。
-- Project file delete 和版本化恢复 deferred。
+- Project file delete UI、版本化恢复和回收站 deferred。
 
 ### 6.4 Sandbox 与 Botified
 
@@ -561,7 +564,7 @@ Core deliverables:
 - workspace/project create/list/select；
 - endpoint create/list/use，字段限定 OpenAI-compatible；
 - server-side chat smoke，不要求持久化；
-- project file list/upload/download；
+- project file list/upload/download/delete through server-side API；
 - task create/cancel/status/events/artifacts API；
 - API contract snapshot；
 - static Web UI 调用 `/api/...`；
@@ -588,7 +591,7 @@ Deferred:
 - endpoint edit/delete；
 - chat_sessions/chat_messages/chat_attachments；
 - audit/usage dashboard；
-- project file delete UI；
+- project file delete UI、版本化恢复、回收站；
 - OIDC。
 
 ### P3：Botified Sandbox Agent Tasks
@@ -758,4 +761,4 @@ This checklist is for handoff, not a release gate bureaucracy.
 3. Collect full runner image/K8s/JuiceFS live artifact evidence: runner image digest, sandbox pod/PVC mount, Botified bash marker, timeline/artifact, cancel/reap.
 4. Run real `scripts/deploy/smoke.sh --task-smoke` with any `SMOKE_*` values in `--app-env`, and, when collecting manual reclaim evidence, `--task-reclaim-smoke [--task-reclaim-reap-apply]` in self-hosted/existing-cloud/offline deploys and archive redacted reports; these smokes remain supporting evidence and do not replace real K8s/JuiceFS observations.
 5. Generate real `config/offline-artifacts.env` and real substrate env/secrets, then run clean VM/disconnected VM/existing-cloud acceptance.
-6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、file delete UI in deferred backlog until Core runtime/deploy evidence exists.
+6. Keep chat persistence、audit/usage dashboard、full CRUD、endpoint edit/delete、project file delete UI/version/restore/recycle bin in deferred backlog until Core runtime/deploy evidence exists; keep the existing server-side file delete API/core smoke as Core.

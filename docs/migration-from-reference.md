@@ -47,11 +47,27 @@
 | `.reference/agentsmith/packages/api-entry-node` | `packages/api-entry-node` | `modify` | 保留 Node API entrypoint；删除 Keycloak hard dependency、AFSCP/ASBCP/LLMUP/JVS/WebDAV/mount/terminal route。所有业务能力在服务端完成。 | **Core**。route/API tests 证明 active surface；真实 ingress/session 由 deploy smoke 证明。 |
 | `.reference/agentsmith/src` | `src/web` | `modify` | Web 是静态 API client，只做 session、表单、列表、timeline、artifact/file 展示。删除 file versioning、save/restore、mount、WebDAV、terminal、K8s/Botified/Postgres/S3 直接访问。 | **Core** UI shell。视觉和真实浏览器体验可作为手工/visual evidence；业务不能落在 UI。 |
 | `.reference/agentsmith/infra/docker` 或旧 image build 片段 | `infra/docker` | `modify` | 保留 app image 与 Botified runner image 的构建边界；runner image 来自 pinned Botified source。不得构建 Codex runner、AFSCP、ASBCP、LLMUP、JVS 或 release-kit images。 | **Core**。Dockerfile 形状可本地检查；digest-pinned image acceptance 属于 **External Evidence**。 |
-| `.reference/agentsmith/infra/deploy` | `scripts/deploy`，以及未来需要时的 `infra/k8s` | `mine` | 只借鉴 namespace-scoped manifest/apply/status/doctor/down/smoke 形状。当前 active deploy scripts 只能管理 app-owned resources，不做 cluster bootstrap、substrate install 或 forbidden RBAC。 | **Core** + **External Evidence**。本地 deploy tests 证明 plan/RBAC；真实 cluster apply/smoke 另存证据。 |
+| `.reference/agentsmith/infra/deploy` | `packages/sandbox-controller/src/appManifestRenderer.ts`、`scripts/deploy`、generated `out/manifests` | `mine` | 只借鉴 namespace-scoped manifest/apply/status/doctor/down/smoke 形状。当前没有 tracked `infra/k8s` 静态目录；manifest 由 renderer 生成到 `out/manifests`。active deploy scripts 只能管理 app-owned resources，不做 cluster bootstrap、substrate install 或 forbidden RBAC。 | **Core** + **External Evidence**。本地 deploy tests 证明 plan/RBAC；真实 cluster apply/smoke 另存证据。 |
 | `.reference/agentsmith/infra/db` 或旧 app schema 片段 | `infra/db/migrations` | `modify` | 只保留 Lite product schema：workspace/project/endpoint/task/event/artifact/file 等。不得导入 substrate schema、JVS schema、governance ledger 或 release evidence tables。 | **Core**。migration tests 证明 app DB bundle。 |
 | `.reference/botified` pinned source | `third_party/botified` | `vendor` | 以 pinned source 进入第三方目录，只作为 runner runtime 输入。`PINNED_SOURCE.json` 是来源锚点；optional Botified TUI/playground/provider extras 不进入产品面。 | **Core** runtime input；真实 Botified binary/service 行为属于 **External Evidence**。 |
 | `.reference/agentsmith/e2e` | `e2e/smoke` | `modify` | 保留少量产品行为 smoke：API、task、artifact、deploy smoke。删除 story/gate/release matrix 和治理系统测试。 | **Core** local/fake smoke；live smoke 报告属于 **External Evidence**。 |
 | `.reference/agentsmith/e2e` operator/reclaim 片段 | `e2e/operator-lifecycle` | `modify` | 只保留 operator lifecycle 的事实型验证：task cancel、TTL、reap、resource cleanup。不得恢复 release rehearsal 或 quality gate matrix。 | **External Evidence** 优先；本地脚本可作为命令形状 smoke。 |
+
+## 2.1 Active Script Root Coverage
+
+`git ls-files scripts` 下的 active script roots 也必须有迁移决策。脚本是产品边界的一部分：它们可以是 build/dev/deploy/diagnostic helper，但不能成为旧系统回流的命令入口。
+
+| Active script root | Reference repo/path | Decision | 原因 | Core/Deferred/External Evidence 关系 |
+| --- | --- | --- | --- | --- |
+| `scripts/dev` | `.reference/agentsmith` local dev/env helper ideas | `mine` | 只保留本地 API/dev 启动和 env/secrets allowlist 契约。不得启动 substrate install、旧控制平面、provider proxy、mount daemon 或 release workflow。 | **Core** local dev contract；不替代真实 substrate readiness。 |
+| `scripts/db` | `.reference/agentsmith/infra/db` migration runner ideas | `modify` | 只执行 app-owned `infra/db/migrations`。不得安装 substrate schema、JVS schema、governance ledger 或外部控制平面 schema。 | **Core** app DB bootstrap；真实 Postgres 可用性属于 **External Evidence**。 |
+| `scripts/deploy` | `.reference/agentsmith/infra/deploy` namespace deploy helper ideas | `mine` | 只包含 app render/apply/status/doctor/smoke/down/import/cleanup helpers。manifest 来自 app renderer 并写入 `out/manifests`；脚本不得管理 cluster bootstrap、substrate credentials、cluster-wide RBAC 或 old release gates。 | **Core** command shape and static checks；真实 apply/smoke 属于 **External Evidence**。 |
+| `scripts/acceptance` | `.reference/botified` runner acceptance ideas | `modify` | 只验证 pinned Botified runner 的 local process/container acceptance。不得把 Botified optional TUI/playground/provider extras 或 Codex runner contract 变成产品命令。 | **Core** local runner-process evidence；container/K8s/JuiceFS 仍按 **External Evidence** 分层。 |
+| `scripts/visual` | `.reference/agentsmith` UI smoke/screenshot ideas | `mine` | 只做静态 Web UI 视觉诊断，使用 fake product services。不得直连 Botified/K8s/Postgres/S3/JuiceFS 或成为 release gate。 | Diagnostic only；不替代 API/deploy evidence。 |
+| `scripts/build-images.sh` | `.reference/agentsmith/infra/docker` image build helper ideas | `modify` | 只构建 app image 和 Botified runner image，并可写 digest-pinned lock。不得构建 Codex runner、AFSCP、ASBCP、LLMUP、JVS 或 release-kit images。 | **Core** packaging helper；push digest evidence 属于 **External Evidence**。 |
+| `scripts/build-offline-bundle.sh` | `.reference/agentsmith-release-kit` offline bundle helper ideas | `mine` | 只打包 app/runner digest-pinned images 和 app bundle manifest/checksums。不得复制 release campaign、substrate offline cache、evidence bureaucracy 或 governance command tree。 | **Core** app offline bundle shape；真实 disconnected app deploy 属于 **External Evidence**。 |
+| `scripts/check-forbidden-surfaces.sh` | boundary audit helper ideas | `mine` | 只做 lightweight active-surface grep，把失败指向本 ledger。它不是 release gate，也不替代人工路径级审计。 | **Core** boundary sanity check。 |
+| `scripts/copy-web-assets.mjs` | static web build helper ideas | `mine` | 只把 app-owned static Web assets 复制到 build output。不得引入 reference UI build pipeline、asset CDN、TUI bundle 或 product terminal entrypoint。 | **Core** build helper。 |
 
 ## 3. Substrates Repo Boundary Ledger
 
@@ -99,6 +115,8 @@
 
 如果新增 workspace package，开发者必须先判断它来自哪个 reference path、属于 `keep / modify / delete / deferred / vendor / mine` 的哪一种、是否属于 Core，以及需要什么本地或外部证据。新增 package 不能只是为了容纳旧系统回流。
 
+同理，如果 `git ls-files scripts` 出现新的 top-level script root 或 root-level helper，必须先在 **Active Script Root Coverage** 中补迁移决策，再把它作为 active command surface 使用。
+
 ## 6. Check Contract
 
 `npm run check:forbidden-surfaces` 和 `tests/boundary/repo-scope.test.ts` 只做轻量边界确认：
@@ -106,6 +124,6 @@
 - active source 中不得出现被删除系统的 package、command、route、manifest 或 UI entrypoint；
 - `third_party/botified` 不得把 optional Botified TUI/playground/provider extras 当成 runner 输入；
 - `package.json` 的 workspace 列表必须保持 Lite 范围；
-- active workspace package 必须能在本 ledger 中找到路径锚点。
+- active workspace package 和 active script roots 必须能在本 ledger 中找到路径锚点。
 
 这些检查不是文档格式治理层，也不替代人工审计。它们的作用是把失败指向本 ledger，让开发团队回到路径级迁移决策，而不是只修一个 grep 词。

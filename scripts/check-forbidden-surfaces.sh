@@ -4,13 +4,42 @@ cd "$(dirname "$0")/.."
 
 deny='AFSCP|JVS|WebDAV|LLMUP|MONGO_|REDIS_|KEYCLOAK_|ASBCP_|pods/exec|xterm|product:ready|gate:|release:campaign|agent-task-runner|agent-runner-contract'
 ledger="docs/migration-from-reference.md"
-paths=(package.json packages src infra e2e)
+paths=(package.json packages src infra e2e scripts)
 existing=()
 for path in "${paths[@]}"; do
   [ -e "$path" ] && existing+=("$path")
 done
 
-if rg -n "$deny" "${existing[@]}" --glob '!**/*.md' --glob '!third_party/**'; then
+is_allowed_active_hit() {
+  local hit="$1"
+  case "$hit" in
+    # The doctor script names pods/exec only as a negative RBAC probe.
+    "scripts/deploy/doctor.sh:"*"for resource in pods/exec persistentvolumes persistentvolumeclaims clusterroles; do")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+active_hits=()
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  if ! is_allowed_active_hit "$hit"; then
+    active_hits+=("$hit")
+  fi
+done < <(
+  rg -n "$deny" "${existing[@]}" \
+    --glob '!**/*.md' \
+    --glob '!**/.reference/**' \
+    --glob '!dist/**' \
+    --glob '!out/**' \
+    --glob '!third_party/**' \
+    --glob '!**/third_party/**' \
+    --glob '!scripts/check-forbidden-surfaces.sh' || true
+)
+
+if [ "${#active_hits[@]}" -gt 0 ]; then
+  printf '%s\n' "${active_hits[@]}"
   echo "Forbidden removed surface found in active app source. See ${ledger} for migration decisions." >&2
   exit 1
 fi
