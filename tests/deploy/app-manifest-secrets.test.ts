@@ -187,9 +187,29 @@ describe("app manifest rendering", () => {
     const overrideConfigMap = overrideManifests.find(
       (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
     );
+    const overrideDeployment = overrideManifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
     const overrideConfigMapData = (overrideConfigMap as { data?: Record<string, string> } | undefined)?.data;
+    const overrideMountPath = overrideDeployment?.spec.template.spec.containers[0]?.volumeMounts[0]?.mountPath;
 
     assert.equal(overrideConfigMapData?.AGENTSMITH_LITE_DATA_DIR, "/custom-data-root");
+    assert.equal(overrideMountPath, "/custom-data-root");
+  });
+
+  it("rejects relative API data roots before rendering Kubernetes env or mounts", () => {
+    assert.throws(
+      () =>
+        renderAppManifests({
+          namespace: "agentsmith",
+          imageTag: "dev",
+          env: {
+            AGENTSMITH_LITE_DATA_DIR: "relative-data-root"
+          },
+          secrets: {}
+        }),
+      /AGENTSMITH_LITE_DATA_DIR must be an absolute path/
+    );
   });
 
   it("renders the namespace sandbox limit default and operator override", () => {

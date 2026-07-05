@@ -12,7 +12,7 @@ export interface AppManifestInput {
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
-  const appDataRoot = input.env.AGENTSMITH_LITE_DATA_DIR ?? "/agentsmith-lite";
+  const appDataRoot = resolveAppDataRoot(input.env);
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
     "app.kubernetes.io/part-of": "agentsmith-lite",
@@ -86,7 +86,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 volumeMounts: [
                   {
                     name: "project-files",
-                    mountPath: "/agentsmith-lite"
+                    mountPath: appDataRoot
                   }
                 ]
               }
@@ -197,6 +197,14 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     }
   ];
+}
+
+function resolveAppDataRoot(env: Record<string, string>): string {
+  const dataRoot = env.AGENTSMITH_LITE_DATA_DIR ?? "/agentsmith-lite";
+  if (!dataRoot.startsWith("/")) {
+    throw new Error("AGENTSMITH_LITE_DATA_DIR must be an absolute path");
+  }
+  return dataRoot;
 }
 
 function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels: Record<string, string>): KubernetesResource | undefined {
