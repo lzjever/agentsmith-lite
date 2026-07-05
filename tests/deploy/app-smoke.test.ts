@@ -15,6 +15,10 @@ const appSmokeNotCovered = [
   "independent-k8s-resource-deletion-observation",
   "full-external-evidence"
 ];
+const appSmokeSandboxCoverage = "task-api-sandbox-render-pvc-runner-image-contract";
+const appSmokeSandboxContractScope = "product-api-sandbox-render-contract";
+const defaultSandboxRunnerImage = "registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const defaultSandboxPvcClaimName = "agentsmith-lite-files";
 
 describe("deploy app smoke", () => {
   it("smoke.sh dispatches to the API-only app smoke with env base URL and contract admin secret", () => {
@@ -526,9 +530,11 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           status: "running",
           endpointId: "endpoint_task",
           sandbox: {
-            resources: [
-              { kind: "Secret", metadata: { name: "asl-botified-task-smoke" }, stringData: { BOTIFIED_SERVICE_KEY: "task-service-key-secret" } }
-            ]
+            resources: sandboxResources({
+              taskId: "task_smoke",
+              runId: "run_task_smoke",
+              subPath: "workspaces/workspace_task/projects/project_task"
+            })
           }
         }));
       } else if (req.method === "GET" && req.url === "/api/tasks/task_smoke/events") {
@@ -588,7 +594,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         "secret/task-smoke"
       ], {
         BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword,
-        SMOKE_TASK: "true"
+        SMOKE_TASK: "true",
+        BOTIFIED_RUNNER_IMAGE: defaultSandboxRunnerImage,
+        JUICEFS_PVC_NAME: defaultSandboxPvcClaimName,
+        AGENTSMITH_LITE_SANDBOX_MODE: "live"
       });
 
       assert.equal(result.status, 0, result.stderr);
@@ -609,7 +618,8 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
             "project-file-api-crud",
             "operator-sandbox-status-api",
             "endpoint-chat-api",
-            "task-api-create-events-artifact-download-marker"
+            "task-api-create-events-artifact-download-marker",
+            appSmokeSandboxCoverage
           ],
           notCovered: appSmokeNotCovered
         },
@@ -626,6 +636,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           artifactBytes: 51,
           artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
           markerObserved: true,
+          sandboxContract: sandboxContractSummary({
+            taskId: "task_smoke",
+            subPath: "workspaces/workspace_task/projects/project_task"
+          }),
           runScopedStatus: {
             runId: "run_task_smoke",
             activeTaskCount: 1,
@@ -773,7 +787,14 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
             id: "task_smoke_reclaim_case",
             runId: "run_smoke_reclaim_case",
             status: "running",
-            endpointId: "endpoint_reclaim"
+            endpointId: "endpoint_reclaim",
+            sandbox: {
+              resources: sandboxResources({
+                taskId: "task_smoke_reclaim_case",
+                runId: "run_smoke_reclaim_case",
+                subPath: "workspaces/workspace_reclaim/projects/project_reclaim"
+              })
+            }
           }));
         } else {
           assert.match(parsedBody.prompt as string, /reclaim/i);
@@ -784,9 +805,11 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
             status: "running",
             endpointId: "endpoint_reclaim",
             sandbox: {
-              resources: [
-                { kind: "Secret", metadata: { name: "asl-botified-task-reclaim" }, stringData: { BOTIFIED_SERVICE_KEY: "reclaim-service-key-secret" } }
-              ]
+              resources: sandboxResources({
+                taskId: "task_reclaim",
+                runId: "run_reclaim",
+                subPath: "workspaces/workspace_reclaim/projects/project_reclaim"
+              })
             }
           }));
         }
@@ -896,6 +919,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
             "operator-sandbox-status-api",
             "endpoint-chat-api",
             "task-api-create-events-artifact-download-marker",
+            appSmokeSandboxCoverage,
             "task-api-cancel-scoped-reap-dry-run"
           ],
           notCovered: appSmokeNotCovered
@@ -913,6 +937,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           artifactBytes: 51,
           artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
           markerObserved: true,
+          sandboxContract: sandboxContractSummary({
+            taskId: "task_smoke_reclaim_case",
+            subPath: "workspaces/workspace_reclaim/projects/project_reclaim"
+          }),
           runScopedStatus: {
             runId: "run_smoke_reclaim_case",
             activeTaskCount: 1,
@@ -928,6 +956,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           runId: "run_reclaim",
           createStatus: "running",
           cancelStatus: "stopping",
+          sandboxContract: sandboxContractSummary({
+            taskId: "task_reclaim",
+            subPath: "workspaces/workspace_reclaim/projects/project_reclaim"
+          }),
           reapScope: {
             scopedToRunId: true,
             applyEnabled: false
@@ -1061,7 +1093,14 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           id: "task_reclaim_apply",
           runId: "run_reclaim_apply",
           status: "running",
-          endpointId: "endpoint_apply"
+          endpointId: "endpoint_apply",
+          sandbox: {
+            resources: sandboxResources({
+              taskId: "task_reclaim_apply",
+              runId: "run_reclaim_apply",
+              subPath: "workspaces/workspace_apply/projects/project_apply"
+            })
+          }
         }));
       } else if (req.method === "POST" && req.url === "/api/tasks/task_reclaim_apply/cancel") {
         assert.equal(body, "");
@@ -1122,6 +1161,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
             "project-file-api-crud",
             "operator-sandbox-status-api",
             "endpoint-chat-api",
+            appSmokeSandboxCoverage,
             "task-api-cancel-scoped-reap-dry-run",
             "task-api-cancel-scoped-reap-apply",
             "task-api-cancel-scoped-reap-final-dry-run"
@@ -1136,6 +1176,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           runId: "run_reclaim_apply",
           createStatus: "running",
           cancelStatus: "stopping",
+          sandboxContract: sandboxContractSummary({
+            taskId: "task_reclaim_apply",
+            subPath: "workspaces/workspace_apply/projects/project_apply"
+          }),
           reapScope: {
             scopedToRunId: true,
             applyEnabled: true
@@ -1187,6 +1231,249 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
       ]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("app-smoke.mjs rejects task sandbox contract gaps and env drift without leaking response secrets", async () => {
+    const cases: Array<{
+      name: string;
+      expectedMessage: RegExp;
+      env?: Record<string, string>;
+      resources: (ids: { taskId: string; runId: string; projectId: string; workspaceId: string }) => unknown[];
+      leakPatterns: RegExp[];
+    }> = [
+      {
+        name: "missing-pod",
+        expectedMessage: /task smoke sandbox\.resources must contain exactly one Pod/,
+        resources: () => [
+          {
+            kind: "Secret",
+            metadata: {
+              name: "asl-botified-missing-pod",
+              annotations: {
+                endpoint: "https://leaky.missing-pod.test/v1"
+              }
+            },
+            stringData: {
+              BOTIFIED_SERVICE_KEY: "missing-pod-service-key-secret",
+              MODEL_API_KEY: "sk-missing-pod-model-key"
+            }
+          }
+        ],
+        leakPatterns: [
+          /missing-pod-admin-secret/,
+          /secret\/missing-pod-smoke/,
+          /missing-pod-service-key-secret/,
+          /sk-missing-pod-model-key/,
+          /https:\/\/models\.missing-pod\.test\/v1/,
+          /https:\/\/leaky\.missing-pod\.test\/v1/
+        ]
+      },
+      {
+        name: "image-drift",
+        expectedMessage: /task smoke botified-runner image does not match BOTIFIED_RUNNER_IMAGE/,
+        env: {
+          BOTIFIED_RUNNER_IMAGE: "registry.example.test/agentsmith/botified-runner@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        resources: ({ taskId, runId, projectId, workspaceId }) => sandboxResources({
+          taskId,
+          runId,
+          subPath: `workspaces/${workspaceId}/projects/${projectId}`,
+          runnerImage: "registry.example.test/agentsmith/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          serviceKey: "image-drift-service-key-secret",
+          modelKey: "sk-image-drift-model-key"
+        }),
+        leakPatterns: [
+          /image-drift-admin-secret/,
+          /secret\/image-drift-smoke/,
+          /image-drift-service-key-secret/,
+          /sk-image-drift-model-key/,
+          /https:\/\/models\.image-drift\.test\/v1/,
+          /sha256:2222222222222222222222222222222222222222222222222222222222222222/,
+          /sha256:3333333333333333333333333333333333333333333333333333333333333333/
+        ]
+      },
+      {
+        name: "pvc-drift",
+        expectedMessage: /task smoke project-files PVC claimName does not match JUICEFS_PVC_NAME/,
+        env: {
+          JUICEFS_PVC_NAME: "agentsmith-lite-prod-files"
+        },
+        resources: ({ taskId, runId, projectId, workspaceId }) => sandboxResources({
+          taskId,
+          runId,
+          subPath: `workspaces/${workspaceId}/projects/${projectId}`,
+          pvcClaimName: "agentsmith-lite-other-files",
+          serviceKey: "pvc-drift-service-key-secret",
+          modelKey: "sk-pvc-drift-model-key"
+        }),
+        leakPatterns: [
+          /pvc-drift-admin-secret/,
+          /secret\/pvc-drift-smoke/,
+          /pvc-drift-service-key-secret/,
+          /sk-pvc-drift-model-key/,
+          /https:\/\/models\.pvc-drift\.test\/v1/,
+          /agentsmith-lite-prod-files/,
+          /agentsmith-lite-other-files/
+        ]
+      },
+      {
+        name: "live-tag",
+        expectedMessage: /task smoke live sandbox botified-runner image must be digest pinned/,
+        env: {
+          AGENTSMITH_LITE_SANDBOX_MODE: "live"
+        },
+        resources: ({ taskId, runId, projectId, workspaceId }) => sandboxResources({
+          taskId,
+          runId,
+          subPath: `workspaces/${workspaceId}/projects/${projectId}`,
+          runnerImage: "agentsmith-lite/botified-runner:dev",
+          serviceKey: "live-tag-service-key-secret",
+          modelKey: "sk-live-tag-model-key"
+        }),
+        leakPatterns: [
+          /live-tag-admin-secret/,
+          /secret\/live-tag-smoke/,
+          /live-tag-service-key-secret/,
+          /sk-live-tag-model-key/,
+          /https:\/\/models\.live-tag\.test\/v1/,
+          /agentsmith-lite\/botified-runner:dev/
+        ]
+      }
+    ];
+
+    for (const testCase of cases) {
+      const slug = testCase.name.replaceAll("-", "_");
+      const adminPassword = `${testCase.name}-admin-secret`;
+      const workspaceId = `workspace_${slug}`;
+      const projectId = `project_${slug}`;
+      const endpointId = `endpoint_${slug}`;
+      const taskId = `task_${slug}`;
+      const runId = `run_${slug}`;
+      const requests: SmokeRequest[] = [];
+      const server = createServer(async (req, res) => {
+        const body = await readRequestBody(req);
+        requests.push({
+          method: req.method,
+          url: req.url,
+          cookie: req.headers.cookie,
+          csrf: req.headers["x-csrf-token"]?.toString(),
+          body
+        });
+        const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
+
+        res.setHeader("content-type", "application/json");
+        if (req.method === "GET" && req.url === "/api/health") {
+          res.end(JSON.stringify({ status: "ok", version: "test" }));
+        } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+          assert.deepEqual(parsedBody, { password: adminPassword });
+          res.end(JSON.stringify({ created: true }));
+        } else if (req.method === "POST" && req.url === "/api/auth/login") {
+          res.setHeader("set-cookie", `asl_session=${slug}-session; HttpOnly; Path=/`);
+          res.end(JSON.stringify({ csrfToken: `csrf-${slug}` }));
+        } else if (req.method === "POST" && req.url === "/api/workspaces") {
+          res.end(JSON.stringify({ id: workspaceId, name: "Deploy Smoke" }));
+        } else if (req.method === "POST" && req.url === `/api/workspaces/${workspaceId}/projects`) {
+          res.end(JSON.stringify({ id: projectId, workspaceId, name: "API Smoke" }));
+        } else if (req.method === "POST" && req.url === `/api/projects/${projectId}/endpoints`) {
+          assert.deepEqual(parsedBody, {
+            name: "Deploy Smoke Endpoint",
+            protocol: "openai_chat_completions",
+            baseUrl: `https://models.${testCase.name}.test/v1`,
+            model: `${testCase.name}-model`,
+            apiKeySecretRef: `secret/${testCase.name}-smoke`,
+            capabilities: ["text"],
+            requestTimeoutSecs: 30
+          });
+          res.end(JSON.stringify({ id: endpointId }));
+        } else if (req.method === "POST" && req.url === `/api/projects/${projectId}/chat`) {
+          res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
+        } else if (req.method === "POST" && req.url === `/api/projects/${projectId}/files`) {
+          res.end(JSON.stringify({ path: "files/deploy-smoke.txt", bytes: 24 }));
+        } else if (req.method === "GET" && req.url === `/api/projects/${projectId}/files?path=files`) {
+          res.end(JSON.stringify({ entries: [{ path: "files/deploy-smoke.txt", type: "file" }] }));
+        } else if (req.method === "GET" && req.url === `/api/projects/${projectId}/files/download?path=files%2Fdeploy-smoke.txt`) {
+          res.end(JSON.stringify({ path: "files/deploy-smoke.txt", content: "hello from deploy smoke\n" }));
+        } else if (req.method === "DELETE" && req.url === `/api/projects/${projectId}/files`) {
+          res.end(JSON.stringify({ deleted: true }));
+        } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+          res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0 }));
+        } else if (req.method === "GET" && req.url === `/api/operator/sandbox/status?runId=${runId}`) {
+          res.end(JSON.stringify(statusResponse(runId, {
+            activeTaskCount: 1,
+            runCounts: { total: 1, active: 1, running: 1 },
+            observedResourceCounts: { Pod: 1 },
+            cleanupTargetCount: 1
+          })));
+        } else if (req.method === "POST" && req.url === `/api/projects/${projectId}/tasks`) {
+          assert.equal(parsedBody.endpointId, endpointId);
+          res.end(JSON.stringify({
+            id: taskId,
+            runId,
+            status: "running",
+            sandbox: {
+              resources: testCase.resources({ taskId, runId, projectId, workspaceId })
+            }
+          }));
+        } else if (req.method === "GET" && req.url === `/api/tasks/${taskId}/events`) {
+          res.end(JSON.stringify([]));
+        } else if (req.method === "GET" && req.url === `/api/tasks/${taskId}/artifacts`) {
+          res.end(JSON.stringify([{
+            id: `artifact_${slug}`,
+            taskId,
+            fileId: `file_${slug}`,
+            name: "agentsmith-lite-task-smoke.txt",
+            bytes: 51,
+            createdAt: "2026-01-01T00:00:01.000Z"
+          }]));
+        } else if (req.method === "GET" && req.url === `/api/tasks/${taskId}/artifacts/artifact_${slug}/download`) {
+          res.setHeader("content-type", "application/octet-stream");
+          res.end("runtime accepted\nAGENTSMITH_LITE_TASK_SMOKE_MARKER\n");
+        } else if (req.method === "POST" && req.url === `/api/tasks/${taskId}/cancel`) {
+          assert.equal(body, "");
+          res.end(JSON.stringify({ id: taskId, runId, status: "stopping" }));
+        } else {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      try {
+        const result = await runNode([
+          "scripts/deploy/app-smoke.mjs",
+          "--base-url",
+          baseUrl,
+          "--endpoint-base-url",
+          `https://models.${testCase.name}.test/v1`,
+          "--endpoint-model",
+          `${testCase.name}-model`,
+          "--endpoint-secret-ref",
+          `secret/${testCase.name}-smoke`,
+          "--task-smoke"
+        ], {
+          BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword,
+          ...(testCase.env ?? {})
+        });
+
+        assert.equal(result.status, 1, result.stderr);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, testCase.expectedMessage);
+        for (const pattern of testCase.leakPatterns) {
+          assert.doesNotMatch(result.stderr, pattern);
+        }
+        assert.doesNotMatch(result.stderr, /runtime accepted|AGENTSMITH_LITE_TASK_SMOKE_MARKER/);
+        assert.deepEqual(requests.filter((request) => (
+          request.url === `/api/projects/${projectId}/tasks` ||
+          request.url?.startsWith(`/api/tasks/${taskId}`)
+        )).map((request) => `${request.method} ${request.url}`), [
+          `POST /api/projects/${projectId}/tasks`,
+          `POST /api/tasks/${taskId}/cancel`
+        ]);
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      }
     }
   });
 
@@ -1247,9 +1534,12 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           runId: "run_mismatch",
           status: "running",
           sandbox: {
-            resources: [
-              { kind: "Secret", stringData: { BOTIFIED_SERVICE_KEY: "mismatch-service-key-secret" } }
-            ]
+            resources: sandboxResources({
+              taskId: "task_mismatch",
+              runId: "run_mismatch",
+              subPath: "workspaces/workspace_mismatch/projects/project_mismatch",
+              serviceKey: "mismatch-service-key-secret"
+            })
           }
         }));
       } else if (req.method === "GET" && req.url === "/api/tasks/task_mismatch/events") {
@@ -1626,6 +1916,9 @@ function runNode(args: string[], env: Record<string, string>): Promise<{ status:
         SMOKE_ENDPOINT_BASE_URL: "",
         SMOKE_ENDPOINT_MODEL: "",
         SMOKE_ENDPOINT_SECRET_REF: "",
+        BOTIFIED_RUNNER_IMAGE: "",
+        JUICEFS_PVC_NAME: "",
+        AGENTSMITH_LITE_SANDBOX_MODE: "",
         ...env
       },
       stdio: ["ignore", "pipe", "pipe"]
@@ -1656,6 +1949,96 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface SandboxResourceOptions {
+  taskId: string;
+  runId: string;
+  subPath: string;
+  runnerImage?: string;
+  pvcClaimName?: string;
+  serviceKey?: string;
+  modelKey?: string;
+}
+
+interface SandboxContractSummaryOptions {
+  taskId: string;
+  subPath: string;
+  runnerImage?: string;
+  pvcClaimName?: string;
+}
+
+function sandboxResources(options: SandboxResourceOptions): unknown[] {
+  const runnerImage = options.runnerImage ?? defaultSandboxRunnerImage;
+  const pvcClaimName = options.pvcClaimName ?? defaultSandboxPvcClaimName;
+  return [
+    {
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: `asl-botified-${options.taskId}` },
+      stringData: {
+        BOTIFIED_SERVICE_KEY: options.serviceKey ?? `${options.taskId}-service-key-secret`,
+        MODEL_API_KEY: options.modelKey ?? `sk-${options.taskId}-model-key`
+      }
+    },
+    {
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: {
+        name: `asl-task-${options.taskId}`,
+        namespace: "agentsmith",
+        labels: {
+          "agentsmith-lite/run-id": options.runId
+        }
+      },
+      spec: {
+        containers: [
+          {
+            name: "botified-runner",
+            image: runnerImage,
+            volumeMounts: [
+              {
+                name: "project-files",
+                mountPath: "/workspace/project",
+                subPath: options.subPath
+              },
+              {
+                name: "botified-config",
+                mountPath: "/etc/botified",
+                readOnly: true
+              }
+            ]
+          }
+        ],
+        volumes: [
+          {
+            name: "project-files",
+            persistentVolumeClaim: {
+              claimName: pvcClaimName
+            }
+          },
+          {
+            name: "botified-config",
+            configMap: {
+              name: `botified-${options.taskId}`
+            }
+          }
+        ]
+      }
+    }
+  ];
+}
+
+function sandboxContractSummary(options: SandboxContractSummaryOptions) {
+  return {
+    scope: appSmokeSandboxContractScope,
+    podName: `asl-task-${options.taskId}`,
+    runnerContainer: "botified-runner",
+    runnerImage: options.runnerImage ?? defaultSandboxRunnerImage,
+    pvcClaimName: options.pvcClaimName ?? defaultSandboxPvcClaimName,
+    mountPath: "/workspace/project",
+    subPath: options.subPath
+  };
 }
 
 function reapResponse(dryRun: boolean, actionCount: number, cleanupTargetCount: number, storedRunIds: string[]) {

@@ -35,6 +35,12 @@ const EVIDENCE_NOT_COVERED = [
   "independent-k8s-resource-deletion-observation",
   "full-external-evidence"
 ];
+const SANDBOX_CONTRACT_SCOPE = "product-api-sandbox-render-contract";
+const SANDBOX_CONTRACT_COVERAGE = "task-api-sandbox-render-pvc-runner-image-contract";
+const RUNNER_CONTAINER_NAME = "botified-runner";
+const PROJECT_FILES_VOLUME_NAME = "project-files";
+const PROJECT_FILES_MOUNT_PATH = "/workspace/project";
+const DIGEST_PINNED_IMAGE_PATTERN = /@sha256:[0-9a-f]{64}$/i;
 
 const sensitiveValues = new Set();
 
@@ -71,6 +77,10 @@ async function main() {
   if (endpointConfig.secretRef) {
     sensitiveValues.add(endpointConfig.secretRef);
   }
+  if (endpointConfig.baseUrl) {
+    sensitiveValues.add(endpointConfig.baseUrl);
+  }
+  addSensitiveEnvValues(["BOTIFIED_RUNNER_IMAGE", "JUICEFS_PVC_NAME"]);
 
   const smoke = new AppSmokeClient(args.baseUrl);
   const health = await smoke.requestJson("GET", "/api/health");
@@ -206,6 +216,7 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
     taskId = requireString(create.body.id, "task id");
     const runId = requireString(create.body.runId, "task run id");
     createStatus = requireString(create.body.status, "task create status");
+    const sandboxContract = summarizeSandboxContract(create.body, "task smoke");
 
     const verified = await waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs);
     const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task smoke run-scoped status");
@@ -222,6 +233,7 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       artifactBytes: verified.artifactBytes,
       artifactSha256: verified.artifactSha256,
       markerObserved: verified.markerObserved,
+      sandboxContract,
       runScopedStatus
     };
   } catch (error) {
@@ -291,44 +303,62 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
 }
 
 async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
-  const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
-    auth: true,
-    body: {
-      endpointId,
-      prompt: TASK_RECLAIM_PROMPT
+  let taskId;
+  let cancelAttempted = false;
+  try {
+    const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+      auth: true,
+      body: {
+        endpointId,
+        prompt: TASK_RECLAIM_PROMPT
+      }
+    });
+    taskId = requireString(create.body.id, "task reclaim task id");
+    const runId = requireString(create.body.runId, "task reclaim run id");
+    const createStatus = requireString(create.body.status, "task reclaim create status");
+    const sandboxContract = summarizeSandboxContract(create.body, "task reclaim");
+
+    cancelAttempted = true;
+    const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      auth: true
+    });
+    const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
+    const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task reclaim run-scoped status");
+
+    const reap = {
+      dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
+    };
+    if (reapApply) {
+      reap.apply = await runScopedReap(smoke, runId, true, "task reclaim apply reap");
+      reap.finalDryRun = await runScopedReap(smoke, runId, false, "task reclaim final dry-run reap");
     }
-  });
-  const taskId = requireString(create.body.id, "task reclaim task id");
-  const runId = requireString(create.body.runId, "task reclaim run id");
-  const createStatus = requireString(create.body.status, "task reclaim create status");
 
-  const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
-    auth: true
-  });
-  const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
-  const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task reclaim run-scoped status");
-
-  const reap = {
-    dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
-  };
-  if (reapApply) {
-    reap.apply = await runScopedReap(smoke, runId, true, "task reclaim apply reap");
-    reap.finalDryRun = await runScopedReap(smoke, runId, false, "task reclaim final dry-run reap");
+    return {
+      status: "completed",
+      taskId,
+      runId,
+      createStatus,
+      cancelStatus,
+      sandboxContract,
+      reapScope: {
+        scopedToRunId: true,
+        applyEnabled: Boolean(reapApply)
+      },
+      runScopedStatus,
+      reap
+    };
+  } catch (error) {
+    if (taskId && !cancelAttempted) {
+      try {
+        await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+          auth: true
+        });
+      } catch {
+        // Preserve the original task reclaim smoke failure.
+      }
+    }
+    throw error;
   }
-
-  return {
-    status: "completed",
-    taskId,
-    runId,
-    createStatus,
-    cancelStatus,
-    reapScope: {
-      scopedToRunId: true,
-      applyEnabled: Boolean(reapApply)
-    },
-    runScopedStatus,
-    reap
-  };
 }
 
 async function getRunScopedStatusSummary(smoke, runId, context) {
@@ -379,6 +409,79 @@ function summarizeReapResult(result, expectedDryRun, context) {
   };
 }
 
+function summarizeSandboxContract(taskCreateBody, context) {
+  const resources = requireArray(taskCreateBody?.sandbox?.resources, `${context} sandbox.resources`);
+  const pods = resources.filter((resource) => isRecord(resource) && resource.kind === "Pod");
+  if (pods.length !== 1) {
+    throw new Error(`${context} sandbox.resources must contain exactly one Pod`);
+  }
+
+  const pod = pods[0];
+  const podName = requireString(pod.metadata?.name, `${context} sandbox Pod name`);
+  const containers = requireArray(pod.spec?.containers, `${context} sandbox Pod containers`);
+  const runner = containers.find((container) => isRecord(container) && container.name === RUNNER_CONTAINER_NAME);
+  if (!runner) {
+    throw new Error(`${context} sandbox Pod must include ${RUNNER_CONTAINER_NAME} container`);
+  }
+
+  const runnerImage = requireString(runner.image, `${context} ${RUNNER_CONTAINER_NAME} image`);
+  const expectedRunnerImage = firstNonEmpty(process.env.BOTIFIED_RUNNER_IMAGE);
+  if (expectedRunnerImage && runnerImage !== expectedRunnerImage) {
+    throw new Error(`${context} ${RUNNER_CONTAINER_NAME} image does not match BOTIFIED_RUNNER_IMAGE`);
+  }
+  if (process.env.AGENTSMITH_LITE_SANDBOX_MODE === "live" && !DIGEST_PINNED_IMAGE_PATTERN.test(runnerImage)) {
+    throw new Error(`${context} live sandbox ${RUNNER_CONTAINER_NAME} image must be digest pinned`);
+  }
+
+  const volumes = requireArray(pod.spec?.volumes, `${context} sandbox Pod volumes`);
+  const projectVolume = volumes.find((volume) => isRecord(volume) && volume.name === PROJECT_FILES_VOLUME_NAME);
+  if (!projectVolume || !isRecord(projectVolume.persistentVolumeClaim)) {
+    throw new Error(`${context} sandbox Pod must include ${PROJECT_FILES_VOLUME_NAME} PVC volume`);
+  }
+  const pvcClaimName = requireString(
+    projectVolume.persistentVolumeClaim.claimName,
+    `${context} ${PROJECT_FILES_VOLUME_NAME} PVC claimName`
+  );
+  const expectedPvcClaimName = firstNonEmpty(process.env.JUICEFS_PVC_NAME);
+  if (expectedPvcClaimName && pvcClaimName !== expectedPvcClaimName) {
+    throw new Error(`${context} ${PROJECT_FILES_VOLUME_NAME} PVC claimName does not match JUICEFS_PVC_NAME`);
+  }
+
+  const volumeMounts = requireArray(runner.volumeMounts, `${context} ${RUNNER_CONTAINER_NAME} volumeMounts`);
+  const projectMount = volumeMounts.find((mount) => isRecord(mount) && mount.name === PROJECT_FILES_VOLUME_NAME);
+  if (!projectMount) {
+    throw new Error(`${context} ${RUNNER_CONTAINER_NAME} must mount ${PROJECT_FILES_VOLUME_NAME}`);
+  }
+  const mountPath = requireString(projectMount.mountPath, `${context} ${PROJECT_FILES_VOLUME_NAME} mountPath`);
+  if (mountPath !== PROJECT_FILES_MOUNT_PATH) {
+    throw new Error(`${context} ${PROJECT_FILES_VOLUME_NAME} mountPath must be ${PROJECT_FILES_MOUNT_PATH}`);
+  }
+  const subPath = requireString(projectMount.subPath, `${context} ${PROJECT_FILES_VOLUME_NAME} subPath`);
+  if (!isSafeRelativeSubPath(subPath)) {
+    throw new Error(`${context} ${PROJECT_FILES_VOLUME_NAME} subPath must be a non-empty relative path without ..`);
+  }
+
+  return {
+    scope: SANDBOX_CONTRACT_SCOPE,
+    podName,
+    runnerContainer: RUNNER_CONTAINER_NAME,
+    runnerImage,
+    pvcClaimName,
+    mountPath,
+    subPath
+  };
+}
+
+function isSafeRelativeSubPath(value) {
+  return (
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !/^[A-Za-z]:[\\/]/.test(value) &&
+    !value.includes("\\") &&
+    !value.includes("..")
+  );
+}
+
 function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskReclaimReapApply }) {
   const covered = [
     "product-api-health",
@@ -392,6 +495,9 @@ function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskRe
   }
   if (taskSmoke) {
     covered.push("task-api-create-events-artifact-download-marker");
+  }
+  if (taskSmoke || taskReclaimSmoke) {
+    covered.push(SANDBOX_CONTRACT_COVERAGE);
   }
   if (taskReclaimSmoke) {
     covered.push("task-api-cancel-scoped-reap-dry-run");
@@ -449,6 +555,10 @@ function stringRecordField(value, field) {
   }
   const fieldValue = value[field];
   return typeof fieldValue === "string" && fieldValue.length > 0 ? fieldValue : undefined;
+}
+
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function sha256Hex(value) {
@@ -581,6 +691,15 @@ function taskSmokeTimeoutSecs() {
   return parsePositiveIntegerEnv("SMOKE_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
 }
 
+function addSensitiveEnvValues(names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.length > 0) {
+      sensitiveValues.add(value);
+    }
+  }
+}
+
 async function writeReport(reportPath, reportJson) {
   await mkdir(dirname(reportPath), { recursive: true });
   await writeFile(reportPath, reportJson, "utf8");
@@ -701,7 +820,12 @@ function redact(value) {
       redacted = redacted.split(sensitive).join("<redacted>");
     }
   }
-  return redacted;
+  return redacted
+    .replace(/https?:\/\/[^\s"'<>]+/g, "<redacted-url>")
+    .replace(/\bbsk_[A-Za-z0-9._-]+/g, "bsk_<redacted>")
+    .replace(/\bsk-[A-Za-z0-9._-]+/g, "sk-<redacted>")
+    .replace(/(BOTIFIED_SERVICE_KEY["'\s:=]+)[^"',\s}]+/g, "$1<redacted>")
+    .replace(/(MODEL_API_KEY["'\s:=]+)[^"',\s}]+/g, "$1<redacted>");
 }
 
 function sleep(ms) {
