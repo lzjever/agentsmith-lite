@@ -34,7 +34,6 @@ describe("task events API", () => {
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "make notes" } },
           {
             cursor: "c2",
             seq: 2,
@@ -72,9 +71,9 @@ describe("task events API", () => {
     const leakedJson = JSON.stringify({ events, artifacts });
 
     assert.deepEqual(events.map((event: { kind: string; botifiedSeq: number }) => [event.kind, event.botifiedSeq]), [
-      ["user_input", 1],
       ["artifact", 2]
     ]);
+    assert.equal(task.prompt, "make notes");
     assert.deepEqual(artifacts.map((artifact: { fileId: string; name: string; bytes: number; sha256?: string }) => [
       artifact.fileId,
       artifact.name,

@@ -3,10 +3,12 @@ import { newId, nowIso } from "../../domain/src/ids.js";
 import { isSecretLikeText, redactBotifiedPayload, redactSecretLikeText } from "./redaction.js";
 
 export interface BotifiedTimelineEvent {
+  version?: string;
   cursor?: string;
   seq?: number;
   session_id?: string;
   type?: string;
+  data?: Record<string, unknown>;
   payload?: Record<string, unknown>;
   heartbeat?: boolean;
 }
@@ -52,9 +54,10 @@ export function projectBotifiedTimelineEvents(
     nextCursor = safeNextCursor(item.cursor, nextCursor);
 
     const kind = mapEventKind(item.type);
+    const sourcePayload = timelinePayload(item);
     const payload = item.type === "file.published"
-      ? projectedFilePublishedPayload(item.payload ?? {}, item.seq)
-      : redactBotifiedPayload(item.payload ?? {});
+      ? projectedFilePublishedPayload(sourcePayload, item.seq)
+      : redactBotifiedPayload(sourcePayload);
     events.push({
       id: newId("evt"),
       taskId,
@@ -68,7 +71,7 @@ export function projectBotifiedTimelineEvents(
     });
 
     if (item.type === "file.published") {
-      const file = projectFileArtifact(item.payload ?? {}, item.seq);
+      const file = projectFileArtifact(sourcePayload, item.seq);
       const artifactId = newId("art");
       const artifact: AgentTaskArtifact = {
         id: artifactId,
@@ -98,6 +101,10 @@ export function projectBotifiedTimelineEvents(
     enumerable: false
   });
   return result;
+}
+
+function timelinePayload(item: BotifiedTimelineEvent): Record<string, unknown> {
+  return item.data ?? item.payload ?? {};
 }
 
 function projectedFilePublishedPayload(payload: Record<string, unknown>, seq: number): Record<string, unknown> {

@@ -211,6 +211,90 @@ describe("botified runtime integration", () => {
     assert.doesNotMatch(JSON.stringify(projection), /download_url|botified\.internal|bsk_file_secret|\/v1\/files/);
   });
 
+  it("projects real Botified timeline envelope data fields", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        version: "botified.timeline.v1",
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "assistant_message.completed",
+        data: {
+          text: "done with Bearer bsk_data_secret",
+          nested: { apiKey: "sk-data-secret" }
+        },
+        payload: {
+          text: "legacy fallback should not win"
+        }
+      },
+      {
+        version: "botified.timeline.v1",
+        cursor: "c2",
+        seq: 2,
+        session_id: "s1",
+        type: "file.published",
+        data: {
+          file_id: "file_data_1",
+          filename: "data-report.txt",
+          size_bytes: 23,
+          sha256: "e".repeat(64)
+        },
+        payload: {
+          file_id: "legacy_file",
+          filename: "legacy.txt",
+          size_bytes: 1
+        }
+      },
+      {
+        version: "botified.timeline.v1",
+        cursor: "c3",
+        seq: 3,
+        session_id: "s1",
+        type: "service.error",
+        data: {
+          message: "service leaked Bearer bsk_error_secret and sk-error-secret"
+        }
+      }
+    ]);
+
+    assert.equal(projection.events[0]?.payload.text, "done with Bearer <redacted>");
+    assert.deepEqual(projection.events[0]?.payload.nested, { apiKey: "[redacted]" });
+    assert.deepEqual(projection.events[1]?.payload, {
+      file_id: "file_data_1",
+      filename: "data-report.txt",
+      size_bytes: 23,
+      sha256: "e".repeat(64)
+    });
+    assert.equal(projection.events[2]?.payload.message, "service leaked Bearer <redacted> and sk-<redacted>");
+    assert.deepEqual(projection.artifacts.map((artifact) => ({
+      fileId: artifact.fileId,
+      name: artifact.name,
+      bytes: artifact.bytes,
+      sha256: artifact.sha256
+    })), [
+      {
+        fileId: "file_data_1",
+        name: "data-report.txt",
+        bytes: 23,
+        sha256: "e".repeat(64)
+      }
+    ]);
+    assert.deepEqual(projection.artifactDownloads.map((download) => ({
+      fileId: download.fileId,
+      filename: download.filename,
+      sizeBytes: download.sizeBytes,
+      sha256: download.sha256
+    })), [
+      {
+        fileId: "file_data_1",
+        filename: "data-report.txt",
+        sizeBytes: 23,
+        sha256: "e".repeat(64)
+      }
+    ]);
+    assert.doesNotMatch(JSON.stringify(projection.events), /bsk_data_secret|sk-data-secret|bsk_error_secret|sk-error-secret/);
+  });
+
   it("redacts secret-like timeline payload values recursively", () => {
     const projection = projectBotifiedTimelineEvents("task-1", [
       {

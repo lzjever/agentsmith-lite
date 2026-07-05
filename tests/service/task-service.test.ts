@@ -29,7 +29,6 @@ describe("task service Botified orchestration", () => {
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "build it" } },
           {
             cursor: "c2",
             seq: 2,
@@ -75,12 +74,12 @@ describe("task service Botified orchestration", () => {
     assert.equal(JSON.stringify(runtimeState).includes("test-service-key"), false);
 
     const events = await store.listTaskEvents(task.id);
-    assert.deepEqual(events.map((event) => event.kind), ["user_input", "assistant_message", "artifact"]);
-    assert.deepEqual(events.map((event) => event.botifiedSeq), [1, 2, 3]);
-    assert.equal(events[0]?.payload.text, "build it");
-    assert.equal(events[1]?.payload.text, "working with Bearer <redacted> and sk-<redacted>");
-    assert.deepEqual(events[1]?.payload.notes, ["safe", "array bsk_<redacted>", { nested: "sk-<redacted>" }]);
-    assert.deepEqual(events[1]?.payload.nested, { apiKey: "[redacted]", trace: "Bearer <redacted>" });
+    assert.equal(task.prompt, "build it");
+    assert.deepEqual(events.map((event) => event.kind), ["assistant_message", "artifact"]);
+    assert.deepEqual(events.map((event) => event.botifiedSeq), [2, 3]);
+    assert.equal(events[0]?.payload.text, "working with Bearer <redacted> and sk-<redacted>");
+    assert.deepEqual(events[0]?.payload.notes, ["safe", "array bsk_<redacted>", { nested: "sk-<redacted>" }]);
+    assert.deepEqual(events[0]?.payload.nested, { apiKey: "[redacted]", trace: "Bearer <redacted>" });
     assert.doesNotMatch(
       JSON.stringify(events),
       /bsk_timeline_secret|sk-timeline-secret|bsk_array_secret|sk-nested-secret|sk-field-secret|bsk_nested_secret/
@@ -100,6 +99,33 @@ describe("task service Botified orchestration", () => {
       /Botified service key is required/
     );
     assert.equal(botified.postMessageCalls.length, 0);
+  });
+
+  it("uses the safe Botified post cursor as the first timeline resume cursor", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: []
+      }
+    ], {
+      postResult: {
+        accepted: true,
+        messageId: "msg_1",
+        cursor: "timeline:main:post"
+      }
+    });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified);
+
+    const task = await services.tasks.createTask(userId, projectId, {
+      prompt: "start from the post cursor",
+      endpointId
+    });
+
+    const runtimeState = await store.jsonDocs.get("sandbox_runtime_state", task.id);
+    assert.ok(runtimeState, "runtime state should be stored");
+    assert.equal(runtimeState.timelineCursor, "timeline:main:post");
+    assert.equal("postMessageCursor" in runtimeState, false);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["timeline:main:post"]);
   });
 
   it("keeps dry-run default local and does not resolve model credentials or apply live resources", async () => {
@@ -771,7 +797,6 @@ describe("task service Botified orchestration", () => {
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "ship" } },
           { cursor: "c2", seq: 2, session_id: "s1", type: "assistant_message.completed", payload: { text: "ok" } }
         ],
         nextCursor: "c2"
@@ -779,7 +804,6 @@ describe("task service Botified orchestration", () => {
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "duplicate" } },
           { cursor: "c2", seq: 2, session_id: "s1", type: "assistant_message.completed", payload: { text: "duplicate" } },
           { cursor: "c3", seq: 3, session_id: "s1", type: "file.published", payload: { file_id: "f2", name: "notes.md", bytes: 9 } }
         ],
@@ -800,10 +824,11 @@ describe("task service Botified orchestration", () => {
     const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
     const eventsAgain = await services.tasks.listTaskEvents(userId, task.id);
 
-    assert.deepEqual(events.map((event) => event.botifiedSeq), [1, 2, 3]);
-    assert.deepEqual(eventsAgain.map((event) => event.botifiedSeq), [1, 2, 3]);
+    assert.equal(task.prompt, "ship");
+    assert.deepEqual(events.map((event) => event.botifiedSeq), [2, 3]);
+    assert.deepEqual(eventsAgain.map((event) => event.botifiedSeq), [2, 3]);
     assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [["f2", "notes.md", 9]]);
-    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "c2", "c3", "c3"]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c2", "c3", "c3"]);
   });
 
   it("downloads newly published Botified artifacts into the product artifact directory idempotently", async () => {
@@ -818,7 +843,7 @@ describe("task service Botified orchestration", () => {
             seq: 1,
             session_id: "s1",
             type: "file.published",
-            payload: {
+            data: {
               file_id: "file_real_1",
               filename: "../final report.txt",
               mime_type: "text/plain",
@@ -838,7 +863,7 @@ describe("task service Botified orchestration", () => {
             seq: 1,
             session_id: "s1",
             type: "file.published",
-            payload: {
+            data: {
               file_id: "file_real_1",
               filename: "../../overwrite.txt",
               size_bytes: 999,
@@ -865,6 +890,8 @@ describe("task service Botified orchestration", () => {
       const project = await store.findProject(projectId);
       assert.ok(project, "expected project fixture");
       const artifactPath = path.join(dataRoot, project.rootPath, "tasks", task.id, "artifacts", `${artifact.id}-final-report.txt`);
+      assert.equal(botified.downloadFileCalls[0]?.fileId, "file_real_1");
+      assert.notEqual(botified.downloadFileCalls[0]?.fileId, "botified-1");
 
       assert.deepEqual(artifacts.map((item) => [item.fileId, item.name, item.bytes, item.sha256]), [
         ["file_real_1", "final-report.txt", artifactBytes.byteLength, "a".repeat(64)]
@@ -948,7 +975,7 @@ describe("task service Botified orchestration", () => {
         ["refresh_file_1", "first.txt", firstBytes.byteLength],
         ["refresh_file_2", "second.txt", secondBytes.byteLength]
       ]);
-      assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "c1"]);
+      assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c1"]);
       assert.deepEqual(botified.downloadFileCalls.map((call) => call.fileId), ["refresh_file_1", "refresh_file_2"]);
     } finally {
       await rm(dataRoot, { recursive: true, force: true });

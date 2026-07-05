@@ -73,7 +73,6 @@ export interface BotifiedTaskAddressInput {
 interface BotifiedTaskRuntimeState {
   baseUrl: string;
   timelineCursor?: string;
-  postMessageCursor?: string;
   lastSyncedAt?: string;
 }
 
@@ -218,10 +217,10 @@ export class TaskService {
         throw new ProductError("Botified did not accept task prompt", 502);
       }
       acceptedPrompt = true;
-      const postMessageCursor = safeRuntimeCursor(posted.cursor);
+      const timelineCursor = safeRuntimeCursor(posted.cursor);
       await this.writeRuntimeState(id, {
         ...state,
-        ...(postMessageCursor !== undefined ? { postMessageCursor } : {})
+        ...(timelineCursor !== undefined ? { timelineCursor } : {})
       });
       if (liveRun) {
         await this.updatePersistedRun(liveRun.runId, { phase: "running", cleanupStatus: "active" });
@@ -406,13 +405,9 @@ export class TaskService {
     const baseUrl = stringDocumentField(document, "botifiedBaseUrl");
     const state: BotifiedTaskRuntimeState = { baseUrl };
     const timelineCursor = safeRuntimeCursor(optionalStringDocumentField(document, "timelineCursor"));
-    const postMessageCursor = safeRuntimeCursor(optionalStringDocumentField(document, "postMessageCursor"));
     const lastSyncedAt = optionalStringDocumentField(document, "lastSyncedAt");
     if (timelineCursor !== undefined) {
       state.timelineCursor = timelineCursor;
-    }
-    if (postMessageCursor !== undefined) {
-      state.postMessageCursor = postMessageCursor;
     }
     if (lastSyncedAt !== undefined) {
       state.lastSyncedAt = lastSyncedAt;
@@ -425,12 +420,8 @@ export class TaskService {
       botifiedBaseUrl: state.baseUrl
     };
     const timelineCursor = safeRuntimeCursor(state.timelineCursor);
-    const postMessageCursor = safeRuntimeCursor(state.postMessageCursor);
     if (timelineCursor !== undefined) {
       document.timelineCursor = timelineCursor;
-    }
-    if (postMessageCursor !== undefined) {
-      document.postMessageCursor = postMessageCursor;
     }
     if (state.lastSyncedAt !== undefined) {
       document.lastSyncedAt = state.lastSyncedAt;

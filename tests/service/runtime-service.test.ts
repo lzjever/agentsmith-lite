@@ -50,7 +50,7 @@ describe("live sandbox runtime service", () => {
     assert.equal(result.sandboxReap.dryRun, false);
     assert.equal((await store.findTask(task.id))?.status, "completed");
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "c0"]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c0"]);
     assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), [
       "Pod",
       "Service",
