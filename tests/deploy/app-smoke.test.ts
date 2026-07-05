@@ -504,6 +504,13 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         res.end(JSON.stringify({ deleted: true }));
       } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
         res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status?runId=run_task_smoke") {
+        res.end(JSON.stringify(statusResponse("run_task_smoke", {
+          activeTaskCount: 1,
+          runCounts: { total: 1, active: 1, running: 1 },
+          observedResourceCounts: { Pod: 1, Secret: 1 },
+          cleanupTargetCount: 2
+        })));
       } else if (req.method === "POST" && req.url === "/api/projects/project_task/tasks") {
         assert.equal(parsedBody.endpointId, "endpoint_task");
         assert.equal(typeof parsedBody.prompt, "string");
@@ -515,6 +522,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         assert.equal(JSON.stringify(parsedBody).includes("secret/task-smoke"), false);
         res.end(JSON.stringify({
           id: "task_smoke",
+          runId: "run_task_smoke",
           status: "running",
           endpointId: "endpoint_task",
           sandbox: {
@@ -616,7 +624,15 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           eventKinds: ["turn_started", "turn_completed"],
           artifactBytes: 51,
           artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
-          markerObserved: true
+          markerObserved: true,
+          runScopedStatus: {
+            runId: "run_task_smoke",
+            activeTaskCount: 1,
+            runCounts: { total: 1, active: 1, running: 1 },
+            observedResourceCounts: { Pod: 1, Secret: 1 },
+            cleanupTargetCount: 2,
+            errorCount: 0
+          }
         }
       });
       assert.notEqual(report.task.createStatus, 200);
@@ -645,7 +661,8 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         "GET /api/tasks/task_smoke/artifacts",
         "GET /api/tasks/task_smoke/events",
         "GET /api/tasks/task_smoke/artifacts",
-        "GET /api/tasks/task_smoke/artifacts/artifact_task_smoke/download"
+        "GET /api/tasks/task_smoke/artifacts/artifact_task_smoke/download",
+        "GET /api/operator/sandbox/status?runId=run_task_smoke"
       ]);
       const taskCreate = requests.find((request) => request.url === "/api/projects/project_task/tasks");
       assert.ok(taskCreate);
@@ -729,6 +746,20 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         res.end(JSON.stringify({ deleted: true }));
       } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
         res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status?runId=run_reclaim") {
+        res.end(JSON.stringify(statusResponse("run_reclaim", {
+          activeTaskCount: 1,
+          runCounts: { total: 1, cleanupRequested: 1, stopping: 1 },
+          observedResourceCounts: { Pod: 1, Secret: 1 },
+          cleanupTargetCount: 2
+        })));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status?runId=run_smoke_reclaim_case") {
+        res.end(JSON.stringify(statusResponse("run_smoke_reclaim_case", {
+          activeTaskCount: 1,
+          runCounts: { total: 1, active: 1, running: 1 },
+          observedResourceCounts: { Pod: 1 },
+          cleanupTargetCount: 1
+        })));
       } else if (req.method === "POST" && req.url === "/api/projects/project_reclaim/tasks") {
         taskCreates += 1;
         assert.equal(parsedBody.endpointId, "endpoint_reclaim");
@@ -879,7 +910,15 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           eventKinds: ["turn_started", "turn_completed"],
           artifactBytes: 51,
           artifactSha256: "5dd3c17fbeb5a93a5f89f4b32eb096f443a8ce3ad643c18d4ea0bba65ac8f9a1",
-          markerObserved: true
+          markerObserved: true,
+          runScopedStatus: {
+            runId: "run_smoke_reclaim_case",
+            activeTaskCount: 1,
+            runCounts: { total: 1, active: 1, running: 1 },
+            observedResourceCounts: { Pod: 1 },
+            cleanupTargetCount: 1,
+            errorCount: 0
+          }
         },
         taskReclaim: {
           status: "completed",
@@ -890,6 +929,14 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           reapScope: {
             scopedToRunId: true,
             applyEnabled: false
+          },
+          runScopedStatus: {
+            runId: "run_reclaim",
+            activeTaskCount: 1,
+            runCounts: { total: 1, cleanupRequested: 1, stopping: 1 },
+            observedResourceCounts: { Pod: 1, Secret: 1 },
+            cleanupTargetCount: 2,
+            errorCount: 0
           },
           reap: {
             dryRun: {
@@ -926,8 +973,10 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         "GET /api/tasks/task_smoke_reclaim_case/events",
         "GET /api/tasks/task_smoke_reclaim_case/artifacts",
         "GET /api/tasks/task_smoke_reclaim_case/artifacts/artifact_task_smoke_reclaim_case/download",
+        "GET /api/operator/sandbox/status?runId=run_smoke_reclaim_case",
         "POST /api/projects/project_reclaim/tasks",
         "POST /api/tasks/task_reclaim/cancel",
+        "GET /api/operator/sandbox/status?runId=run_reclaim",
         "POST /api/operator/sandbox/reap"
       ]);
       assert.equal(taskCreates, 2);
@@ -997,6 +1046,13 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         res.end(JSON.stringify({ deleted: true }));
       } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
         res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
+      } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status?runId=run_reclaim_apply") {
+        res.end(JSON.stringify(statusResponse("run_reclaim_apply", {
+          activeTaskCount: 1,
+          runCounts: { total: 1, cleanupRequested: 1, stopping: 1 },
+          observedResourceCounts: { Pod: 1, ConfigMap: 1 },
+          cleanupTargetCount: 3
+        })));
       } else if (req.method === "POST" && req.url === "/api/projects/project_apply/tasks") {
         assert.equal(parsedBody.endpointId, "endpoint_apply");
         res.end(JSON.stringify({
@@ -1081,6 +1137,14 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           reapScope: {
             scopedToRunId: true,
             applyEnabled: true
+          },
+          runScopedStatus: {
+            runId: "run_reclaim_apply",
+            activeTaskCount: 1,
+            runCounts: { total: 1, cleanupRequested: 1, stopping: 1 },
+            observedResourceCounts: { Pod: 1, ConfigMap: 1 },
+            cleanupTargetCount: 3,
+            errorCount: 0
           },
           reap: {
             dryRun: {
@@ -1491,5 +1555,37 @@ function reapResponse(dryRun: boolean, actionCount: number, cleanupTargetCount: 
     errors: [],
     dryRun,
     storedRunIds
+  };
+}
+
+function statusResponse(
+  runId: string,
+  input: {
+    activeTaskCount: number;
+    runCounts: Record<string, number>;
+    observedResourceCounts: Record<string, number>;
+    cleanupTargetCount: number;
+    errorCount?: number;
+  }
+) {
+  return {
+    namespace: "agentsmith",
+    activeTaskCount: input.activeTaskCount,
+    runCounts: input.runCounts,
+    observedResourceCounts: input.observedResourceCounts,
+    cleanupPlan: {
+      targets: Array.from({ length: input.cleanupTargetCount }, (_value, index) => ({
+        type: "store_run_state",
+        source: "store",
+        runId,
+        reason: `status_reason_${index}`,
+        phase: "stopping",
+        cleanupStatus: "cleaned"
+      })),
+      recentFailures: []
+    },
+    recentCleanupFailures: [],
+    actionSummary: [],
+    errors: Array.from({ length: input.errorCount ?? 0 }, (_value, index) => `status error ${index}`)
   };
 }

@@ -8,13 +8,24 @@ base_url="${APP_PUBLIC_BASE_URL:-}"
 env_file=
 cookie_file=""
 csrf_token=""
+run_id=""
+require_value() {
+  local flag="$1"
+  local value="${2:-}"
+  if [ -z "$value" ] || [[ "$value" == --* ]]; then
+    echo "$flag requires a value" >&2
+    exit 2
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --env) env_file="$2"; shift 2 ;;
+    --env) require_value "$1" "${2:-}"; env_file="$2"; shift 2 ;;
     --resources) resources=true; shift ;;
-    --base-url) base_url="$2"; shift 2 ;;
-    --cookie-file) cookie_file="$2"; shift 2 ;;
-    --csrf-token) csrf_token="$2"; shift 2 ;;
+    --base-url) require_value "$1" "${2:-}"; base_url="$2"; shift 2 ;;
+    --cookie-file) require_value "$1" "${2:-}"; cookie_file="$2"; shift 2 ;;
+    --csrf-token) require_value "$1" "${2:-}"; csrf_token="$2"; shift 2 ;;
+    --run-id) require_value "$1" "${2:-}"; run_id="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -55,6 +66,9 @@ if [ "$resources" = true ]; then
   helper_args=(scripts/deploy/operator-sandbox.mjs status --base-url "$base_url" --cookie-file "$cookie_file")
   if [ -n "$csrf_token" ]; then
     helper_args+=(--csrf-token "$csrf_token")
+  fi
+  if [ -n "$run_id" ]; then
+    helper_args+=(--run-id "$run_id")
   fi
   node "${helper_args[@]}"
 else

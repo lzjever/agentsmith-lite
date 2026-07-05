@@ -51,6 +51,21 @@ describe("deploy status/down scripts", () => {
       assert.match(status.stdout, /Recent cleanup failures:/);
       assert.match(status.stdout, /previous cleanup failed/);
 
+      const scopedStatus = await runNode([
+        "scripts/deploy/operator-sandbox.mjs",
+        "status",
+        "--base-url",
+        baseUrl,
+        "--cookie-file",
+        cookieFile,
+        "--run-id",
+        "run1"
+      ]);
+      assert.equal(scopedStatus.status, 0, scopedStatus.stderr);
+      assert.match(scopedStatus.stdout, /Sandbox operator status/);
+      assert.match(scopedStatus.stdout, /Active task count: 1/);
+      assert.match(scopedStatus.stdout, /would store run run1/);
+
       const defaultReap = await runNode([
         "scripts/deploy/operator-sandbox.mjs",
         "reap",
@@ -107,6 +122,7 @@ describe("deploy status/down scripts", () => {
 
     assert.deepEqual(requests.map((request) => [request.method, request.url]), [
       ["GET", "/api/operator/sandbox/status"],
+      ["GET", "/api/operator/sandbox/status?runId=run1"],
       ["POST", "/api/operator/sandbox/reap"],
       ["POST", "/api/operator/sandbox/reap"],
       ["POST", "/api/operator/sandbox/reap"]
@@ -114,14 +130,16 @@ describe("deploy status/down scripts", () => {
     assert.equal(requests[0]?.cookie, "asl_session=test-session");
     assert.equal(requests[0]?.body, "");
     assert.equal(requests[1]?.cookie, "asl_session=test-session");
-    assert.equal(requests[1]?.csrf, "csrf-default");
-    assert.deepEqual(JSON.parse(requests[1]?.body ?? ""), {});
+    assert.equal(requests[1]?.body, "");
     assert.equal(requests[2]?.cookie, "asl_session=test-session");
-    assert.equal(requests[2]?.csrf, "csrf-test");
-    assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), { runId: "run1" });
+    assert.equal(requests[2]?.csrf, "csrf-default");
+    assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), {});
     assert.equal(requests[3]?.cookie, "asl_session=test-session");
-    assert.equal(requests[3]?.csrf, "csrf-apply");
-    assert.deepEqual(JSON.parse(requests[3]?.body ?? ""), { apply: true, runId: "run1" });
+    assert.equal(requests[3]?.csrf, "csrf-test");
+    assert.deepEqual(JSON.parse(requests[3]?.body ?? ""), { runId: "run1" });
+    assert.equal(requests[4]?.cookie, "asl_session=test-session");
+    assert.equal(requests[4]?.csrf, "csrf-apply");
+    assert.deepEqual(JSON.parse(requests[4]?.body ?? ""), { apply: true, runId: "run1" });
   });
 
   it("operator-sandbox.mjs rejects reap dry-run and apply together", async () => {
@@ -157,6 +175,24 @@ describe("deploy status/down scripts", () => {
     assert.match(result.stderr, /operator sandbox API auth/);
   });
 
+  it("status.sh rejects --run-id without a value", () => {
+    const cases = [
+      ["--resources", "--run-id"],
+      ["--resources", "--run-id", "--csrf-token", "csrf-test"]
+    ];
+
+    for (const args of cases) {
+      const result = spawnSync("bash", ["scripts/deploy/status.sh", ...args], {
+        cwd: process.cwd(),
+        encoding: "utf8"
+      });
+
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /--run-id requires a value/);
+      assert.doesNotMatch(result.stderr, /unbound variable|unknown argument/);
+    }
+  });
+
   it("status.sh --resources calls the operator sandbox API helper with env base URL and auth", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-status-api-"));
     const envFile = path.join(tempDir, "deploy.env");
@@ -190,7 +226,9 @@ OUT
       "--cookie-file",
       cookieFile,
       "--csrf-token",
-      "csrf-test"
+      "csrf-test",
+      "--run-id",
+      "run1"
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -208,6 +246,7 @@ OUT
     assert.match(helperArgs, /--base-url http:\/\/operator\.example\.test/);
     assert.match(helperArgs, new RegExp(`--cookie-file ${escapeRegExp(cookieFile)}`));
     assert.match(helperArgs, /--csrf-token csrf-test/);
+    assert.match(helperArgs, /--run-id run1/);
     assert.match(result.stdout, /Active task count: 1/);
     assert.match(result.stdout, /Cleanup targets:/);
     assert.match(result.stdout, /Runtime directories:/);

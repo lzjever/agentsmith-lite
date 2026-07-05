@@ -33,7 +33,7 @@ Current operator API routes:
 - `GET /api/operator/sandbox/status`
 - `POST /api/operator/sandbox/reap`
 
-Operator routes are admin-only. Mutating routes require the session cookie and `x-csrf-token`.
+Operator routes are admin-only. Mutating routes require the session cookie and `x-csrf-token`. `GET /api/operator/sandbox/status` accepts an optional `runId` query parameter to scope the status response to one sandbox run; omitting it preserves the global operator status response.
 
 Endpoint create requests accept `apiKeySecretRef` values in `secret/<slug>` form, where the slug uses lowercase letters, digits, and hyphens only. Endpoint `baseUrl` must be HTTPS and must not include credentials, query, or hash. The server stores the ref, but endpoint create/list responses, dashboard responses, and chat `endpointSnapshot` responses do not expose `apiKeySecretRef`; public endpoint payloads expose only `hasCredentialRef`.
 

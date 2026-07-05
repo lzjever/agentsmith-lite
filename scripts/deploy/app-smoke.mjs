@@ -204,9 +204,13 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       }
     });
     taskId = requireString(create.body.id, "task id");
+    const runId = optionalString(create.body.runId);
     createStatus = requireString(create.body.status, "task create status");
 
     const verified = await waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs);
+    const runScopedStatus = runId
+      ? await getRunScopedStatusSummary(smoke, runId, "task smoke run-scoped status")
+      : undefined;
     completed = true;
     return {
       status: "completed",
@@ -218,7 +222,8 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
       eventKinds: verified.eventKinds,
       artifactBytes: verified.artifactBytes,
       artifactSha256: verified.artifactSha256,
-      markerObserved: verified.markerObserved
+      markerObserved: verified.markerObserved,
+      ...(runScopedStatus ? { runScopedStatus } : {})
     };
   } catch (error) {
     if (taskId && !completed) {
@@ -302,6 +307,7 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
     auth: true
   });
   const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
+  const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task reclaim run-scoped status");
 
   const reap = {
     dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
@@ -321,7 +327,28 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply) {
       scopedToRunId: true,
       applyEnabled: Boolean(reapApply)
     },
+    runScopedStatus,
     reap
+  };
+}
+
+async function getRunScopedStatusSummary(smoke, runId, context) {
+  const result = await smoke.requestJson(
+    "GET",
+    `/api/operator/sandbox/status?${new URLSearchParams({ runId }).toString()}`,
+    { auth: true }
+  );
+  return summarizeRunScopedStatus(result, runId, context);
+}
+
+function summarizeRunScopedStatus(result, runId, context) {
+  return {
+    runId,
+    activeTaskCount: requireNumber(result?.activeTaskCount, `${context} active task count`),
+    runCounts: numberRecord(result?.runCounts, `${context} run counts`),
+    observedResourceCounts: numberRecord(result?.observedResourceCounts, `${context} observed resource counts`),
+    cleanupTargetCount: requireArray(result?.cleanupPlan?.targets, `${context} cleanup targets`).length,
+    errorCount: requireArray(result?.errors, `${context} errors`).length
   };
 }
 
@@ -599,6 +626,26 @@ function requireString(value, name) {
     throw new Error(`${name} missing from API response`);
   }
   return value;
+}
+
+function optionalString(value) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function requireNumber(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${name} missing from API response`);
+  }
+  return value;
+}
+
+function numberRecord(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${name} missing from API response`);
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => typeof entryValue === "number" && Number.isFinite(entryValue))
+  );
 }
 
 function requireArray(value, name) {

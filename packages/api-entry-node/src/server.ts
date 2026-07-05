@@ -160,7 +160,8 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   if (segments[0] === "api" && segments[1] === "operator" && segments[2] === "sandbox") {
     requireAdmin(user);
     if (segments[3] === "status" && method === "GET") {
-      return sendJson(res, 200, await services.sandboxLifecycle.getSandboxStatus());
+      const runId = url.searchParams.get("runId");
+      return sendJson(res, 200, await services.sandboxLifecycle.getSandboxStatus(runId ? { runId } : {}));
     }
     if (segments[3] === "reap" && method === "POST") {
       const body = await readJson(req);

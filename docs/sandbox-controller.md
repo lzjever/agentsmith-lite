@@ -62,14 +62,14 @@ TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SAN
 
 `SandboxLifecycleService` provides two explicit operations:
 
-- `getSandboxStatus()` reads active tasks, persisted run state, observed K8s resources, runtime directory state, and recent cleanup failures without mutating anything.
+- `getSandboxStatus({ runId? })` reads active tasks, persisted run state, observed K8s resources, runtime directory state, and recent cleanup failures without mutating anything. Passing `runId` scopes those counts, observations, and cleanup-plan summaries to one sandbox run.
 - `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete/mark-cleanup actions, then re-observes resources. Only after K8s cleanup is complete does it remove runtime cleanup candidates (`home` and `botified`), retain durable `artifacts`, and persist cleaned store-state transitions with fencing.
 
 Both operations return the same server-generated `cleanupPlan.targets[]` shape as the lifecycle source of truth. Targets include non-secret K8s/store summaries (`delete_resource`, `mark_cleanup`, `store_run_state`) plus runtime directory targets that distinguish cleanup candidates from retained artifacts. Directory cleanup is performed only in the service layer after `dataRoot` containment checks. Cleanup failures are recorded back into the run state as bounded, redacted recent failure metadata and prevent the run from being marked cleaned.
 
 The product API exposes these as admin-only endpoints:
 
-- `GET /api/operator/sandbox/status`
+- `GET /api/operator/sandbox/status`, optionally scoped with `?runId=<runId>`
 - `POST /api/operator/sandbox/reap`, defaulting to dry-run unless the JSON body contains `"apply": true`.
 
 Operator scripts should be thin clients of these endpoints. They must not reimplement lifecycle business logic or build independent cleanup plans from kubectl output.

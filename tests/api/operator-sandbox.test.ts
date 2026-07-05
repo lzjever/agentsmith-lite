@@ -126,6 +126,56 @@ describe("operator sandbox API", () => {
     ));
     assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real/);
   });
+
+  it("passes runId query scope to sandbox status while preserving admin auth", async () => {
+    const store = createLocalInMemoryProductStore();
+    const otherRun = sandboxRun({
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      idleExpiresAt: "2999-01-01T00:00:00.000Z",
+      directories: runtimeDirectories(dataRoot, "task1")
+    });
+    const scopedRun = sandboxRunFor("task2", "run2", {
+      phase: "stopping",
+      cleanupStatus: "cleanup_requested",
+      directories: runtimeDirectories(dataRoot, "task2"),
+      lastCleanupError: {
+        at: "2026-07-04T00:00:00.000Z",
+        target: "runtime_directory:home",
+        message: "previous scoped cleanup failed"
+      }
+    });
+    await store.createTask(taskForRun(otherRun, "running"));
+    await store.createTask(taskForRun(scopedRun, "running"));
+    await store.sandboxRuns.put(otherRun);
+    await store.sandboxRuns.put(scopedRun);
+    api = await createApiServer({
+      port: 0,
+      dataRoot,
+      builtinAdminPassword: "admin-password",
+      store
+    });
+
+    const unauthenticated = await fetch(api.baseUrl + "/api/operator/sandbox/status?runId=run2");
+    assert.equal(unauthenticated.status, 401);
+
+    const auth = await login(api.baseUrl);
+    const globalStatus = await auth.requestJson("GET", "/api/operator/sandbox/status");
+    assert.equal(globalStatus.activeTaskCount, 2);
+    assert.equal(globalStatus.runCounts.total, 2);
+
+    const scopedStatus = await auth.requestJson("GET", "/api/operator/sandbox/status?runId=run2");
+    assert.equal(scopedStatus.activeTaskCount, 1);
+    assert.equal(scopedStatus.runCounts.total, 1);
+    assert.equal(scopedStatus.runCounts.cleanupRequested, 1);
+    assert.deepEqual(
+      scopedStatus.cleanupPlan.targets.map((target: { runId?: string }) => target.runId),
+      ["run2", "run2", "run2", "run2"]
+    );
+    assert.deepEqual(scopedStatus.recentCleanupFailures.map((failure: { runId: string; target: string }) => [failure.runId, failure.target]), [
+      ["run2", "runtime_directory:home"]
+    ]);
+    assert.doesNotMatch(JSON.stringify(scopedStatus), /bsk_|sk-real|MODEL_API_KEY/);
+  });
 });
 
 async function login(baseUrl: string) {
@@ -207,6 +257,26 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     updatedAt: "2026-07-04T00:00:00.000Z",
     ...overrides
   };
+}
+
+function sandboxRunFor(taskId: string, runId: string, overrides: Partial<SandboxRunState> = {}): SandboxRunState {
+  return sandboxRun({
+    taskId,
+    runId,
+    resourceNames: {
+      pod: `asl-task-${taskId}`,
+      service: `asl-task-${taskId}`,
+      configMap: `asl-task-${taskId}-config`,
+      secret: `asl-botified-${taskId}`,
+      serviceAccount: `asl-task-${taskId}`,
+      networkPolicy: `asl-task-${taskId}`
+    },
+    serviceKeySecretRef: {
+      name: `asl-botified-${taskId}`,
+      key: "BOTIFIED_SERVICE_KEY"
+    },
+    ...overrides
+  });
 }
 
 function runtimeDirectories(dataRoot: string, taskId: string) {

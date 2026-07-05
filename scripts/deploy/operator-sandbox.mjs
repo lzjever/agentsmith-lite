@@ -8,7 +8,7 @@ try {
   if (args.command === "status") {
     requireOption(args.baseUrl, "--base-url");
     requireOption(args.cookieFile, "--cookie-file");
-    const result = await requestJson("GET", "/api/operator/sandbox/status", args);
+    const result = await requestJson("GET", sandboxStatusPath(args), args);
     printStatus(result);
   } else if (args.command === "reap") {
     requireOption(args.baseUrl, "--base-url");
@@ -126,6 +126,14 @@ async function readCookieFile(cookieFile) {
 function printStatus(result) {
   console.log("Sandbox operator status");
   printCommon(result);
+}
+
+function sandboxStatusPath(args) {
+  if (!args.runId) {
+    return "/api/operator/sandbox/status";
+  }
+  const query = new URLSearchParams({ runId: args.runId });
+  return `/api/operator/sandbox/status?${query.toString()}`;
 }
 
 function printReap(result) {
