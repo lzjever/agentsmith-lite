@@ -40,8 +40,8 @@ scripts/build-offline-bundle.sh \
   --runner-image agentsmith-lite/botified-runner@sha256:<64hex> \
   --output dist/app-offline-bundle
 scripts/deploy/import-images.sh --bundle dist/app-offline-bundle
-scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env --tag dev --out out/manifests
-scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env
+scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env --tag dev --out out/manifests --images-lock dist/app-offline-bundle/images.lock
+scripts/deploy/doctor.sh --env substrate.env --secrets substrate.secrets.env --out out/manifests --bundle dist/app-offline-bundle
 scripts/deploy/smoke.sh --base-url http://127.0.0.1:3000
 ```
 
