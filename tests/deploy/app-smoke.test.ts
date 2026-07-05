@@ -752,7 +752,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
     }
   });
 
-  it("app-smoke.mjs appends scoped read-only k8s evidence to task smoke", async () => {
+  it("app-smoke.mjs appends scoped read-only k8s evidence for all six lifecycle resources to task smoke", async () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-k8s-evidence-"));
     const reportPath = path.join(tempDir, "reports", "smoke-report.json");
     const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
@@ -829,13 +829,14 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
           Pod: { count: 1, names: ["asl-task-k8s"] },
           Secret: { count: 1, names: ["secret/asl-k8s-secret"] },
           ConfigMap: { count: 1, names: ["configmap/asl-k8s-config"] },
+          ServiceAccount: { count: 1, names: ["serviceaccount/asl-k8s-service-account"] },
           Service: { count: 1, names: ["service/asl-k8s-service"] },
           NetworkPolicy: { count: 1, names: ["networkpolicy/asl-k8s-network"] }
         }
       });
 
       const calls = readFileSync(kubectlCalls, "utf8").trim().split("\n");
-      assert.equal(calls.length, 5);
+      assert.equal(calls.length, 6);
       for (const call of calls) {
         assert.match(call, /^--kubeconfig \/tmp\/k8s-evidence\.kubeconfig --context kind-agentsmith get /);
         assert.match(call, / -n agentsmith-preview /);
@@ -844,6 +845,7 @@ printf '{"status":"ok","profile":"light","baseUrl":"http://deploy.example.test",
         assert.doesNotMatch(call, /secret\/k8s-smoke|k8s-admin-secret|s3-raw-secret-value|juicefs-raw-secret-value/);
       }
       assert.match(calls[0] ?? "", / get pods .* -o json$/);
+      assert.equal(calls.some((call) => / get serviceaccounts .* -o name$/.test(call)), true);
       for (const call of calls.slice(1)) {
         assert.match(call, / -o name$/);
       }
@@ -2399,6 +2401,9 @@ JSON
     ;;
   configmaps:name|configmap:name)
     printf 'configmap/${options.resourcePrefix}-config\\n'
+    ;;
+  serviceaccounts:name|serviceaccount:name)
+    printf 'serviceaccount/${options.resourcePrefix}-service-account\\n'
     ;;
   services:name|service:name)
     printf 'service/${options.resourcePrefix}-service\\n'

@@ -47,6 +47,7 @@ const K8S_RUN_ID_LABEL = "agentsmith-lite/run-id";
 const K8S_NAME_ONLY_RESOURCE_KINDS = [
   ["Secret", "secrets"],
   ["ConfigMap", "configmaps"],
+  ["ServiceAccount", "serviceaccounts"],
   ["Service", "services"],
   ["NetworkPolicy", "networkpolicies"]
 ];
