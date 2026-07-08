@@ -14,6 +14,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   const auth = resolveAuthConfig(input);
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
   const appDataRoot = resolveAppDataRoot(input.env);
+  const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
     "app.kubernetes.io/part-of": "agentsmith-lite",
@@ -49,6 +50,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
         AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
           input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
+        ...(runtimeTickMs ? { AGENTSMITH_LITE_RUNTIME_TICK_MS: runtimeTickMs } : {}),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
         ...auth.configMapData,
         ...modelBaseUrlConfig
@@ -267,7 +269,7 @@ function resolveAuthConfig(input: AppManifestInput): {
   configMapData: Record<string, string>;
   secretKeys: Set<string>;
 } {
-  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
     if (Object.hasOwn(input.secrets, key)) {
       throw new Error(`auth config key ${key} is not allowed in app Secret`);
     }
@@ -283,7 +285,7 @@ function resolveAuthConfig(input: AppManifestInput): {
 
   const baseSecretKeys = new Set(["POSTGRES_APP_URL", "APP_SESSION_SECRET"]);
   if (authMode === "builtin_admin") {
-    for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+    for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
       if (input.env[key]?.trim()) {
         throw new Error(`${key} must be empty when AUTH_MODE=builtin_admin`);
       }
@@ -296,6 +298,7 @@ function resolveAuthConfig(input: AppManifestInput): {
   }
 
   const issuerUrl = requireAuthConfig(input.env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
+  const backchannelBaseUrl = optionalAuthConfig(input.env.OIDC_BACKCHANNEL_BASE_URL);
   const clientId = requireAuthConfig(input.env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
   requireAuthConfig(input.secrets.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
   baseSecretKeys.add("OIDC_CLIENT_SECRET");
@@ -303,6 +306,7 @@ function resolveAuthConfig(input: AppManifestInput): {
     configMapData: {
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: issuerUrl,
+      ...(backchannelBaseUrl ? { OIDC_BACKCHANNEL_BASE_URL: backchannelBaseUrl } : {}),
       OIDC_CLIENT_ID: clientId
     },
     secretKeys: baseSecretKeys
@@ -315,4 +319,9 @@ function requireAuthConfig(value: string | undefined, key: string): string {
     throw new Error(`${key} is required when AUTH_MODE=oidc`);
   }
   return trimmed;
+}
+
+function optionalAuthConfig(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }

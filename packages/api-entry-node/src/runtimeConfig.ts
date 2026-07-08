@@ -10,6 +10,7 @@ export interface RuntimeAuthConfig {
 
 export interface OidcRuntimeConfig {
   issuerUrl: string;
+  backchannelBaseUrl?: string;
   clientId: string;
   clientSecret: string;
 }
@@ -33,14 +34,18 @@ export function parseRuntimeAuthConfig(env: Record<string, string | undefined>):
   if (mode === "oidc") {
     return { mode, oidc: requireOidcRuntimeConfig(env) };
   }
+  if (env.OIDC_BACKCHANNEL_BASE_URL?.trim()) {
+    throw new Error("OIDC_BACKCHANNEL_BASE_URL must be empty when AUTH_MODE=builtin_admin");
+  }
   return { mode };
 }
 
 export function requireOidcRuntimeConfig(env: Record<string, string | undefined>): OidcRuntimeConfig {
   const issuerUrl = requireHttpUrl(env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
+  const backchannelBaseUrl = optionalHttpUrl(env.OIDC_BACKCHANNEL_BASE_URL, "OIDC_BACKCHANNEL_BASE_URL");
   const clientId = requireNonEmpty(env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
   const clientSecret = requireNonEmpty(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
-  return { issuerUrl, clientId, clientSecret };
+  return { issuerUrl, ...(backchannelBaseUrl ? { backchannelBaseUrl } : {}), clientId, clientSecret };
 }
 
 export function parseSandboxMode(value: string | undefined): SandboxMode {
@@ -94,9 +99,21 @@ function requireNonEmpty(value: string | undefined, name: string): string {
 
 function requireHttpUrl(value: string | undefined, name: string): string {
   const trimmed = requireNonEmpty(value, name);
+  return parseHttpUrl(trimmed, name);
+}
+
+function optionalHttpUrl(value: string | undefined, name: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return parseHttpUrl(trimmed, name);
+}
+
+function parseHttpUrl(value: string, name: string): string {
   let parsed: URL;
   try {
-    parsed = new URL(trimmed);
+    parsed = new URL(value);
   } catch {
     throw new Error(`${name} must be an http or https URL when AUTH_MODE=oidc`);
   }

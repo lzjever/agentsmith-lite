@@ -115,8 +115,10 @@ describe("app manifest rendering", () => {
         APP_PUBLIC_BASE_URL: "https://agentsmith.example.com",
         AUTH_MODE: "oidc",
         OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+        OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         OIDC_CLIENT_ID: "agentsmith-lite",
         AGENTSMITH_LITE_SANDBOX_MODE: "live",
+        AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
         AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
         S3_ENDPOINT: "https://s3.example.com",
@@ -138,6 +140,7 @@ describe("app manifest rendering", () => {
     const serialized = JSON.stringify(manifests);
     assert.match(serialized, /AUTH_MODE/);
     assert.match(serialized, /OIDC_ISSUER_URL/);
+    assert.match(serialized, /OIDC_BACKCHANNEL_BASE_URL/);
     assert.match(serialized, /OIDC_CLIENT_ID/);
     assert.match(serialized, /OIDC_CLIENT_SECRET/);
     assert.match(serialized, /POSTGRES_APP_URL/);
@@ -159,14 +162,17 @@ describe("app manifest rendering", () => {
     const secretData = (secret as { stringData?: Record<string, string> } | undefined)?.stringData;
     assert.equal(configMapData?.AUTH_MODE, "oidc");
     assert.equal(configMapData?.OIDC_ISSUER_URL, "https://keycloak.example.test/realms/agentsmith");
+    assert.equal(configMapData?.OIDC_BACKCHANNEL_BASE_URL, "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith");
     assert.equal(configMapData?.OIDC_CLIENT_ID, "agentsmith-lite");
     assert.equal(configMapData?.OIDC_CLIENT_SECRET, undefined);
     assert.equal(secretData?.OIDC_CLIENT_SECRET, "oidc-client-secret");
     assert.equal(secretData?.BUILTIN_ADMIN_INITIAL_PASSWORD, undefined);
     assert.equal(secretData?.OIDC_ISSUER_URL, undefined);
+    assert.equal(secretData?.OIDC_BACKCHANNEL_BASE_URL, undefined);
     assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
+    assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
@@ -203,6 +209,13 @@ describe("app manifest rendering", () => {
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
       },
       {
+        name: "OIDC backchannel metadata in secrets",
+        env: {},
+        secrets: { OIDC_BACKCHANNEL_BASE_URL: "DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL" },
+        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
+      },
+      {
         name: "OIDC mode missing secret",
         env: {
           AUTH_MODE: "oidc",
@@ -222,6 +235,16 @@ describe("app manifest rendering", () => {
         secrets: {},
         error: /OIDC_ISSUER_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      },
+      {
+        name: "builtin mode with non-empty OIDC backchannel metadata",
+        env: {
+          AUTH_MODE: "builtin_admin",
+          OIDC_BACKCHANNEL_BASE_URL: "DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL"
+        },
+        secrets: {},
+        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       }
     ];
 
@@ -344,6 +367,7 @@ describe("app manifest rendering", () => {
     const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "dry-run");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
+    assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, undefined);
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "agentsmith-lite/botified-runner:dev");
     assert.equal(configMapData?.AUTH_MODE, undefined);
     assert.ok(

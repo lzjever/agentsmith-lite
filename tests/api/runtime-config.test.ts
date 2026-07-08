@@ -34,18 +34,21 @@ describe("runtime config", () => {
       AUTH_MODE: "builtin_admin",
       OIDC_ISSUER_URL: "",
       OIDC_CLIENT_ID: "",
-      OIDC_CLIENT_SECRET: ""
+      OIDC_CLIENT_SECRET: "",
+      OIDC_BACKCHANNEL_BASE_URL: ""
     }), { mode: "builtin_admin" });
 
     assert.deepEqual(parseRuntimeAuthConfig({
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: " https://keycloak.example.test/realms/agentsmith ",
+      OIDC_BACKCHANNEL_BASE_URL: " http://keycloak.keycloak.svc.cluster.local/realms/agentsmith ",
       OIDC_CLIENT_ID: " agentsmith-lite ",
       OIDC_CLIENT_SECRET: " client-secret "
     }), {
       mode: "oidc",
       oidc: {
         issuerUrl: "https://keycloak.example.test/realms/agentsmith",
+        backchannelBaseUrl: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         clientId: "agentsmith-lite",
         clientSecret: "client-secret"
       }
@@ -54,14 +57,20 @@ describe("runtime config", () => {
     for (const env of [
       { AUTH_MODE: "oidc", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret" },
       { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "ftp://issuer.example.test", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret" },
+      { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "https://issuer.example.test", OIDC_BACKCHANNEL_BASE_URL: "ftp://keycloak", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret" },
       { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "https://issuer.example.test", OIDC_CLIENT_SECRET: "secret" },
       { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "https://issuer.example.test", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "" }
     ]) {
       assert.throws(
         () => requireOidcRuntimeConfig(env),
-        /OIDC_(ISSUER_URL|CLIENT_ID|CLIENT_SECRET)/
+        /OIDC_(ISSUER_URL|BACKCHANNEL_BASE_URL|CLIENT_ID|CLIENT_SECRET)/
       );
     }
+
+    assert.throws(
+      () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin", OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.local" }),
+      /OIDC_BACKCHANNEL_BASE_URL/
+    );
   });
 
   it("parses sandbox mode fail-closed except for empty dry-run defaults", () => {

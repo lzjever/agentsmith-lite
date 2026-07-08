@@ -42,7 +42,9 @@ const productSecretKeys = new Set([
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
   "REGISTRY_URL",
-  "IMAGE_PULL_SECRET_NAME"
+  "IMAGE_PULL_SECRET_NAME",
+  "OIDC_BOOTSTRAP_USERNAME",
+  "OIDC_BOOTSTRAP_PASSWORD"
 ]);
 
 export async function readContractFiles(options = {}) {
@@ -232,7 +234,7 @@ function classifyAuthMetadataKey(key, kind, value) {
     }
     return "oidc-secret-in-env";
   }
-  if (key === "OIDC_ISSUER_URL" || key === "OIDC_CLIENT_ID") {
+  if (key === "OIDC_ISSUER_URL" || key === "OIDC_BACKCHANNEL_BASE_URL" || key === "OIDC_CLIENT_ID") {
     if (kind === "env" && value.trim() !== "") {
       return "allow";
     }
@@ -262,7 +264,7 @@ function validateAuthContract(env, secrets) {
     return;
   }
 
-  for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+  for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
     if (env[key]?.trim()) {
       throw new EnvContractError(`${key} must be empty in substrate env when AUTH_MODE=builtin_admin`);
     }

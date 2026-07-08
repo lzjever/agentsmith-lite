@@ -41,7 +41,9 @@ describe("deploy env contract", () => {
         "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
         "AUTH_MODE=oidc",
         "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_BACKCHANNEL_BASE_URL=http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         "OIDC_CLIENT_ID=agentsmith-lite",
+        "OIDC_BOOTSTRAP_USERNAME=DO_NOT_PRINT_OIDC_BOOTSTRAP_USERNAME",
         "S3_ENDPOINT=DO_NOT_PRINT_S3_ENDPOINT",
         "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
         "JUICEFS_PVC_NAME=agentsmith-lite-files",
@@ -54,6 +56,7 @@ describe("deploy env contract", () => {
         "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
         "APP_SESSION_SECRET=app-session-secret-at-least-32-chars",
         "OIDC_CLIENT_SECRET=oidc-client-secret",
+        "OIDC_BOOTSTRAP_PASSWORD=DO_NOT_PRINT_OIDC_BOOTSTRAP_PASSWORD",
         "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
         "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
         ""
@@ -68,6 +71,7 @@ describe("deploy env contract", () => {
       APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
       OIDC_CLIENT_ID: "agentsmith-lite",
       JUICEFS_PVC_NAME: "agentsmith-lite-files",
       POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
@@ -97,6 +101,13 @@ describe("deploy env contract", () => {
         secretsContents: "OIDC_CLIENT_SECRET=\n",
         error: /OIDC_ISSUER_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      },
+      {
+        name: "builtin with non-empty OIDC backchannel URL",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_BACKCHANNEL_BASE_URL=DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL\n",
+        secretsContents: "OIDC_CLIENT_SECRET=\n",
+        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
       {
         name: "builtin with non-empty OIDC client ID",
@@ -145,6 +156,13 @@ describe("deploy env contract", () => {
         secretsContents: "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\nOIDC_CLIENT_ID=agentsmith-lite\nOIDC_CLIENT_SECRET=secret\n",
         error: /OIDC_ISSUER_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      },
+      {
+        name: "OIDC backchannel URL misplaced in secrets",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
+        secretsContents: "OIDC_BACKCHANNEL_BASE_URL=DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL\nOIDC_CLIENT_SECRET=secret\n",
+        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       }
     ];
 

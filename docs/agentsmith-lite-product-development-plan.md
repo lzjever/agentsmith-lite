@@ -71,47 +71,44 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 - Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 health/auth/project/endpoint/chat/file/task/cancel/reap，stdout 输出，失败非零。
 - App doctor 只做静态 manifest/env 和可选 K8s read-only facts 检查，stdout/stderr 输出，失败非零。
+- OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已完成；app 消费 substrates 输出的 issuer/client/secret/backchannel。
 - Botified runner acceptance 保留本地进程和 runner image 两层，覆盖 health/messages/timeline/file/state/abort。
 - API product workflow test 覆盖 login、workspace、project、endpoint、chat、file CRUD、task resources。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 
 仍需注意的现实：
 
-- README/OPERATOR 仍描述 built-in admin 本地路径；OIDC/Keycloak 是下一步核心闭环工作。
+- Keycloak bootstrap 创建的本地登录用户只用于本地/operator 登录，不进入 app runtime。
+- README/OPERATOR 仍描述 built-in admin 本地路径；OIDC/Keycloak app integration 已完成，后续只做文档收敛和真实部署验证。
 - K8s/Botified/JuiceFS 的完整 artifact 流需要 local substrate 环境实际跑通。
 - Cleanup 必须继续保持 runId/label fencing，不能扩大到非 app-owned resources。
 
 ## Immediate Next Work
 
-1. **OIDC/Keycloak app integration**
-   - 接入 substrates 输出的 OIDC issuer/client/client secret。
-   - 实现 login/callback/session/logout。
-   - 保留 CSRF/API 权限边界，收敛 built-in admin 到本地/过渡用途。
-   - 添加 auth/session route 和 env contract 的小型行为测试。
-
-2. **Local K8s deploy loop**
+1. **Local K8s deploy loop**
    - 使用 substrates 输出 env/secrets 渲染并部署 app。
    - 确认 API/Web readiness、schema bootstrap、JuiceFS PVC、sandbox RBAC。
    - 让 product workflow check 能对 live app 完成 health/auth/project/endpoint/file 基础路径。
+   - 验证 OIDC session 使用 public issuer，server-side backchannel 使用 in-cluster URL。
 
-3. **Botified task artifact loop**
+2. **Botified task artifact loop**
    - 确认 runner image 可在 sandbox pod 中启动。
    - 通过 Botified bash 写入文件并 publish artifact。
    - API 能读取 events、列出 artifacts、下载 artifact 内容。
    - 增加只覆盖 task artifact 投影和下载路径的行为测试。
 
-4. **Cancel / TTL / Reap**
+3. **Cancel / TTL / Reap**
    - cancel 调用 Botified abort，并标记 task/run state。
    - TTL tick 只选中 app-owned expired resources。
    - reap 支持 runId scoped dry-run/apply，并使用 label/UID fence。
    - 补齐 cleanup 不越界的 targeted tests。
 
-5. **Web UI API client**
+4. **Web UI API client**
    - UI 完成 workspace/project/endpoint/task/files/artifacts 最小操作面。
    - UI 不导入 app internals，不调用 `/api/operator/*`。
    - 继续用 boundary test 固定 API-client-only 约束。
 
-6. **Docs and commands stay small**
+5. **Docs and commands stay small**
    - README/OPERATOR 只保留可执行命令和核心边界。
    - 新命令必须直接服务产品闭环，stdout/stderr 清晰，失败非零。
    - 删除与核心闭环无关的 prose tests、长矩阵、默认产物生成。

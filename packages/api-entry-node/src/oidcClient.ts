@@ -27,13 +27,31 @@ export interface OidcClientAdapter {
 
 export interface CreateOpenIdConnectClientInput {
   issuerUrl: string;
+  backchannelBaseUrl?: string;
   clientId: string;
   clientSecret: string;
 }
 
 export async function createOpenIdConnectClient(input: CreateOpenIdConnectClientInput): Promise<OidcClientAdapter> {
-  const config = await oidc.discovery(new URL(input.issuerUrl), input.clientId, input.clientSecret);
+  const discoveryOptions = createDiscoveryOptions(input.issuerUrl, input.backchannelBaseUrl);
+  const config = await oidc.discovery(new URL(input.issuerUrl), input.clientId, input.clientSecret, undefined, discoveryOptions);
   return new OpenIdConnectClient(config, input.issuerUrl);
+}
+
+export function rewriteOidcBackchannelRequest(
+  request: string | URL | Request,
+  issuerUrl: string,
+  backchannelBaseUrl: string
+): string | Request {
+  const originalUrl = request instanceof Request ? request.url : request.toString();
+  const rewrittenUrl = rewriteOidcBackchannelUrl(originalUrl, issuerUrl, backchannelBaseUrl);
+  if (!rewrittenUrl || rewrittenUrl === originalUrl) {
+    return request instanceof Request ? request : originalUrl;
+  }
+  if (request instanceof Request) {
+    return new Request(rewrittenUrl, request);
+  }
+  return rewrittenUrl;
 }
 
 class OpenIdConnectClient implements OidcClientAdapter {
@@ -86,4 +104,43 @@ class OpenIdConnectClient implements OidcClientAdapter {
 
 function issuerFromClaims(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function createDiscoveryOptions(issuerUrl: string, backchannelBaseUrl: string | undefined): oidc.DiscoveryRequestOptions | undefined {
+  const options: oidc.DiscoveryRequestOptions = {};
+  let hasOptions = false;
+  if (backchannelBaseUrl) {
+    options[oidc.customFetch] = async (url, init) =>
+      fetch(rewriteOidcBackchannelUrl(url, issuerUrl, backchannelBaseUrl) ?? url, toRequestInit(init));
+    hasOptions = true;
+  }
+  if (usesHttp(issuerUrl) || (backchannelBaseUrl ? usesHttp(backchannelBaseUrl) : false)) {
+    options.execute = [oidc.allowInsecureRequests];
+    hasOptions = true;
+  }
+  return hasOptions ? options : undefined;
+}
+
+function rewriteOidcBackchannelUrl(url: string, issuerUrl: string, backchannelBaseUrl: string): string | undefined {
+  const issuer = issuerUrl.replace(/\/$/, "");
+  if (url !== issuer && !url.startsWith(`${issuer}/`) && !url.startsWith(`${issuer}?`)) {
+    return undefined;
+  }
+
+  const backchannel = backchannelBaseUrl.replace(/\/$/, "");
+  return `${backchannel}${url.slice(issuer.length)}`;
+}
+
+function usesHttp(url: string): boolean {
+  return new URL(url).protocol === "http:";
+}
+
+function toRequestInit(init: oidc.CustomFetchOptions): RequestInit {
+  return {
+    method: init.method,
+    headers: init.headers,
+    redirect: init.redirect,
+    ...(init.signal ? { signal: init.signal } : {}),
+    ...(init.body === undefined ? {} : { body: init.body as BodyInit })
+  };
 }
