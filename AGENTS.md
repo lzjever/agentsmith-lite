@@ -22,7 +22,7 @@ Aggressively remove existing and new governance overhead:
 - evidence/report/rehearsal/release/gate/matrix systems;
 - default `*-report.json` outputs and report-only fields;
 - diagnostic document generation;
-- generic smoke concepts and smoke reports;
+- umbrella validation concepts and pass/fail summaries detached from real product paths;
 - tests that test the testing or release machinery;
 - tests that assert docs prose;
 - generated archives or indexes that are not needed to run the product.
