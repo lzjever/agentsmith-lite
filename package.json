@@ -28,8 +28,8 @@
     "dev:web": "npm run dev:api",
     "dev": "npm run dev:api",
     "check:forbidden-surfaces": "scripts/check-forbidden-surfaces.sh",
-    "acceptance:botified-runner": "npm run build && node scripts/acceptance/botified-runner-acceptance.mjs",
-    "acceptance:botified-runner-image": "npm run build && node scripts/acceptance/botified-runner-acceptance.mjs --container-image agentsmith-lite/botified-runner:acceptance",
+    "check:botified-runner": "npm run build && node scripts/botified/check-runner.mjs",
+    "check:botified-runner-image": "npm run build && node scripts/botified/check-runner.mjs --container-image agentsmith-lite/botified-runner:check",
     "e2e:operator-lifecycle": "npm run build && node e2e/operator-lifecycle/operator-lifecycle.mjs",
     "visual:screenshot": "npm run build && node scripts/visual/screenshot.mjs"
   },

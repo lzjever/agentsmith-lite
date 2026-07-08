@@ -315,7 +315,7 @@ async function createProjectWithEndpoint(baseUrl: string) {
     baseUrl: "https://models.example.com/v1",
     model: "gpt-compatible",
     apiKeySecretRef: "secret/mock",
-    capabilities: ["text"],
+    capabilities: ["text", "tool_calls"],
     requestTimeoutSecs: 30
   });
 

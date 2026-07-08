@@ -13,11 +13,11 @@ const configuredModelApiKey = "DO_NOT_PRINT_CONFIGURED_MODEL_API_KEY";
 const s3SecretKey = "DO_NOT_PRINT_S3_SECRET_KEY";
 const juicefsMetaUrl = "redis://DO_NOT_PRINT_JUICEFS_META_URL";
 const downloadToken = "DO_NOT_PRINT_DOWNLOAD_TOKEN";
-const artifactFilename = "botified-release-check.txt";
-const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\n";
+const artifactFilename = "botified-runner-check.txt";
+const artifactContent = "BOTIFIED_RUNNER_CHECK_OUTPUT\n";
 const artifactSha256 = createHash("sha256").update(artifactContent).digest("hex");
 
-describe("Botified runner local acceptance", () => {
+describe("Botified runner local check", () => {
   it("entrypoint keeps production args by default", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-entrypoint-"));
     const fakeBinary = path.join(tempDir, "botified");
@@ -67,11 +67,11 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     assert.equal(readFileSync(callsFile, "utf8").trim(), "serve --config /tmp/runtime.yaml --mock-provider");
   });
 
-  it("acceptance script observes mock bash output, published artifact download, state, and abort without leaking secrets", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-acceptance-"));
+  it("check script observes mock bash output, published artifact download, state, and abort without leaking secrets", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-runner-check-"));
     const fakeBinary = writeFakeBotifiedBinary(tempDir);
 
-    const result = runAcceptance(fakeBinary, ["--timeout-secs", "3"], {
+    const result = runRunnerCheck(fakeBinary, ["--timeout-secs", "3"], {
       BOTIFIED_SERVICE_KEY: serviceKey,
       MODEL_API_KEY: modelApiKey,
       BOTIFIED_TEXT_API_KEY: botifiedTextApiKey,
@@ -104,7 +104,7 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     assert.equal(summary.mode, "local-process");
     assert.equal(summary.markerObserved, true);
     assert.equal(summary.publishedArtifact.eventObserved, true);
-    assert.equal(summary.publishedArtifact.fileId, "file_acceptance_artifact");
+    assert.equal(summary.publishedArtifact.fileId, "file_runner_check_artifact");
     assert.equal(summary.publishedArtifact.filename, artifactFilename);
     assert.equal(summary.publishedArtifact.bytes, Buffer.byteLength(artifactContent));
     assert.equal(summary.publishedArtifact.sha256, artifactSha256);
@@ -118,8 +118,8 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     assertNoSecretLeak(result.stdout, result.stderr);
   });
 
-  it("acceptance script shows startup failure without leaking secrets", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-acceptance-fail-"));
+  it("check script shows startup failure without leaking secrets", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-runner-check-fail-"));
     const fakeBinary = path.join(tempDir, "botified-fail");
     writeFileSync(fakeBinary, `#!/usr/bin/env bash
 printf 'startup failed with %s %s %s %s %s %s\\n' "$BOTIFIED_SERVICE_KEY" "$MODEL_API_KEY" "$BOTIFIED_TEXT_API_KEY" "$AGENTSMITH_LITE_MODEL_API_KEY_OPENAI" "$S3_SECRET_KEY" "$JUICEFS_META_URL" >&2
@@ -127,7 +127,7 @@ exit 42
 `);
     chmodSync(fakeBinary, 0o755);
 
-    const result = runAcceptance(fakeBinary, ["--timeout-secs", "0.5"], {
+    const result = runRunnerCheck(fakeBinary, ["--timeout-secs", "0.5"], {
       BOTIFIED_SERVICE_KEY: serviceKey,
       MODEL_API_KEY: modelApiKey,
       BOTIFIED_TEXT_API_KEY: botifiedTextApiKey,
@@ -142,12 +142,12 @@ exit 42
   });
 });
 
-function runAcceptance(
+function runRunnerCheck(
   binaryPath: string,
   args: string[],
   env: Record<string, string>
 ): { status: number | null; stdout: string; stderr: string } {
-  return spawnSync("node", ["scripts/acceptance/botified-runner-acceptance.mjs", "--binary", binaryPath, ...args], {
+  return spawnSync("node", ["scripts/botified/check-runner.mjs", "--binary", binaryPath, ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
@@ -186,9 +186,9 @@ const port = Number(rawConfig.match(/\\n  port: (\\d+)\\n/)?.[1]);
 const serviceKey = process.env.BOTIFIED_SERVICE_KEY;
 let messageAccepted = false;
 let outputReady = false;
-const artifactFileId = "file_acceptance_artifact";
-const artifactFilename = "botified-release-check.txt";
-const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\\n";
+const artifactFileId = "file_runner_check_artifact";
+const artifactFilename = "botified-runner-check.txt";
+const artifactContent = "BOTIFIED_RUNNER_CHECK_OUTPUT\\n";
 const artifactSha256 = ${JSON.stringify(artifactSha256)};
 
 function authorized(req) {
@@ -214,7 +214,7 @@ const server = http.createServer((req, res) => {
       body += chunk;
     });
     req.on("end", () => {
-      if (!body.includes("BOTIFIED_RELEASE_CHECK_BASH")) {
+      if (!body.includes("BOTIFIED_RUNNER_CHECK_BASH")) {
         res.statusCode = 422;
         res.end(JSON.stringify({ error: { code: "missing_trigger", message: "missing trigger" } }));
         return;
@@ -241,8 +241,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url.startsWith("/v1/timeline")) {
     const events = outputReady
       ? [
-        { type: "tool_call", tool: "bash", id: "acceptance_bash" },
-        { type: "tool_output", text: "BOTIFIED_RELEASE_CHECK_OUTPUT" },
+        { type: "tool_call", tool: "bash", id: "runner_check_bash" },
+        { type: "tool_output", text: "BOTIFIED_RUNNER_CHECK_OUTPUT" },
         {
           type: "file.published",
           data: {
@@ -253,7 +253,7 @@ const server = http.createServer((req, res) => {
             sha256: artifactSha256,
             download_url: "http://127.0.0.1:" + port + "/v1/files/" + artifactFileId + "?token=DO_NOT_PRINT_DOWNLOAD_TOKEN",
             source: "published",
-            description: "acceptance artifact"
+            description: "runner check artifact"
           }
         }
       ]

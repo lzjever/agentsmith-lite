@@ -25,15 +25,15 @@ try {
     data: { email: "admin@agentsmith-lite.local", password: "admin-password" }
   });
   const csrfToken = (await login.json()).csrfToken;
-  const workspace = await (await context.request.post(server.baseUrl + "/api/workspaces", {
+  const workspace = await requestJson(context, "POST", "/api/workspaces", {
     headers: { "x-csrf-token": csrfToken },
     data: { name: "Visual Workspace" }
-  })).json();
-  const project = await (await context.request.post(server.baseUrl + `/api/workspaces/${workspace.id}/projects`, {
+  });
+  const project = await requestJson(context, "POST", `/api/workspaces/${workspace.id}/projects`, {
     headers: { "x-csrf-token": csrfToken },
     data: { name: "Visual Project" }
-  })).json();
-  const endpoint = await (await context.request.post(server.baseUrl + `/api/projects/${project.id}/endpoints`, {
+  });
+  const endpoint = await requestJson(context, "POST", `/api/projects/${project.id}/endpoints`, {
     headers: { "x-csrf-token": csrfToken },
     data: {
       name: "Visual Endpoint",
@@ -41,11 +41,11 @@ try {
       baseUrl: "https://models.example.com/v1",
       model: "gpt-compatible",
       apiKeySecretRef: "secret/visual",
-      capabilities: ["text"],
+      capabilities: ["text", "tool_calls"],
       requestTimeoutSecs: 30
     }
-  })).json();
-  await context.request.post(server.baseUrl + `/api/projects/${project.id}/tasks`, {
+  });
+  await requestJson(context, "POST", `/api/projects/${project.id}/tasks`, {
     headers: { "x-csrf-token": csrfToken },
     data: { endpointId: endpoint.id, prompt: "Visual task" }
   });
@@ -93,6 +93,18 @@ try {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function requestJson(context, method, pathname, options) {
+  const response = await context.request.fetch(server.baseUrl + pathname, {
+    method,
+    ...options
+  });
+  const text = await response.text();
+  if (!response.ok()) {
+    throw new Error(`${method} ${pathname} failed with ${response.status()}: ${text}`);
+  }
+  return text ? JSON.parse(text) : {};
 }
 
 function fakeBotifiedClient(bytes) {

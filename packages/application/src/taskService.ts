@@ -91,6 +91,12 @@ const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const API_OWNED_ARTIFACT_DIRECTORY_MODE = 0o755;
 
+function requireTaskEndpointToolCalls(endpoint: ModelEndpoint): void {
+  if (!endpoint.capabilities.includes("tool_calls")) {
+    throw new ProductError("Task endpoint must support the tool_calls capability for Botified tool execution", 409);
+  }
+}
+
 export interface ActiveTaskSyncResult {
   activeTaskCount: number;
   syncedTaskIds: string[];
@@ -139,6 +145,7 @@ export class TaskService {
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const project = await this.workspaces.requireProjectForUser(userId, projectId);
     const endpoint = await this.endpoints.requireEndpointForProject(projectId, endpointId);
+    requireTaskEndpointToolCalls(endpoint);
     const active = (await this.store.listTasksForProject(projectId)).filter((task) =>
       ["queued", "starting", "running", "stopping"].includes(task.status)
     );

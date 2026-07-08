@@ -8,14 +8,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const mockProviderTrigger = "BOTIFIED_RELEASE_CHECK_BASH";
-const mockProviderMarker = "BOTIFIED_RELEASE_CHECK_OUTPUT";
-const mockProviderArtifactFilename = "botified-release-check.txt";
+const mockProviderTrigger = "BOTIFIED_RUNNER_CHECK_BASH";
+const mockProviderMarker = "BOTIFIED_RUNNER_CHECK_OUTPUT";
+const mockProviderArtifactFilename = "botified-runner-check.txt";
 const mockProviderArtifactSha256 = sha256Text(`${mockProviderMarker}\n`);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "../..");
 const defaultBinary = path.join(repoRoot, "third_party/botified/target/release/botified");
-const defaultContainerImage = "agentsmith-lite/botified-runner:acceptance";
+const defaultContainerImage = "agentsmith-lite/botified-runner:check";
 const botifiedRunnerDockerfile = path.join(repoRoot, "infra/docker/Dockerfile.botified-runner");
 const distClientPath = path.join(repoRoot, "dist/packages/ports/src/botified.js");
 const containerConfigPath = "/etc/botified/botified-runtime.yaml";
@@ -69,7 +69,7 @@ async function main() {
   const { FetchBotifiedRuntimeHttpClient } = await import(pathToFileURL(distClientPath).href);
   const client = new FetchBotifiedRuntimeHttpClient();
   const tempDir = await mkdtemp(path.join(tmpdir(), "agentsmith-lite-botified-runner-"));
-  const serviceKey = process.env.BOTIFIED_SERVICE_KEY || `asl-acceptance-${randomBytes(18).toString("hex")}`;
+  const serviceKey = process.env.BOTIFIED_SERVICE_KEY || `asl-runner-check-${randomBytes(18).toString("hex")}`;
   activeRedactor.add(serviceKey);
 
   const startedAt = Date.now();
@@ -81,7 +81,7 @@ async function main() {
     const configPath = path.join(tempDir, "botified-runtime.yaml");
     const workDir = path.join(tempDir, "workspace");
     const hostDataDir = options.mode === "container-image" ? path.join(workDir, "state") : path.join(tempDir, "state");
-    await prepareAcceptanceWorkspace({ workDir, dataDir: hostDataDir });
+    await prepareRunnerCheckWorkspace({ workDir, dataDir: hostDataDir });
 
     if (options.mode === "local-process") {
       await writeFile(configPath, runtimeConfigYaml({
@@ -123,13 +123,13 @@ async function main() {
     const posted = await client.postMessage(
       baseUrl,
       serviceKey,
-      `Run the local Botified runner acceptance check: ${mockProviderTrigger}. Write ${mockProviderArtifactFilename} with exactly ${mockProviderMarker} on one line, then publish_file it.`
+      `Run the local Botified runner check: ${mockProviderTrigger}. Write ${mockProviderArtifactFilename} with exactly ${mockProviderMarker} on one line, then publish_file it.`
     );
     if (posted.accepted !== true) {
-      throw new Error("Botified did not accept the acceptance message");
+      throw new Error("Botified did not accept the runner check message");
     }
 
-    const observed = await waitForAcceptanceArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor: posted.cursor });
+    const observed = await waitForRunnerCheckArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor: posted.cursor });
     const abort = await client.abort(baseUrl, serviceKey);
     const finalState = await client.readState(baseUrl, serviceKey);
 
@@ -263,11 +263,11 @@ function resolveCliPath(value) {
 
 function usage() {
   return [
-    "usage: node scripts/acceptance/botified-runner-acceptance.mjs [--binary PATH] [--timeout-secs N] [--keep-temp]",
-    "       node scripts/acceptance/botified-runner-acceptance.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
+    "usage: node scripts/botified/check-runner.mjs [--binary PATH] [--timeout-secs N] [--keep-temp]",
+    "       node scripts/botified/check-runner.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
     "",
-    "Runs Botified runner acceptance with the vendored binary by default, or with a runner image/container when --container-image is provided.",
-    "On success, prints the acceptance summary JSON to stdout."
+    "Runs the Botified runner check with the vendored binary by default, or with a runner image/container when --container-image is provided.",
+    "On success, prints the runner check summary JSON to stdout."
   ].join("\n");
 }
 
@@ -409,7 +409,7 @@ function cleanupContainer({ runtime, containerName, redactor }) {
   });
 }
 
-async function prepareAcceptanceWorkspace({ workDir, dataDir }) {
+async function prepareRunnerCheckWorkspace({ workDir, dataDir }) {
   const writableDirs = [
     dataDir,
     path.join(dataDir, "tasks"),
@@ -569,7 +569,7 @@ async function waitForHealth({ client, baseUrl, serviceKey, childHandle, deadlin
   ].filter(Boolean).join("\n"));
 }
 
-async function waitForAcceptanceArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor }) {
+async function waitForRunnerCheckArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor }) {
   let timelineCursor = cursor;
   let markerObserved = false;
   let publishedArtifact;
@@ -579,7 +579,7 @@ async function waitForAcceptanceArtifact({ client, baseUrl, serviceKey, childHan
   let lastArtifactError;
 
   while (Date.now() < deadline) {
-    assertChildStillRunning(childHandle, "during runner acceptance");
+    assertChildStillRunning(childHandle, "during runner check");
 
     const [state, timeline] = await Promise.all([
       client.readState(baseUrl, serviceKey),

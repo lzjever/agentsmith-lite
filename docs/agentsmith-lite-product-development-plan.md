@@ -72,7 +72,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 health/auth/project/endpoint/chat/file/task/cancel/reap，stdout 输出，失败非零。
 - App doctor 只做静态 manifest/env 和可选 K8s read-only facts 检查，stdout/stderr 输出，失败非零。
 - OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已完成；app 消费 substrates 输出的 issuer/client/secret/backchannel。
-- Botified runner acceptance 保留本地进程和 runner image 两层，覆盖 health/messages/timeline/file/state/abort。
+- Botified runner check 保留本地进程和 runner image 两层，覆盖 health/messages/timeline/file/state/abort。
 - API product workflow test 覆盖 login、workspace、project、endpoint、chat、file CRUD、task resources。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 

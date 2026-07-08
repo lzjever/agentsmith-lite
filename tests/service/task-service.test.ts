@@ -104,6 +104,42 @@ describe("task service Botified orchestration", () => {
     assert.equal(botified.postMessageCalls.length, 0);
   });
 
+  it("rejects text-only endpoints before creating sandbox or Botified side effects", async () => {
+    const operations: string[] = [];
+    const botified = new FakeBotifiedClient([], { operations });
+    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+    const resolver = new FakeCredentialResolver({
+      apiKey: "sk-real-model-key",
+      baseUrl: "https://models.example.com/v1/"
+    });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      endpointCapabilities: ["text"],
+      modelCredentialResolver: resolver,
+      liveSandbox: {
+        port: livePort,
+        readinessTimeoutMs: 1000,
+        readinessPollMs: 10,
+        sleep: livePort.sleep
+      }
+    });
+
+    await assert.rejects(
+      () => services.tasks.createTask(userId, projectId, { prompt: "publish a file", endpointId }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProductError);
+        assert.equal(error.statusCode, 409);
+        assert.match(error.message, /tool_calls/);
+        assert.doesNotMatch(error.message, /sk-real-model-key|secret\/openai/);
+        return true;
+      }
+    );
+    assert.deepEqual(operations, []);
+    assert.equal(livePort.appliedResources.length, 0);
+    assert.equal(botified.postMessageCalls.length, 0);
+    assert.deepEqual(resolver.calls, []);
+    assert.deepEqual(await store.listTasksForProject(projectId), []);
+  });
+
   it("uses the safe Botified post cursor as the first timeline resume cursor", async () => {
     const botified = new FakeBotifiedClient([
       {
@@ -1495,6 +1531,7 @@ describe("task service Botified orchestration", () => {
 interface SetupOptions {
   serviceKeyFactory?: () => string | undefined;
   dataRoot?: string;
+  endpointCapabilities?: Array<"text" | "image" | "tool_calls">;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: CreateApplicationServicesInput["liveSandbox"];
   sandboxNamespaceLimit?: number;
@@ -1528,7 +1565,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     baseUrl: "https://models.example.com/v1",
     model: "gpt-compatible",
     apiKeySecretRef: "secret/openai",
-    capabilities: ["text", "tool_calls"],
+    capabilities: options.endpointCapabilities ?? ["text", "tool_calls"],
     requestTimeoutSecs: 45
   });
 

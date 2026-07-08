@@ -96,6 +96,11 @@ describe("web ui client boundary", () => {
       assert.match(source, required.route, `browser UI must include ${required.name} product API route`);
       assert.match(source, required.method, `browser UI must call ${required.name} through the expected workflow`);
     }
+    assert.match(
+      source,
+      /capabilities:\s*\[\s*"text"\s*,\s*"tool_calls"\s*]/,
+      "browser UI must create task-ready endpoints with tool_calls capability"
+    );
   });
 });
 

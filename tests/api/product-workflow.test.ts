@@ -56,7 +56,7 @@ describe("api product workflow", () => {
       baseUrl: "https://models.example.com/v1",
       model: "gpt-compatible",
       apiKeySecretRef: "secret/openai",
-      capabilities: ["text"],
+      capabilities: ["text", "tool_calls"],
       requestTimeoutSecs: 30
     }, cookie, csrf);
     assertNoApiKeySecretRef(endpoint);

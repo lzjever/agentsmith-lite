@@ -99,7 +99,7 @@ endpointForm.addEventListener("submit", async (event) => {
         baseUrl: formString(form, "baseUrl"),
         model: formString(form, "model"),
         apiKeySecretRef: formString(form, "secretRef"),
-        capabilities: ["text"],
+        capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: parseTimeout(form.get("requestTimeoutSecs"))
       }
     });

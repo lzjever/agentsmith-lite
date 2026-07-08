@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-const image = "agentsmith-lite/botified-runner:acceptance-test";
+const image = "agentsmith-lite/botified-runner:check-test";
 const serviceKey = "DO_NOT_PRINT_IMAGE_SERVICE_KEY";
 const modelApiKey = "DO_NOT_PRINT_IMAGE_MODEL_API_KEY";
 const botifiedTextApiKey = "DO_NOT_PRINT_IMAGE_BOTIFIED_TEXT_API_KEY";
@@ -14,17 +14,17 @@ const configuredModelApiKey = "DO_NOT_PRINT_IMAGE_CONFIGURED_MODEL_API_KEY";
 const s3SecretKey = "DO_NOT_PRINT_IMAGE_S3_SECRET_KEY";
 const juicefsMetaUrl = "redis://DO_NOT_PRINT_IMAGE_JUICEFS_META_URL";
 const downloadToken = "DO_NOT_PRINT_IMAGE_DOWNLOAD_TOKEN";
-const artifactFilename = "botified-release-check.txt";
-const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\n";
+const artifactFilename = "botified-runner-check.txt";
+const artifactContent = "BOTIFIED_RUNNER_CHECK_OUTPUT\n";
 const artifactSha256 = createHash("sha256").update(artifactContent).digest("hex");
 
-describe("Botified runner image acceptance", () => {
+describe("Botified runner image check", () => {
   it("builds the runner image and observes marker, published artifact download, state, and abort through a fake runtime", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-acceptance-"));
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-check-"));
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
     const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "success");
 
-    const result = runImageAcceptance(fakeRuntime, ["--timeout-secs", "3"], secretEnv());
+    const result = runImageCheck(fakeRuntime, ["--timeout-secs", "3"], secretEnv());
 
     assert.equal(result.status, 0, result.stderr);
     const summary = JSON.parse(result.stdout) as {
@@ -54,7 +54,7 @@ describe("Botified runner image acceptance", () => {
     assert.equal(summary.imageId, "sha256:fake-image-id");
     assert.equal(summary.markerObserved, true);
     assert.equal(summary.publishedArtifact.eventObserved, true);
-    assert.equal(summary.publishedArtifact.fileId, "file_acceptance_artifact");
+    assert.equal(summary.publishedArtifact.fileId, "file_runner_check_artifact");
     assert.equal(summary.publishedArtifact.filename, artifactFilename);
     assert.equal(summary.publishedArtifact.bytes, Buffer.byteLength(artifactContent));
     assert.equal(summary.publishedArtifact.sha256, artifactSha256);
@@ -89,12 +89,12 @@ describe("Botified runner image acceptance", () => {
     assertNoSecretLeak(result.stdout, result.stderr);
   });
 
-  it("keeps a successful container acceptance successful when workspace cleanup needs permission repair", () => {
+  it("keeps a successful container check successful when workspace cleanup needs permission repair", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-image-cleanup-"));
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
     const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "success-permission-trap");
 
-    const result = runImageAcceptance(fakeRuntime, ["--timeout-secs", "3"], secretEnv());
+    const result = runImageCheck(fakeRuntime, ["--timeout-secs", "3"], secretEnv());
 
     assert.equal(result.status, 0, result.stderr);
     const summary = JSON.parse(result.stdout) as {
@@ -118,7 +118,7 @@ describe("Botified runner image acceptance", () => {
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
     const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "no-health");
 
-    const result = runImageAcceptance(fakeRuntime, ["--skip-build", "--timeout-secs", "0.4"], secretEnv());
+    const result = runImageCheck(fakeRuntime, ["--skip-build", "--timeout-secs", "0.4"], secretEnv());
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /timed out waiting for Botified health/);
@@ -131,7 +131,7 @@ describe("Botified runner image acceptance", () => {
     const callsFile = path.join(tempDir, "runtime-calls.jsonl");
     const fakeRuntime = writeFakeRuntime(tempDir, callsFile, "start-failure");
 
-    const result = runImageAcceptance(fakeRuntime, ["--skip-build", "--timeout-secs", "0.5"], secretEnv());
+    const result = runImageCheck(fakeRuntime, ["--skip-build", "--timeout-secs", "0.5"], secretEnv());
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /startup failed/);
@@ -140,13 +140,13 @@ describe("Botified runner image acceptance", () => {
   });
 });
 
-function runImageAcceptance(
+function runImageCheck(
   runtimePath: string,
   args: string[],
   env: Record<string, string>
 ): { status: number | null; stdout: string; stderr: string } {
   return spawnSync("node", [
-    "scripts/acceptance/botified-runner-acceptance.mjs",
+    "scripts/botified/check-runner.mjs",
     "--container-image", image,
     "--runtime", runtimePath,
     ...args
@@ -271,9 +271,9 @@ if (mode === "no-health") {
 const serviceKey = process.env.BOTIFIED_SERVICE_KEY;
 let messageAccepted = false;
 let outputReady = false;
-const artifactFileId = "file_acceptance_artifact";
-const artifactFilename = "botified-release-check.txt";
-const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\\n";
+const artifactFileId = "file_runner_check_artifact";
+const artifactFilename = "botified-runner-check.txt";
+const artifactContent = "BOTIFIED_RUNNER_CHECK_OUTPUT\\n";
 const artifactSha256 = ${JSON.stringify(artifactSha256)};
 
 function authorized(req) {
@@ -299,7 +299,7 @@ const server = http.createServer((req, res) => {
       body += chunk;
     });
     req.on("end", () => {
-      if (!body.includes("BOTIFIED_RELEASE_CHECK_BASH")) {
+      if (!body.includes("BOTIFIED_RUNNER_CHECK_BASH")) {
         res.statusCode = 422;
         res.end(JSON.stringify({ error: { code: "missing_trigger", message: "missing trigger" } }));
         return;
@@ -326,8 +326,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url.startsWith("/v1/timeline")) {
     const events = outputReady
       ? [
-        { type: "tool_call", tool: "bash", id: "acceptance_bash" },
-        { type: "tool_output", text: "BOTIFIED_RELEASE_CHECK_OUTPUT" },
+        { type: "tool_call", tool: "bash", id: "runner_check_bash" },
+        { type: "tool_output", text: "BOTIFIED_RUNNER_CHECK_OUTPUT" },
         {
           type: "file.published",
           data: {
@@ -338,7 +338,7 @@ const server = http.createServer((req, res) => {
             sha256: artifactSha256,
             download_url: "http://127.0.0.1:" + hostPort + "/v1/files/" + artifactFileId + "?token=DO_NOT_PRINT_IMAGE_DOWNLOAD_TOKEN",
             source: "published",
-            description: "acceptance artifact"
+            description: "runner check artifact"
           }
         }
       ]

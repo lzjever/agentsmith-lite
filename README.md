@@ -33,18 +33,18 @@ scripts/dev/up.sh --env substrate.env --secrets substrate.secrets.env \
 
 ## Manual Checks
 
-These are opt-in developer checks, not part of the default release path:
+These are opt-in developer checks, not part of the default test path:
 
 ```bash
-npm run acceptance:botified-runner
-npm run acceptance:botified-runner-image
+npm run check:botified-runner
+npm run check:botified-runner-image
 npm run e2e:operator-lifecycle
 npm run visual:screenshot
 ```
 
-`acceptance:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts a mock-provider command, observes bash output plus `file.published`, downloads the published artifact through the Botified file API, verifies marker/filename/bytes/sha256, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process acceptance only; Kubernetes Pod/PVC, JuiceFS artifact flow, product task API, and cleanup require an external environment.
+`check:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts a mock-provider command, observes bash output plus `file.published`, downloads the published artifact through the Botified file API, verifies marker/filename/bytes/sha256, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process only; Kubernetes Pod/PVC, JuiceFS artifact flow, product task API, and cleanup require an external environment.
 
-`acceptance:botified-runner-image` builds the Node output, builds `agentsmith-lite/botified-runner:acceptance` from `infra/docker/Dockerfile.botified-runner`, runs that runner container with the mock provider, and exercises `/healthz`, `/v1/messages`, `/v1/timeline`, Botified file download, `/v1/state`, and `/v1/abort` through a random loopback port. It requires Docker to pull the Dockerfile base images. When it succeeds, this is runner-container-only acceptance; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap.
+`check:botified-runner-image` builds the Node output, builds `agentsmith-lite/botified-runner:check` from `infra/docker/Dockerfile.botified-runner`, runs that runner container with the mock provider, and exercises `/healthz`, `/v1/messages`, `/v1/timeline`, Botified file download, `/v1/state`, and `/v1/abort` through a random loopback port. It requires Docker to pull the Dockerfile base images. When it succeeds, this is runner-container-only; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap.
 
 The operator lifecycle e2e and visual screenshot are independent manual checks; they are not run by `npm test`. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
 
