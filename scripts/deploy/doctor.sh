@@ -186,11 +186,26 @@ if [ -n "$sandbox_namespace_limit" ]; then
   }
 fi
 
-for required in POSTGRES_APP_URL BUILTIN_ADMIN_INITIAL_PASSWORD; do
+auth_mode="${AUTH_MODE:-builtin_admin}"
+case "$auth_mode" in
+  ""|builtin_admin) auth_mode=builtin_admin ;;
+  oidc) ;;
+  *) echo "AUTH_MODE must be builtin_admin or oidc" >&2; exit 1 ;;
+esac
+
+for required in POSTGRES_APP_URL; do
   [ -n "${!required:-}" ] || { echo "$required is required for app deploy" >&2; exit 1; }
 done
 require_secret_min_length APP_SESSION_SECRET 32
-if [ "$sandbox_mode" = "live" ] && [ "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" = "admin-password" ]; then
+if [ "$auth_mode" = "builtin_admin" ]; then
+  [ -n "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" ] || { echo "BUILTIN_ADMIN_INITIAL_PASSWORD is required for app deploy" >&2; exit 1; }
+fi
+if [ "$auth_mode" = "oidc" ]; then
+  for required in OIDC_ISSUER_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET; do
+    [ -n "${!required:-}" ] || { echo "$required is required for app deploy when AUTH_MODE=oidc" >&2; exit 1; }
+  done
+fi
+if [ "$sandbox_mode" = "live" ] && [ "$auth_mode" = "builtin_admin" ] && [ "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" = "admin-password" ]; then
   echo "BUILTIN_ADMIN_INITIAL_PASSWORD must be non-default when AGENTSMITH_LITE_SANDBOX_MODE=live" >&2
   exit 1
 fi
@@ -205,13 +220,26 @@ fi
 
 if [ -d "$out" ]; then
   rg -q 'kind: Deployment' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
-  rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*[^[:space:]]' "$out" || {
-    echo "rendered app Secret missing non-empty BUILTIN_ADMIN_INITIAL_PASSWORD" >&2
-    exit 1
-  }
-  if [ "$sandbox_mode" = "live" ] && rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*"?admin-password"?[[:space:]]*$' "$out"; then
-    echo "rendered app Secret uses the default BUILTIN_ADMIN_INITIAL_PASSWORD in live mode" >&2
-    exit 1
+  if [ "$auth_mode" = "builtin_admin" ]; then
+    rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*[^[:space:]]' "$out" || {
+      echo "rendered app Secret missing non-empty BUILTIN_ADMIN_INITIAL_PASSWORD" >&2
+      exit 1
+    }
+    if [ "$sandbox_mode" = "live" ] && rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*"?admin-password"?[[:space:]]*$' "$out"; then
+      echo "rendered app Secret uses the default BUILTIN_ADMIN_INITIAL_PASSWORD in live mode" >&2
+      exit 1
+    fi
+  else
+    rg -q '^[[:space:]]*AUTH_MODE:[[:space:]]*oidc[[:space:]]*$' "$out" || {
+      echo "rendered app ConfigMap missing AUTH_MODE=oidc" >&2
+      exit 1
+    }
+    for required in OIDC_ISSUER_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET; do
+      rg -q "^[[:space:]]*${required}:[[:space:]]*[^[:space:]]" "$out" || {
+        echo "rendered app manifests missing non-empty $required" >&2
+        exit 1
+      }
+    done
   fi
   if requires_app_ingress "${APP_PUBLIC_BASE_URL:-}"; then
     rg -q 'kind: Ingress' "$out" || { echo "rendered app Ingress missing" >&2; exit 1; }

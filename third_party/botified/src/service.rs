@@ -3930,7 +3930,7 @@ impl EnqueueInputAttempt {
     }
 }
 
-fn enqueue_preflight_locked(
+fn enqueue_admission_locked(
     inner: &ServiceInner,
     state: &mut ServiceInnerState,
     message_id: &str,
@@ -4034,7 +4034,7 @@ async fn enqueue_input_inner(
     {
         let mut state = inner.state.lock().expect("service state mutex poisoned");
         if let Some(attempt) =
-            enqueue_preflight_locked(inner, &mut state, &message_id, &content, source, urgency)
+            enqueue_admission_locked(inner, &mut state, &message_id, &content, source, urgency)
         {
             return attempt;
         }
@@ -4054,7 +4054,7 @@ async fn enqueue_input_inner(
     }
 
     let mut state = inner.state.lock().expect("service state mutex poisoned");
-    match enqueue_preflighted_locked(inner, &mut state, accepted) {
+    match enqueue_admitted_locked(inner, &mut state, accepted) {
         Ok((outcome, start_cancel, preemption)) => {
             EnqueueInputAttempt::accepted(outcome, start_cancel, preemption)
         }
@@ -4113,9 +4113,9 @@ async fn enqueue_subagent_callback_input(
     }
 
     let cursor_seq = inner.last_event_seq();
-    let preflight_outcome = {
+    let admission_outcome = {
         let mut state = inner.state.lock().expect("service state mutex poisoned");
-        enqueue_preflight_locked(inner, &mut state, &callback_id, &content, source, urgency).map(
+        enqueue_admission_locked(inner, &mut state, &callback_id, &content, source, urgency).map(
             |attempt| {
                 let (event_status, callback_status, failure_reason) =
                     callback_status_for_enqueue_outcome(&attempt);
@@ -4130,7 +4130,7 @@ async fn enqueue_subagent_callback_input(
             },
         )
     };
-    if let Some(outcome) = preflight_outcome {
+    if let Some(outcome) = admission_outcome {
         return record_subagent_callback_outcome(inner, subagent_id, outcome);
     }
 
@@ -4192,7 +4192,7 @@ async fn enqueue_subagent_callback_input(
         } else {
             let mut state = inner.state.lock().expect("service state mutex poisoned");
             let mut preemption_to_emit = None;
-            let attempt = match enqueue_preflighted_locked(inner, &mut state, accepted) {
+            let attempt = match enqueue_admitted_locked(inner, &mut state, accepted) {
                 Ok((outcome, start_cancel, preemption)) => {
                     preemption_to_emit = preemption;
                     EnqueueInputAttempt::accepted(outcome, start_cancel, None)
@@ -4623,7 +4623,7 @@ fn enqueue_locked(
     finalize_prepared_enqueue_locked(inner, state, prepared, published)
 }
 
-fn enqueue_preflighted_locked(
+fn enqueue_admitted_locked(
     inner: &ServiceInner,
     state: &mut ServiceInnerState,
     accepted: AcceptedInputEntry,

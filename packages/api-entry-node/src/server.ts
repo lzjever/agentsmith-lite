@@ -1,10 +1,12 @@
 import { createReadStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import {
+  DEFAULT_SESSION_SECRET,
   createApplicationServices,
   requireLiveSandboxBuiltinAdminPassword,
   requireLiveSandboxSessionSecret
@@ -16,12 +18,17 @@ import { ProductError } from "../../domain/src/errors.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
+import type { AuthMode } from "./runtimeConfig.js";
+import type { OidcClientAdapter } from "./oidcClient.js";
 
 export interface ApiServerOptions {
   port: number;
   dataRoot: string;
+  authMode?: AuthMode;
   builtinAdminPassword: string;
   sessionSecret?: string;
+  publicBaseUrl?: string;
+  oidcClient?: OidcClientAdapter;
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
@@ -45,20 +52,27 @@ export interface RunningApiServer {
 }
 
 export async function createApiServer(options: ApiServerOptions): Promise<RunningApiServer> {
+  const authMode = options.authMode ?? "builtin_admin";
+  if (authMode === "oidc" && !options.oidcClient) {
+    throw new Error("OIDC client is required when AUTH_MODE=oidc");
+  }
   if (options.liveSandbox && !process.env.POSTGRES_APP_URL?.trim()) {
     throw new Error("POSTGRES_APP_URL is required when AGENTSMITH_LITE_SANDBOX_MODE=live");
   }
   if (options.liveSandbox) {
-    requireLiveSandboxBuiltinAdminPassword(options.builtinAdminPassword);
+    if (authMode === "builtin_admin") {
+      requireLiveSandboxBuiltinAdminPassword(options.builtinAdminPassword);
+    }
     requireLiveSandboxSessionSecret(options.sessionSecret);
   }
   await mkdir(options.dataRoot, { recursive: true });
   const store = options.store ?? createInMemoryProductStore();
+  const effectiveSessionSecret = options.sessionSecret ?? DEFAULT_SESSION_SECRET;
   const serviceOptions = {
     store,
     dataRoot: options.dataRoot,
     builtinAdminPassword: options.builtinAdminPassword,
-    ...(options.sessionSecret ? { sessionSecret: options.sessionSecret } : {}),
+    sessionSecret: effectiveSessionSecret,
     ...(options.namespace ? { namespace: options.namespace } : {}),
     ...(options.pvcName ? { pvcName: options.pvcName } : {}),
     ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {}),
@@ -72,6 +86,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
+    requireBuiltinAdminPasswordForLiveSandbox: authMode === "builtin_admin",
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
@@ -80,7 +95,13 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     try {
       const requestUrl = new URL(req.url ?? "/", "http://localhost");
       if (requestUrl.pathname.startsWith("/api/")) {
-        await routeApi(req, res, requestUrl, services, options.builtinAdminPassword);
+        await routeApi(req, res, requestUrl, services, {
+          authMode,
+          bootstrapPassword: options.builtinAdminPassword,
+          sessionSecret: effectiveSessionSecret,
+          ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
+          ...(options.oidcClient ? { oidcClient: options.oidcClient } : {})
+        });
       } else {
         await serveWeb(req, res, requestUrl);
       }
@@ -108,7 +129,15 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
 
 type Services = ReturnType<typeof createApplicationServices>;
 
-async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, services: Services, bootstrapPassword: string): Promise<void> {
+interface AuthRouteContext {
+  authMode: AuthMode;
+  bootstrapPassword: string;
+  sessionSecret: string;
+  publicBaseUrl?: string;
+  oidcClient?: OidcClientAdapter;
+}
+
+async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, services: Services, auth: AuthRouteContext): Promise<void> {
   const method = req.method ?? "GET";
   const segments = url.pathname.split("/").filter(Boolean);
 
@@ -117,18 +146,24 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   }
 
   if (method === "GET" && url.pathname === "/api/bootstrap") {
-    return sendJson(res, 200, { authMode: "builtin_admin", hasAdmin: true });
+    return sendJson(res, 200, { authMode: auth.authMode, hasAdmin: await services.auth.hasAnyUser() });
   }
 
   if (method === "POST" && url.pathname === "/api/auth/bootstrap") {
+    if (auth.authMode !== "builtin_admin") {
+      throw new ProductError("Route not found", 404);
+    }
     const body = await readJson(req);
-    if (body.password !== bootstrapPassword) {
+    if (body.password !== auth.bootstrapPassword) {
       throw new ProductError("Bootstrap password does not match configured admin password", 403);
     }
     return sendJson(res, 200, await services.auth.bootstrapBuiltInAdmin());
   }
 
   if (method === "POST" && url.pathname === "/api/auth/login") {
+    if (auth.authMode !== "builtin_admin") {
+      throw new ProductError("Route not found", 404);
+    }
     const body = await readJson(req);
     const result = await services.auth.login(asString(body.email), asString(body.password));
     res.setHeader("set-cookie", [
@@ -137,14 +172,59 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     return sendJson(res, 200, result);
   }
 
+  if (method === "GET" && url.pathname === "/api/auth/oidc/start") {
+    if (auth.authMode !== "oidc" || !auth.oidcClient) {
+      throw new ProductError("Route not found", 404);
+    }
+    const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl);
+    const authorization = await auth.oidcClient.createAuthorizationRequest({ redirectUri });
+    res.setHeader("set-cookie", [
+      `asl_oidc_tx=${encodeOidcTransaction({
+        state: authorization.state,
+        codeVerifier: authorization.codeVerifier,
+        nonce: authorization.nonce,
+        redirectUri,
+        createdAt: Date.now()
+      }, auth.sessionSecret)}; HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=600`
+    ]);
+    return sendRedirect(res, 302, authorization.authorizationUrl);
+  }
+
+  if (method === "GET" && url.pathname === "/api/auth/oidc/callback") {
+    if (auth.authMode !== "oidc" || !auth.oidcClient) {
+      throw new ProductError("Route not found", 404);
+    }
+    const transaction = decodeOidcTransaction(getCookie(req, "asl_oidc_tx"), auth.sessionSecret);
+    const result = await services.auth.loginExternalPrincipal(await auth.oidcClient.completeAuthorizationCallback({
+      callbackUrl: `${transaction.redirectUri}${url.search}`,
+      redirectUri: transaction.redirectUri,
+      state: transaction.state,
+      codeVerifier: transaction.codeVerifier,
+      nonce: transaction.nonce
+    }));
+    res.setHeader("set-cookie", [
+      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`,
+      "asl_oidc_tx=; HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=0"
+    ]);
+    return sendRedirect(res, 302, "/");
+  }
+
   const sessionId = getCookie(req, "asl_session");
-  const user = await services.auth.requireSession(sessionId);
+  const sessionPrincipal = await services.auth.requireSessionPrincipal(sessionId);
+  const user = sessionPrincipal.user;
   if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     await services.auth.requireCsrf(sessionId, req.headers["x-csrf-token"]?.toString() ?? null);
   }
 
   if (method === "GET" && url.pathname === "/api/me") {
-    return sendJson(res, 200, { user });
+    return sendJson(res, 200, { user, csrfToken: sessionPrincipal.csrfToken });
+  }
+
+  if (method === "POST" && url.pathname === "/api/auth/logout") {
+    res.setHeader("set-cookie", [
+      "asl_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+    ]);
+    return sendJson(res, 200, { loggedOut: true });
   }
 
   if (method === "GET" && url.pathname === "/api/dashboard") {
@@ -341,6 +421,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function sendRedirect(res: ServerResponse, status: 302, location: string): void {
+  res.writeHead(status, { location });
+  res.end();
+}
+
 function sendArtifactDownload(
   res: ServerResponse,
   download: Awaited<ReturnType<Services["tasks"]["downloadTaskArtifact"]>>
@@ -429,6 +514,91 @@ function requiredSearchParam(url: URL, name: string): string {
   const value = url.searchParams.get(name);
   if (value === null) {
     throw new ProductError(`Missing ${name} query parameter`);
+  }
+  return value;
+}
+
+interface OidcTransaction {
+  state: string;
+  codeVerifier: string;
+  nonce?: string | undefined;
+  redirectUri: string;
+  createdAt: number;
+}
+
+function encodeOidcTransaction(transaction: OidcTransaction, sessionSecret: string): string {
+  const payload = Buffer.from(JSON.stringify(transaction), "utf8").toString("base64url");
+  return `${payload}.${sign(payload, sessionSecret)}`;
+}
+
+function decodeOidcTransaction(value: string | null, sessionSecret: string): OidcTransaction {
+  if (!value) {
+    throw new ProductError("OIDC login transaction is required", 403);
+  }
+  const [payload, signature] = value.split(".");
+  if (!payload || !signature || !constantTimeEqual(signature, sign(payload, sessionSecret))) {
+    throw new ProductError("OIDC login transaction is invalid", 403);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
+  } catch {
+    throw new ProductError("OIDC login transaction is invalid", 403);
+  }
+  if (!isOidcTransaction(parsed) || Date.now() - parsed.createdAt > 10 * 60 * 1000) {
+    throw new ProductError("OIDC login transaction is invalid", 403);
+  }
+  return parsed;
+}
+
+function sign(payload: string, sessionSecret: string): string {
+  return createHmac("sha256", sessionSecret).update(payload).digest("base64url");
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isOidcTransaction(value: unknown): value is OidcTransaction {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.state === "string" &&
+    candidate.state.length > 0 &&
+    typeof candidate.codeVerifier === "string" &&
+    candidate.codeVerifier.length > 0 &&
+    (candidate.nonce === undefined || typeof candidate.nonce === "string") &&
+    typeof candidate.redirectUri === "string" &&
+    candidate.redirectUri.length > 0 &&
+    typeof candidate.createdAt === "number" &&
+    Number.isFinite(candidate.createdAt);
+}
+
+function oidcRedirectUri(req: IncomingMessage, publicBaseUrl: string | undefined): string {
+  const baseUrl = publicBaseUrl?.trim() || requestOrigin(req);
+  const parsed = new URL(baseUrl);
+  const prefix = parsed.pathname.replace(/\/$/, "");
+  parsed.pathname = `${prefix}/api/auth/oidc/callback`;
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function requestOrigin(req: IncomingMessage): string {
+  const protocol = firstHeaderValue(req.headers["x-forwarded-proto"]) ?? "http";
+  const host = firstHeaderValue(req.headers["x-forwarded-host"]) ?? req.headers.host;
+  if (!host) {
+    throw new ProductError("Host header is required");
+  }
+  return `${protocol}://${host}`;
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
   }
   return value;
 }

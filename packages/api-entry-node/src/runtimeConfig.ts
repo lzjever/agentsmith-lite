@@ -1,7 +1,18 @@
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 
-export type AuthMode = "builtin_admin";
+export type AuthMode = "builtin_admin" | "oidc";
 export type SandboxMode = "dry-run" | "live";
+
+export interface RuntimeAuthConfig {
+  mode: AuthMode;
+  oidc?: OidcRuntimeConfig;
+}
+
+export interface OidcRuntimeConfig {
+  issuerUrl: string;
+  clientId: string;
+  clientSecret: string;
+}
 
 export function parseAuthMode(value: string | undefined): AuthMode {
   const trimmed = value?.trim();
@@ -11,7 +22,25 @@ export function parseAuthMode(value: string | undefined): AuthMode {
   if (trimmed === "builtin_admin") {
     return "builtin_admin";
   }
-  throw new Error("AUTH_MODE must be empty or builtin_admin");
+  if (trimmed === "oidc") {
+    return "oidc";
+  }
+  throw new Error("AUTH_MODE must be empty, builtin_admin, or oidc");
+}
+
+export function parseRuntimeAuthConfig(env: Record<string, string | undefined>): RuntimeAuthConfig {
+  const mode = parseAuthMode(env.AUTH_MODE);
+  if (mode === "oidc") {
+    return { mode, oidc: requireOidcRuntimeConfig(env) };
+  }
+  return { mode };
+}
+
+export function requireOidcRuntimeConfig(env: Record<string, string | undefined>): OidcRuntimeConfig {
+  const issuerUrl = requireHttpUrl(env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
+  const clientId = requireNonEmpty(env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
+  const clientSecret = requireNonEmpty(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
+  return { issuerUrl, clientId, clientSecret };
 }
 
 export function parseSandboxMode(value: string | undefined): SandboxMode {
@@ -53,4 +82,26 @@ export function parseSandboxNamespaceLimit(value: string | undefined): number {
     throw new Error("AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT must be a positive integer");
   }
   return parsed;
+}
+
+function requireNonEmpty(value: string | undefined, name: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    throw new Error(`${name} is required when AUTH_MODE=oidc`);
+  }
+  return trimmed;
+}
+
+function requireHttpUrl(value: string | undefined, name: string): string {
+  const trimmed = requireNonEmpty(value, name);
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`${name} must be an http or https URL when AUTH_MODE=oidc`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${name} must be an http or https URL when AUTH_MODE=oidc`);
+  }
+  return parsed.toString().replace(/\/$/, "");
 }

@@ -1,4 +1,4 @@
-import { scrypt as scryptCallback, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, scrypt as scryptCallback, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import type { AuthSession, StoredUser, User } from "../../contracts/src/api.js";
 import { ForbiddenError, UnauthorizedError } from "../../domain/src/errors.js";
@@ -14,6 +14,17 @@ export interface LoginResult {
   sessionId: string;
   csrfToken: string;
   expiresAt: string;
+}
+
+export interface SessionPrincipal {
+  user: User;
+  csrfToken: string;
+}
+
+export interface ExternalPrincipal {
+  issuer: string;
+  subject: string;
+  email?: string | undefined;
 }
 
 export class AuthService {
@@ -59,7 +70,28 @@ export class AuthService {
     };
   }
 
+  async loginExternalPrincipal(principal: ExternalPrincipal): Promise<LoginResult> {
+    const userId = externalUserId(principal);
+    const existing = await this.store.findUserById(userId);
+    const storedUser = existing ?? await this.createExternalUser(userId, principal);
+    const session = await this.createSession(userId);
+    return {
+      user: publicUser(storedUser),
+      sessionId: session.id,
+      csrfToken: session.csrfToken,
+      expiresAt: session.expiresAt
+    };
+  }
+
+  async hasAnyUser(): Promise<boolean> {
+    return (await this.store.countUsers()) > 0;
+  }
+
   async requireSession(sessionId: string | null): Promise<User> {
+    return (await this.requireSessionPrincipal(sessionId)).user;
+  }
+
+  async requireSessionPrincipal(sessionId: string | null): Promise<SessionPrincipal> {
     if (!sessionId) {
       throw new UnauthorizedError();
     }
@@ -71,7 +103,10 @@ export class AuthService {
     if (!user) {
       throw new UnauthorizedError();
     }
-    return publicUser(user);
+    return {
+      user: publicUser(user),
+      csrfToken: session.csrfToken
+    };
   }
 
   async requireCsrf(sessionId: string | null, csrfToken: string | null): Promise<void> {
@@ -99,6 +134,20 @@ export class AuthService {
   getSessionSecretFingerprint(): string {
     return `sha256:${Buffer.from(this.sessionSecret).toString("base64url").slice(0, 12)}`;
   }
+
+  private async createExternalUser(userId: string, principal: ExternalPrincipal): Promise<StoredUser> {
+    const timestamp = nowIso();
+    const user: StoredUser = {
+      id: userId,
+      email: externalEmail(principal),
+      role: "admin",
+      passwordHash: "external:oidc",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    await this.store.createUser(user);
+    return user;
+  }
 }
 
 async function hashPassword(password: string, salt = randomBytes(16).toString("hex")): Promise<string> {
@@ -121,3 +170,27 @@ function publicUser(user: StoredUser): User {
   return structuredClone(publicFields);
 }
 
+function externalUserId(principal: ExternalPrincipal): string {
+  const issuer = requireExternalPrincipalField(principal.issuer, "issuer");
+  const subject = requireExternalPrincipalField(principal.subject, "subject");
+  const digest = createHash("sha256").update(`${issuer}\0${subject}`).digest("hex").slice(0, 32);
+  return `user_oidc_${digest}`;
+}
+
+function externalEmail(principal: ExternalPrincipal): string {
+  const email = principal.email?.trim().toLowerCase();
+  if (email) {
+    return email;
+  }
+  const subject = requireExternalPrincipalField(principal.subject, "subject");
+  const digest = createHash("sha256").update(subject).digest("hex").slice(0, 16);
+  return `oidc-${digest}@agentsmith-lite.local`;
+}
+
+function requireExternalPrincipalField(value: string, name: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new UnauthorizedError(`OIDC principal ${name} is required`);
+  }
+  return trimmed;
+}

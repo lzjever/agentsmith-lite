@@ -28,7 +28,9 @@ const productWorkflowEnvKeys = new Set([
   "PRODUCT_WORKFLOW_CHECK_TASK_ARTIFACT",
   "PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM",
   "PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM_REAP_APPLY",
-  "PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS"
+  "PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS",
+  "PRODUCT_WORKFLOW_COOKIE_FILE",
+  "PRODUCT_WORKFLOW_CSRF_TOKEN"
 ]);
 
 const productSecretKeys = new Set([
@@ -58,6 +60,7 @@ export async function readContractFiles(options = {}) {
     : [];
   const env = [...envEntries, ...appEnvEntries];
   const secrets = [...secretEntries, ...appSecretEntries];
+  validateAuthContract(Object.fromEntries(env), Object.fromEntries(secrets));
 
   return {
     entries: [...envEntries, ...secretEntries, ...appEnvEntries, ...appSecretEntries],
@@ -212,24 +215,61 @@ function classifyKey(key, kind, allowProductWorkflow, value) {
 
 function classifyAuthMetadataKey(key, kind, value) {
   if (key === "AUTH_MODE") {
+    if (kind === "env" && value.trim() === "oidc") {
+      return "allow";
+    }
     if (kind === "env" && (value.trim() === "" || value.trim() === "builtin_admin")) {
       return "ignore";
     }
     return "invalid-auth-mode";
   }
   if (key === "OIDC_CLIENT_SECRET") {
-    if (kind === "secrets" && value.trim() === "") {
+    if (kind === "secrets" && value.trim() !== "") {
+      return "allow";
+    }
+    if (kind === "secrets") {
       return "ignore";
     }
-    return "non-empty-oidc-secret";
+    return "oidc-secret-in-env";
   }
   if (key === "OIDC_ISSUER_URL" || key === "OIDC_CLIENT_ID") {
-    if (kind === "env" && value.trim() === "") {
+    if (kind === "env" && value.trim() !== "") {
+      return "allow";
+    }
+    if (kind === "env") {
       return "ignore";
     }
-    return "non-empty-oidc-public-metadata";
+    return "oidc-public-metadata-in-secrets";
   }
   return null;
+}
+
+function validateAuthContract(env, secrets) {
+  const authMode = env.AUTH_MODE?.trim() || "builtin_admin";
+  if (authMode !== "builtin_admin" && authMode !== "oidc") {
+    throw new EnvContractError("AUTH_MODE must be builtin_admin or oidc");
+  }
+
+  if (authMode === "oidc") {
+    for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+      if (!env[key]?.trim()) {
+        throw new EnvContractError(`${key} is required in substrate env when AUTH_MODE=oidc`);
+      }
+    }
+    if (!secrets.OIDC_CLIENT_SECRET?.trim()) {
+      throw new EnvContractError("OIDC_CLIENT_SECRET is required in substrate secrets when AUTH_MODE=oidc");
+    }
+    return;
+  }
+
+  for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+    if (env[key]?.trim()) {
+      throw new EnvContractError(`${key} must be empty in substrate env when AUTH_MODE=builtin_admin`);
+    }
+  }
+  if (secrets.OIDC_CLIENT_SECRET?.trim()) {
+    throw new EnvContractError("OIDC_CLIENT_SECRET must be empty in substrate secrets when AUTH_MODE=builtin_admin");
+  }
 }
 
 function isSubstrateEnvKey(key) {
@@ -274,11 +314,11 @@ function formatKeyError(disposition, key, file, lineNumber) {
     case "product-secret-in-app-secrets":
       return `product secret key ${key} must come from substrate secrets at ${location}`;
     case "invalid-auth-mode":
-      return `deferred auth key ${key} must be empty or builtin_admin in substrate env at ${location}`;
-    case "non-empty-oidc-secret":
-      return `deferred auth key ${key} must be empty in substrate secrets at ${location}`;
-    case "non-empty-oidc-public-metadata":
-      return `deferred auth key ${key} must be empty in substrate env at ${location}`;
+      return `auth key ${key} must be set in substrate env as empty, builtin_admin, or oidc at ${location}`;
+    case "oidc-secret-in-env":
+      return `secret key ${key} is not allowed in env at ${location}`;
+    case "oidc-public-metadata-in-secrets":
+      return `non-secret config key ${key} is not allowed in secrets at ${location}`;
     default:
       return `invalid env contract key ${key} at ${location}`;
   }

@@ -42,6 +42,53 @@ describe("deploy app doctor artifact checks", () => {
     assertDoctorPassed(doctor.stdout, { imageIdentity: "not provided" });
   });
 
+  it("passes rendered OIDC manifests without requiring a built-in admin password", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-app-doctor-oidc-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(
+      envFile,
+      [
+        "KUBE_NAMESPACE=agentsmith",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(
+      secretsFile,
+      [
+        "POSTGRES_APP_URL=postgres://app",
+        `APP_SESSION_SECRET=${validAppSessionSecret}`,
+        "OIDC_CLIENT_SECRET=oidc-client-secret",
+        ""
+      ].join("\n")
+    );
+
+    const render = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(render.status, 0, render.stderr);
+    const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
+    assert.match(manifest, /AUTH_MODE: oidc/);
+    assert.match(manifest, /OIDC_ISSUER_URL: https:\/\/keycloak\.example\.test\/realms\/agentsmith/);
+    assert.match(manifest, /OIDC_CLIENT_ID: agentsmith-lite/);
+    assert.match(manifest, /OIDC_CLIENT_SECRET: oidc-client-secret/);
+    assert.doesNotMatch(manifest, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
+
+    const doctor = spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.equal(doctor.status, 0, doctor.stderr);
+    assertDoctorPassed(doctor.stdout, { imageIdentity: "not provided" });
+  });
+
   it("passes static rendered manifest checks when the app Ingress is present", () => {
     const fixture = writeDoctorFixture();
 
@@ -207,7 +254,7 @@ describe("deploy app doctor artifact checks", () => {
     assert.match(result.stderr, /Ingress/i);
   });
 
-  it("fails when the deploy package omits the built-in admin password", () => {
+  it("fails when the builtin deploy package omits the built-in admin password", () => {
     const fixture = writeDoctorFixture({ adminPassword: null });
 
     const result = runDoctor(fixture, []);

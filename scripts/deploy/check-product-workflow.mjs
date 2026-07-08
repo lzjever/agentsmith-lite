@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const ADMIN_EMAIL = "admin@agentsmith-lite.local";
 const WORKSPACE_NAME = "Deploy Product Workflow";
@@ -71,6 +72,7 @@ async function main() {
   }
 
   const endpointConfig = endpointCheckConfig(args);
+  const sessionConfig = explicitSessionConfig(args);
   if (taskArtifactCheck && !endpointConfig.complete) {
     throw new UsageError(
       "task artifact check requires endpoint config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
@@ -84,8 +86,13 @@ async function main() {
   const taskTimeoutSecs = taskArtifactCheck ? taskCheckTimeoutSecs() : DEFAULT_TASK_TIMEOUT_SECS;
 
   const adminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD;
-  requireOption(adminPassword, "BUILTIN_ADMIN_INITIAL_PASSWORD");
-  sensitiveValues.add(adminPassword);
+  if (!sessionConfig) {
+    requireOption(adminPassword, "BUILTIN_ADMIN_INITIAL_PASSWORD");
+    sensitiveValues.add(adminPassword);
+  } else {
+    sensitiveValues.add(sessionConfig.cookie);
+    sensitiveValues.add(sessionConfig.csrfToken);
+  }
 
   if (endpointConfig.secretRef) {
     sensitiveValues.add(endpointConfig.secretRef);
@@ -98,15 +105,17 @@ async function main() {
 
   const k8sRunResourceObserver = checkK8sRunResources ? createK8sRunResourceObserver() : undefined;
 
-  const workflow = new ProductWorkflowClient(args.baseUrl);
+  const workflow = new ProductWorkflowClient(args.baseUrl, sessionConfig);
   const health = await workflow.requestJson("GET", "/api/health");
   if (health.status !== "ok") {
     throw new Error("health check did not return ok");
   }
-  await workflow.requestJson("POST", "/api/auth/bootstrap", {
-    body: { password: adminPassword }
-  });
-  await workflow.login(ADMIN_EMAIL, adminPassword);
+  if (!sessionConfig) {
+    await workflow.requestJson("POST", "/api/auth/bootstrap", {
+      body: { password: adminPassword }
+    });
+    await workflow.login(ADMIN_EMAIL, adminPassword);
+  }
 
   const workspace = await workflow.requestJson("POST", "/api/workspaces", {
     auth: true,
@@ -792,10 +801,10 @@ function sha256Hex(value) {
 }
 
 class ProductWorkflowClient {
-  constructor(baseUrl) {
+  constructor(baseUrl, sessionConfig) {
     this.baseUrl = baseUrl;
-    this.cookie = "";
-    this.csrfToken = "";
+    this.cookie = sessionConfig?.cookie ?? "";
+    this.csrfToken = sessionConfig?.csrfToken ?? "";
   }
 
   async login(email, password) {
@@ -870,6 +879,12 @@ function parseArgs(argv) {
     } else if (arg === "--endpoint-secret-ref") {
       parsed.endpointSecretRef = requireValue(argv, index, arg);
       index += 1;
+    } else if (arg === "--cookie-file") {
+      parsed.cookieFile = requireValue(argv, index, arg);
+      index += 1;
+    } else if (arg === "--csrf-token") {
+      parsed.csrfToken = requireValue(argv, index, arg);
+      index += 1;
     } else if (arg === "--check-task-artifact") {
       parsed.taskArtifactCheck = true;
     } else if (arg === "--check-task-reclaim") {
@@ -883,6 +898,31 @@ function parseArgs(argv) {
     }
   }
   return parsed;
+}
+
+function explicitSessionConfig(args) {
+  const cookieFile = firstNonEmpty(args.cookieFile, process.env.PRODUCT_WORKFLOW_COOKIE_FILE);
+  const csrfToken = firstNonEmpty(args.csrfToken, process.env.PRODUCT_WORKFLOW_CSRF_TOKEN);
+  if (!cookieFile && !csrfToken) {
+    return undefined;
+  }
+  requireOption(cookieFile, "--cookie-file or PRODUCT_WORKFLOW_COOKIE_FILE");
+  requireOption(csrfToken, "--csrf-token or PRODUCT_WORKFLOW_CSRF_TOKEN");
+  return {
+    cookie: readSessionCookie(cookieFile),
+    csrfToken
+  };
+}
+
+function readSessionCookie(cookieFile) {
+  const text = readFileSync(cookieFile, "utf8");
+  const cookie = text.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("asl_session="));
+  if (!cookie) {
+    throw new UsageError("session cookie file must contain asl_session");
+  }
+  return cookie.split(";")[0];
 }
 
 function endpointCheckConfig(args) {

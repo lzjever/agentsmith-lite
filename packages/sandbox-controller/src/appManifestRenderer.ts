@@ -11,7 +11,7 @@ export interface AppManifestInput {
 }
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
-  rejectDeferredAuthSurface(input);
+  const auth = resolveAuthConfig(input);
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
   const appDataRoot = resolveAppDataRoot(input.env);
   const labels = {
@@ -25,10 +25,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
     Object.entries(input.env).filter(([key]) => key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_"))
   );
   const appSecretData: Record<string, string> = {};
-  const appSecretKeys = Object.keys(input.secrets).filter((key) =>
-    ["POSTGRES_APP_URL", "APP_SESSION_SECRET", "BUILTIN_ADMIN_INITIAL_PASSWORD"].includes(key) ||
-    key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_")
-  );
+  const appSecretKeys = Object.keys(input.secrets).filter((key) => auth.secretKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_"));
   for (const key of appSecretKeys) {
     const value = input.secrets[key];
     if (value) {
@@ -53,6 +50,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
           input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
+        ...auth.configMapData,
         ...modelBaseUrlConfig
       }
     },
@@ -199,14 +197,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   ];
 }
 
-function rejectDeferredAuthSurface(input: AppManifestInput): void {
-  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"]) {
-    if (Object.hasOwn(input.env, key) || Object.hasOwn(input.secrets, key)) {
-      throw new Error(`deferred auth key ${key} is not allowed in app manifests`);
-    }
-  }
-}
-
 function resolveAppDataRoot(env: Record<string, string>): string {
   const dataRoot = env.AGENTSMITH_LITE_DATA_DIR ?? "/agentsmith-lite";
   if (!dataRoot.startsWith("/")) {
@@ -271,4 +261,58 @@ function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels
     metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels },
     spec
   };
+}
+
+function resolveAuthConfig(input: AppManifestInput): {
+  configMapData: Record<string, string>;
+  secretKeys: Set<string>;
+} {
+  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+    if (Object.hasOwn(input.secrets, key)) {
+      throw new Error(`auth config key ${key} is not allowed in app Secret`);
+    }
+  }
+  if (Object.hasOwn(input.env, "OIDC_CLIENT_SECRET")) {
+    throw new Error("secret key OIDC_CLIENT_SECRET is not allowed in app ConfigMap");
+  }
+
+  const authMode = input.env.AUTH_MODE?.trim() || "builtin_admin";
+  if (authMode !== "builtin_admin" && authMode !== "oidc") {
+    throw new Error("AUTH_MODE must be builtin_admin or oidc in app manifests");
+  }
+
+  const baseSecretKeys = new Set(["POSTGRES_APP_URL", "APP_SESSION_SECRET"]);
+  if (authMode === "builtin_admin") {
+    for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+      if (input.env[key]?.trim()) {
+        throw new Error(`${key} must be empty when AUTH_MODE=builtin_admin`);
+      }
+    }
+    if (input.secrets.OIDC_CLIENT_SECRET?.trim()) {
+      throw new Error("OIDC_CLIENT_SECRET must be empty when AUTH_MODE=builtin_admin");
+    }
+    baseSecretKeys.add("BUILTIN_ADMIN_INITIAL_PASSWORD");
+    return { configMapData: {}, secretKeys: baseSecretKeys };
+  }
+
+  const issuerUrl = requireAuthConfig(input.env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
+  const clientId = requireAuthConfig(input.env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
+  requireAuthConfig(input.secrets.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
+  baseSecretKeys.add("OIDC_CLIENT_SECRET");
+  return {
+    configMapData: {
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: issuerUrl,
+      OIDC_CLIENT_ID: clientId
+    },
+    secretKeys: baseSecretKeys
+  };
+}
+
+function requireAuthConfig(value: string | undefined, key: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    throw new Error(`${key} is required when AUTH_MODE=oidc`);
+  }
+  return trimmed;
 }

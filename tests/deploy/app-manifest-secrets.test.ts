@@ -113,6 +113,9 @@ describe("app manifest rendering", () => {
         KUBE_NAMESPACE: "agentsmith",
         JUICEFS_PVC_NAME: "agentsmith-lite-files",
         APP_PUBLIC_BASE_URL: "https://agentsmith.example.com",
+        AUTH_MODE: "oidc",
+        OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+        OIDC_CLIENT_ID: "agentsmith-lite",
         AGENTSMITH_LITE_SANDBOX_MODE: "live",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
         AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
@@ -124,6 +127,7 @@ describe("app manifest rendering", () => {
         POSTGRES_APP_URL: "postgresql://app:secret@db/app",
         APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
         BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
+        OIDC_CLIENT_SECRET: "oidc-client-secret",
         AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai",
         S3_ACCESS_KEY: "raw-access",
         S3_SECRET_KEY: "raw-secret",
@@ -132,11 +136,13 @@ describe("app manifest rendering", () => {
     });
 
     const serialized = JSON.stringify(manifests);
-    assert.doesNotMatch(serialized, /AUTH_MODE/);
-    assert.doesNotMatch(serialized, /OIDC_CLIENT_SECRET/);
+    assert.match(serialized, /AUTH_MODE/);
+    assert.match(serialized, /OIDC_ISSUER_URL/);
+    assert.match(serialized, /OIDC_CLIENT_ID/);
+    assert.match(serialized, /OIDC_CLIENT_SECRET/);
     assert.match(serialized, /POSTGRES_APP_URL/);
     assert.match(serialized, /APP_SESSION_SECRET/);
-    assert.match(serialized, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
+    assert.doesNotMatch(serialized, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
     assert.match(serialized, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI/);
     assert.match(serialized, /sk-openai/);
     assert.match(serialized, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI/);
@@ -151,6 +157,14 @@ describe("app manifest rendering", () => {
     const secret = manifests.find((manifest) => manifest.kind === "Secret" && manifest.metadata.name === "agentsmith-lite-app-secrets");
     const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
     const secretData = (secret as { stringData?: Record<string, string> } | undefined)?.stringData;
+    assert.equal(configMapData?.AUTH_MODE, "oidc");
+    assert.equal(configMapData?.OIDC_ISSUER_URL, "https://keycloak.example.test/realms/agentsmith");
+    assert.equal(configMapData?.OIDC_CLIENT_ID, "agentsmith-lite");
+    assert.equal(configMapData?.OIDC_CLIENT_SECRET, undefined);
+    assert.equal(secretData?.OIDC_CLIENT_SECRET, "oidc-client-secret");
+    assert.equal(secretData?.BUILTIN_ADMIN_INITIAL_PASSWORD, undefined);
+    assert.equal(secretData?.OIDC_ISSUER_URL, undefined);
+    assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
@@ -159,18 +173,56 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
   });
 
-  it("fails closed when deferred auth keys reach the renderer without leaking values", () => {
+  it("fails closed when OIDC keys are misplaced or incomplete without leaking values", () => {
     const cases: Array<{
-      key: string;
-      location: "env" | "secrets";
-      value: string;
+      name: string;
+      env: Record<string, string>;
+      secrets: Record<string, string>;
+      error: RegExp;
+      leakedValue: RegExp;
     }> = [
-      { key: "AUTH_MODE", location: "env", value: "DO_NOT_PRINT_AUTH_MODE" },
-      { key: "OIDC_CLIENT_SECRET", location: "secrets", value: "DO_NOT_PRINT_OIDC_CLIENT_SECRET" },
-      { key: "OIDC_ISSUER_URL", location: "env", value: "DO_NOT_PRINT_OIDC_ISSUER_URL_ENV" },
-      { key: "OIDC_ISSUER_URL", location: "secrets", value: "DO_NOT_PRINT_OIDC_ISSUER_URL_SECRET" },
-      { key: "OIDC_CLIENT_ID", location: "env", value: "DO_NOT_PRINT_OIDC_CLIENT_ID_ENV" },
-      { key: "OIDC_CLIENT_ID", location: "secrets", value: "DO_NOT_PRINT_OIDC_CLIENT_ID_SECRET" }
+      {
+        name: "invalid auth mode",
+        env: { AUTH_MODE: "DO_NOT_PRINT_AUTH_MODE" },
+        secrets: {},
+        error: /AUTH_MODE/,
+        leakedValue: /DO_NOT_PRINT_AUTH_MODE/
+      },
+      {
+        name: "OIDC secret in config",
+        env: { OIDC_CLIENT_SECRET: "DO_NOT_PRINT_OIDC_CLIENT_SECRET" },
+        secrets: {},
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "OIDC public metadata in secrets",
+        env: {},
+        secrets: { OIDC_ISSUER_URL: "DO_NOT_PRINT_OIDC_ISSUER_URL" },
+        error: /OIDC_ISSUER_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      },
+      {
+        name: "OIDC mode missing secret",
+        env: {
+          AUTH_MODE: "oidc",
+          OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+          OIDC_CLIENT_ID: "DO_NOT_PRINT_OIDC_CLIENT_ID"
+        },
+        secrets: {},
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
+      },
+      {
+        name: "builtin mode with non-empty OIDC metadata",
+        env: {
+          AUTH_MODE: "builtin_admin",
+          OIDC_ISSUER_URL: "DO_NOT_PRINT_OIDC_ISSUER_URL"
+        },
+        secrets: {},
+        error: /OIDC_ISSUER_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
+      }
     ];
 
     for (const candidate of cases) {
@@ -179,16 +231,16 @@ describe("app manifest rendering", () => {
           renderAppManifests({
             namespace: "agentsmith",
             imageTag: "dev",
-            env: candidate.location === "env" ? { [candidate.key]: candidate.value } : {},
-            secrets: candidate.location === "secrets" ? { [candidate.key]: candidate.value } : {}
+            env: candidate.env,
+            secrets: candidate.secrets
           }),
         (error: unknown) => {
-          assert.ok(error instanceof Error, candidate.key);
-          assert.match(error.message, new RegExp(candidate.key), candidate.key);
-          assert.doesNotMatch(error.message, new RegExp(candidate.value), candidate.key);
+          assert.ok(error instanceof Error, candidate.name);
+          assert.match(error.message, candidate.error, candidate.name);
+          assert.doesNotMatch(error.message, candidate.leakedValue, candidate.name);
           return true;
         },
-        `${candidate.key} in ${candidate.location}`
+        candidate.name
       );
     }
   });

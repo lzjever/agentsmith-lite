@@ -174,7 +174,7 @@ describe("deploy apply plan", () => {
     ]);
   });
 
-  it("preflights --images-lock before dry-run and keeps the apply command order", () => {
+  it("validates --images-lock before dry-run and keeps the apply command order", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-plan-lock-"));
     const envFile = path.join(tempDir, "deploy.env");
     const lockFile = path.join(tempDir, "images.lock");
@@ -218,7 +218,7 @@ describe("deploy apply plan", () => {
     ]);
   });
 
-  it("fails --images-lock dry-run preflight before kubectl when manifests do not match the lock", () => {
+  it("fails --images-lock dry-run check before kubectl when manifests do not match the lock", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-plan-lock-mismatch-"));
     const lockFile = path.join(tempDir, "images.lock");
     const outDir = path.join(tempDir, "manifests");

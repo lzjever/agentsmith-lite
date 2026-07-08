@@ -3,23 +3,63 @@ import { describe, it } from "node:test";
 import {
   optionalRuntimeTickIntervalMs,
   parseAuthMode,
+  parseRuntimeAuthConfig,
   parseSandboxMode,
-  parseSandboxNamespaceLimit
+  parseSandboxNamespaceLimit,
+  requireOidcRuntimeConfig
 } from "../../packages/api-entry-node/src/runtimeConfig.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 describe("runtime config", () => {
-  it("fails closed for deferred auth modes while allowing empty builtin admin defaults", () => {
+  it("parses builtin admin and OIDC auth modes while keeping empty values on the builtin default", () => {
     assert.equal(parseAuthMode(undefined), "builtin_admin");
     assert.equal(parseAuthMode(""), "builtin_admin");
     assert.equal(parseAuthMode("   "), "builtin_admin");
     assert.equal(parseAuthMode("builtin_admin"), "builtin_admin");
     assert.equal(parseAuthMode(" builtin_admin "), "builtin_admin");
+    assert.equal(parseAuthMode("oidc"), "oidc");
+    assert.equal(parseAuthMode(" oidc "), "oidc");
 
-    for (const value of ["oidc", "OIDC", "keycloak", "false", "0"]) {
+    for (const value of ["OIDC", "keycloak", "false", "0"]) {
       assert.throws(
         () => parseAuthMode(value),
-        /AUTH_MODE must be empty or builtin_admin/
+        /AUTH_MODE must be empty, builtin_admin, or oidc/
+      );
+    }
+  });
+
+  it("requires shaped non-empty OIDC runtime config only when AUTH_MODE=oidc", () => {
+    assert.deepEqual(parseRuntimeAuthConfig({}), { mode: "builtin_admin" });
+    assert.deepEqual(parseRuntimeAuthConfig({
+      AUTH_MODE: "builtin_admin",
+      OIDC_ISSUER_URL: "",
+      OIDC_CLIENT_ID: "",
+      OIDC_CLIENT_SECRET: ""
+    }), { mode: "builtin_admin" });
+
+    assert.deepEqual(parseRuntimeAuthConfig({
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: " https://keycloak.example.test/realms/agentsmith ",
+      OIDC_CLIENT_ID: " agentsmith-lite ",
+      OIDC_CLIENT_SECRET: " client-secret "
+    }), {
+      mode: "oidc",
+      oidc: {
+        issuerUrl: "https://keycloak.example.test/realms/agentsmith",
+        clientId: "agentsmith-lite",
+        clientSecret: "client-secret"
+      }
+    });
+
+    for (const env of [
+      { AUTH_MODE: "oidc", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret" },
+      { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "ftp://issuer.example.test", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "secret" },
+      { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "https://issuer.example.test", OIDC_CLIENT_SECRET: "secret" },
+      { AUTH_MODE: "oidc", OIDC_ISSUER_URL: "https://issuer.example.test", OIDC_CLIENT_ID: "client", OIDC_CLIENT_SECRET: "" }
+    ]) {
+      assert.throws(
+        () => requireOidcRuntimeConfig(env),
+        /OIDC_(ISSUER_URL|CLIENT_ID|CLIENT_SECRET)/
       );
     }
   });

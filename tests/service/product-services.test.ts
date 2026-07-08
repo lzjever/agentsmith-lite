@@ -30,6 +30,43 @@ describe("product services", () => {
     assert.equal(listed[0]?.projects[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
   });
 
+  it("logs in a verified external principal as a stable local admin user", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password"
+    });
+
+    const first = await services.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-user-1",
+      email: "Admin.User@Example.Test"
+    });
+    const second = await services.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-user-1",
+      email: "renamed@example.test"
+    });
+
+    assert.equal(first.user.id, second.user.id);
+    assert.match(first.user.id, /^user_oidc_/);
+    assert.equal(first.user.email, "admin.user@example.test");
+    assert.equal(second.user.email, "admin.user@example.test");
+    assert.equal(first.user.role, "admin");
+    assert.equal(second.user.role, "admin");
+    assert.match(first.sessionId, /^sess_/);
+    assert.match(first.csrfToken, /^csrf_/);
+    assert.match(second.sessionId, /^sess_/);
+    assert.match(second.csrfToken, /^csrf_/);
+    assert.equal(await store.countUsers(), 1);
+
+    await assert.rejects(
+      () => services.auth.login("admin.user@example.test", "anything"),
+      /Invalid email or password/
+    );
+  });
+
   it("accepts only OpenAI-compatible endpoint configuration and never calls providers while saving", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({

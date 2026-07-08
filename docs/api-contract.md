@@ -8,6 +8,9 @@ Current product API routes:
 - `GET /api/bootstrap`
 - `POST /api/auth/bootstrap`
 - `POST /api/auth/login`
+- `GET /api/auth/oidc/start`
+- `GET /api/auth/oidc/callback`
+- `POST /api/auth/logout`
 - `GET /api/me`
 - `GET /api/dashboard`
 - `GET /api/workspaces`

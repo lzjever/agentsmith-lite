@@ -100,6 +100,63 @@ printf '{"status":"ok"}\\n'
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(escapeRegExp(adminPassword)));
   });
 
+  it("check-product-workflow.sh dispatches OIDC workflow checks with explicit session input", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-workflow-sh-oidc-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const cookieFile = path.join(tempDir, "admin.cookie");
+    const fakeNode = path.join(tempDir, "node");
+    const callsFile = path.join(tempDir, "node-calls.txt");
+
+    writeFileSync(envFile, [
+      "APP_PUBLIC_BASE_URL=http://deploy.example.test",
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+      "OIDC_CLIENT_ID=agentsmith-lite",
+      ""
+    ].join("\n"));
+    writeFileSync(secretsFile, [
+      "OIDC_CLIENT_SECRET=oidc-client-secret",
+      ""
+    ].join("\n"));
+    writeFileSync(cookieFile, "asl_session=session-from-oidc\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+{
+  printf 'args=%s\\n' "$*"
+  printf 'admin_password=%s\\n' "\${BUILTIN_ADMIN_INITIAL_PASSWORD:-}"
+} > "$FAKE_NODE_CALLS"
+printf '{"status":"ok"}\\n'
+`);
+    chmodSync(fakeNode, 0o755);
+
+    const result = spawnSync("bash", [
+      "scripts/deploy/check-product-workflow.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-from-oidc"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const call = readFileSync(callsFile, "utf8");
+    assert.match(call, /args=scripts\/deploy\/check-product-workflow\.mjs --base-url http:\/\/deploy\.example\.test --cookie-file .*admin\.cookie --csrf-token csrf-from-oidc/);
+    assert.match(call, /admin_password=\n/);
+    assert.doesNotMatch(result.stdout + result.stderr + call, /oidc-client-secret/);
+  });
+
   it("check-product-workflow.sh rejects workflow overlay keys in substrate env without printing values", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-workflow-substrate-"));
     const envFile = path.join(tempDir, "substrate.env");
@@ -178,6 +235,64 @@ printf '{"status":"ok"}\\n'
         "GET /api/operator/sandbox/status"
       ]);
       for (const request of server.requests.slice(3)) {
+        assert.equal(request.cookie, "asl_session=workflow-session", `${request.method} ${request.url} missing session cookie`);
+        assert.equal(request.csrf, "csrf-workflow", `${request.method} ${request.url} missing csrf token`);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("check-product-workflow.mjs can use an explicit OIDC session without builtin bootstrap or login", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-workflow-mjs-oidc-"));
+    const cookieFile = path.join(tempDir, "admin.cookie");
+    writeFileSync(cookieFile, "asl_session=workflow-session\n");
+    const server = await startWorkflowServer({
+      adminPassword: "unused-admin-secret",
+      workspaceId: "workspace_oidc",
+      projectId: "project_oidc",
+      endpointId: "endpoint_oidc",
+      endpointBaseUrl: "https://models.oidc.test/v1",
+      endpointModel: "oidc-model",
+      endpointSecretRef: "secret/oidc-workflow"
+    });
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/check-product-workflow.mjs",
+        "--base-url",
+        server.baseUrl,
+        "--cookie-file",
+        cookieFile,
+        "--csrf-token",
+        "csrf-workflow",
+        "--endpoint-base-url",
+        "https://models.oidc.test/v1",
+        "--endpoint-model",
+        "oidc-model",
+        "--endpoint-secret-ref",
+        "secret/oidc-workflow"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: ""
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const summary = JSON.parse(result.stdout) as ProductWorkflowSummary;
+      assert.equal(summary.status, "ok");
+      assert.equal(summary.workspaceId, "workspace_oidc");
+      assert.deepEqual(server.requests.map((request) => `${request.method} ${request.url}`), [
+        "GET /api/health",
+        "POST /api/workspaces",
+        "POST /api/workspaces/workspace_oidc/projects",
+        "POST /api/projects/project_oidc/endpoints",
+        "POST /api/projects/project_oidc/chat",
+        "POST /api/projects/project_oidc/files",
+        "GET /api/projects/project_oidc/files?path=files",
+        "GET /api/projects/project_oidc/files/download?path=files%2Fproduct-workflow-check.txt",
+        "DELETE /api/projects/project_oidc/files",
+        "GET /api/operator/sandbox/status"
+      ]);
+      for (const request of server.requests.slice(1)) {
         assert.equal(request.cookie, "asl_session=workflow-session", `${request.method} ${request.url} missing session cookie`);
         assert.equal(request.csrf, "csrf-workflow", `${request.method} ${request.url} missing csrf token`);
       }

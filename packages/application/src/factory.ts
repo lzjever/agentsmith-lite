@@ -29,6 +29,7 @@ export interface CreateApplicationServicesInput {
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: TaskLiveSandboxConfig;
+  requireBuiltinAdminPasswordForLiveSandbox?: boolean;
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
@@ -40,7 +41,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const workspaces = new WorkspaceService(input.store);
   const endpoints = new EndpointService(input.store, workspaces);
   const files = new FileService();
-  const builtinAdminPassword = input.liveSandbox
+  const builtinAdminPassword = input.liveSandbox && input.requireBuiltinAdminPasswordForLiveSandbox !== false
     ? requireLiveSandboxBuiltinAdminPassword(input.builtinAdminPassword)
     : input.builtinAdminPassword;
   const sessionSecret = input.liveSandbox

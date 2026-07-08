@@ -1,6 +1,6 @@
 # Auth Bootstrap
 
-P0 auth mode is built-in admin.
+Built-in admin remains available when `AUTH_MODE=builtin_admin`.
 
 Local defaults:
 
@@ -14,3 +14,4 @@ Deployment should provide:
 
 `POST /api/auth/bootstrap` creates the stable admin user once when the request password matches the configured bootstrap password. `POST /api/auth/login` returns a session and CSRF token.
 
+When `AUTH_MODE=oidc`, the server owns OIDC start/callback handling and sets the same `asl_session` HttpOnly cookie after a verified external principal login. Built-in bootstrap/login routes fail closed in OIDC mode.

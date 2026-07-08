@@ -30,63 +30,140 @@ describe("deploy env contract", () => {
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
-  it("rejects active OIDC auth and non-empty OIDC secret values without printing their values", () => {
+  it("accepts generated OIDC substrate env/secrets while exporting only app-consumed keys", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-oidc-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    writeFileSync(
+      envFile,
+      [
+        "KUBE_NAMESPACE=agentsmith-preview",
+        "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
+        "S3_ENDPOINT=DO_NOT_PRINT_S3_ENDPOINT",
+        "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
+        "JUICEFS_PVC_NAME=agentsmith-lite-files",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(
+      secretsFile,
+      [
+        "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
+        "APP_SESSION_SECRET=app-session-secret-at-least-32-chars",
+        "OIDC_CLIENT_SECRET=oidc-client-secret",
+        "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
+        "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
+        ""
+      ].join("\n")
+    );
+
+    const result = runContract(["export", "--env", envFile, "--secrets", secretsFile]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readAssignments(result.stdout), {
+      KUBE_NAMESPACE: "agentsmith-preview",
+      APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      JUICEFS_PVC_NAME: "agentsmith-lite-files",
+      POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
+      APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
+      OIDC_CLIENT_SECRET: "oidc-client-secret"
+    });
+    assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
+  });
+
+  it("rejects malformed auth substrate values without printing their values", () => {
     const cases: Array<{
       name: string;
-      flag: "--env" | "--secrets";
-      file: string;
-      contents: string;
+      envContents?: string;
+      secretsContents?: string;
       error: RegExp;
       leakedValue: RegExp;
     }> = [
       {
-        name: "OIDC auth mode in substrate env",
-        flag: "--env",
-        file: "substrate.env",
-        contents: "AUTH_MODE=oidc\n",
-        error: /AUTH_MODE/,
-        leakedValue: /oidc/
-      },
-      {
-        name: "non-builtin auth mode in substrate env",
-        flag: "--env",
-        file: "substrate.env",
-        contents: "AUTH_MODE=DO_NOT_PRINT_AUTH_MODE\n",
+        name: "non-builtin and non-oidc auth mode",
+        envContents: "AUTH_MODE=DO_NOT_PRINT_AUTH_MODE\n",
         error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_AUTH_MODE/
       },
       {
-        name: "non-empty OIDC client secret in substrate secrets",
-        flag: "--secrets",
-        file: "substrate.secrets.env",
-        contents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
-        error: /OIDC_CLIENT_SECRET/,
-        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
-      },
-      {
-        name: "non-empty OIDC issuer URL in substrate env",
-        flag: "--env",
-        file: "substrate.env",
-        contents: "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\n",
+        name: "builtin with non-empty OIDC issuer URL",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\n",
+        secretsContents: "OIDC_CLIENT_SECRET=\n",
         error: /OIDC_ISSUER_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
       },
       {
-        name: "non-empty OIDC client ID in substrate env",
-        flag: "--env",
-        file: "substrate.env",
-        contents: "OIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID\n",
+        name: "builtin with non-empty OIDC client ID",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID\n",
+        secretsContents: "OIDC_CLIENT_SECRET=\n",
         error: /OIDC_CLIENT_ID/,
         leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
+      },
+      {
+        name: "builtin with non-empty OIDC client secret",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\n",
+        secretsContents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "OIDC without issuer URL",
+        envContents: "AUTH_MODE=oidc\nOIDC_CLIENT_ID=agentsmith-lite\n",
+        secretsContents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
+        error: /OIDC_ISSUER_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "OIDC without client ID",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\n",
+        secretsContents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
+        error: /OIDC_CLIENT_ID/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "OIDC without client secret",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
+        secretsContents: "",
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /agentsmith-lite/
+      },
+      {
+        name: "OIDC secret misplaced in env",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\nOIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
+        error: /OIDC_CLIENT_SECRET/,
+        leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
+      },
+      {
+        name: "OIDC public metadata misplaced in secrets",
+        envContents: "AUTH_MODE=oidc\n",
+        secretsContents: "OIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\nOIDC_CLIENT_ID=agentsmith-lite\nOIDC_CLIENT_SECRET=secret\n",
+        error: /OIDC_ISSUER_URL/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
       }
     ];
 
     for (const candidate of cases) {
       const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-${candidate.name.replace(/\s+/g, "-")}-`));
-      const contractFile = path.join(tempDir, candidate.file);
-      writeFileSync(contractFile, candidate.contents);
+      const envFile = path.join(tempDir, "substrate.env");
+      const secretsFile = path.join(tempDir, "substrate.secrets.env");
+      if (candidate.envContents !== undefined) {
+        writeFileSync(envFile, candidate.envContents);
+      }
+      if (candidate.secretsContents !== undefined) {
+        writeFileSync(secretsFile, candidate.secretsContents);
+      }
 
-      const result = runContract(["export", candidate.flag, contractFile]);
+      const result = runContract([
+        "export",
+        ...(candidate.envContents !== undefined ? ["--env", envFile] : []),
+        ...(candidate.secretsContents !== undefined ? ["--secrets", secretsFile] : [])
+      ]);
 
       assert.notEqual(result.status, 0, candidate.name);
       assert.match(result.stderr, candidate.error, candidate.name);

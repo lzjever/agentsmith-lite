@@ -1,4 +1,5 @@
 const state = {
+  authMode: "builtin_admin",
   csrfToken: null,
   workspaceId: null,
   projectId: null,
@@ -26,11 +27,16 @@ const taskEndpointSelect = document.querySelector("#task-endpoint");
 const chatReplyEl = document.querySelector("#chat-reply");
 const uploadFileButton = document.querySelector("#upload-file");
 
+await refreshBootstrap();
 await refreshHealth();
 await refreshDashboard();
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (state.authMode === "oidc") {
+    window.location.href = "/api/auth/oidc/start";
+    return;
+  }
   const form = new FormData(loginForm);
   try {
     await api("/api/auth/bootstrap", {
@@ -210,6 +216,15 @@ async function refreshHealth() {
   healthEl.textContent = `${health.status} · v${health.version}`;
 }
 
+async function refreshBootstrap() {
+  const bootstrap = await api("/api/bootstrap");
+  state.authMode = bootstrap.authMode ?? "builtin_admin";
+  loginForm.querySelector("button").textContent = state.authMode === "oidc" ? "Sign in" : "Sign in";
+  for (const field of loginForm.querySelectorAll("label")) {
+    field.classList.toggle("hidden", state.authMode === "oidc");
+  }
+}
+
 async function refreshDashboard() {
   const response = await fetch("/api/dashboard");
   if (response.status === 401) {
@@ -223,6 +238,10 @@ async function refreshDashboard() {
   }
 
   const dashboard = await response.json();
+  if (!state.csrfToken) {
+    const me = await api("/api/me");
+    state.csrfToken = me.csrfToken;
+  }
   const current = renderDashboard(dashboard);
   loginEl.classList.add("hidden");
   dashboardEl.classList.remove("hidden");
