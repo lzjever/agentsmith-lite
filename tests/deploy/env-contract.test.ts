@@ -27,6 +27,7 @@ describe("deploy env contract", () => {
       APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
       BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret-from-substrate"
     });
+    assert.doesNotMatch(result.stdout, /KUBERNETES_SKIP_K3S/);
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
@@ -400,6 +401,7 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
       "KUBE_CONTEXT=kind-agentsmith",
       "KUBE_NAMESPACE=agentsmith-preview",
+      "KUBERNETES_SKIP_K3S=true",
       "S3_ENDPOINT=DO_NOT_PRINT_S3_ENDPOINT",
       "S3_REGION=DO_NOT_PRINT_S3_REGION",
       "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
