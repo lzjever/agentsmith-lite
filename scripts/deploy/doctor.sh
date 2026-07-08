@@ -9,7 +9,7 @@ app_secrets_file=
 out=out/manifests
 bundle=
 images_lock=
-deploy_images_summary='{"source":"none"}'
+image_identity_check="not provided"
 static_only=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -241,55 +241,27 @@ if [ -n "$bundle" ] || [ -n "$images_lock" ]; then
     check_args+=(--images-lock "$images_lock")
   fi
 
-  deploy_images_summary="$(node scripts/deploy/app-doctor-check.mjs "${check_args[@]}" --summary-json)"
+  node scripts/deploy/app-doctor-check.mjs "${check_args[@]}"
+  if [ -n "$bundle" ] && [ -n "$images_lock" ]; then
+    image_identity_check="bundle and images.lock"
+  elif [ -n "$bundle" ]; then
+    image_identity_check="bundle"
+  else
+    image_identity_check="images.lock"
+  fi
 fi
 
 if [ "$static_only" = false ] && [ "$env_file_requested_k8s_fact_checks" = true ] && { [ -n "${KUBECONFIG_PATH:-}" ] || [ -n "${KUBE_CONTEXT:-}" ]; }; then
   run_k8s_fact_checks
-fi
-
-mkdir -p out
-if [ "$static_only" = true ]; then
-  k8s_facts_report="skipped in static-only mode"
+  k8s_fact_check="checked"
+elif [ "$static_only" = true ]; then
+  k8s_fact_check="skipped static-only"
 else
-  k8s_facts_report="when kube env is configured, checks schema job completion, API rollout, JuiceFS PVC, and API service account RBAC"
+  k8s_fact_check="skipped no kube env"
 fi
-APP_DOCTOR_DEPLOY_IMAGES_JSON="$deploy_images_summary" \
-APP_DOCTOR_NAMESPACE="${KUBE_NAMESPACE:-agentsmith}" \
-APP_DOCTOR_K8S_FACTS_REPORT="$k8s_facts_report" \
-node --input-type=module <<'NODE'
-import { writeFileSync } from "node:fs";
 
-const allowedSources = new Set(["bundle", "images-lock", "bundle+images-lock", "none"]);
-const validatedManifestImages = JSON.parse(process.env.APP_DOCTOR_DEPLOY_IMAGES_JSON ?? "{\"source\":\"none\"}");
-if (!validatedManifestImages || typeof validatedManifestImages !== "object" || !allowedSources.has(validatedManifestImages.source)) {
-  throw new Error("internal app doctor deploy image summary is invalid");
-}
-
-const report = {
-  schema: "agentsmith-lite.app-doctor/v1",
-  checks: {
-    app_images: "offline bundle, images.lock, and rendered manifests are checked when provided",
-    schema_job: "expected agentsmith-lite-schema-bootstrap",
-    web_api_readiness: "expected agentsmith-lite-api deployment/service and ingress for non-local public URLs",
-    sandbox_rbac: "expected namespaced Role without exec subresource",
-    k8s_facts:
-      process.env.APP_DOCTOR_K8S_FACTS_REPORT ??
-      "when kube env is configured, checks schema job completion, API rollout, JuiceFS PVC, and API service account RBAC",
-    botified_smoke: "uses third_party/botified/PINNED_SOURCE.json and botified serve"
-  },
-  secret_policy: "only product secrets are rendered to app-owned Kubernetes Secrets",
-  deployIdentity: {
-    namespace: process.env.APP_DOCTOR_NAMESPACE || "agentsmith",
-    resources: {
-      deployment: "agentsmith-lite-api",
-      schemaJob: "agentsmith-lite-schema-bootstrap",
-      runnerImageConfigMap: "agentsmith-lite-config/BOTIFIED_RUNNER_IMAGE"
-    },
-    validatedManifestImages
-  }
-};
-
-writeFileSync("out/app-doctor-report.json", `${JSON.stringify(report, null, 2)}\n`);
-NODE
-echo "App doctor passed. Report: out/app-doctor-report.json"
+echo "App doctor passed"
+echo "Rendered manifests checked"
+echo "App image identity: $image_identity_check"
+echo "K8s facts: $k8s_fact_check"
+echo "Botified pin checked"

@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const releaseSmokeTrigger = "BOTIFIED_RELEASE_SMOKE_BASH";
-const releaseSmokeMarker = "BOTIFIED_RELEASE_SMOKE_OUTPUT";
-const releaseSmokeArtifactFilename = "botified-release-smoke.txt";
-const releaseSmokeArtifactSha256 = sha256Text(`${releaseSmokeMarker}\n`);
+const mockProviderTrigger = "BOTIFIED_RELEASE_CHECK_BASH";
+const mockProviderMarker = "BOTIFIED_RELEASE_CHECK_OUTPUT";
+const mockProviderArtifactFilename = "botified-release-check.txt";
+const mockProviderArtifactSha256 = sha256Text(`${mockProviderMarker}\n`);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "../..");
 const defaultBinary = path.join(repoRoot, "third_party/botified/target/release/botified");
@@ -20,7 +20,6 @@ const botifiedRunnerDockerfile = path.join(repoRoot, "infra/docker/Dockerfile.bo
 const distClientPath = path.join(repoRoot, "dist/packages/ports/src/botified.js");
 const containerConfigPath = "/etc/botified/botified-runtime.yaml";
 const containerWorkspacePath = "/workspace";
-const containerNotCovered = ["k8s", "juicefs", "pvc", "product-task-api", "cancel-reap"];
 
 class Redactor {
   #values = [];
@@ -70,7 +69,7 @@ async function main() {
   const { FetchBotifiedRuntimeHttpClient } = await import(pathToFileURL(distClientPath).href);
   const client = new FetchBotifiedRuntimeHttpClient();
   const tempDir = await mkdtemp(path.join(tmpdir(), "agentsmith-lite-botified-runner-"));
-  const serviceKey = process.env.BOTIFIED_SERVICE_KEY || `asl-smoke-${randomBytes(18).toString("hex")}`;
+  const serviceKey = process.env.BOTIFIED_SERVICE_KEY || `asl-acceptance-${randomBytes(18).toString("hex")}`;
   activeRedactor.add(serviceKey);
 
   const startedAt = Date.now();
@@ -82,7 +81,7 @@ async function main() {
     const configPath = path.join(tempDir, "botified-runtime.yaml");
     const workDir = path.join(tempDir, "workspace");
     const hostDataDir = options.mode === "container-image" ? path.join(workDir, "state") : path.join(tempDir, "state");
-    await prepareSmokeWorkspace({ workDir, dataDir: hostDataDir });
+    await prepareAcceptanceWorkspace({ workDir, dataDir: hostDataDir });
 
     if (options.mode === "local-process") {
       await writeFile(configPath, runtimeConfigYaml({
@@ -124,23 +123,19 @@ async function main() {
     const posted = await client.postMessage(
       baseUrl,
       serviceKey,
-      `Run the local Botified release smoke: ${releaseSmokeTrigger}. Write ${releaseSmokeArtifactFilename} with exactly ${releaseSmokeMarker} on one line, then publish_file it.`
+      `Run the local Botified runner acceptance check: ${mockProviderTrigger}. Write ${mockProviderArtifactFilename} with exactly ${mockProviderMarker} on one line, then publish_file it.`
     );
     if (posted.accepted !== true) {
-      throw new Error("Botified did not accept the smoke message");
+      throw new Error("Botified did not accept the acceptance message");
     }
 
-    const observed = await waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, deadline, cursor: posted.cursor });
+    const observed = await waitForAcceptanceArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor: posted.cursor });
     const abort = await client.abort(baseUrl, serviceKey);
     const finalState = await client.readState(baseUrl, serviceKey);
 
-    const report = {
+    const summary = {
       status: "ok",
       mode: options.mode,
-      scope: options.mode === "container-image" ? "runner-container-only" : "local-runner-process-only",
-      notCovered: options.mode === "container-image"
-        ? containerNotCovered
-        : ["runner-container-image", ...containerNotCovered],
       baseUrl,
       messageAccepted: posted.accepted,
       markerObserved: observed.markerObserved,
@@ -155,24 +150,20 @@ async function main() {
       durationMs: Date.now() - startedAt
     };
     if (options.mode === "local-process") {
-      report.binary = path.relative(repoRoot, options.binaryPath) || path.basename(options.binaryPath);
+      summary.binary = path.relative(repoRoot, options.binaryPath) || path.basename(options.binaryPath);
     } else {
-      report.image = options.image;
-      report.runtime = options.runtime;
+      summary.image = options.image;
+      summary.runtime = options.runtime;
       const imageMetadata = inspectContainerImage({ runtime: options.runtime, image: options.image, redactor: activeRedactor });
       if (imageMetadata.imageId) {
-        report.imageId = imageMetadata.imageId;
+        summary.imageId = imageMetadata.imageId;
       }
       if (imageMetadata.repoDigests.length > 0) {
-        report.repoDigests = imageMetadata.repoDigests;
+        summary.repoDigests = imageMetadata.repoDigests;
       }
     }
 
-    const reportJson = `${JSON.stringify(report, null, 2)}\n`;
-    if (options.reportPath) {
-      await writeReport(options.reportPath, reportJson);
-    }
-    process.stdout.write(reportJson);
+    process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   } finally {
     if (containerName) {
       cleanupContainer({ runtime: options.runtime, containerName, redactor: activeRedactor });
@@ -203,7 +194,6 @@ function parseArgs(argv) {
     skipBuild: false,
     timeoutMs: 20_000,
     keepTemp: false,
-    reportPath: undefined,
     help: false
   };
 
@@ -247,9 +237,6 @@ function parseArgs(argv) {
       case "--keep-temp":
         options.keepTemp = true;
         break;
-      case "--report":
-        options.reportPath = resolveCliPath(nextValue(argv, ++index, "--report"));
-        break;
       case "-h":
       case "--help":
         options.help = true;
@@ -276,18 +263,12 @@ function resolveCliPath(value) {
 
 function usage() {
   return [
-    "usage: node scripts/acceptance/botified-runner-smoke.mjs [--binary PATH] [--timeout-secs N] [--keep-temp] [--report PATH]",
-    "       node scripts/acceptance/botified-runner-smoke.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N] [--report PATH]",
+    "usage: node scripts/acceptance/botified-runner-acceptance.mjs [--binary PATH] [--timeout-secs N] [--keep-temp]",
+    "       node scripts/acceptance/botified-runner-acceptance.mjs --container-image IMAGE [--runtime PATH_OR_NAME] [--skip-build] [--timeout-secs N]",
     "",
     "Runs Botified runner acceptance with the vendored binary by default, or with a runner image/container when --container-image is provided.",
-    "When --report is provided and the smoke succeeds, writes the stdout JSON to that path.",
-    "When it succeeds, container mode is runner-container-only evidence; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap."
+    "On success, prints the acceptance summary JSON to stdout."
   ].join("\n");
-}
-
-async function writeReport(reportPath, reportJson) {
-  await mkdir(path.dirname(reportPath), { recursive: true });
-  await writeFile(reportPath, reportJson, "utf8");
 }
 
 async function requireReadableBuildOutput() {
@@ -428,7 +409,7 @@ function cleanupContainer({ runtime, containerName, redactor }) {
   });
 }
 
-async function prepareSmokeWorkspace({ workDir, dataDir }) {
+async function prepareAcceptanceWorkspace({ workDir, dataDir }) {
   const writableDirs = [
     dataDir,
     path.join(dataDir, "tasks"),
@@ -588,7 +569,7 @@ async function waitForHealth({ client, baseUrl, serviceKey, childHandle, deadlin
   ].filter(Boolean).join("\n"));
 }
 
-async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, deadline, cursor }) {
+async function waitForAcceptanceArtifact({ client, baseUrl, serviceKey, childHandle, deadline, cursor }) {
   let timelineCursor = cursor;
   let markerObserved = false;
   let publishedArtifact;
@@ -598,7 +579,7 @@ async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, d
   let lastArtifactError;
 
   while (Date.now() < deadline) {
-    assertChildStillRunning(childHandle, "during release smoke");
+    assertChildStillRunning(childHandle, "during runner acceptance");
 
     const [state, timeline] = await Promise.all([
       client.readState(baseUrl, serviceKey),
@@ -608,13 +589,13 @@ async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, d
     finalState = state.state ?? finalState;
     activeItemCount = Array.isArray(state.activeItems) ? state.activeItems.length : activeItemCount;
     eventsObserved += timeline.events.length;
-    markerObserved ||= timeline.events.some((event) => JSON.stringify(event).includes(releaseSmokeMarker));
+    markerObserved ||= timeline.events.some((event) => JSON.stringify(event).includes(mockProviderMarker));
     for (const event of timeline.events) {
       publishedArtifact = extractPublishedArtifact(event) ?? publishedArtifact;
     }
     timelineCursor = timeline.nextCursor ?? timelineCursor;
 
-    if (markerObserved && publishedArtifact && hasIdleEvidence(state)) {
+    if (markerObserved && publishedArtifact && hasIdleState(state)) {
       try {
         const verifiedArtifact = await verifyPublishedArtifact({
           client,
@@ -638,7 +619,7 @@ async function waitForReleaseSmoke({ client, baseUrl, serviceKey, childHandle, d
   }
 
   throw new Error([
-    `timed out waiting for ${releaseSmokeMarker} and file.published; markerObserved=${markerObserved} filePublishedObserved=${Boolean(publishedArtifact)} finalState=${finalState} activeItemCount=${activeItemCount}`,
+    `timed out waiting for mock-provider marker and file.published; markerObserved=${markerObserved} filePublishedObserved=${Boolean(publishedArtifact)} finalState=${finalState} activeItemCount=${activeItemCount}`,
     lastArtifactError ? `artifact verification error: ${errorMessage(lastArtifactError)}` : "",
     childHandle.redactedOutput()
   ].filter(Boolean).join("\n"));
@@ -648,13 +629,13 @@ async function verifyPublishedArtifact({ client, baseUrl, serviceKey, artifact }
   if (!artifact.fileId) {
     throw new Error("file.published did not include file_id");
   }
-  if (artifact.filename !== releaseSmokeArtifactFilename) {
-    throw new Error(`file.published filename mismatch: expected ${releaseSmokeArtifactFilename}, got ${artifact.filename || "<missing>"}`);
+  if (artifact.filename !== mockProviderArtifactFilename) {
+    throw new Error(`file.published filename mismatch: expected ${mockProviderArtifactFilename}, got ${artifact.filename || "<missing>"}`);
   }
-  if (artifact.bytes !== Buffer.byteLength(`${releaseSmokeMarker}\n`)) {
-    throw new Error(`file.published size mismatch: expected ${Buffer.byteLength(`${releaseSmokeMarker}\n`)}, got ${artifact.bytes}`);
+  if (artifact.bytes !== Buffer.byteLength(`${mockProviderMarker}\n`)) {
+    throw new Error(`file.published size mismatch: expected ${Buffer.byteLength(`${mockProviderMarker}\n`)}, got ${artifact.bytes}`);
   }
-  if (artifact.sha256 !== releaseSmokeArtifactSha256) {
+  if (artifact.sha256 !== mockProviderArtifactSha256) {
     throw new Error(`file.published sha256 mismatch for ${artifact.fileId}`);
   }
 
@@ -663,13 +644,13 @@ async function verifyPublishedArtifact({ client, baseUrl, serviceKey, artifact }
   const downloadedSha256 = downloaded.sha256 ?? sha256Bytes(downloaded.bytes);
   const downloadedFilename = downloaded.filename ?? "";
   const downloadedText = Buffer.from(downloaded.bytes).toString("utf8");
-  const markerMatched = downloadedText === `${releaseSmokeMarker}\n`;
+  const markerMatched = downloadedText === `${mockProviderMarker}\n`;
 
   if (!markerMatched) {
     throw new Error(`downloaded artifact content mismatch for ${artifact.fileId}`);
   }
-  if (downloadedFilename !== releaseSmokeArtifactFilename) {
-    throw new Error(`downloaded artifact filename mismatch: expected ${releaseSmokeArtifactFilename}, got ${downloadedFilename || "<missing>"}`);
+  if (downloadedFilename !== mockProviderArtifactFilename) {
+    throw new Error(`downloaded artifact filename mismatch: expected ${mockProviderArtifactFilename}, got ${downloadedFilename || "<missing>"}`);
   }
   if (downloadedBytes !== artifact.bytes) {
     throw new Error(`downloaded artifact size mismatch: expected ${artifact.bytes}, got ${downloadedBytes}`);
@@ -732,7 +713,7 @@ function sha256Bytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function hasIdleEvidence(state) {
+function hasIdleState(state) {
   if (state.state === "idle" || state.state === "completed") {
     return true;
   }

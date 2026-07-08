@@ -7,7 +7,7 @@ import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
-describe("api smoke", () => {
+describe("api product workflow", () => {
   let baseUrl = "";
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
@@ -22,7 +22,7 @@ describe("api smoke", () => {
       chatClient: fakeChatClient(chatCalls),
       modelCredentialResolver: fakeResolver({
         "secret/openai": {
-          apiKey: "sk-from-api-smoke",
+          apiKey: "sk-from-api-workflow",
           baseUrl: "https://models.example.com/v1"
         }
       })
@@ -71,12 +71,13 @@ describe("api smoke", () => {
       endpointId: endpoint.id,
       messages: [{ role: "user", content: "hello" }]
     }, cookie, csrf);
+    const fileContent = "hello from API product workflow";
     const fileValidation = await postJson(`/api/projects/${project.id}/files/validate`, {
       path: "files/readme.md"
     }, cookie, csrf);
     const uploadedFile = await requestJson("POST", `/api/projects/${project.id}/files`, {
       path: "files/readme.md",
-      content: "hello from API smoke"
+      content: fileContent
     }, cookie, csrf);
     const listedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
     const downloadedFile = await requestJson(
@@ -100,7 +101,7 @@ describe("api smoke", () => {
     assert.equal(chatCalls.length, 1);
     assert.equal(chatCalls[0]?.endpoint.id, endpoint.id);
     assert.deepEqual(chatCalls[0]?.messages, [{ role: "user", content: "hello" }]);
-    assert.equal(chatCalls[0]?.apiKey, "sk-from-api-smoke");
+    assert.equal(chatCalls[0]?.apiKey, "sk-from-api-workflow");
     assert.deepEqual(chat.endpointSnapshot, {
       id: endpoint.id,
       baseUrl: "https://models.example.com/v1",
@@ -108,9 +109,9 @@ describe("api smoke", () => {
       protocol: "openai_chat_completions"
     });
     assert.equal(fileValidation.normalizedPath, "files/readme.md");
-    assert.deepEqual(uploadedFile, { path: "files/readme.md", bytes: 20 });
+    assert.deepEqual(uploadedFile, { path: "files/readme.md", bytes: Buffer.byteLength(fileContent) });
     assert.equal(listedFiles.entries.some((entry: { path: string }) => entry.path === "files/readme.md"), true);
-    assert.deepEqual(downloadedFile, { path: "files/readme.md", content: "hello from API smoke" });
+    assert.deepEqual(downloadedFile, { path: "files/readme.md", content: fileContent });
     assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "running");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);

@@ -95,7 +95,7 @@ describe("operator sandbox API", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
   });
 
-  it("reports cleanup action summaries for expired sandbox runs", async () => {
+  it("returns cleanup action summaries for expired sandbox runs", async () => {
     const store = createLocalInMemoryProductStore();
     await store.sandboxRuns.put(sandboxRun({
       directories: runtimeDirectories(dataRoot, "task1"),

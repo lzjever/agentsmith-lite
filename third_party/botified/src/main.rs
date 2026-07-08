@@ -579,11 +579,11 @@ impl Error for StartupError {}
 
 struct DevelopmentMockProvider;
 
-const RELEASE_SMOKE_TRIGGER: &str = "BOTIFIED_RELEASE_SMOKE_BASH";
-const RELEASE_SMOKE_TOOL_CALL_ID: &str = "release_smoke_bash";
-const RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID: &str = "release_smoke_publish_file";
-const RELEASE_SMOKE_OUTPUT_MARKER: &str = "BOTIFIED_RELEASE_SMOKE_OUTPUT";
-const RELEASE_SMOKE_ARTIFACT_FILENAME: &str = "botified-release-smoke.txt";
+const RELEASE_CHECK_TRIGGER: &str = "BOTIFIED_RELEASE_CHECK_BASH";
+const RELEASE_CHECK_TOOL_CALL_ID: &str = "release_check_bash";
+const RELEASE_CHECK_PUBLISH_TOOL_CALL_ID: &str = "release_check_publish_file";
+const RELEASE_CHECK_OUTPUT_MARKER: &str = "BOTIFIED_RELEASE_CHECK_OUTPUT";
+const RELEASE_CHECK_ARTIFACT_FILENAME: &str = "botified-release-check.txt";
 
 #[async_trait]
 impl Provider for DevelopmentMockProvider {
@@ -593,37 +593,37 @@ impl Provider for DevelopmentMockProvider {
         _cancel: CancellationToken,
     ) -> Result<ProviderResponse, ProviderError> {
         let messages = request.transcript_messages();
-        if pending_release_smoke_tool_result(&messages, RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID) {
-            return Ok(ProviderResponse::text("release smoke bash complete"));
+        if pending_release_check_tool_result(&messages, RELEASE_CHECK_PUBLISH_TOOL_CALL_ID) {
+            return Ok(ProviderResponse::text("release check bash complete"));
         }
-        if pending_release_smoke_tool_result(&messages, RELEASE_SMOKE_TOOL_CALL_ID)
+        if pending_release_check_tool_result(&messages, RELEASE_CHECK_TOOL_CALL_ID)
             && request
                 .tools
                 .iter()
                 .any(|tool| tool.name == botified::PUBLISH_FILE_TOOL_NAME)
         {
             return Ok(ProviderResponse::tool_calls(vec![botified::ToolCall::new(
-                RELEASE_SMOKE_PUBLISH_TOOL_CALL_ID,
+                RELEASE_CHECK_PUBLISH_TOOL_CALL_ID,
                 botified::PUBLISH_FILE_TOOL_NAME,
                 serde_json::json!({
-                    "path": RELEASE_SMOKE_ARTIFACT_FILENAME,
-                    "filename": RELEASE_SMOKE_ARTIFACT_FILENAME,
+                    "path": RELEASE_CHECK_ARTIFACT_FILENAME,
+                    "filename": RELEASE_CHECK_ARTIFACT_FILENAME,
                     "mime_type": "text/plain",
-                    "description": "release smoke artifact"
+                    "description": "release check artifact"
                 }),
             )]));
         }
 
         let text = latest_user_text(&messages).unwrap_or("message received");
-        if text.contains(RELEASE_SMOKE_TRIGGER)
+        if text.contains(RELEASE_CHECK_TRIGGER)
             && request.tools.iter().any(|tool| tool.name == "bash")
         {
             return Ok(ProviderResponse::tool_calls(vec![botified::ToolCall::new(
-                RELEASE_SMOKE_TOOL_CALL_ID,
+                RELEASE_CHECK_TOOL_CALL_ID,
                 "bash",
                 serde_json::json!({
                     "command": format!(
-                        "sleep 1; printf '%s\\n' '{RELEASE_SMOKE_OUTPUT_MARKER}' > {RELEASE_SMOKE_ARTIFACT_FILENAME}; printf '%s\\n' '{RELEASE_SMOKE_OUTPUT_MARKER}'"
+                        "sleep 1; printf '%s\\n' '{RELEASE_CHECK_OUTPUT_MARKER}' > {RELEASE_CHECK_ARTIFACT_FILENAME}; printf '%s\\n' '{RELEASE_CHECK_OUTPUT_MARKER}'"
                     ),
                     "timeout_secs": 5
                 }),
@@ -649,7 +649,7 @@ fn latest_user_text(messages: &[botified::Message]) -> Option<&str> {
     })
 }
 
-fn pending_release_smoke_tool_result(messages: &[botified::Message], tool_call_id: &str) -> bool {
+fn pending_release_check_tool_result(messages: &[botified::Message], tool_call_id: &str) -> bool {
     for message in messages.iter().rev() {
         match message {
             botified::Message::ToolResult(result)

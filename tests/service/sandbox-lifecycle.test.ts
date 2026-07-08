@@ -15,7 +15,7 @@ import {
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
 describe("sandbox lifecycle service", () => {
-  it("reports persisted and observed state without exposing secrets", async () => {
+  it("returns persisted and observed state without exposing secrets", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     await store.createTask(taskForRun(run, "running"));

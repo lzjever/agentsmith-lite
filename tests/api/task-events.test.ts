@@ -99,7 +99,7 @@ describe("task events API", () => {
     assert.doesNotMatch(JSON.stringify(downloadHeaders), /api-service-key|botified\.internal|download_url|\/v1\/files/);
   });
 
-  it("aborts through the Botified port and reports abort failures as structured errors", async () => {
+  it("aborts through the Botified port and returns abort failures as structured errors", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
     api = await createApiServer({
       port: 0,

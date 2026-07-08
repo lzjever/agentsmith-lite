@@ -53,7 +53,7 @@ try {
   await page.goto(server.baseUrl + "/", { waitUntil: "networkidle" });
   await page.waitForSelector("#artifacts");
   const artifactText = await page.locator("#artifacts").textContent();
-  assert(artifactText?.includes("visual-report.txt"), "dashboard artifact section missing seeded artifact");
+  assert(artifactText?.includes("visual-artifact.txt"), "dashboard artifact section missing seeded artifact");
   const overlaps = await page.evaluate(() => {
     const boxes = [...document.querySelectorAll(".panel")]
       .map((element) => {
@@ -107,7 +107,7 @@ function fakeBotifiedClient(bytes) {
           type: "file.published",
           payload: {
             file_id: "visual_file_1",
-            filename: "visual-report.txt",
+            filename: "visual-artifact.txt",
             mime_type: "text/plain",
             size_bytes: bytes.byteLength,
             sha256: "d".repeat(64),
@@ -137,7 +137,7 @@ function fakeBotifiedClient(bytes) {
       assert(fileId === "visual_file_1", "unexpected Botified file id");
       return {
         bytes,
-        filename: "visual-report.txt",
+        filename: "visual-artifact.txt",
         mimeType: "text/plain",
         sizeBytes: bytes.byteLength
       };

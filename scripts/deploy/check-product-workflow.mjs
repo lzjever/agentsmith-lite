@@ -2,47 +2,36 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 
 const ADMIN_EMAIL = "admin@agentsmith-lite.local";
-const WORKSPACE_NAME = "Deploy Smoke";
-const PROJECT_NAME = "API Smoke";
-const FILE_PATH = "files/deploy-smoke.txt";
-const FILE_CONTENT = "hello from deploy smoke\n";
-const TASK_ARTIFACT_NAME = "agentsmith-lite-task-smoke.txt";
-const TASK_MARKER = "AGENTSMITH_LITE_TASK_SMOKE_MARKER";
+const WORKSPACE_NAME = "Deploy Product Workflow";
+const PROJECT_NAME = "API Product Workflow";
+const FILE_PATH = "files/product-workflow-check.txt";
+const FILE_CONTENT = "hello from deploy product workflow check\n";
+const TASK_ARTIFACT_NAME = "agentsmith-lite-task-workflow.txt";
+const TASK_MARKER = "AGENTSMITH_LITE_TASK_WORKFLOW_MARKER";
 const TASK_POLL_INTERVAL_MS = 500;
 const DEFAULT_TASK_TIMEOUT_SECS = 45;
 const TASK_PROMPT = [
-  "Deploy smoke runtime acceptance test.",
-  "Use bash in the current task home/cwd to create agentsmith-lite-task-smoke.txt.",
-  "The file content must include this exact marker on its own line: AGENTSMITH_LITE_TASK_SMOKE_MARKER.",
-  "Then use the Botified publish_file tool to publish that file with filename agentsmith-lite-task-smoke.txt.",
+  "Deploy product workflow task artifact check.",
+  "Use bash in the current task home/cwd to create agentsmith-lite-task-workflow.txt.",
+  "The file content must include this exact marker on its own line: AGENTSMITH_LITE_TASK_WORKFLOW_MARKER.",
+  "Then use the Botified publish_file tool to publish that file with filename agentsmith-lite-task-workflow.txt.",
   "Keep the response brief and do not include credentials or endpoint secret references."
 ].join("\n");
 const TASK_RECLAIM_PROMPT = [
-  "Deploy smoke task reclaim acceptance test.",
+  "Deploy product workflow task reclaim check.",
   "Use bash in the current task home/cwd to run a long sleep, for example: sleep 600.",
   "Do not publish files, do not create artifacts, and do not include credentials or endpoint secret references.",
-  "The smoke harness will cancel this task and then run scoped sandbox reap checks."
+  "The product workflow harness will cancel this task and then run scoped sandbox reap checks."
 ].join("\n");
 const TERMINAL_EVENT_KINDS = new Set(["turn_completed", "turn_failed", "runtime_error"]);
-const EVIDENCE_NOT_COVERED = [
-  "external-k8s-observation",
-  "sandbox-pod-pvc-volume-mount-spec-observed",
-  "juicefs-backend",
-  "runner-image-digest",
-  "independent-k8s-resource-deletion-observation",
-  "full-external-evidence"
-];
 const SANDBOX_CONTRACT_SCOPE = "product-api-sandbox-render-contract";
-const SANDBOX_CONTRACT_COVERAGE = "task-api-sandbox-render-pvc-runner-image-contract";
 const RUNNER_CONTAINER_NAME = "botified-runner";
 const PROJECT_FILES_VOLUME_NAME = "project-files";
 const PROJECT_FILES_MOUNT_PATH = "/workspace/project";
 const DIGEST_PINNED_IMAGE_PATTERN = /@sha256:[0-9a-f]{64}$/i;
-const DIGEST_EVIDENCE_PATTERN = /sha256:[0-9a-f]{64}/i;
+const DIGEST_PATTERN = /sha256:[0-9a-f]{64}/i;
 const K8S_RUN_ID_LABEL = "agentsmith-lite/run-id";
 const K8S_NAME_ONLY_RESOURCE_KINDS = [
   ["Secret", "secrets"],
@@ -69,30 +58,30 @@ class UsageError extends Error {}
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   requireOption(args.baseUrl, "--base-url");
-  const taskSmoke = taskSmokeEnabled(args);
-  const taskReclaimSmoke = taskReclaimSmokeEnabled(args);
+  const taskArtifactCheck = taskArtifactCheckEnabled(args);
+  const taskReclaimCheck = taskReclaimCheckEnabled(args);
   const taskReclaimReapApply = taskReclaimReapApplyEnabled(args);
-  const k8sEvidence = Boolean(args.k8sEvidence);
+  const checkK8sRunResources = Boolean(args.checkK8sRunResources);
 
-  if (taskReclaimReapApply && !taskReclaimSmoke) {
-    throw new UsageError("task reclaim reap apply requires task reclaim smoke");
+  if (taskReclaimReapApply && !taskReclaimCheck) {
+    throw new UsageError("task reclaim reap apply requires task reclaim check");
   }
-  if (k8sEvidence && !taskSmoke && !taskReclaimSmoke) {
-    throw new UsageError("k8s evidence requires task smoke or task reclaim smoke");
+  if (checkK8sRunResources && !taskArtifactCheck && !taskReclaimCheck) {
+    throw new UsageError("k8s run resource check requires task artifact or task reclaim check");
   }
 
-  const endpointConfig = endpointSmokeConfig(args);
-  if (taskSmoke && !endpointConfig.complete) {
+  const endpointConfig = endpointCheckConfig(args);
+  if (taskArtifactCheck && !endpointConfig.complete) {
     throw new UsageError(
-      "task smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
+      "task artifact check requires endpoint config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
     );
   }
-  if (taskReclaimSmoke && !endpointConfig.complete) {
+  if (taskReclaimCheck && !endpointConfig.complete) {
     throw new UsageError(
-      "task reclaim smoke requires endpoint smoke config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
+      "task reclaim check requires endpoint config: --endpoint-base-url, --endpoint-model, and --endpoint-secret-ref"
     );
   }
-  const taskTimeoutSecs = taskSmoke ? taskSmokeTimeoutSecs() : DEFAULT_TASK_TIMEOUT_SECS;
+  const taskTimeoutSecs = taskArtifactCheck ? taskCheckTimeoutSecs() : DEFAULT_TASK_TIMEOUT_SECS;
 
   const adminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD;
   requireOption(adminPassword, "BUILTIN_ADMIN_INITIAL_PASSWORD");
@@ -107,25 +96,25 @@ async function main() {
   addSensitiveEnvValues(["BOTIFIED_RUNNER_IMAGE", "JUICEFS_PVC_NAME"]);
   addSensitiveEnvValuesByPrefix(["S3_", "JUICEFS_"]);
 
-  const k8sObserver = k8sEvidence ? createK8sEvidenceObserver() : undefined;
+  const k8sRunResourceObserver = checkK8sRunResources ? createK8sRunResourceObserver() : undefined;
 
-  const smoke = new AppSmokeClient(args.baseUrl);
-  const health = await smoke.requestJson("GET", "/api/health");
+  const workflow = new ProductWorkflowClient(args.baseUrl);
+  const health = await workflow.requestJson("GET", "/api/health");
   if (health.status !== "ok") {
-    throw new Error("health check did not report ok");
+    throw new Error("health check did not return ok");
   }
-  await smoke.requestJson("POST", "/api/auth/bootstrap", {
+  await workflow.requestJson("POST", "/api/auth/bootstrap", {
     body: { password: adminPassword }
   });
-  await smoke.login(ADMIN_EMAIL, adminPassword);
+  await workflow.login(ADMIN_EMAIL, adminPassword);
 
-  const workspace = await smoke.requestJson("POST", "/api/workspaces", {
+  const workspace = await workflow.requestJson("POST", "/api/workspaces", {
     auth: true,
     body: { name: WORKSPACE_NAME }
   });
   const workspaceId = requireString(workspace.id, "workspace id");
 
-  const project = await smoke.requestJson("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/projects`, {
+  const project = await workflow.requestJson("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/projects`, {
     auth: true,
     body: { name: PROJECT_NAME }
   });
@@ -134,10 +123,10 @@ async function main() {
   let chat = { status: "skipped" };
   let endpointId;
   if (endpointConfig.complete) {
-    const endpoint = await smoke.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/endpoints`, {
+    const endpoint = await workflow.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/endpoints`, {
       auth: true,
       body: {
-        name: "Deploy Smoke Endpoint",
+        name: "Deploy Product Workflow Endpoint",
         protocol: "openai_chat_completions",
         baseUrl: endpointConfig.baseUrl,
         model: endpointConfig.model,
@@ -147,17 +136,17 @@ async function main() {
       }
     });
     endpointId = requireString(endpoint.id, "endpoint id");
-    await smoke.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/chat`, {
+    await workflow.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/chat`, {
       auth: true,
       body: {
         endpointId,
-        messages: [{ role: "user", content: "deploy smoke" }]
+        messages: [{ role: "user", content: "deploy product workflow" }]
       }
     });
     chat = { status: "completed" };
   }
 
-  await smoke.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/files`, {
+  await workflow.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/files`, {
     auth: true,
     body: {
       path: FILE_PATH,
@@ -165,82 +154,70 @@ async function main() {
     }
   });
 
-  const files = await smoke.requestJson("GET", `/api/projects/${encodeURIComponent(projectId)}/files?path=files`, {
+  const files = await workflow.requestJson("GET", `/api/projects/${encodeURIComponent(projectId)}/files?path=files`, {
     auth: true
   });
   const entries = Array.isArray(files.entries) ? files.entries : [];
   if (!entries.some((entry) => entry && typeof entry === "object" && entry.path === FILE_PATH)) {
-    throw new Error("uploaded smoke file was not listed");
+    throw new Error("uploaded workflow check file was not listed");
   }
 
-  const downloaded = await smoke.requestJson(
+  const downloaded = await workflow.requestJson(
     "GET",
     `/api/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(FILE_PATH)}`,
     { auth: true }
   );
   if (downloaded.path !== FILE_PATH || downloaded.content !== FILE_CONTENT) {
-    throw new Error("downloaded smoke file did not match uploaded content");
+    throw new Error("downloaded workflow check file did not match uploaded content");
   }
 
-  await smoke.requestJson("DELETE", `/api/projects/${encodeURIComponent(projectId)}/files`, {
+  await workflow.requestJson("DELETE", `/api/projects/${encodeURIComponent(projectId)}/files`, {
     auth: true,
     body: { path: FILE_PATH }
   });
 
-  await smoke.requestJson("GET", "/api/operator/sandbox/status", {
+  await workflow.requestJson("GET", "/api/operator/sandbox/status", {
     auth: true
   });
 
   let task = { status: "skipped" };
-  if (taskSmoke) {
-    task = await runTaskSmoke(smoke, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
-    if (k8sObserver) {
-      task.k8sEvidence = await k8sObserver.observeRun(task.runId, "task smoke k8s evidence", {
+  if (taskArtifactCheck) {
+    task = await runTaskArtifactCheck(workflow, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
+    if (k8sRunResourceObserver) {
+      task.k8sRunResources = await k8sRunResourceObserver.observeRun(task.runId, "task artifact k8s run resource check", {
         expectedSandboxContract: task.sandboxContract
       });
     }
   }
 
-  const report = {
+  const result = {
     status: "ok",
-    profile: taskSmoke || taskReclaimSmoke ? "full" : "light",
     baseUrl: args.baseUrl,
     workspaceId,
     projectId,
-    evidenceScope: buildEvidenceScope({
-      endpointSmoke: endpointConfig.complete,
-      taskSmoke,
-      taskReclaimSmoke,
-      taskReclaimReapApply,
-      k8sEvidence
-    }),
     chat,
     task
   };
 
-  if (taskReclaimSmoke) {
-    report.taskReclaim = await runTaskReclaimSmoke(
-      smoke,
+  if (taskReclaimCheck) {
+    result.taskReclaim = await runTaskReclaimCheck(
+      workflow,
       projectId,
       requireString(endpointId, "endpoint id"),
       taskReclaimReapApply,
-      k8sObserver
+      k8sRunResourceObserver
     );
   }
 
-  const reportJson = `${JSON.stringify(report)}\n`;
-  if (args.report) {
-    await writeReport(args.report, reportJson);
-  }
-  process.stdout.write(reportJson);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
+async function runTaskArtifactCheck(workflow, projectId, endpointId, timeoutSecs) {
   let taskId;
   let createStatus;
   let completed = false;
   try {
-    const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+    const create = await workflow.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
       auth: true,
       body: {
         endpointId,
@@ -250,10 +227,10 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
     taskId = requireString(create.body.id, "task id");
     const runId = requireString(create.body.runId, "task run id");
     createStatus = requireString(create.body.status, "task create status");
-    const sandboxContract = summarizeSandboxContract(create.body, "task smoke");
+    const sandboxContract = summarizeSandboxContract(create.body, "task artifact check");
 
-    const verified = await waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs);
-    const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task smoke run-scoped status");
+    const verified = await waitForVerifiedTaskArtifact(workflow, taskId, timeoutSecs);
+    const runScopedStatus = await getRunScopedStatusSummary(workflow, runId, "task artifact check run-scoped status");
     completed = true;
     return {
       status: "completed",
@@ -273,27 +250,27 @@ async function runTaskSmoke(smoke, projectId, endpointId, timeoutSecs) {
   } catch (error) {
     if (taskId && !completed) {
       try {
-        await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        await workflow.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
           auth: true
         });
       } catch {
-        // Preserve the original task smoke failure.
+        // Preserve the original task artifact check failure.
       }
     }
     throw error;
   }
 }
 
-async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
+async function waitForVerifiedTaskArtifact(workflow, taskId, timeoutSecs) {
   const deadline = Date.now() + (timeoutSecs * 1000);
   const observedEvents = createObservedTaskEventSummary();
   while (Date.now() <= deadline) {
     const encodedTaskId = encodeURIComponent(taskId);
-    const events = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/events`, {
+    const events = requireArray(await workflow.requestJson("GET", `/api/tasks/${encodedTaskId}/events`, {
       auth: true
     }), "task events");
     recordObservedTaskEvents(observedEvents, events);
-    const artifacts = requireArray(await smoke.requestJson("GET", `/api/tasks/${encodedTaskId}/artifacts`, {
+    const artifacts = requireArray(await workflow.requestJson("GET", `/api/tasks/${encodedTaskId}/artifacts`, {
       auth: true
     }), "task artifacts");
 
@@ -303,13 +280,13 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
         continue;
       }
       const artifactId = requireString(artifact.id, "task artifact id");
-      const content = await smoke.requestText(
+      const content = await workflow.requestText(
         "GET",
         `/api/tasks/${encodedTaskId}/artifacts/${encodeURIComponent(artifactId)}/download`,
         { auth: true }
       );
       if (!content.includes(TASK_MARKER)) {
-        throw new Error(`artifact ${artifactId} did not contain task smoke marker`);
+        throw new Error(`artifact ${artifactId} did not contain task workflow marker`);
       }
       const eventSummary = finalizeObservedTaskEventSummary(observedEvents);
       return {
@@ -325,7 +302,7 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
 
     const terminal = events.find((event) => TERMINAL_EVENT_KINDS.has(event?.kind));
     if (terminal) {
-      throw new Error(`task smoke reached terminal event ${terminal.kind} before verified artifact`);
+      throw new Error(`task artifact check reached terminal event ${terminal.kind} before verified artifact`);
     }
 
     const remainingMs = deadline - Date.now();
@@ -333,14 +310,14 @@ async function waitForVerifiedTaskArtifact(smoke, taskId, timeoutSecs) {
       await sleep(Math.min(TASK_POLL_INTERVAL_MS, remainingMs));
     }
   }
-  throw new Error(`task smoke timed out after ${timeoutSecs} seconds waiting for verified artifact`);
+  throw new Error(`task artifact check timed out after ${timeoutSecs} seconds waiting for verified artifact`);
 }
 
-async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply, k8sObserver) {
+async function runTaskReclaimCheck(workflow, projectId, endpointId, reapApply, k8sRunResourceObserver) {
   let taskId;
   let cancelAttempted = false;
   try {
-    const create = await smoke.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+    const create = await workflow.fetchJson("POST", `/api/projects/${encodeURIComponent(projectId)}/tasks`, {
       auth: true,
       body: {
         endpointId,
@@ -353,35 +330,35 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply, k8sO
     const sandboxContract = summarizeSandboxContract(create.body, "task reclaim");
 
     cancelAttempted = true;
-    const cancel = await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    const cancel = await workflow.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
       auth: true
     });
     const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
-    const runScopedStatus = await getRunScopedStatusSummary(smoke, runId, "task reclaim run-scoped status");
-    const k8sEvidence = k8sObserver
+    const runScopedStatus = await getRunScopedStatusSummary(workflow, runId, "task reclaim run-scoped status");
+    const k8sRunResources = k8sRunResourceObserver
       ? {
-          beforeReap: await k8sObserver.observeRun(runId, "task reclaim before reap k8s evidence", {
+          beforeReap: await k8sRunResourceObserver.observeRun(runId, "task reclaim before reap k8s run resource check", {
             expectedSandboxContract: sandboxContract
           })
         }
       : undefined;
 
     const reap = {
-      dryRun: await runScopedReap(smoke, runId, false, "task reclaim dry-run reap")
+      dryRun: await runScopedReap(workflow, runId, false, "task reclaim dry-run reap")
     };
-    if (k8sObserver) {
-      k8sEvidence.afterDryRun = await k8sObserver.observeRun(runId, "task reclaim after dry-run k8s evidence", {
+    if (k8sRunResourceObserver) {
+      k8sRunResources.afterDryRun = await k8sRunResourceObserver.observeRun(runId, "task reclaim after dry-run k8s run resource check", {
         expectedSandboxContract: sandboxContract
       });
     }
     if (reapApply) {
-      reap.apply = await runScopedReap(smoke, runId, true, "task reclaim apply reap");
-      reap.finalDryRun = await runScopedReap(smoke, runId, false, "task reclaim final dry-run reap");
-      if (k8sObserver) {
-        k8sEvidence.afterApply = await k8sObserver.observeRun(runId, "task reclaim after apply k8s evidence", {
+      reap.apply = await runScopedReap(workflow, runId, true, "task reclaim apply reap");
+      reap.finalDryRun = await runScopedReap(workflow, runId, false, "task reclaim final dry-run reap");
+      if (k8sRunResourceObserver) {
+        k8sRunResources.afterApply = await k8sRunResourceObserver.observeRun(runId, "task reclaim after apply k8s run resource check", {
           allowNoPods: true
         });
-        k8sEvidence.reclaimScopedResult = summarizeK8sReclaimScopedResult(k8sEvidence.beforeReap, k8sEvidence.afterApply);
+        k8sRunResources.reclaimScopedResult = summarizeK8sReclaimScopedResult(k8sRunResources.beforeReap, k8sRunResources.afterApply);
       }
     }
 
@@ -398,24 +375,24 @@ async function runTaskReclaimSmoke(smoke, projectId, endpointId, reapApply, k8sO
       },
       runScopedStatus,
       reap,
-      ...(k8sEvidence ? { k8sEvidence } : {})
+      ...(k8sRunResources ? { k8sRunResources } : {})
     };
   } catch (error) {
     if (taskId && !cancelAttempted) {
       try {
-        await smoke.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        await workflow.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
           auth: true
         });
       } catch {
-        // Preserve the original task reclaim smoke failure.
+        // Preserve the original task reclaim check failure.
       }
     }
     throw error;
   }
 }
 
-async function getRunScopedStatusSummary(smoke, runId, context) {
-  const result = await smoke.requestJson(
+async function getRunScopedStatusSummary(workflow, runId, context) {
+  const result = await workflow.requestJson(
     "GET",
     `/api/operator/sandbox/status?${new URLSearchParams({ runId }).toString()}`,
     { auth: true }
@@ -434,8 +411,8 @@ function summarizeRunScopedStatus(result, runId, context) {
   };
 }
 
-async function runScopedReap(smoke, runId, apply, context) {
-  const result = await smoke.requestJson("POST", "/api/operator/sandbox/reap", {
+async function runScopedReap(workflow, runId, apply, context) {
+  const result = await workflow.requestJson("POST", "/api/operator/sandbox/reap", {
     auth: true,
     body: apply ? { runId, apply: true } : { runId }
   });
@@ -449,7 +426,7 @@ function summarizeReapResult(result, expectedDryRun, context) {
   }
   const errors = requireArray(result?.errors, `${context} errors`);
   if (errors.length > 0) {
-    throw new Error(`${context} reported ${errors.length} error(s)`);
+    throw new Error(`${context} returned ${errors.length} error(s)`);
   }
   return {
     dryRun,
@@ -525,7 +502,7 @@ function summarizeSandboxContract(taskCreateBody, context) {
   };
 }
 
-function createK8sEvidenceObserver() {
+function createK8sRunResourceObserver() {
   const namespace = firstNonEmpty(process.env.KUBE_NAMESPACE);
   requireOption(namespace, "KUBE_NAMESPACE");
   const kubectlBin = firstNonEmpty(process.env.KUBECTL_BIN) ?? "kubectl";
@@ -538,10 +515,10 @@ function createK8sEvidenceObserver() {
   if (context) {
     baseArgs.push("--context", context);
   }
-  return new K8sEvidenceObserver({ kubectlBin, baseArgs, namespace });
+  return new K8sRunResourceObserver({ kubectlBin, baseArgs, namespace });
 }
 
-class K8sEvidenceObserver {
+class K8sRunResourceObserver {
   constructor({ kubectlBin, baseArgs, namespace }) {
     this.kubectlBin = kubectlBin;
     this.baseArgs = baseArgs;
@@ -645,11 +622,11 @@ class K8sEvidenceObserver {
 
 function validateReadOnlyKubectlGetArgs(args, context) {
   if (args[0] !== "get") {
-    throw new Error(`${context} attempted non-get kubectl evidence command`);
+    throw new Error(`${context} attempted non-get kubectl command`);
   }
   for (const arg of args) {
     if (FORBIDDEN_KUBECTL_COMMANDS.has(arg)) {
-      throw new Error(`${context} attempted forbidden kubectl evidence command ${arg}`);
+      throw new Error(`${context} attempted forbidden kubectl command ${arg}`);
     }
   }
 }
@@ -684,8 +661,8 @@ function summarizeK8sPod(pod, runId, context, expectedSandboxContract) {
   if (!DIGEST_PINNED_IMAGE_PATTERN.test(runnerImage)) {
     throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} image must be digest pinned`);
   }
-  if (!DIGEST_EVIDENCE_PATTERN.test(runnerImageID)) {
-    throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} imageID must include digest evidence`);
+  if (!DIGEST_PATTERN.test(runnerImageID)) {
+    throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} imageID must include digest`);
   }
 
   const volumes = requireArray(pod?.spec?.volumes, `${context} pod ${name} volumes`);
@@ -748,8 +725,8 @@ function summarizeK8sReclaimScopedResult(before, after) {
   };
 }
 
-function totalK8sResourceCount(evidence) {
-  return Object.values(evidence.resources).reduce((total, resource) => total + resource.count, 0);
+function totalK8sResourceCount(summary) {
+  return Object.values(summary.resources).reduce((total, resource) => total + resource.count, 0);
 }
 
 function isSafeRelativeSubPath(value) {
@@ -760,46 +737,6 @@ function isSafeRelativeSubPath(value) {
     !value.includes("\\") &&
     !value.includes("..")
   );
-}
-
-function buildEvidenceScope({ endpointSmoke, taskSmoke, taskReclaimSmoke, taskReclaimReapApply, k8sEvidence }) {
-  const covered = [
-    "product-api-health",
-    "builtin-admin-auth",
-    "workspace-project-api",
-    "project-file-api-crud",
-    "operator-sandbox-status-api"
-  ];
-  if (endpointSmoke) {
-    covered.push("endpoint-chat-api");
-  }
-  if (taskSmoke) {
-    covered.push("task-api-create-events-artifact-download-marker");
-  }
-  if (taskSmoke || taskReclaimSmoke) {
-    covered.push(SANDBOX_CONTRACT_COVERAGE);
-  }
-  if (taskReclaimSmoke) {
-    covered.push("task-api-cancel-scoped-reap-dry-run");
-    if (taskReclaimReapApply) {
-      covered.push("task-api-cancel-scoped-reap-apply");
-      covered.push("task-api-cancel-scoped-reap-final-dry-run");
-    }
-  }
-  if (k8sEvidence) {
-    covered.push("external-k8s-observation");
-    covered.push("sandbox-pod-pvc-volume-mount-spec-observed");
-    covered.push("runner-image-digest");
-    if (taskReclaimSmoke && taskReclaimReapApply) {
-      covered.push("independent-k8s-resource-deletion-observation");
-    }
-  }
-  const notCovered = EVIDENCE_NOT_COVERED.filter((item) => !covered.includes(item));
-  return {
-    scope: k8sEvidence ? "product-api-plus-k8s-readonly" : "product-api-only",
-    covered,
-    notCovered
-  };
 }
 
 function createObservedTaskEventSummary() {
@@ -854,7 +791,7 @@ function sha256Hex(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-class AppSmokeClient {
+class ProductWorkflowClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl;
     this.cookie = "";
@@ -933,17 +870,14 @@ function parseArgs(argv) {
     } else if (arg === "--endpoint-secret-ref") {
       parsed.endpointSecretRef = requireValue(argv, index, arg);
       index += 1;
-    } else if (arg === "--task-smoke") {
-      parsed.taskSmoke = true;
-    } else if (arg === "--task-reclaim-smoke") {
-      parsed.taskReclaimSmoke = true;
-    } else if (arg === "--task-reclaim-reap-apply") {
+    } else if (arg === "--check-task-artifact") {
+      parsed.taskArtifactCheck = true;
+    } else if (arg === "--check-task-reclaim") {
+      parsed.taskReclaimCheck = true;
+    } else if (arg === "--check-task-reclaim-reap-apply") {
       parsed.taskReclaimReapApply = true;
-    } else if (arg === "--k8s-evidence") {
-      parsed.k8sEvidence = true;
-    } else if (arg === "--report") {
-      parsed.report = requireValue(argv, index, arg);
-      index += 1;
+    } else if (arg === "--check-k8s-run-resources") {
+      parsed.checkK8sRunResources = true;
     } else {
       throw new UsageError(`unknown argument: ${arg}`);
     }
@@ -951,10 +885,10 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function endpointSmokeConfig(args) {
-  const baseUrl = firstNonEmpty(args.endpointBaseUrl, process.env.SMOKE_ENDPOINT_BASE_URL);
-  const model = firstNonEmpty(args.endpointModel, process.env.SMOKE_ENDPOINT_MODEL);
-  const secretRef = firstNonEmpty(args.endpointSecretRef, process.env.SMOKE_ENDPOINT_SECRET_REF);
+function endpointCheckConfig(args) {
+  const baseUrl = firstNonEmpty(args.endpointBaseUrl, process.env.PRODUCT_WORKFLOW_ENDPOINT_BASE_URL);
+  const model = firstNonEmpty(args.endpointModel, process.env.PRODUCT_WORKFLOW_ENDPOINT_MODEL);
+  const secretRef = firstNonEmpty(args.endpointSecretRef, process.env.PRODUCT_WORKFLOW_ENDPOINT_SECRET_REF);
   return {
     baseUrl,
     model,
@@ -963,23 +897,23 @@ function endpointSmokeConfig(args) {
   };
 }
 
-function taskSmokeEnabled(args) {
-  const envTaskSmoke = parseSmokeBooleanEnv("SMOKE_TASK");
-  return Boolean(args.taskSmoke || envTaskSmoke);
+function taskArtifactCheckEnabled(args) {
+  const envTaskArtifactCheck = parseWorkflowBooleanEnv("PRODUCT_WORKFLOW_CHECK_TASK_ARTIFACT");
+  return Boolean(args.taskArtifactCheck || envTaskArtifactCheck);
 }
 
-function taskReclaimSmokeEnabled(args) {
-  const envTaskReclaimSmoke = parseSmokeBooleanEnv("SMOKE_TASK_RECLAIM");
-  return Boolean(args.taskReclaimSmoke || envTaskReclaimSmoke);
+function taskReclaimCheckEnabled(args) {
+  const envTaskReclaimCheck = parseWorkflowBooleanEnv("PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM");
+  return Boolean(args.taskReclaimCheck || envTaskReclaimCheck);
 }
 
 function taskReclaimReapApplyEnabled(args) {
-  const envTaskReclaimReapApply = parseSmokeBooleanEnv("SMOKE_TASK_RECLAIM_REAP_APPLY");
+  const envTaskReclaimReapApply = parseWorkflowBooleanEnv("PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM_REAP_APPLY");
   return Boolean(args.taskReclaimReapApply || envTaskReclaimReapApply);
 }
 
-function taskSmokeTimeoutSecs() {
-  return parsePositiveIntegerEnv("SMOKE_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
+function taskCheckTimeoutSecs() {
+  return parsePositiveIntegerEnv("PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS", DEFAULT_TASK_TIMEOUT_SECS);
 }
 
 function addSensitiveEnvValues(names) {
@@ -1002,12 +936,7 @@ function addSensitiveEnvValuesByPrefix(prefixes) {
   }
 }
 
-async function writeReport(reportPath, reportJson) {
-  await mkdir(dirname(reportPath), { recursive: true });
-  await writeFile(reportPath, reportJson, "utf8");
-}
-
-function parseSmokeBooleanEnv(name) {
+function parseWorkflowBooleanEnv(name) {
   const value = process.env[name];
   if (value === undefined || value === "" || value === "false") {
     return false;
@@ -1141,7 +1070,7 @@ function errorMessage(error) {
 main().catch((error) => {
   const message = error instanceof UsageError
     ? error.message
-    : `app smoke failed: ${errorMessage(error)}`;
+    : `product workflow check failed: ${errorMessage(error)}`;
   console.error(redact(message));
   process.exit(error instanceof UsageError ? 2 : 1);
 });

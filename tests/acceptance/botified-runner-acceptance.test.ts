@@ -13,8 +13,8 @@ const configuredModelApiKey = "DO_NOT_PRINT_CONFIGURED_MODEL_API_KEY";
 const s3SecretKey = "DO_NOT_PRINT_S3_SECRET_KEY";
 const juicefsMetaUrl = "redis://DO_NOT_PRINT_JUICEFS_META_URL";
 const downloadToken = "DO_NOT_PRINT_DOWNLOAD_TOKEN";
-const artifactFilename = "botified-release-smoke.txt";
-const artifactContent = "BOTIFIED_RELEASE_SMOKE_OUTPUT\n";
+const artifactFilename = "botified-release-check.txt";
+const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\n";
 const artifactSha256 = createHash("sha256").update(artifactContent).digest("hex");
 
 describe("Botified runner local acceptance", () => {
@@ -67,11 +67,11 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     assert.equal(readFileSync(callsFile, "utf8").trim(), "serve --config /tmp/runtime.yaml --mock-provider");
   });
 
-  it("smoke script observes mock bash output, published artifact download, state, and abort without leaking secrets", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-smoke-"));
+  it("acceptance script observes mock bash output, published artifact download, state, and abort without leaking secrets", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-acceptance-"));
     const fakeBinary = writeFakeBotifiedBinary(tempDir);
 
-    const result = runSmoke(fakeBinary, ["--timeout-secs", "3"], {
+    const result = runAcceptance(fakeBinary, ["--timeout-secs", "3"], {
       BOTIFIED_SERVICE_KEY: serviceKey,
       MODEL_API_KEY: modelApiKey,
       BOTIFIED_TEXT_API_KEY: botifiedTextApiKey,
@@ -81,10 +81,9 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
     });
 
     assert.equal(result.status, 0, result.stderr);
-    const report = JSON.parse(result.stdout) as {
+    const summary = JSON.parse(result.stdout) as {
       status: string;
       mode: string;
-      notCovered: string[];
       markerObserved: boolean;
       publishedArtifact: {
         eventObserved: boolean;
@@ -101,27 +100,26 @@ printf '%s\\n' "$*" > "$BOTIFIED_CALLS_FILE"
       abort: { aborted: boolean };
       eventsObserved: number;
     };
-    assert.equal(report.status, "ok");
-    assert.equal(report.mode, "local-process");
-    assert.deepEqual(report.notCovered, ["runner-container-image", "k8s", "juicefs", "pvc", "product-task-api", "cancel-reap"]);
-    assert.equal(report.markerObserved, true);
-    assert.equal(report.publishedArtifact.eventObserved, true);
-    assert.equal(report.publishedArtifact.fileId, "file_release_smoke");
-    assert.equal(report.publishedArtifact.filename, artifactFilename);
-    assert.equal(report.publishedArtifact.bytes, Buffer.byteLength(artifactContent));
-    assert.equal(report.publishedArtifact.sha256, artifactSha256);
-    assert.equal(report.publishedArtifact.markerMatched, true);
-    assert.equal(report.publishedArtifact.downloadedBytes, Buffer.byteLength(artifactContent));
-    assert.equal(report.publishedArtifact.downloadedSha256, artifactSha256);
-    assert.equal(report.publishedArtifact.downloadedFilename, artifactFilename);
-    assert.equal(report.finalState, "idle");
-    assert.equal(report.abort.aborted, true);
-    assert.ok(report.eventsObserved >= 1);
+    assert.equal(summary.status, "ok");
+    assert.equal(summary.mode, "local-process");
+    assert.equal(summary.markerObserved, true);
+    assert.equal(summary.publishedArtifact.eventObserved, true);
+    assert.equal(summary.publishedArtifact.fileId, "file_acceptance_artifact");
+    assert.equal(summary.publishedArtifact.filename, artifactFilename);
+    assert.equal(summary.publishedArtifact.bytes, Buffer.byteLength(artifactContent));
+    assert.equal(summary.publishedArtifact.sha256, artifactSha256);
+    assert.equal(summary.publishedArtifact.markerMatched, true);
+    assert.equal(summary.publishedArtifact.downloadedBytes, Buffer.byteLength(artifactContent));
+    assert.equal(summary.publishedArtifact.downloadedSha256, artifactSha256);
+    assert.equal(summary.publishedArtifact.downloadedFilename, artifactFilename);
+    assert.equal(summary.finalState, "idle");
+    assert.equal(summary.abort.aborted, true);
+    assert.ok(summary.eventsObserved >= 1);
     assertNoSecretLeak(result.stdout, result.stderr);
   });
 
-  it("smoke script reports startup failure without leaking secrets", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-smoke-fail-"));
+  it("acceptance script shows startup failure without leaking secrets", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-botified-acceptance-fail-"));
     const fakeBinary = path.join(tempDir, "botified-fail");
     writeFileSync(fakeBinary, `#!/usr/bin/env bash
 printf 'startup failed with %s %s %s %s %s %s\\n' "$BOTIFIED_SERVICE_KEY" "$MODEL_API_KEY" "$BOTIFIED_TEXT_API_KEY" "$AGENTSMITH_LITE_MODEL_API_KEY_OPENAI" "$S3_SECRET_KEY" "$JUICEFS_META_URL" >&2
@@ -129,7 +127,7 @@ exit 42
 `);
     chmodSync(fakeBinary, 0o755);
 
-    const result = runSmoke(fakeBinary, ["--timeout-secs", "0.5"], {
+    const result = runAcceptance(fakeBinary, ["--timeout-secs", "0.5"], {
       BOTIFIED_SERVICE_KEY: serviceKey,
       MODEL_API_KEY: modelApiKey,
       BOTIFIED_TEXT_API_KEY: botifiedTextApiKey,
@@ -144,12 +142,12 @@ exit 42
   });
 });
 
-function runSmoke(
+function runAcceptance(
   binaryPath: string,
   args: string[],
   env: Record<string, string>
 ): { status: number | null; stdout: string; stderr: string } {
-  return spawnSync("node", ["scripts/acceptance/botified-runner-smoke.mjs", "--binary", binaryPath, ...args], {
+  return spawnSync("node", ["scripts/acceptance/botified-runner-acceptance.mjs", "--binary", binaryPath, ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
@@ -188,9 +186,9 @@ const port = Number(rawConfig.match(/\\n  port: (\\d+)\\n/)?.[1]);
 const serviceKey = process.env.BOTIFIED_SERVICE_KEY;
 let messageAccepted = false;
 let outputReady = false;
-const artifactFileId = "file_release_smoke";
-const artifactFilename = "botified-release-smoke.txt";
-const artifactContent = "BOTIFIED_RELEASE_SMOKE_OUTPUT\\n";
+const artifactFileId = "file_acceptance_artifact";
+const artifactFilename = "botified-release-check.txt";
+const artifactContent = "BOTIFIED_RELEASE_CHECK_OUTPUT\\n";
 const artifactSha256 = ${JSON.stringify(artifactSha256)};
 
 function authorized(req) {
@@ -216,7 +214,7 @@ const server = http.createServer((req, res) => {
       body += chunk;
     });
     req.on("end", () => {
-      if (!body.includes("BOTIFIED_RELEASE_SMOKE_BASH")) {
+      if (!body.includes("BOTIFIED_RELEASE_CHECK_BASH")) {
         res.statusCode = 422;
         res.end(JSON.stringify({ error: { code: "missing_trigger", message: "missing trigger" } }));
         return;
@@ -243,8 +241,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url.startsWith("/v1/timeline")) {
     const events = outputReady
       ? [
-        { type: "tool_call", tool: "bash", id: "release_smoke_bash" },
-        { type: "tool_output", text: "BOTIFIED_RELEASE_SMOKE_OUTPUT" },
+        { type: "tool_call", tool: "bash", id: "acceptance_bash" },
+        { type: "tool_output", text: "BOTIFIED_RELEASE_CHECK_OUTPUT" },
         {
           type: "file.published",
           data: {
@@ -255,7 +253,7 @@ const server = http.createServer((req, res) => {
             sha256: artifactSha256,
             download_url: "http://127.0.0.1:" + port + "/v1/files/" + artifactFileId + "?token=DO_NOT_PRINT_DOWNLOAD_TOKEN",
             source: "published",
-            description: "release smoke artifact"
+            description: "acceptance artifact"
           }
         }
       ]

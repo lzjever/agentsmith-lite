@@ -10,11 +10,10 @@ app_secrets_file=
 endpoint_base_url=
 endpoint_model=
 endpoint_secret_ref=
-report_path=out/smoke-report.json
-task_smoke=false
-task_reclaim_smoke=false
+task_artifact_check=false
+task_reclaim_check=false
 task_reclaim_reap_apply=false
-k8s_evidence=false
+check_k8s_run_resources=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base-url) base_url="$2"; shift 2 ;;
@@ -25,11 +24,10 @@ while [ "$#" -gt 0 ]; do
     --endpoint-base-url) endpoint_base_url="$2"; shift 2 ;;
     --endpoint-model) endpoint_model="$2"; shift 2 ;;
     --endpoint-secret-ref) endpoint_secret_ref="$2"; shift 2 ;;
-    --report) report_path="$2"; shift 2 ;;
-    --task-smoke) task_smoke=true; shift ;;
-    --task-reclaim-smoke) task_reclaim_smoke=true; shift ;;
-    --task-reclaim-reap-apply) task_reclaim_reap_apply=true; shift ;;
-    --k8s-evidence) k8s_evidence=true; shift ;;
+    --check-task-artifact) task_artifact_check=true; shift ;;
+    --check-task-reclaim) task_reclaim_check=true; shift ;;
+    --check-task-reclaim-reap-apply) task_reclaim_reap_apply=true; shift ;;
+    --check-k8s-run-resources) check_k8s_run_resources=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -49,7 +47,7 @@ unset_substrate_only_env() {
 }
 
 load_contract_env() {
-  local args=(export --profile smoke)
+  local args=(export --allow-product-workflow)
   local assignments assignment
   if [ -n "$env_file" ]; then
     args+=(--env "$env_file")
@@ -75,10 +73,10 @@ load_contract_env
 unset_substrate_only_env
 
 base_url="${base_url:-${APP_PUBLIC_BASE_URL:-}}"
-[ -n "$base_url" ] || { echo "smoke.sh requires --base-url or APP_PUBLIC_BASE_URL" >&2; exit 2; }
-[ -n "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" ] || { echo "smoke.sh requires BUILTIN_ADMIN_INITIAL_PASSWORD from --secrets or environment" >&2; exit 2; }
+[ -n "$base_url" ] || { echo "check-product-workflow.sh requires --base-url or APP_PUBLIC_BASE_URL" >&2; exit 2; }
+[ -n "${BUILTIN_ADMIN_INITIAL_PASSWORD:-}" ] || { echo "check-product-workflow.sh requires BUILTIN_ADMIN_INITIAL_PASSWORD from --secrets or environment" >&2; exit 2; }
 
-args=(scripts/deploy/app-smoke.mjs --base-url "$base_url" --report "$report_path")
+args=(scripts/deploy/check-product-workflow.mjs --base-url "$base_url")
 if [ -n "$endpoint_base_url" ]; then
   args+=(--endpoint-base-url "$endpoint_base_url")
 fi
@@ -88,25 +86,25 @@ fi
 if [ -n "$endpoint_secret_ref" ]; then
   args+=(--endpoint-secret-ref "$endpoint_secret_ref")
 fi
-if [ "$task_smoke" = true ]; then
-  args+=(--task-smoke)
+if [ "$task_artifact_check" = true ]; then
+  args+=(--check-task-artifact)
 fi
-if [ "$task_reclaim_smoke" = true ]; then
-  args+=(--task-reclaim-smoke)
+if [ "$task_reclaim_check" = true ]; then
+  args+=(--check-task-reclaim)
 fi
 if [ "$task_reclaim_reap_apply" = true ]; then
-  args+=(--task-reclaim-reap-apply)
+  args+=(--check-task-reclaim-reap-apply)
 fi
-if [ "$k8s_evidence" = true ]; then
-  args+=(--k8s-evidence)
+if [ "$check_k8s_run_resources" = true ]; then
+  args+=(--check-k8s-run-resources)
 fi
 
 BUILTIN_ADMIN_INITIAL_PASSWORD="$BUILTIN_ADMIN_INITIAL_PASSWORD" \
-SMOKE_ENDPOINT_BASE_URL="${SMOKE_ENDPOINT_BASE_URL:-}" \
-SMOKE_ENDPOINT_MODEL="${SMOKE_ENDPOINT_MODEL:-}" \
-SMOKE_ENDPOINT_SECRET_REF="${SMOKE_ENDPOINT_SECRET_REF:-}" \
-SMOKE_TASK="${SMOKE_TASK:-}" \
-SMOKE_TASK_RECLAIM="${SMOKE_TASK_RECLAIM:-}" \
-SMOKE_TASK_RECLAIM_REAP_APPLY="${SMOKE_TASK_RECLAIM_REAP_APPLY:-}" \
-SMOKE_TASK_TIMEOUT_SECS="${SMOKE_TASK_TIMEOUT_SECS:-}" \
+PRODUCT_WORKFLOW_ENDPOINT_BASE_URL="${PRODUCT_WORKFLOW_ENDPOINT_BASE_URL:-}" \
+PRODUCT_WORKFLOW_ENDPOINT_MODEL="${PRODUCT_WORKFLOW_ENDPOINT_MODEL:-}" \
+PRODUCT_WORKFLOW_ENDPOINT_SECRET_REF="${PRODUCT_WORKFLOW_ENDPOINT_SECRET_REF:-}" \
+PRODUCT_WORKFLOW_CHECK_TASK_ARTIFACT="${PRODUCT_WORKFLOW_CHECK_TASK_ARTIFACT:-}" \
+PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM="${PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM:-}" \
+PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM_REAP_APPLY="${PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM_REAP_APPLY:-}" \
+PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS="${PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS:-}" \
 node "${args[@]}"

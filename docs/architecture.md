@@ -15,4 +15,4 @@ Chat requests go from the browser to `/api/projects/{projectId}/chat`, then the 
 
 The API store factory is environment controlled: `POSTGRES_APP_URL` selects the real Postgres adapter, while unset local/test runs use memory. Live sandbox mode fails fast without `POSTGRES_APP_URL`; only local dry-run/test flows may use the in-memory fallback. Substrate-only metadata such as JuiceFS state is not read by product migrations or the app store.
 
-Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus reap. Admin operator status/reap endpoints remain explicit diagnostics and manual convergence tools, not governance gates or a Kubernetes watch/operator control plane.
+Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus reap. Admin operator status/reap endpoints remain explicit diagnostics and manual convergence tools, not a Kubernetes watch/operator control plane.

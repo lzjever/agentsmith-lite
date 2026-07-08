@@ -201,7 +201,7 @@ describe("Botified HTTP client", () => {
         status: 200,
         headers: {
           "content-type": "text/plain",
-          "content-disposition": "attachment; filename=\"report.txt\"",
+          "content-disposition": "attachment; filename=\"artifact.txt\"",
           "x-botified-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         }
       });
@@ -216,7 +216,7 @@ describe("Botified HTTP client", () => {
       sizeBytes: downloaded.sizeBytes,
       sha256: downloaded.sha256
     }, {
-      filename: "report.txt",
+      filename: "artifact.txt",
       mimeType: "text/plain",
       sizeBytes: 5,
       sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"

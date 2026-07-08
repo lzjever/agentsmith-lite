@@ -21,14 +21,14 @@ const appEnvKeys = new Set([
   "AGENTSMITH_LITE_RUNTIME_TICK_MS"
 ]);
 
-const smokeEnvKeys = new Set([
-  "SMOKE_ENDPOINT_BASE_URL",
-  "SMOKE_ENDPOINT_MODEL",
-  "SMOKE_ENDPOINT_SECRET_REF",
-  "SMOKE_TASK",
-  "SMOKE_TASK_RECLAIM",
-  "SMOKE_TASK_RECLAIM_REAP_APPLY",
-  "SMOKE_TASK_TIMEOUT_SECS"
+const productWorkflowEnvKeys = new Set([
+  "PRODUCT_WORKFLOW_ENDPOINT_BASE_URL",
+  "PRODUCT_WORKFLOW_ENDPOINT_MODEL",
+  "PRODUCT_WORKFLOW_ENDPOINT_SECRET_REF",
+  "PRODUCT_WORKFLOW_CHECK_TASK_ARTIFACT",
+  "PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM",
+  "PRODUCT_WORKFLOW_CHECK_TASK_RECLAIM_REAP_APPLY",
+  "PRODUCT_WORKFLOW_TASK_TIMEOUT_SECS"
 ]);
 
 const productSecretKeys = new Set([
@@ -45,16 +45,16 @@ const generatedSubstrateOnlyKeys = new Set([
 
 export async function readContractFiles(options = {}) {
   const envEntries = options.envFile
-    ? await readContractFile(options.envFile, "env", { profile: options.profile })
+    ? await readContractFile(options.envFile, "env", { allowProductWorkflow: options.allowProductWorkflow })
     : [];
   const secretEntries = options.secretsFile
-    ? await readContractFile(options.secretsFile, "secrets", { profile: options.profile })
+    ? await readContractFile(options.secretsFile, "secrets", { allowProductWorkflow: options.allowProductWorkflow })
     : [];
   const appEnvEntries = options.appEnvFile
-    ? await readContractFile(options.appEnvFile, "app-env", { profile: options.profile })
+    ? await readContractFile(options.appEnvFile, "app-env", { allowProductWorkflow: options.allowProductWorkflow })
     : [];
   const appSecretEntries = options.appSecretsFile
-    ? await readContractFile(options.appSecretsFile, "app-secrets", { profile: options.profile })
+    ? await readContractFile(options.appSecretsFile, "app-secrets", { allowProductWorkflow: options.allowProductWorkflow })
     : [];
   const env = [...envEntries, ...appEnvEntries];
   const secrets = [...secretEntries, ...appSecretEntries];
@@ -78,7 +78,7 @@ export function parseContractText(text, options = {}) {
     throw new EnvContractError("env contract parser requires kind env, secrets, app-env, or app-secrets");
   }
 
-  const profile = options.profile ?? "default";
+  const allowProductWorkflow = options.allowProductWorkflow === true;
   const file = options.file ?? "<inline>";
   const entries = new Map();
   const lines = text.split(/\r?\n/);
@@ -88,7 +88,7 @@ export function parseContractText(text, options = {}) {
       continue;
     }
     const { key, value } = parsed;
-    const disposition = classifyKey(key, kind, profile, value);
+    const disposition = classifyKey(key, kind, allowProductWorkflow, value);
     if (disposition === "allow") {
       entries.set(key, value);
       continue;
@@ -147,7 +147,7 @@ function parseValue(rawValue, key, context) {
   return rawValue.slice(1, -1);
 }
 
-function classifyKey(key, kind, profile, value) {
+function classifyKey(key, kind, allowProductWorkflow, value) {
   const authMetadataDisposition = classifyAuthMetadataKey(key, kind, value);
   if (authMetadataDisposition) {
     return authMetadataDisposition;
@@ -186,11 +186,11 @@ function classifyKey(key, kind, profile, value) {
   }
 
   if (kind === "app-env") {
-    if (isAppEnvKey(key, profile)) {
+    if (isAppEnvKey(key, allowProductWorkflow)) {
       return "allow";
     }
-    if (smokeEnvKeys.has(key)) {
-      return "smoke-profile-required";
+    if (productWorkflowEnvKeys.has(key)) {
+      return "product-workflow-allow-required";
     }
     if (isProductSecretKey(key) || isAppSecretKey(key)) {
       return "secret-in-env";
@@ -236,12 +236,12 @@ function isSubstrateEnvKey(key) {
   return substrateEnvKeys.has(key);
 }
 
-function isAppEnvKey(key, profile) {
-  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || (profile === "smoke" && smokeEnvKeys.has(key));
+function isAppEnvKey(key, allowProductWorkflow) {
+  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || (allowProductWorkflow && productWorkflowEnvKeys.has(key));
 }
 
 function isAnyAppEnvKey(key) {
-  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || smokeEnvKeys.has(key);
+  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_") || productWorkflowEnvKeys.has(key);
 }
 
 function isProductSecretKey(key) {
@@ -269,8 +269,8 @@ function formatKeyError(disposition, key, file, lineNumber) {
       return `unknown secrets key ${key} at ${location}`;
     case "app-only-in-substrate":
       return `app overlay key ${key} is not allowed in substrate contract at ${location}`;
-    case "smoke-profile-required":
-      return `smoke overlay key ${key} requires --profile smoke at ${location}`;
+    case "product-workflow-allow-required":
+      return `product workflow overlay key ${key} requires --allow-product-workflow at ${location}`;
     case "product-secret-in-app-secrets":
       return `product secret key ${key} must come from substrate secrets at ${location}`;
     case "invalid-auth-mode":
@@ -291,13 +291,15 @@ function describeLocation(context) {
 function parseCliArgs(argv) {
   const command = argv[0];
   if (command !== "export") {
-    throw new EnvContractError("usage: env-contract.mjs export [--env file] [--secrets file] [--app-env file] [--app-secrets file] [--profile smoke]");
+    throw new EnvContractError("usage: env-contract.mjs export [--env file] [--secrets file] [--app-env file] [--app-secrets file] [--allow-product-workflow]");
   }
 
-  const parsed = { profile: "default" };
+  const parsed = { allowProductWorkflow: false };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--env" || arg === "--secrets" || arg === "--app-env" || arg === "--app-secrets" || arg === "--profile") {
+    if (arg === "--allow-product-workflow") {
+      parsed.allowProductWorkflow = true;
+    } else if (arg === "--env" || arg === "--secrets" || arg === "--app-env" || arg === "--app-secrets") {
       const value = argv[index + 1];
       if (!value) {
         throw new EnvContractError(`${arg} requires a value`);
@@ -307,9 +309,6 @@ function parseCliArgs(argv) {
     } else {
       throw new EnvContractError(`unknown env-contract argument: ${arg}`);
     }
-  }
-  if (parsed.profile !== "default" && parsed.profile !== "smoke") {
-    throw new EnvContractError(`unknown env contract profile: ${parsed.profile}`);
   }
   return parsed;
 }
@@ -321,7 +320,7 @@ async function runCli(argv) {
     secretsFile: args.secrets,
     appEnvFile: args.appEnv,
     appSecretsFile: args.appSecrets,
-    profile: args.profile
+    allowProductWorkflow: args.allowProductWorkflow
   });
   for (const [key, value] of entries) {
     process.stdout.write(`${key}=${value}\n`);

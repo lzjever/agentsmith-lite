@@ -161,7 +161,7 @@ describe("botified runtime integration", () => {
       { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "hello" } },
       { cursor: "c1", seq: 1, session_id: "s1", type: "input.accepted", payload: { text: "duplicate" } },
       { cursor: "c2", seq: 2, session_id: "s1", type: "assistant_message.completed", payload: { text: "done", api_key: "sk-secret" } },
-      { cursor: "c3", seq: 3, session_id: "s1", type: "file.published", payload: { file_id: "f1", name: "report.txt", bytes: 12 } }
+      { cursor: "c3", seq: 3, session_id: "s1", type: "file.published", payload: { file_id: "f1", name: "artifact.txt", bytes: 12 } }
     ]);
 
     assert.equal(projection.events.length, 3);
@@ -212,13 +212,13 @@ describe("botified runtime integration", () => {
         type: "file.published",
         payload: {
           file_id: "file_actual_1",
-          filename: "actual-report.txt",
+          filename: "actual-artifact.txt",
           mime_type: "text/plain",
           size_bytes: 17,
           sha256: "f".repeat(64),
           download_url: "http://botified.internal/v1/files/file_actual_1?service_key=bsk_file_secret",
           source: "published",
-          description: "final report"
+          description: "final artifact"
         }
       }
     ]);
@@ -232,7 +232,7 @@ describe("botified runtime integration", () => {
     })), [
       {
         fileId: "file_actual_1",
-        name: "actual-report.txt",
+        name: "actual-artifact.txt",
         bytes: 17,
         sha256: "f".repeat(64)
       }
@@ -266,7 +266,7 @@ describe("botified runtime integration", () => {
         type: "file.published",
         data: {
           file_id: "file_data_1",
-          filename: "data-report.txt",
+          filename: "data-artifact.txt",
           size_bytes: 23,
           sha256: "e".repeat(64)
         },
@@ -292,7 +292,7 @@ describe("botified runtime integration", () => {
     assert.deepEqual(projection.events[0]?.payload.nested, { apiKey: "[redacted]" });
     assert.deepEqual(projection.events[1]?.payload, {
       file_id: "file_data_1",
-      filename: "data-report.txt",
+      filename: "data-artifact.txt",
       size_bytes: 23,
       sha256: "e".repeat(64)
     });
@@ -305,7 +305,7 @@ describe("botified runtime integration", () => {
     })), [
       {
         fileId: "file_data_1",
-        name: "data-report.txt",
+        name: "data-artifact.txt",
         bytes: 23,
         sha256: "e".repeat(64)
       }
@@ -318,7 +318,7 @@ describe("botified runtime integration", () => {
     })), [
       {
         fileId: "file_data_1",
-        filename: "data-report.txt",
+        filename: "data-artifact.txt",
         sizeBytes: 23,
         sha256: "e".repeat(64)
       }
@@ -388,7 +388,7 @@ describe("botified runtime integration", () => {
         type: "file.published",
         payload: {
           file_id: "artifact-bsk_file_secret",
-          name: "report Bearer bsk_service_secret and sk-model-secret.txt",
+          name: "artifact Bearer bsk_service_secret and sk-model-secret.txt",
           bytes: 12
         }
       },
@@ -406,7 +406,7 @@ describe("botified runtime integration", () => {
 
     assert.equal(projection.artifacts.length, 2);
     assert.equal(projection.artifacts[0]?.fileId, "artifact-bsk_<redacted>");
-    assert.equal(projection.artifacts[0]?.name, "report Bearer <redacted> and sk-<redacted>.txt");
+    assert.equal(projection.artifacts[0]?.name, "artifact Bearer <redacted> and sk-<redacted>.txt");
     assert.equal(projection.artifacts[1]?.fileId, "artifact-sk-<redacted>");
     assert.equal(projection.artifacts[1]?.name, "artifact-sk-<redacted>");
     assert.doesNotMatch(JSON.stringify(projection.artifacts), /bsk_file_secret|bsk_service_secret|sk-model-secret|sk-id-secret/);

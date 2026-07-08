@@ -43,7 +43,7 @@ describe("task service Botified orchestration", () => {
               nested: { apiKey: "sk-field-secret", trace: "Bearer bsk_nested_secret" }
             }
           },
-          { cursor: "c3", seq: 3, session_id: "s1", type: "file.published", payload: { file_id: "f1", name: "report.txt", bytes: 12 } }
+          { cursor: "c3", seq: 3, session_id: "s1", type: "file.published", payload: { file_id: "f1", name: "artifact.txt", bytes: 12 } }
         ],
         nextCursor: "c3"
       }
@@ -89,7 +89,7 @@ describe("task service Botified orchestration", () => {
     );
     const artifacts = await store.listTaskArtifacts(task.id);
     assert.deepEqual(artifacts.map((artifact) => [artifact.taskId, artifact.fileId, artifact.name, artifact.bytes]), [
-      [task.id, "f1", "report.txt", 12]
+      [task.id, "f1", "artifact.txt", 12]
     ]);
   });
 
@@ -1116,7 +1116,7 @@ describe("task service Botified orchestration", () => {
             type: "file.published",
             data: {
               file_id: "file_real_1",
-              filename: "../final report.txt",
+              filename: "../final artifact.txt",
               mime_type: "text/plain",
               size_bytes: artifactBytes.byteLength,
               sha256: "a".repeat(64),
@@ -1160,12 +1160,12 @@ describe("task service Botified orchestration", () => {
       assert.ok(artifact, "expected a projected artifact");
       const project = await store.findProject(projectId);
       assert.ok(project, "expected project fixture");
-      const artifactPath = path.join(dataRoot, project.rootPath, "tasks", task.id, "artifacts", `${artifact.id}-final-report.txt`);
+      const artifactPath = path.join(dataRoot, project.rootPath, "tasks", task.id, "artifacts", `${artifact.id}-final-artifact.txt`);
       assert.equal(botified.downloadFileCalls[0]?.fileId, "file_real_1");
       assert.notEqual(botified.downloadFileCalls[0]?.fileId, "botified-1");
 
       assert.deepEqual(artifacts.map((item) => [item.fileId, item.name, item.bytes, item.sha256]), [
-        ["file_real_1", "final-report.txt", artifactBytes.byteLength, "a".repeat(64)]
+        ["file_real_1", "final-artifact.txt", artifactBytes.byteLength, "a".repeat(64)]
       ]);
       assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
       assert.deepEqual(botified.downloadFileCalls, [

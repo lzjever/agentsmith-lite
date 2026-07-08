@@ -39,7 +39,7 @@ describe("deploy app doctor artifact checks", () => {
     });
 
     assert.equal(doctor.status, 0, doctor.stderr);
-    assert.match(doctor.stdout, /App doctor passed/);
+    assertDoctorPassed(doctor.stdout, { imageIdentity: "not provided" });
   });
 
   it("passes static rendered manifest checks when the app Ingress is present", () => {
@@ -48,13 +48,8 @@ describe("deploy app doctor artifact checks", () => {
     const result = runDoctor(fixture, []);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /App doctor passed/);
-    const { report, text } = readDoctorReport();
-    assertDeployIdentityBase(report);
-    assert.equal(report.deployIdentity.validatedManifestImages.source, "none");
-    assert.equal("app" in report.deployIdentity.validatedManifestImages, false);
-    assert.equal("botifiedRunner" in report.deployIdentity.validatedManifestImages, false);
-    assertReportOmitsSensitiveInputs(text, fixture);
+    assertDoctorPassed(result.stdout, { imageIdentity: "not provided" });
+    assertDoctorOutputOmitsSensitiveInputs(result.stdout, fixture);
   });
 
   it("does not execute env or secrets files while loading deploy contract values", () => {
@@ -69,7 +64,7 @@ describe("deploy app doctor artifact checks", () => {
     const result = runDoctor(fixture, []);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /App doctor passed/);
+    assertDoctorPassed(result.stdout);
     assert.equal(existsSync(envMarker), false);
     assert.equal(existsSync(secretMarker), false);
   });
@@ -84,6 +79,7 @@ describe("deploy app doctor artifact checks", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
+    assertDoctorPassed(result.stdout, { k8sFacts: "skipped no kube env" });
     assert.equal(existsSync(fakeKubectl.callsFile), false);
   });
 
@@ -103,7 +99,7 @@ describe("deploy app doctor artifact checks", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /App doctor passed/);
+    assertDoctorPassed(result.stdout, { k8sFacts: "checked" });
 
     const calls = readFileSync(fakeKubectl.callsFile, "utf8").trim().split("\n");
     assert.ok(
@@ -172,8 +168,7 @@ describe("deploy app doctor artifact checks", () => {
         FAKE_KUBECTL_CALLS: fakeKubectl.callsFile,
         FAKE_KUBECTL_DENY_CHECKS: denyCheck
       });
-      const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
-      const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+      const diagnosticText = `${result.stdout}\n${result.stderr}`;
 
       assert.notEqual(result.status, 0, denyCheck);
       assert.match(result.stderr, expectedDiagnostic, denyCheck);
@@ -226,8 +221,7 @@ describe("deploy app doctor artifact checks", () => {
     const fixture = writeDoctorFixture({ appSessionSecret: weakSecret });
 
     const result = runDoctor(fixture, []);
-    const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
-    const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+    const diagnosticText = `${result.stdout}\n${result.stderr}`;
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /APP_SESSION_SECRET must be at least 32 characters/i);
@@ -283,15 +277,8 @@ describe("deploy app doctor artifact checks", () => {
     const result = runDoctor(fixture, ["--bundle", fixture.bundleDir]);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /App doctor passed/);
-    const { report, text } = readDoctorReport();
-    assertDeployIdentityBase(report);
-    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
-      source: "bundle",
-      app: appDigestRef,
-      botifiedRunner: runnerDigestRef
-    });
-    assertReportOmitsSensitiveInputs(text, fixture);
+    assertDoctorPassed(result.stdout, { imageIdentity: "bundle" });
+    assertDoctorOutputOmitsSensitiveInputs(result.stdout, fixture);
   });
 
   it("passes standalone --images-lock validation against rendered manifests", () => {
@@ -302,19 +289,12 @@ describe("deploy app doctor artifact checks", () => {
     const result = runDoctor(fixture, ["--images-lock", lockFile]);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /App doctor passed/);
-    const { report, text } = readDoctorReport();
-    assertDeployIdentityBase(report);
-    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
-      source: "images-lock",
-      app: appDigestRef,
-      botifiedRunner: runnerDigestRef
-    });
-    assertReportOmitsSensitiveInputs(text, fixture);
-    assert.doesNotMatch(text, new RegExp(escapeRegExp(lockFile)));
+    assertDoctorPassed(result.stdout, { imageIdentity: "images.lock" });
+    assertDoctorOutputOmitsSensitiveInputs(result.stdout, fixture);
+    assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(lockFile)));
   });
 
-  it("reports bundle+images-lock when both image identity inputs validate the rendered manifests", () => {
+  it("prints bundle+images-lock when both image identity inputs validate the rendered manifests", () => {
     const fixture = writeDoctorFixture();
     const lockFile = path.join(fixture.tempDir, "standalone-images.lock");
     writeFileSync(lockFile, `${appDigestRef}\n${runnerDigestRef}\n`);
@@ -322,15 +302,9 @@ describe("deploy app doctor artifact checks", () => {
     const result = runDoctor(fixture, ["--bundle", fixture.bundleDir, "--images-lock", lockFile]);
 
     assert.equal(result.status, 0, result.stderr);
-    const { report, text } = readDoctorReport();
-    assertDeployIdentityBase(report);
-    assert.deepEqual(report.deployIdentity.validatedManifestImages, {
-      source: "bundle+images-lock",
-      app: appDigestRef,
-      botifiedRunner: runnerDigestRef
-    });
-    assertReportOmitsSensitiveInputs(text, fixture);
-    assert.doesNotMatch(text, new RegExp(escapeRegExp(lockFile)));
+    assertDoctorPassed(result.stdout, { imageIdentity: "bundle and images.lock" });
+    assertDoctorOutputOmitsSensitiveInputs(result.stdout, fixture);
+    assert.doesNotMatch(result.stdout, new RegExp(escapeRegExp(lockFile)));
   });
 
   it("requires an existing --out path when validating a bundle or images.lock", () => {
@@ -499,8 +473,7 @@ stringData:
     });
 
     const result = runDoctor(fixture, []);
-    const report = existsSync("out/app-doctor-report.json") ? readFileSync("out/app-doctor-report.json", "utf8") : "";
-    const diagnosticText = `${result.stdout}\n${result.stderr}\n${report}`;
+    const diagnosticText = `${result.stdout}\n${result.stderr}`;
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /substrate-only secrets/i);
@@ -669,26 +642,21 @@ function appendChecksumLine(bundleDir: string, relativePath: string, sha256: str
   writeFileSync(path.join(bundleDir, "checksums.txt"), `${readFileSync(path.join(bundleDir, "checksums.txt"), "utf8")}${sha256}  ${relativePath}\n`);
 }
 
-function readDoctorReport(): { report: AppDoctorReport; text: string } {
-  const text = readFileSync("out/app-doctor-report.json", "utf8");
-  return { report: JSON.parse(text) as AppDoctorReport, text };
+function assertDoctorPassed(stdout: string, options: { imageIdentity?: string; k8sFacts?: string } = {}): void {
+  assert.match(stdout, /App doctor passed/);
+  assert.match(stdout, /Rendered manifests checked/);
+  assert.match(stdout, new RegExp(`App image identity: ${escapeRegExp(options.imageIdentity ?? "not provided")}`));
+  if (options.k8sFacts) {
+    assert.match(stdout, new RegExp(`K8s facts: ${escapeRegExp(options.k8sFacts)}`));
+  }
+  assert.match(stdout, /Botified pin checked/);
 }
 
-function assertDeployIdentityBase(report: AppDoctorReport): void {
-  assert.equal(report.schema, "agentsmith-lite.app-doctor/v1");
-  assert.equal(report.deployIdentity.namespace, "agentsmith");
-  assert.deepEqual(report.deployIdentity.resources, {
-    deployment: "agentsmith-lite-api",
-    schemaJob: "agentsmith-lite-schema-bootstrap",
-    runnerImageConfigMap: "agentsmith-lite-config/BOTIFIED_RUNNER_IMAGE"
-  });
-}
-
-function assertReportOmitsSensitiveInputs(reportText: string, fixture: DoctorFixture): void {
-  assert.doesNotMatch(reportText, new RegExp(escapeRegExp(fixture.tempDir)));
-  assert.doesNotMatch(reportText, /app-session-secret-at-least-32-chars/);
-  assert.doesNotMatch(reportText, /admin-secret/);
-  assert.doesNotMatch(reportText, /postgres:\/\/app/);
+function assertDoctorOutputOmitsSensitiveInputs(stdout: string, fixture: DoctorFixture): void {
+  assert.doesNotMatch(stdout, new RegExp(escapeRegExp(fixture.tempDir)));
+  assert.doesNotMatch(stdout, /app-session-secret-at-least-32-chars/);
+  assert.doesNotMatch(stdout, /admin-secret/);
+  assert.doesNotMatch(stdout, /postgres:\/\/app/);
 }
 
 function runDoctor(fixture: DoctorFixture, args: string[], env: NodeJS.ProcessEnv = {}) {
@@ -814,21 +782,4 @@ interface DoctorFixtureOptions {
   postgresUrl?: string | undefined;
   appSessionSecret?: string | undefined;
   adminPassword: string | null;
-}
-
-interface AppDoctorReport {
-  schema: string;
-  deployIdentity: {
-    namespace: string;
-    resources: {
-      deployment: string;
-      schemaJob: string;
-      runnerImageConfigMap: string;
-    };
-    validatedManifestImages: {
-      source: string;
-      app?: string;
-      botifiedRunner?: string;
-    };
-  };
 }
