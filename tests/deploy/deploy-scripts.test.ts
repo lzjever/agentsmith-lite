@@ -287,6 +287,64 @@ OUT
     assert.equal(args.includes("agentsmith-lite/managed-by=agentsmith-lite"), true, result.stdout);
   });
 
+  it("status.sh, cleanup-stuck-tasks.sh, and down.sh accept OIDC substrate env without a secrets file", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-deploy-oidc-env-only-"));
+    const envFile = writeOidcEnvOnly(tempDir);
+    const cookieFile = path.join(tempDir, "cookie.txt");
+    const fakeKubectl = path.join(tempDir, "kubectl");
+    const fakeNode = path.join(tempDir, "node");
+    const nodeCalls = path.join(tempDir, "node-calls.txt");
+    writeFileSync(cookieFile, "asl_session=test-session\n");
+    writeFileSync(fakeKubectl, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_NODE_CALLS"
+printf 'Sandbox cleanup dry-run\\n'
+`);
+    chmodSync(fakeKubectl, 0o755);
+    chmodSync(fakeNode, 0o755);
+    const env = {
+      ...process.env,
+      PATH: `${tempDir}:${process.env.PATH ?? ""}`,
+      FAKE_NODE_CALLS: nodeCalls,
+      AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath
+    };
+
+    const status = spawnSync("bash", ["scripts/deploy/status.sh", "--env", envFile], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env
+    });
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /--kubeconfig/);
+    assert.match(status.stdout, /agentsmith-preview/);
+
+    const cleanup = spawnSync("bash", [
+      "scripts/deploy/cleanup-stuck-tasks.sh",
+      "--env",
+      envFile,
+      "--dry-run",
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-test"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+    assert.match(readFileSync(nodeCalls, "utf8"), /scripts\/deploy\/operator-sandbox\.mjs reap/);
+
+    const down = spawnSync("bash", ["scripts/deploy/down.sh", "--env", envFile, "--dry-run"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env
+    });
+    assert.equal(down.status, 0, down.stderr);
+    assert.match(down.stdout, /delete/);
+    assert.match(down.stdout, /agentsmith-preview/);
+  });
+
   it("cleanup-stuck-tasks.sh --dry-run calls the operator sandbox API helper without kubectl delete", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-cleanup-api-"));
     const envFile = path.join(tempDir, "deploy.env");
@@ -513,6 +571,22 @@ function escapeRegExp(value: string): string {
 function writeMaliciousEnv(tempDir: string, name: string, marker: string, extraLine: string): string {
   const envFile = path.join(tempDir, name);
   writeFileSync(envFile, [extraLine, `APP_INGRESS_CLASS=$(touch ${marker})`, ""].join("\n"));
+  return envFile;
+}
+
+function writeOidcEnvOnly(tempDir: string): string {
+  const envFile = path.join(tempDir, "substrate.env");
+  writeFileSync(envFile, [
+    "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+    "KUBE_CONTEXT=kind-agentsmith",
+    "KUBE_NAMESPACE=agentsmith-preview",
+    "APP_PUBLIC_BASE_URL=http://operator.example.test",
+    "AUTH_MODE=oidc",
+    "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+    "OIDC_BACKCHANNEL_BASE_URL=http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
+    "OIDC_CLIENT_ID=agentsmith-lite",
+    ""
+  ].join("\n"));
   return envFile;
 }
 

@@ -11,6 +11,25 @@ const runnerDigestRef = "agentsmith-lite/botified-runner@sha256:2222222222222222
 const localImageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 describe("build images", () => {
+  it("copies workspace package manifests before npm ci in the app image", () => {
+    const rootPackageJson = JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
+      workspaces?: unknown;
+    };
+    const workspaces = readWorkspacePaths(rootPackageJson.workspaces);
+    const dockerfile = readFileSync(path.join(process.cwd(), "infra/docker/Dockerfile.app"), "utf8");
+    const copySources = dockerCopySourcesBeforeNpmCi(dockerfile);
+
+    assert.notEqual(workspaces.length, 0);
+    for (const workspace of workspaces) {
+      const manifestPath = `${workspace}/package.json`;
+      assert.equal(
+        copySources.includes(manifestPath),
+        true,
+        `Dockerfile.app must COPY ${manifestPath} before RUN npm ci`
+      );
+    }
+  });
+
   it("pushes images with the selected runtime and writes images.lock from canonical RepoDigests", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-build-images-"));
     const callsFile = path.join(tempDir, "runtime-calls.log");
@@ -101,6 +120,42 @@ function runBuildImages(args: string[], env: NodeJS.ProcessEnv = process.env) {
     cwd: process.cwd(),
     encoding: "utf8",
     env
+  });
+}
+
+function readWorkspacePaths(workspaces: unknown): string[] {
+  if (Array.isArray(workspaces) && workspaces.every((workspace): workspace is string => typeof workspace === "string")) {
+    return workspaces;
+  }
+  if (
+    typeof workspaces === "object" &&
+    workspaces !== null &&
+    Array.isArray((workspaces as { packages?: unknown }).packages) &&
+    (workspaces as { packages: unknown[] }).packages.every((workspace): workspace is string => typeof workspace === "string")
+  ) {
+    return (workspaces as { packages: string[] }).packages;
+  }
+  throw new Error("root package.json workspaces must be a string array or { packages: string[] }");
+}
+
+function dockerCopySourcesBeforeNpmCi(dockerfile: string): string[] {
+  const linesBeforeNpmCi: string[] = [];
+  for (const line of dockerfile.split(/\r?\n/)) {
+    if (/^\s*RUN\s+npm\s+ci\b/.test(line)) {
+      break;
+    }
+    linesBeforeNpmCi.push(line);
+  }
+  return linesBeforeNpmCi.flatMap((line) => {
+    const match = /^\s*COPY\s+(.+)$/.exec(line);
+    if (!match) {
+      return [];
+    }
+    const copyArgs = match[1];
+    if (copyArgs === undefined) {
+      return [];
+    }
+    return copyArgs.trim().split(/\s+/).slice(0, -1);
   });
 }
 

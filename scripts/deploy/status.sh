@@ -45,7 +45,7 @@ unset_substrate_only_env() {
 }
 
 if [ -n "$env_file" ]; then
-  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs export --env "$env_file")"
+  assignments="$("${AGENTSMITH_LITE_ENV_CONTRACT_NODE:-node}" scripts/deploy/env-contract.mjs export --env-only --env "$env_file")"
   while IFS= read -r assignment; do
     if [ -n "$assignment" ]; then
       export "$assignment"

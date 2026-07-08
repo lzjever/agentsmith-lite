@@ -349,6 +349,49 @@ describe("task service Botified orchestration", () => {
     }
   });
 
+  it("makes live Botified home and data directories runner-writable while keeping artifacts API-owned", async () => {
+    const previousUmask = process.umask(0o022);
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-live-dir-mode-"));
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        dataRoot,
+        modelCredentialResolver: new FakeCredentialResolver({
+          apiKey: "sk-real-model-key",
+          baseUrl: "https://models.example.com/v1/"
+        }),
+        liveSandbox: {
+          port: new FakeLiveSandboxPort({
+            readiness: ["ready"],
+            beforeApply: async (resource) => {
+              const project = await store.findProject(projectId);
+              assert.ok(project, "expected project fixture");
+              const taskId = resource.metadata.labels["agentsmith-lite/task-id"];
+              assert.ok(taskId, "expected task id label before apply");
+              const taskRoot = path.join(dataRoot, project.rootPath, "tasks", taskId);
+
+              await assertRunnerWritableDirectory(path.join(taskRoot, "home"));
+              await assertRunnerWritableDirectory(path.join(taskRoot, "botified"));
+              await assertApiOwnedArtifactDirectory(path.join(taskRoot, "artifacts"));
+            }
+          })
+        }
+      });
+
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "live dir mode", endpointId });
+      const project = await store.findProject(projectId);
+      assert.ok(project, "expected project fixture");
+      const taskRoot = path.join(dataRoot, project.rootPath, "tasks", task.id);
+
+      await assertRunnerWritableDirectory(path.join(taskRoot, "home"));
+      await assertRunnerWritableDirectory(path.join(taskRoot, "botified"));
+      await assertApiOwnedArtifactDirectory(path.join(taskRoot, "artifacts"));
+    } finally {
+      process.umask(previousUmask);
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("does not create Botified runtime directories for dry-run tasks", async () => {
     const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-dry-dirs-"));
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
@@ -1308,6 +1351,79 @@ describe("task service Botified orchestration", () => {
     }
   });
 
+  it("saves a published artifact before terminal live cleanup so the copy remains downloadable", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-terminal-"));
+    const artifactBytes = new TextEncoder().encode("terminal artifact copy survives cleanup");
+    const operations: string[] = [];
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "file.published",
+            payload: {
+              file_id: "terminal_file_1",
+              filename: "terminal.txt",
+              size_bytes: artifactBytes.byteLength
+            }
+          },
+          {
+            cursor: "c2",
+            seq: 2,
+            session_id: "s1",
+            type: "cycle.completed",
+            payload: { ok: true }
+          }
+        ],
+        nextCursor: "c2"
+      }
+    ], {
+      downloads: {
+        terminal_file_1: artifactBytes
+      },
+      operations
+    });
+    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        dataRoot,
+        modelCredentialResolver: new FakeCredentialResolver({
+          apiKey: "sk-real-model-key",
+          baseUrl: "https://models.example.com/v1/"
+        }),
+        liveSandbox: {
+          port: livePort,
+          sleep: livePort.sleep
+        }
+      });
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "publish and finish", endpointId });
+      const artifact = (await store.listTaskArtifacts(task.id))[0];
+      assert.ok(artifact, "expected terminal batch to persist an artifact");
+      botified.readTimelineError = new BotifiedHttpError({
+        status: 404,
+        code: "runtime_gone",
+        message: "runtime cleaned up",
+        retryable: false,
+        responseBody: { error: { code: "runtime_gone" } }
+      });
+
+      const downloaded = await services.tasks.downloadTaskArtifact(userId, task.id, artifact.id);
+
+      assert.equal(task.status, "completed");
+      assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+      assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+      assert.ok(operations.indexOf("download:terminal_file_1") < operations.indexOf("delete:Pod"));
+      assert.equal(downloaded.bytes.toString("utf8"), "terminal artifact copy survives cleanup");
+      assert.deepEqual(botified.downloadFileCalls.map((call) => call.fileId), ["terminal_file_1"]);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("retries artifact persistence when the first Botified download fails", async () => {
     const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-retry-"));
     const artifactBytes = new TextEncoder().encode("retry fills product artifact");
@@ -1473,9 +1589,42 @@ async function assertDirectory(directory: string): Promise<void> {
   assert.equal(stats.isDirectory(), true, `${directory} should be a directory`);
 }
 
+async function assertRunnerWritableDirectory(directory: string): Promise<void> {
+  const stats = await stat(directory);
+  assert.equal(stats.isDirectory(), true, `${directory} should be a directory`);
+  const mode = stats.mode & 0o777;
+  const ownerWritable = stats.uid === BOTIFIED_RUNNER_ID && (mode & 0o300) === 0o300;
+  const groupWritable = stats.gid === BOTIFIED_RUNNER_ID && (mode & 0o030) === 0o030;
+  const otherWritable = (mode & 0o003) === 0o003;
+  assert.equal(
+    ownerWritable || groupWritable || otherWritable,
+    true,
+    `${directory} mode ${mode.toString(8)} uid ${stats.uid} gid ${stats.gid} should let runner 10001 create files`
+  );
+}
+
+async function assertApiOwnedArtifactDirectory(directory: string): Promise<void> {
+  const stats = await stat(directory);
+  assert.equal(stats.isDirectory(), true, `${directory} should be a directory`);
+  const mode = stats.mode & 0o777;
+  assert.equal((mode & 0o002), 0, `${directory} mode ${mode.toString(8)} should not be writable by arbitrary users`);
+  if (process.getuid?.() !== BOTIFIED_RUNNER_ID) {
+    assert.notEqual(stats.uid, BOTIFIED_RUNNER_ID, `${directory} should not be chowned to the Botified runner uid`);
+  }
+  if (process.getgid?.() !== BOTIFIED_RUNNER_ID) {
+    assert.equal(
+      stats.gid === BOTIFIED_RUNNER_ID && (mode & 0o020) !== 0,
+      false,
+      `${directory} should not be group-writable by the Botified runner gid`
+    );
+  }
+}
+
 async function assertMissing(candidate: string): Promise<void> {
   await assert.rejects(() => access(candidate), { code: "ENOENT" });
 }
+
+const BOTIFIED_RUNNER_ID = 10001;
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
@@ -1537,6 +1686,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   }
 
   async downloadFile(baseUrl: string, serviceKey: string, fileId: string) {
+    this.options.operations?.push(`download:${fileId}`);
     this.downloadFileCalls.push({ baseUrl, serviceKey, fileId });
     const failure = this.options.downloadFailures?.[fileId]?.shift();
     if (failure) {

@@ -52,6 +52,9 @@ describe("sandbox manifest renderer", () => {
     assert.equal(pod?.spec.automountServiceAccountToken, false);
     assert.equal(pod?.spec.hostNetwork, false);
     assert.equal(pod?.spec.securityContext.runAsNonRoot, true);
+    assert.equal(pod?.spec.securityContext.runAsUser, 10001);
+    assert.equal(pod?.spec.securityContext.runAsGroup, 10001);
+    assert.equal(pod?.spec.securityContext.fsGroup, 10001);
     const container = pod?.spec.containers[0];
     const projectMount = container?.volumeMounts[0];
     assert.ok(container);
@@ -89,6 +92,7 @@ describe("sandbox manifest renderer", () => {
     assert.equal(container.securityContext.allowPrivilegeEscalation, false);
     assert.notEqual(container.securityContext.privileged, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
+    assert.equal(projectMount.mountPath, "/workspace/project");
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
     const dnsEgress = networkPolicy.spec.egress.find(
@@ -135,7 +139,7 @@ interface PodResource extends KubernetesResource {
   spec: {
     automountServiceAccountToken: boolean;
     hostNetwork: boolean;
-    securityContext: { runAsNonRoot: boolean };
+    securityContext: { runAsNonRoot: boolean; runAsUser: number; runAsGroup: number; fsGroup: number };
     containers: Array<{
       resources: {
         requests: { cpu: string; memory: string };
@@ -148,7 +152,7 @@ interface PodResource extends KubernetesResource {
       };
       env: unknown[];
       readinessProbe: unknown;
-      volumeMounts: Array<{ subPath: string }>;
+      volumeMounts: Array<{ mountPath: string; subPath: string }>;
     }>;
   };
 }

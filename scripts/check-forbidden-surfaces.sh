@@ -16,6 +16,13 @@ is_allowed_active_hit() {
     "scripts/deploy/doctor.sh:"*"for resource in pods/exec persistentvolumes persistentvolumeclaims clusterroles; do")
       return 0
       ;;
+    "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_USER"'*|\
+    "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_PASSWORD"'*|\
+    "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_DATABASE"'*|\
+    "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_ADMIN_USERNAME"'*|\
+    "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_ADMIN_PASSWORD"'*)
+      return 0
+      ;;
   esac
   return 1
 }

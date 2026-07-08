@@ -174,6 +174,46 @@ describe("deploy apply plan", () => {
     ]);
   });
 
+  it("prints the dry-run plan from OIDC substrate env without requiring the secrets file", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-plan-oidc-env-only-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    writeFileSync(
+      envFile,
+      [
+        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+        "KUBE_CONTEXT=kind-agentsmith",
+        "KUBE_NAMESPACE=agentsmith",
+        "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_BACKCHANNEL_BASE_URL=http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
+        ""
+      ].join("\n")
+    );
+    const fakeKubectl = path.join(tempDir, "kubectl");
+    writeFileSync(fakeKubectl, "#!/usr/bin/env bash\necho kubectl should not run >&2\nexit 99\n");
+    chmodSync(fakeKubectl, 0o755);
+
+    const result = spawnSync("bash", ["scripts/deploy/apply.sh", "--env", envFile, "--out", "out/manifests", "--timeout", "45s", "--dry-run"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.deepEqual(result.stdout.trim().split("\n"), [
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith delete job/agentsmith-lite-schema-bootstrap --ignore-not-found",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith apply -f out/manifests",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap --timeout=45s",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api --timeout=45s"
+    ]);
+  });
+
   it("validates --images-lock before dry-run and keeps the apply command order", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-plan-lock-"));
     const envFile = path.join(tempDir, "deploy.env");

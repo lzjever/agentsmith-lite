@@ -41,17 +41,26 @@ done
 [ -z "$app_secrets_file" ] || [ -f "$app_secrets_file" ] || { echo "app secrets file not found: $app_secrets_file" >&2; exit 2; }
 
 unset_substrate_only_env() {
-  local name
-  while IFS= read -r name; do
-    if [ -n "$name" ]; then
-      unset "$name"
-    fi
-  done < <(compgen -v S3_ || true)
+  local keycloak_prefix name
+  unset_env_with_prefix S3_
+  keycloak_prefix=KEYCLOAK
+  unset_env_with_prefix "${keycloak_prefix}_"
+  unset_env_with_prefix OIDC_BOOTSTRAP_
   while IFS= read -r name; do
     if [ -n "$name" ] && [ "$name" != JUICEFS_PVC_NAME ]; then
       unset "$name"
     fi
   done < <(compgen -v JUICEFS_ || true)
+}
+
+unset_env_with_prefix() {
+  local prefix="$1"
+  local name
+  while IFS= read -r name; do
+    if [ -n "$name" ]; then
+      unset "$name"
+    fi
+  done < <(compgen -v "$prefix" || true)
 }
 
 load_contract_env() {

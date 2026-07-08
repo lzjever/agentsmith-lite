@@ -140,14 +140,14 @@ describe("deploy app images.lock", () => {
     const allManifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
     const ingressManifest = readFileSync(path.join(outDir, ingressFile), "utf8");
     for (const manifest of [allManifest, ingressManifest]) {
-      assert.match(manifest, /kind: Ingress/);
-      assert.match(manifest, /namespace: agentsmith-preview/);
-      assert.match(manifest, /host: agentsmith\.example\.com/);
-      assert.match(manifest, /path: \/app/);
-      assert.match(manifest, /ingressClassName: nginx/);
-      assert.match(manifest, /secretName: agentsmith-lite-tls/);
-      assert.match(manifest, /name: agentsmith-lite-api/);
-      assert.match(manifest, /name: http/);
+      assert.match(manifest, /kind: "Ingress"/);
+      assert.match(manifest, /namespace: "agentsmith-preview"/);
+      assert.match(manifest, /host: "agentsmith\.example\.com"/);
+      assert.match(manifest, /path: "\/app"/);
+      assert.match(manifest, /ingressClassName: "nginx"/);
+      assert.match(manifest, /secretName: "agentsmith-lite-tls"/);
+      assert.match(manifest, /name: "agentsmith-lite-api"/);
+      assert.match(manifest, /name: "http"/);
     }
   });
 
@@ -191,16 +191,16 @@ describe("deploy app images.lock", () => {
 
     assert.equal(result.status, 0, result.stderr);
     const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
-    assert.match(manifest, /namespace: agentsmith-preview/);
-    assert.match(manifest, /JUICEFS_PVC_NAME: agentsmith-lite-files/);
-    assert.match(manifest, /kind: Ingress/);
-    assert.match(manifest, /ingressClassName: nginx/);
-    assert.match(manifest, /secretName: agentsmith-lite-tls/);
-    assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: live/);
-    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: registry\.example\.test\/agentsmith\/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333/);
-    assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: https:\/\/models\.example\.test\/v1/);
-    assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: sk-overlay-model-key/);
-    assert.match(manifest, /POSTGRES_APP_URL: postgresql:\/\/app:secret@db\/agentsmith/);
+    assert.match(manifest, /namespace: "agentsmith-preview"/);
+    assert.match(manifest, /JUICEFS_PVC_NAME: "agentsmith-lite-files"/);
+    assert.match(manifest, /kind: "Ingress"/);
+    assert.match(manifest, /ingressClassName: "nginx"/);
+    assert.match(manifest, /secretName: "agentsmith-lite-tls"/);
+    assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: "live"/);
+    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: "registry\.example\.test\/agentsmith\/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333"/);
+    assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https:\/\/models\.example\.test\/v1"/);
+    assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-overlay-model-key"/);
+    assert.match(manifest, /POSTGRES_APP_URL: "postgresql:\/\/app:secret@db\/agentsmith"/);
     assert.doesNotMatch(manifest, /AUTH_MODE/);
     assert.doesNotMatch(manifest, /OIDC_CLIENT_SECRET/);
     assert.doesNotMatch(manifest, /OIDC_ISSUER_URL/);

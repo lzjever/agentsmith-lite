@@ -69,7 +69,5 @@ function formatYamlItem(item, indent) {
 function scalar(value) {
   if (value === null || value === undefined) return "\"\"";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
-  const text = String(value);
-  if (/^[A-Za-z0-9_.:/@-]+$/.test(text)) return text;
-  return JSON.stringify(text);
+  return JSON.stringify(String(value));
 }

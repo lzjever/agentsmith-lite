@@ -3,10 +3,10 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseAppImagesLock, validateAppManifestImagesAgainstLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { createAppDeployPlan, formatKubectlCommand } from "../../dist/packages/sandbox-controller/src/appDeployPlan.js";
-import { readContractFiles } from "./env-contract.mjs";
+import { readEnvOnlyContractFile } from "./env-contract.mjs";
 
 const args = parseArgs(process.argv.slice(2));
-const contract = args.env ? await readContractFiles({ envFile: args.env }) : { env: {} };
+const contract = args.env ? await readEnvOnlyContractFile(args.env) : { env: {} };
 const env = { ...process.env, ...contract.env };
 if (args.images_lock) {
   const imageRefs = parseAppImagesLock(await readFile(args.images_lock, "utf8"));

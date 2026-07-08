@@ -154,6 +154,32 @@ describe("dev/up.sh", () => {
     assert.match(env.PATH ?? "", new RegExp(`^${escapeRegExp(path.join(fixture.tempDir, "bin"))}:`));
   });
 
+  it("scrubs parent substrate-only generated secrets before starting the app", () => {
+    const fixture = createFixture();
+
+    const result = runDevUp([], fixture, {
+      KEYCLOAK_ADMIN_PASSWORD: "DO_NOT_EXPORT_PARENT_KEYCLOAK_ADMIN_PASSWORD",
+      KEYCLOAK_DB_PASSWORD: "DO_NOT_EXPORT_PARENT_KEYCLOAK_DB_PASSWORD",
+      KEYCLOAK_EXTRA_GENERATED_SECRET: "DO_NOT_EXPORT_PARENT_KEYCLOAK_EXTRA",
+      OIDC_BOOTSTRAP_USERNAME: "DO_NOT_EXPORT_PARENT_OIDC_BOOTSTRAP_USERNAME",
+      OIDC_BOOTSTRAP_PASSWORD: "DO_NOT_EXPORT_PARENT_OIDC_BOOTSTRAP_PASSWORD",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      OIDC_CLIENT_SECRET: "preserve-app-oidc-client-secret"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const env = readCapturedEnv(fixture.envFile);
+    assert.equal(env.KEYCLOAK_ADMIN_PASSWORD, undefined);
+    assert.equal(env.KEYCLOAK_DB_PASSWORD, undefined);
+    assert.equal(env.KEYCLOAK_EXTRA_GENERATED_SECRET, undefined);
+    assert.equal(env.OIDC_BOOTSTRAP_USERNAME, undefined);
+    assert.equal(env.OIDC_BOOTSTRAP_PASSWORD, undefined);
+    assert.equal(env.OIDC_ISSUER_URL, "https://keycloak.example.test/realms/agentsmith");
+    assert.equal(env.OIDC_CLIENT_ID, "agentsmith-lite");
+    assert.equal(env.OIDC_CLIENT_SECRET, "preserve-app-oidc-client-secret");
+  });
+
   it("fails closed for unknown arguments without printing following secret-looking values", () => {
     const fixture = createFixture();
 

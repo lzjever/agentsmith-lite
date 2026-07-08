@@ -82,6 +82,11 @@ describe("botified runtime integration", () => {
     assert.equal(config.runtime.cwd, "/workspace/project/tasks/t1/home");
     assert.equal(config.runtime.data_dir, "/workspace/project/tasks/t1/botified");
     assert.equal(config.runtime.session, "t1");
+    assert.equal(config.files.root_dir, "files");
+    assert.equal(pathIsInside(config.runtime.cwd, "/workspace/project/tasks/t1"), true);
+    assert.equal(pathIsInside(config.runtime.data_dir, "/workspace/project/tasks/t1"), true);
+    assert.notEqual(config.runtime.cwd, config.runtime.data_dir);
+    assert.notEqual(config.files.root_dir, "/workspace/project/tasks/t1/artifacts");
     assert.deepEqual(config.tools.enabled, ["bash"]);
     assert.equal(config.skills.default_discovery, false);
     assert.deepEqual(config.skills.explicit, []);
@@ -412,3 +417,7 @@ describe("botified runtime integration", () => {
     assert.doesNotMatch(JSON.stringify(projection.artifacts), /bsk_file_secret|bsk_service_secret|sk-model-secret|sk-id-secret/);
   });
 });
+
+function pathIsInside(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}/`);
+}

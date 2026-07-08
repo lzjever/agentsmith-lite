@@ -159,7 +159,8 @@ run_k8s_fact_checks() {
     done
   done
 
-  for resource in pods/exec persistentvolumes persistentvolumeclaims clusterroles; do
+  run_kubectl_expect_denied "API service account must not be allowed to create pod exec sessions" auth can-i create pods --subresource=exec "--as=$service_account"
+  for resource in persistentvolumes persistentvolumeclaims clusterroles; do
     run_kubectl_expect_denied "API service account must not be allowed to create $resource" auth can-i create "$resource" "--as=$service_account"
   done
 }
@@ -219,7 +220,7 @@ if [ -d "$out" ] && rg -q 'S3_ACCESS_KEY|S3_SECRET_KEY|JUICEFS_META_URL' "$out";
 fi
 
 if [ -d "$out" ]; then
-  rg -q 'kind: Deployment' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
+  rg -q 'kind:[[:space:]]*"?Deployment"?' "$out" || { echo "rendered app Deployment missing" >&2; exit 1; }
   if [ "$auth_mode" = "builtin_admin" ]; then
     rg -q '^[[:space:]]*BUILTIN_ADMIN_INITIAL_PASSWORD:[[:space:]]*[^[:space:]]' "$out" || {
       echo "rendered app Secret missing non-empty BUILTIN_ADMIN_INITIAL_PASSWORD" >&2
@@ -230,7 +231,7 @@ if [ -d "$out" ]; then
       exit 1
     fi
   else
-    rg -q '^[[:space:]]*AUTH_MODE:[[:space:]]*oidc[[:space:]]*$' "$out" || {
+    rg -q '^[[:space:]]*AUTH_MODE:[[:space:]]*"?oidc"?[[:space:]]*$' "$out" || {
       echo "rendered app ConfigMap missing AUTH_MODE=oidc" >&2
       exit 1
     }
@@ -242,10 +243,10 @@ if [ -d "$out" ]; then
     done
   fi
   if requires_app_ingress "${APP_PUBLIC_BASE_URL:-}"; then
-    rg -q 'kind: Ingress' "$out" || { echo "rendered app Ingress missing" >&2; exit 1; }
+    rg -q 'kind:[[:space:]]*"?Ingress"?' "$out" || { echo "rendered app Ingress missing" >&2; exit 1; }
   fi
   rg -q 'agentsmith-lite-schema-bootstrap' "$out" || { echo "schema bootstrap Job missing" >&2; exit 1; }
-  rg -q 'kind: Role' "$out" || { echo "sandbox RBAC Role missing" >&2; exit 1; }
+  rg -q 'kind:[[:space:]]*"?Role"?' "$out" || { echo "sandbox RBAC Role missing" >&2; exit 1; }
   if rg -q 'watch|pods/(exec|log|attach|portforward)|persistentvolumes|persistentvolumeclaims' "$out"; then
     echo "app RBAC includes a forbidden resource" >&2
     exit 1

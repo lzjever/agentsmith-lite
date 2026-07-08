@@ -31,7 +31,7 @@ describe("deploy app doctor artifact checks", () => {
     });
 
     assert.equal(render.status, 0, render.stderr);
-    assert.doesNotMatch(readFileSync(path.join(outDir, "all.yaml"), "utf8"), /kind: Ingress/);
+    assert.doesNotMatch(readFileSync(path.join(outDir, "all.yaml"), "utf8"), /kind: "?Ingress"?/);
 
     const doctor = spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir], {
       cwd: process.cwd(),
@@ -74,10 +74,10 @@ describe("deploy app doctor artifact checks", () => {
 
     assert.equal(render.status, 0, render.stderr);
     const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
-    assert.match(manifest, /AUTH_MODE: oidc/);
-    assert.match(manifest, /OIDC_ISSUER_URL: https:\/\/keycloak\.example\.test\/realms\/agentsmith/);
-    assert.match(manifest, /OIDC_CLIENT_ID: agentsmith-lite/);
-    assert.match(manifest, /OIDC_CLIENT_SECRET: oidc-client-secret/);
+    assert.match(manifest, /AUTH_MODE: "oidc"/);
+    assert.match(manifest, /OIDC_ISSUER_URL: "https:\/\/keycloak\.example\.test\/realms\/agentsmith"/);
+    assert.match(manifest, /OIDC_CLIENT_ID: "agentsmith-lite"/);
+    assert.match(manifest, /OIDC_CLIENT_SECRET: "oidc-client-secret"/);
     assert.doesNotMatch(manifest, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
 
     const doctor = spawnSync("bash", ["scripts/deploy/doctor.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir], {
@@ -181,7 +181,16 @@ describe("deploy app doctor artifact checks", () => {
       }
     }
 
-    for (const resource of ["pods/exec", "persistentvolumes", "persistentvolumeclaims", "clusterroles"]) {
+    assert.ok(
+      calls.some(
+        (call) =>
+          call.includes(" auth can-i create pods --subresource=exec ") &&
+          call.includes("--as=system:serviceaccount:agentsmith:agentsmith-lite-api")
+      ),
+      "API service account must be checked against forbidden pod exec sessions"
+    );
+
+    for (const resource of ["persistentvolumes", "persistentvolumeclaims", "clusterroles"]) {
       assert.ok(
         calls.some(
           (call) =>
@@ -758,7 +767,13 @@ if [[ "$joined" == *" auth can-i "* ]]; then
   found_can_i=0
   verb=""
   resource=""
+  subresource=""
   for arg in "$@"; do
+    case "$arg" in
+      --subresource=*)
+        subresource="\${arg#--subresource=}"
+        ;;
+    esac
     if [ "$found_can_i" = "1" ]; then
       verb="$arg"
       found_can_i=2
@@ -766,7 +781,8 @@ if [[ "$joined" == *" auth can-i "* ]]; then
     fi
     if [ "$found_can_i" = "2" ]; then
       resource="$arg"
-      break
+      found_can_i=3
+      continue
     fi
     if [ "$arg" = "can-i" ]; then
       found_can_i=1
@@ -774,6 +790,9 @@ if [[ "$joined" == *" auth can-i "* ]]; then
   done
 
   check="$verb:$resource"
+  if [ -n "$subresource" ]; then
+    check="$check/$subresource"
+  fi
   case " \${FAKE_KUBECTL_DENY_CHECKS:-} " in
     *" $check "*) exit 1 ;;
   esac
@@ -783,11 +802,21 @@ if [[ "$joined" == *" auth can-i "* ]]; then
 
   case "$resource" in
     pods|services|secrets|configmaps|serviceaccounts|networkpolicies)
+      if [ "$resource" = "pods" ] && [ "$subresource" = "exec" ]; then
+        case "$verb" in
+          create) exit 1 ;;
+        esac
+      fi
       case "$verb" in
         create|get|list|delete|patch) exit 0 ;;
       esac
       ;;
-    pods/exec|persistentvolumes|persistentvolumeclaims|clusterroles)
+    pods/exec)
+      case "$verb" in
+        create|get|list|delete|patch) exit 0 ;;
+      esac
+      ;;
+    persistentvolumes|persistentvolumeclaims|clusterroles)
       exit 1
       ;;
   esac

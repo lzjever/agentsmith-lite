@@ -45,7 +45,12 @@ const generatedSubstrateOnlyKeys = new Set([
   "IMAGE_PULL_SECRET_NAME",
   "KUBERNETES_SKIP_K3S",
   "OIDC_BOOTSTRAP_USERNAME",
-  "OIDC_BOOTSTRAP_PASSWORD"
+  "OIDC_BOOTSTRAP_PASSWORD",
+  "KEYCLOAK_DB_USER",
+  "KEYCLOAK_DB_PASSWORD",
+  "KEYCLOAK_DB_DATABASE",
+  "KEYCLOAK_ADMIN_USERNAME",
+  "KEYCLOAK_ADMIN_PASSWORD"
 ]);
 
 export async function readContractFiles(options = {}) {
@@ -70,6 +75,16 @@ export async function readContractFiles(options = {}) {
     env: Object.fromEntries(env),
     secrets: Object.fromEntries(secrets),
     values: Object.fromEntries([...env, ...secrets])
+  };
+}
+
+export async function readEnvOnlyContractFile(envFile, options = {}) {
+  const entries = await readContractFile(envFile, "env", { allowProductWorkflow: options.allowProductWorkflow });
+  const env = Object.fromEntries(entries);
+  return {
+    entries,
+    env,
+    values: env
   };
 }
 
@@ -334,14 +349,16 @@ function describeLocation(context) {
 function parseCliArgs(argv) {
   const command = argv[0];
   if (command !== "export") {
-    throw new EnvContractError("usage: env-contract.mjs export [--env file] [--secrets file] [--app-env file] [--app-secrets file] [--allow-product-workflow]");
+    throw new EnvContractError("usage: env-contract.mjs export [--env-only] [--env file] [--secrets file] [--app-env file] [--app-secrets file] [--allow-product-workflow]");
   }
 
-  const parsed = { allowProductWorkflow: false };
+  const parsed = { allowProductWorkflow: false, envOnly: false };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--allow-product-workflow") {
       parsed.allowProductWorkflow = true;
+    } else if (arg === "--env-only") {
+      parsed.envOnly = true;
     } else if (arg === "--env" || arg === "--secrets" || arg === "--app-env" || arg === "--app-secrets") {
       const value = argv[index + 1];
       if (!value) {
@@ -358,16 +375,28 @@ function parseCliArgs(argv) {
 
 async function runCli(argv) {
   const args = parseCliArgs(argv);
-  const { entries } = await readContractFiles({
-    envFile: args.env,
-    secretsFile: args.secrets,
-    appEnvFile: args.appEnv,
-    appSecretsFile: args.appSecrets,
-    allowProductWorkflow: args.allowProductWorkflow
-  });
+  const { entries } = args.envOnly
+    ? await readEnvOnlyCliArgs(args)
+    : await readContractFiles({
+        envFile: args.env,
+        secretsFile: args.secrets,
+        appEnvFile: args.appEnv,
+        appSecretsFile: args.appSecrets,
+        allowProductWorkflow: args.allowProductWorkflow
+      });
   for (const [key, value] of entries) {
     process.stdout.write(`${key}=${value}\n`);
   }
+}
+
+async function readEnvOnlyCliArgs(args) {
+  if (!args.env) {
+    throw new EnvContractError("--env-only requires --env");
+  }
+  if (args.secrets || args.appEnv || args.appSecrets) {
+    throw new EnvContractError("--env-only cannot be combined with --secrets, --app-env, or --app-secrets");
+  }
+  return readEnvOnlyContractFile(args.env, { allowProductWorkflow: args.allowProductWorkflow });
 }
 
 const thisFile = fileURLToPath(import.meta.url);

@@ -123,7 +123,8 @@ describe("app manifest rendering", () => {
         AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
         S3_ENDPOINT: "https://s3.example.com",
         S3_BUCKET: "agentsmith-lite-files",
-        JUICEFS_SECRET_NAME: "agentsmith-lite-juicefs"
+        JUICEFS_SECRET_NAME: "agentsmith-lite-juicefs",
+        KEYCLOAK_DB_DATABASE: "keycloak"
       },
       secrets: {
         POSTGRES_APP_URL: "postgresql://app:secret@db/app",
@@ -133,7 +134,11 @@ describe("app manifest rendering", () => {
         AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai",
         S3_ACCESS_KEY: "raw-access",
         S3_SECRET_KEY: "raw-secret",
-        JUICEFS_META_URL: "postgresql://juicefs:secret@db/juicefs"
+        JUICEFS_META_URL: "postgresql://juicefs:secret@db/juicefs",
+        KEYCLOAK_DB_USER: "keycloak-db-user",
+        KEYCLOAK_DB_PASSWORD: "keycloak-db-password",
+        KEYCLOAK_ADMIN_USERNAME: "keycloak-admin",
+        KEYCLOAK_ADMIN_PASSWORD: "keycloak-admin-password"
       }
     });
 
@@ -155,6 +160,11 @@ describe("app manifest rendering", () => {
     assert.doesNotMatch(serialized, /JUICEFS_META_URL/);
     assert.doesNotMatch(serialized, /raw-access/);
     assert.doesNotMatch(serialized, /raw-secret/);
+    assert.doesNotMatch(serialized, /KEYCLOAK_/);
+    assert.doesNotMatch(serialized, /keycloak-db-user/);
+    assert.doesNotMatch(serialized, /keycloak-db-password/);
+    assert.doesNotMatch(serialized, /keycloak-admin/);
+    assert.doesNotMatch(serialized, /keycloak-admin-password/);
 
     const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
     const secret = manifests.find((manifest) => manifest.kind === "Secret" && manifest.metadata.name === "agentsmith-lite-app-secrets");
@@ -410,7 +420,7 @@ describe("app manifest rendering", () => {
   it("keeps the deploy doctor aligned with forbidden sandbox RBAC resources", () => {
     const doctor = readFileSync("scripts/deploy/doctor.sh", "utf8");
 
-    for (const forbidden of ["watch", "pods/(exec|log|attach|portforward)", "persistentvolumes", "persistentvolumeclaims"]) {
+    for (const forbidden of ["watch", "--subresource=exec", "persistentvolumes", "persistentvolumeclaims"]) {
       assert.match(doctor, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
   });

@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { projectBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -84,6 +84,12 @@ export interface TaskArtifactDownload {
   artifact: AgentTaskArtifact;
   bytes: Buffer;
 }
+
+const BOTIFIED_RUNNER_UID = 10001;
+const BOTIFIED_RUNNER_GID = 10001;
+const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
+const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
+const API_OWNED_ARTIFACT_DIRECTORY_MODE = 0o755;
 
 export interface ActiveTaskSyncResult {
   activeTaskCount: number;
@@ -646,12 +652,16 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
     assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
-    const directories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified"), path.resolve(taskRoot, "artifacts")];
-    for (const directory of directories) {
+    const runnerWritableDirectories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified")];
+    const apiOwnedDirectories = [path.resolve(taskRoot, "artifacts")];
+    for (const directory of [...runnerWritableDirectories, ...apiOwnedDirectories]) {
       assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
     }
-    for (const directory of directories) {
-      await mkdir(directory, { recursive: true });
+    for (const directory of runnerWritableDirectories) {
+      await prepareRunnerWritableDirectory(directory);
+    }
+    for (const directory of apiOwnedDirectories) {
+      await prepareApiOwnedArtifactDirectory(directory);
     }
   }
 
@@ -935,4 +945,34 @@ function isNotFound(error: unknown): boolean {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+}
+
+async function prepareRunnerWritableDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: BOTIFIED_RUNNER_DIRECTORY_MODE });
+  const chowned = await tryChownForRunner(directory);
+  await chmod(directory, chowned ? BOTIFIED_RUNNER_DIRECTORY_MODE : BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE);
+}
+
+async function prepareApiOwnedArtifactDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: API_OWNED_ARTIFACT_DIRECTORY_MODE });
+  await chmod(directory, API_OWNED_ARTIFACT_DIRECTORY_MODE);
+}
+
+async function tryChownForRunner(directory: string): Promise<boolean> {
+  try {
+    await chown(directory, BOTIFIED_RUNNER_UID, BOTIFIED_RUNNER_GID);
+    return true;
+  } catch (error) {
+    if (isChownUnavailable(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function isChownUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return error.code === "EPERM" || error.code === "EACCES" || error.code === "EINVAL" || error.code === "ENOSYS";
 }

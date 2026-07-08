@@ -157,6 +157,81 @@ printf '{"status":"ok"}\\n'
     assert.doesNotMatch(result.stdout + result.stderr + call, /oidc-client-secret/);
   });
 
+  it("check-product-workflow.sh scrubs parent substrate-only generated secrets before dispatch", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-workflow-sh-parent-env-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const cookieFile = path.join(tempDir, "admin.cookie");
+    const fakeNode = path.join(tempDir, "node");
+    const callsFile = path.join(tempDir, "node-calls.txt");
+
+    writeFileSync(envFile, [
+      "APP_PUBLIC_BASE_URL=http://deploy.example.test",
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+      "OIDC_CLIENT_ID=agentsmith-lite",
+      ""
+    ].join("\n"));
+    writeFileSync(secretsFile, [
+      "OIDC_CLIENT_SECRET=oidc-client-secret-from-file",
+      ""
+    ].join("\n"));
+    writeFileSync(cookieFile, "asl_session=session-from-oidc\n");
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+{
+  printf 'args=%s\\n' "$*"
+  printf 'keycloak_admin_password=%s\\n' "\${KEYCLOAK_ADMIN_PASSWORD:-}"
+  printf 'keycloak_db_password=%s\\n' "\${KEYCLOAK_DB_PASSWORD:-}"
+  printf 'keycloak_extra_generated_secret=%s\\n' "\${KEYCLOAK_EXTRA_GENERATED_SECRET:-}"
+  printf 'oidc_bootstrap_username=%s\\n' "\${OIDC_BOOTSTRAP_USERNAME:-}"
+  printf 'oidc_bootstrap_password=%s\\n' "\${OIDC_BOOTSTRAP_PASSWORD:-}"
+  printf 'oidc_issuer_url=%s\\n' "\${OIDC_ISSUER_URL:-}"
+  printf 'oidc_client_id=%s\\n' "\${OIDC_CLIENT_ID:-}"
+  printf 'oidc_client_secret=%s\\n' "\${OIDC_CLIENT_SECRET:-}"
+} > "$FAKE_NODE_CALLS"
+printf '{"status":"ok"}\\n'
+`);
+    chmodSync(fakeNode, 0o755);
+
+    const result = spawnSync("bash", [
+      "scripts/deploy/check-product-workflow.sh",
+      "--env",
+      envFile,
+      "--secrets",
+      secretsFile,
+      "--cookie-file",
+      cookieFile,
+      "--csrf-token",
+      "csrf-from-oidc"
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        PATH: `${tempDir}:/usr/bin:/bin`,
+        FAKE_NODE_CALLS: callsFile,
+        AGENTSMITH_LITE_ENV_CONTRACT_NODE: process.execPath,
+        KEYCLOAK_ADMIN_PASSWORD: "DO_NOT_EXPORT_PARENT_KEYCLOAK_ADMIN_PASSWORD",
+        KEYCLOAK_DB_PASSWORD: "DO_NOT_EXPORT_PARENT_KEYCLOAK_DB_PASSWORD",
+        KEYCLOAK_EXTRA_GENERATED_SECRET: "DO_NOT_EXPORT_PARENT_KEYCLOAK_EXTRA",
+        OIDC_BOOTSTRAP_USERNAME: "DO_NOT_EXPORT_PARENT_OIDC_BOOTSTRAP_USERNAME",
+        OIDC_BOOTSTRAP_PASSWORD: "DO_NOT_EXPORT_PARENT_OIDC_BOOTSTRAP_PASSWORD"
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const call = readFileSync(callsFile, "utf8");
+    assert.match(call, /args=scripts\/deploy\/check-product-workflow\.mjs --base-url http:\/\/deploy\.example\.test --cookie-file .*admin\.cookie --csrf-token csrf-from-oidc/);
+    assert.match(call, /keycloak_admin_password=\n/);
+    assert.match(call, /keycloak_db_password=\n/);
+    assert.match(call, /keycloak_extra_generated_secret=\n/);
+    assert.match(call, /oidc_bootstrap_username=\n/);
+    assert.match(call, /oidc_bootstrap_password=\n/);
+    assert.match(call, /oidc_issuer_url=https:\/\/keycloak\.example\.test\/realms\/agentsmith/);
+    assert.match(call, /oidc_client_id=agentsmith-lite/);
+    assert.match(call, /oidc_client_secret=oidc-client-secret-from-file/);
+    assert.doesNotMatch(result.stdout + result.stderr + call, /DO_NOT_EXPORT_PARENT_/);
+  });
+
   it("check-product-workflow.sh rejects workflow overlay keys in substrate env without printing values", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-workflow-substrate-"));
     const envFile = path.join(tempDir, "substrate.env");
