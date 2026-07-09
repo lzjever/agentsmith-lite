@@ -18,7 +18,9 @@ const appEnvKeys = new Set([
   "AGENTSMITH_LITE_DATA_DIR",
   "AGENTSMITH_LITE_SANDBOX_MODE",
   "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT",
-  "AGENTSMITH_LITE_RUNTIME_TICK_MS"
+  "AGENTSMITH_LITE_RUNTIME_TICK_MS",
+  "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP",
+  "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY"
 ]);
 
 const productWorkflowEnvKeys = new Set([
@@ -69,6 +71,7 @@ export async function readContractFiles(options = {}) {
   const env = [...envEntries, ...appEnvEntries];
   const secrets = [...secretEntries, ...appSecretEntries];
   validateAuthContract(Object.fromEntries(env), Object.fromEntries(secrets));
+  validateModelCaContract(Object.fromEntries(env));
 
   return {
     entries: [...envEntries, ...secretEntries, ...appEnvEntries, ...appSecretEntries],
@@ -287,6 +290,12 @@ function validateAuthContract(env, secrets) {
   }
   if (secrets.OIDC_CLIENT_SECRET?.trim()) {
     throw new EnvContractError("OIDC_CLIENT_SECRET must be empty in substrate secrets when AUTH_MODE=builtin_admin");
+  }
+}
+
+function validateModelCaContract(env) {
+  if (env.AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY?.trim() && !env.AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP?.trim()) {
+    throw new EnvContractError("AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP is required when AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY is set");
   }
 }
 

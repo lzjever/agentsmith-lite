@@ -247,6 +247,8 @@ describe("deploy env contract", () => {
         "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
         "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
         "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI='https://models.example.test/v1'",
+        "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP=local-model-ca",
+        "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY=provider-ca.pem",
         ""
       ].join("\n")
     );
@@ -267,6 +269,8 @@ describe("deploy env contract", () => {
       AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: "7",
       AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
       AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.test/v1",
+      AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: "local-model-ca",
+      AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: "provider-ca.pem",
       AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-from-overlay"
     });
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
@@ -300,6 +304,27 @@ describe("deploy env contract", () => {
         contents: "AGENTSMITH_LITE_SANDBOX_MODE=DO_NOT_PRINT_SANDBOX_CONFIG\n",
         error: /AGENTSMITH_LITE_SANDBOX_MODE/,
         leakedValue: /DO_NOT_PRINT_SANDBOX_CONFIG/
+      },
+      {
+        name: "CA config in app secrets",
+        file: "app.secrets.env",
+        contents: "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP=DO_NOT_PRINT_CA_CONFIG\n",
+        error: /AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP/,
+        leakedValue: /DO_NOT_PRINT_CA_CONFIG/
+      },
+      {
+        name: "raw CA PEM in app env",
+        file: "app.env",
+        contents: "AGENTSMITH_LITE_MODEL_CA_PEM='DO_NOT_PRINT_BEGIN_CERTIFICATE'\n",
+        error: /AGENTSMITH_LITE_MODEL_CA_PEM/,
+        leakedValue: /DO_NOT_PRINT_BEGIN_CERTIFICATE/
+      },
+      {
+        name: "CA key without ConfigMap name",
+        file: "app.env",
+        contents: "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY=DO_NOT_PRINT_CA_KEY\n",
+        error: /AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP/,
+        leakedValue: /DO_NOT_PRINT_CA_KEY/
       }
     ];
 

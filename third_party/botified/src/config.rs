@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -25,6 +26,7 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    pub ca_bundle_path: Option<PathBuf>,
     pub request_timeout: Duration,
     pub thinking: ThinkingConfig,
 }
@@ -55,6 +57,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("ca_bundle_path", &self.ca_bundle_path)
             .field("request_timeout", &self.request_timeout)
             .field("thinking", &self.thinking)
             .finish()
@@ -72,6 +75,7 @@ impl OpenAiCompatibleConfig {
             base_url: base_url.into(),
             model: model.into(),
             api_key: None,
+            ca_bundle_path: None,
             request_timeout: DEFAULT_PROVIDER_TIMEOUT,
             thinking: ThinkingConfig::default(),
         }
@@ -79,6 +83,16 @@ impl OpenAiCompatibleConfig {
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn with_ca_bundle_path(mut self, ca_bundle_path: impl Into<PathBuf>) -> Self {
+        self.ca_bundle_path = Some(ca_bundle_path.into());
+        self
+    }
+
+    pub fn with_optional_ca_bundle_path(mut self, ca_bundle_path: Option<PathBuf>) -> Self {
+        self.ca_bundle_path = ca_bundle_path;
         self
     }
 

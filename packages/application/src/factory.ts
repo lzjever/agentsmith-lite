@@ -8,7 +8,7 @@ import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
 import { RuntimeService } from "./runtimeService.js";
 import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "./sandboxLifecycleService.js";
-import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type TaskLiveSandboxConfig } from "./taskService.js";
+import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type ModelCaReference, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
 export const DEFAULT_SESSION_SECRET = "dev-session-secret";
@@ -28,6 +28,7 @@ export interface CreateApplicationServicesInput {
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   chatClient?: OpenAICompatibleClient;
   modelCredentialResolver?: ModelCredentialResolver;
+  modelCa?: ModelCaReference;
   liveSandbox?: TaskLiveSandboxConfig;
   requireBuiltinAdminPasswordForLiveSandbox?: boolean;
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
@@ -69,6 +70,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",
     botifiedServiceKeySecret: sessionSecret,
     modelCredentialResolver,
+    ...(input.modelCa ? { modelCa: input.modelCa } : {}),
     sandboxLifecycle,
     ...(input.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: input.sandboxNamespaceLimit } : {}),
     ...(input.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: input.liveSandboxMaxLifetimeMs } : {}),

@@ -9,6 +9,12 @@ export interface SandboxResourceNameOverrides {
   networkPolicy?: string;
 }
 
+export interface SandboxModelCaReference {
+  configMapName: string;
+  configMapKey: string;
+  path: string;
+}
+
 export interface SandboxRenderInput {
   namespace: string;
   workspaceId: string;
@@ -26,6 +32,7 @@ export interface SandboxRenderInput {
   memoryRequest: string;
   cpuLimit: string;
   memoryLimit: string;
+  modelCa?: SandboxModelCaReference;
   resourceNames?: SandboxResourceNameOverrides;
 }
 
@@ -38,6 +45,28 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const serviceName = input.resourceNames?.service ?? `asl-task-${input.taskId}`;
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
   const modelApiKeySecretKey = input.modelApiKeySecretKey ?? "MODEL_API_KEY";
+  const modelCaVolume = input.modelCa
+    ? {
+        name: "model-ca",
+        configMap: {
+          name: input.modelCa.configMapName,
+          items: [
+            {
+              key: input.modelCa.configMapKey,
+              path: modelCaFilename(input.modelCa.path)
+            }
+          ]
+        }
+      }
+    : undefined;
+  const modelCaMount = input.modelCa
+    ? {
+        name: "model-ca",
+        mountPath: input.modelCa.path,
+        subPath: modelCaFilename(input.modelCa.path),
+        readOnly: true
+      }
+    : undefined;
 
   const resources: KubernetesResource[] = [
     {
@@ -158,7 +187,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 name: "botified-config",
                 mountPath: "/etc/botified",
                 readOnly: true
-              }
+              },
+              ...(modelCaMount ? [modelCaMount] : [])
             ]
           }
         ],
@@ -174,7 +204,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             configMap: {
               name: configName
             }
-          }
+          },
+          ...(modelCaVolume ? [modelCaVolume] : [])
         ]
       }
     },
@@ -263,4 +294,9 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
     namespace: input.namespace,
     resources
   };
+}
+
+function modelCaFilename(caPath: string): string {
+  const parts = caPath.split("/");
+  return parts[parts.length - 1] || "ca.crt";
 }

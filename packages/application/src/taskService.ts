@@ -41,6 +41,12 @@ export interface TaskLiveSandboxConfig {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export interface ModelCaReference {
+  configMapName: string;
+  configMapKey: string;
+  path: string;
+}
+
 export interface BotifiedServiceKeyInput {
   namespace: string;
   workspaceId: string;
@@ -63,6 +69,7 @@ export interface TaskServiceConfig {
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
   modelCredentialResolver?: ModelCredentialResolver;
+  modelCa?: ModelCaReference;
   sandboxLifecycle?: SandboxLifecycleService;
 }
 
@@ -184,7 +191,8 @@ export class TaskService {
       cpuRequest: "250m",
       memoryRequest: "512Mi",
       cpuLimit: "1",
-      memoryLimit: "1Gi"
+      memoryLimit: "1Gi",
+      ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {})
     });
 
     const task = await this.store.createTask({
@@ -604,6 +612,7 @@ export class TaskService {
         cpuLimit: "1",
         memoryLimit: "1Gi"
       },
+      ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
       fencingToken: 1,
       cleanupStatus: "active",
       createdAt: input.timestamp,
@@ -639,6 +648,7 @@ export class TaskService {
         botifiedDataPath: input.run.directories.botified,
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         modelApiKeyEnv: "MODEL_API_KEY",
+        ...(this.config.modelCa ? { modelCaBundlePath: this.config.modelCa.path } : {}),
         servicePort: input.run.botifiedPort
       }
     });

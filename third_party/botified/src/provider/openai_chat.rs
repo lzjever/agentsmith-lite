@@ -3,7 +3,7 @@ use std::future::Future;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode};
+use reqwest::{Certificate, Client, StatusCode};
 use serde_json::{json, Map, Number, Value};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -68,8 +68,31 @@ impl OpenAiChatProvider {
             .thinking
             .validate()
             .map_err(|error| ProviderError::config(error.to_string()))?;
-        let client = Client::builder()
-            .timeout(config.request_timeout)
+        let mut builder = Client::builder().timeout(config.request_timeout);
+        if let Some(ca_bundle_path) = config.ca_bundle_path.as_ref() {
+            let pem = std::fs::read(ca_bundle_path).map_err(|error| {
+                ProviderError::config(format!(
+                    "failed to read provider CA bundle {}: {error}",
+                    ca_bundle_path.display()
+                ))
+            })?;
+            let certificates = Certificate::from_pem_bundle(&pem).map_err(|error| {
+                ProviderError::config(format!(
+                    "failed to parse provider CA bundle {}: {error}",
+                    ca_bundle_path.display()
+                ))
+            })?;
+            if certificates.is_empty() {
+                return Err(ProviderError::config(format!(
+                    "provider CA bundle {} did not contain any PEM certificates",
+                    ca_bundle_path.display()
+                )));
+            }
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        let client = builder
             .build()
             .map_err(|error| ProviderError::request_failed(error.to_string()))?;
         Ok(Self {
@@ -1525,6 +1548,27 @@ mod tests {
     use crate::llm_text_preview::{
         LlmTextPreviewFilter, LlmTextPreviewHub, LlmTextPreviewMetadata,
     };
+    use std::path::PathBuf;
+
+    #[test]
+    fn ca_bundle_path_is_loaded_when_building_openai_chat_provider() {
+        let path = temp_file_path("ca-bundle-invalid.pem");
+        std::fs::write(&path, b"not a pem certificate").expect("write invalid CA bundle");
+
+        let error = match OpenAiChatProvider::new(
+            OpenAiCompatibleConfig::new("local-openai", "https://models.local.test/v1", "gpt")
+                .with_api_key("sk-test")
+                .with_ca_bundle_path(path.clone()),
+        ) {
+            Ok(_) => panic!("invalid CA bundle should fail provider construction"),
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("CA bundle"));
+        assert!(message.contains(&path.display().to_string()));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn llm_text_preview_stream_parser_handles_split_crlf_utf8_comment_empty_and_done() {
@@ -1966,5 +2010,16 @@ mod tests {
             }
         }
         split
+    }
+
+    fn temp_file_path(name: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "botified-openai-chat-{name}-{}-{stamp}",
+            std::process::id()
+        ))
     }
 }

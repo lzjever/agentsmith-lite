@@ -62,6 +62,11 @@ export interface PersistedSandboxRunState {
     cpuLimit: string;
     memoryLimit: string;
   };
+  modelCa?: {
+    configMapName: string;
+    configMapKey: string;
+    path: string;
+  };
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;

@@ -132,6 +132,39 @@ describe("botified runtime integration", () => {
     assert.equal(serialized.includes("sk-real-model-key"), false);
   });
 
+  it("passes an optional model CA bundle path to the provider config without secrets or PEM", () => {
+    const config = generateBotifiedConfig({
+      endpoint: {
+        id: "e1",
+        projectId: "p1",
+        name: "model",
+        protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1",
+        model: "gpt-compatible",
+        apiKeySecretRef: "secret/model",
+        capabilities: ["text", "tool_calls"],
+        requestTimeoutSecs: 30,
+        createdAt: "2026-07-04T00:00:00.000Z",
+        updatedAt: "2026-07-04T00:00:00.000Z"
+      },
+      task: {
+        taskId: "t1",
+        projectMountPath: "/workspace/project",
+        taskHomePath: "/workspace/project/tasks/t1/home",
+        botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
+        modelApiKeyEnv: "MODEL_API_KEY",
+        modelCaBundlePath: "/etc/agentsmith-lite/model-ca/ca.crt"
+      }
+    });
+
+    assert.equal(config.providers[0]?.ca_bundle_path, "/etc/agentsmith-lite/model-ca/ca.crt");
+    const serialized = serializeBotifiedConfig(config);
+    assert.equal(serialized.includes('"ca_bundle_path": "/etc/agentsmith-lite/model-ca/ca.crt"'), true);
+    assert.equal(serialized.includes("sk-real-model-key"), false);
+    assert.equal(serialized.includes("BEGIN CERTIFICATE"), false);
+  });
+
   it("enables view_image only when the configured provider can handle images", () => {
     const config = generateBotifiedConfig({
       endpoint: {

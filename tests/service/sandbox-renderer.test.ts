@@ -133,6 +133,64 @@ describe("sandbox manifest renderer", () => {
     assert.ok(!serialized.includes("hostPath"));
     assert.ok(!serialized.includes('"privileged":true'));
   });
+
+  it("mounts an optional model CA ConfigMap read-only without relaxing sandbox egress", () => {
+    const rendered = renderSandboxResources({
+      namespace: "agentsmith",
+      workspaceId: "w1",
+      projectId: "p1",
+      taskId: "t1",
+      runId: "r1",
+      image: "example/botified-runner@sha256:abc",
+      pvcName: "agentsmith-lite-files",
+      projectSubPath: "workspaces/w1/projects/p1",
+      botifiedPort: 3099,
+      serviceKeySecretName: "botified-t1",
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi",
+      modelCa: {
+        configMapName: "local-model-ca",
+        configMapKey: "provider-ca.pem",
+        path: "/etc/agentsmith-lite/model-ca/ca.crt"
+      }
+    });
+
+    const pod = rendered.resources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
+    const container = pod?.spec.containers[0];
+    assert.ok(container);
+    assert.ok(
+      container.volumeMounts.some(
+        (mount) => mount.name === "model-ca" && mount.mountPath === "/etc/agentsmith-lite/model-ca/ca.crt" && mount.subPath === "ca.crt" && mount.readOnly === true
+      )
+    );
+    assert.ok(
+      pod?.spec.volumes.some(
+        (volume) =>
+          volume.name === "model-ca" &&
+          volume.configMap?.name === "local-model-ca" &&
+          volume.configMap.items?.[0]?.key === "provider-ca.pem" &&
+          volume.configMap.items?.[0]?.path === "ca.crt"
+      )
+    );
+
+    const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy") as
+      | NetworkPolicyResource
+      | undefined;
+    assert.ok(networkPolicy);
+    assert.ok(
+      networkPolicy.spec.egress.every(
+        (rule) =>
+          Array.isArray(rule.ports) &&
+          rule.ports.length > 0 &&
+          rule.ports.every(
+            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 443)
+          )
+      )
+    );
+    assert.doesNotMatch(JSON.stringify(rendered.resources), /BEGIN CERTIFICATE|sk-real-model-key/);
+  });
 });
 
 interface PodResource extends KubernetesResource {
@@ -152,7 +210,14 @@ interface PodResource extends KubernetesResource {
       };
       env: unknown[];
       readinessProbe: unknown;
-      volumeMounts: Array<{ mountPath: string; subPath: string }>;
+      volumeMounts: Array<{ name: string; mountPath: string; subPath: string; readOnly?: boolean }>;
+    }>;
+    volumes: Array<{
+      name: string;
+      configMap?: {
+        name: string;
+        items?: Array<{ key: string; path: string }>;
+      };
     }>;
   };
 }

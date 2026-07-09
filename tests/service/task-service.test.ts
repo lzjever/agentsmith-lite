@@ -246,6 +246,11 @@ describe("task service Botified orchestration", () => {
     });
     const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
       modelCredentialResolver: resolver,
+      modelCa: {
+        configMapName: "local-model-ca",
+        configMapKey: "provider-ca.pem",
+        path: "/etc/agentsmith-lite/model-ca/ca.crt"
+      },
       liveSandbox: {
         port: livePort,
         readinessTimeoutMs: 1000,
@@ -281,11 +286,29 @@ describe("task service Botified orchestration", () => {
     const appliedConfig = livePort.appliedResources.find((resource) => resource.kind === "ConfigMap") as ConfigMapResource | undefined;
     const generatedConfig = JSON.parse(appliedConfig?.data["botified-config.yaml"] ?? "{}") as {
       service?: { port?: number };
-      providers?: Array<{ api_key_env?: string }>;
+      providers?: Array<{ api_key_env?: string; ca_bundle_path?: string }>;
     };
     assert.equal(generatedConfig.service?.port, 3099);
     assert.equal(generatedConfig.providers?.[0]?.api_key_env, "MODEL_API_KEY");
+    assert.equal(generatedConfig.providers?.[0]?.ca_bundle_path, "/etc/agentsmith-lite/model-ca/ca.crt");
     assert.equal(JSON.stringify(generatedConfig).includes("sk-real-model-key"), false);
+    assert.equal(JSON.stringify(generatedConfig).includes("BEGIN CERTIFICATE"), false);
+    const appliedPod = livePort.appliedResources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
+    const appliedContainer = appliedPod?.spec.containers[0];
+    assert.ok(
+      appliedContainer?.volumeMounts.some(
+        (mount) => mount.name === "model-ca" && mount.mountPath === "/etc/agentsmith-lite/model-ca/ca.crt" && mount.subPath === "ca.crt" && mount.readOnly === true
+      )
+    );
+    assert.ok(
+      appliedPod?.spec.volumes.some(
+        (volume) =>
+          volume.name === "model-ca" &&
+          volume.configMap?.name === "local-model-ca" &&
+          volume.configMap.items?.[0]?.key === "provider-ca.pem" &&
+          volume.configMap.items?.[0]?.path === "ca.crt"
+      )
+    );
 
     const publicSecret = task.sandbox.resources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
     assert.deepEqual(publicSecret?.stringData, {
@@ -1537,6 +1560,7 @@ interface SetupOptions {
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
+  modelCa?: CreateApplicationServicesInput["modelCa"];
 }
 
 async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory: SetupOptions | (() => string | undefined) = {}) {
@@ -1554,6 +1578,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
+    ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   });
   const { user } = await services.auth.loginAfterBootstrap(builtinAdminPassword);
@@ -1878,4 +1903,19 @@ interface SecretResource extends KubernetesResource {
 
 interface ConfigMapResource extends KubernetesResource {
   data: Record<string, string>;
+}
+
+interface PodResource extends KubernetesResource {
+  spec: {
+    containers: Array<{
+      volumeMounts: Array<{ name: string; mountPath: string; subPath?: string; readOnly?: boolean }>;
+    }>;
+    volumes: Array<{
+      name: string;
+      configMap?: {
+        name: string;
+        items?: Array<{ key: string; path: string }>;
+      };
+    }>;
+  };
 }

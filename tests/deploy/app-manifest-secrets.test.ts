@@ -189,6 +189,62 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
   });
 
+  it("mounts an optional model CA ConfigMap into the API pod without embedding raw PEM config", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: "local-model-ca",
+        AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: "provider-ca.pem",
+        AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.local.test/v1"
+      },
+      secrets: {
+        AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai"
+      }
+    });
+
+    const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
+    const configMapData = (configMap as { data?: Record<string, string> } | undefined)?.data;
+    assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP, "local-model-ca");
+    assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY, "provider-ca.pem");
+    assert.equal(configMapData?.NODE_EXTRA_CA_CERTS, undefined);
+    assert.equal(configMapData?.ca, undefined);
+    assert.equal(configMapData?.["ca.crt"], undefined);
+    assert.doesNotMatch(JSON.stringify(configMapData), /BEGIN CERTIFICATE/);
+
+    const secret = manifests.find((manifest) => manifest.kind === "Secret" && manifest.metadata.name === "agentsmith-lite-app-secrets");
+    const secretData = (secret as { stringData?: Record<string, string> } | undefined)?.stringData;
+    assert.equal(secretData?.AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP, undefined);
+    assert.equal(secretData?.AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY, undefined);
+
+    const deployment = manifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
+    const podSpec = deployment?.spec.template.spec;
+    const container = podSpec?.containers[0];
+    assert.ok(container);
+    assert.deepEqual(container.env, [
+      {
+        name: "NODE_EXTRA_CA_CERTS",
+        value: "/etc/agentsmith-lite/model-ca/ca.crt"
+      }
+    ]);
+    assert.ok(
+      container.volumeMounts.some(
+        (mount) => mount.name === "model-ca" && mount.mountPath === "/etc/agentsmith-lite/model-ca/ca.crt" && mount.subPath === "ca.crt" && mount.readOnly === true
+      )
+    );
+    assert.ok(
+      podSpec?.volumes.some(
+        (volume) =>
+          volume.name === "model-ca" &&
+          volume.configMap?.name === "local-model-ca" &&
+          volume.configMap.items?.[0]?.key === "provider-ca.pem" &&
+          volume.configMap.items?.[0]?.path === "ca.crt"
+      )
+    );
+  });
+
   it("fails closed when OIDC keys are misplaced or incomplete without leaking values", () => {
     const cases: Array<{
       name: string;
@@ -507,7 +563,15 @@ interface DeploymentResource {
     template: {
       spec: {
         containers: Array<{
-          volumeMounts: Array<{ mountPath: string }>;
+          env?: Array<{ name: string; value: string }>;
+          volumeMounts: Array<{ name?: string; mountPath: string; subPath?: string; readOnly?: boolean }>;
+        }>;
+        volumes: Array<{
+          name: string;
+          configMap?: {
+            name: string;
+            items?: Array<{ key: string; path: string }>;
+          };
         }>;
       };
     };

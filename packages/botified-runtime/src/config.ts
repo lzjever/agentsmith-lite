@@ -7,6 +7,7 @@ export interface BotifiedTaskRuntimeInput {
   botifiedDataPath: string;
   serviceKeyEnv: string;
   modelApiKeyEnv: string;
+  modelCaBundlePath?: string;
   servicePort?: number;
 }
 
@@ -71,6 +72,7 @@ export interface BotifiedProviderConfig {
   base_url: string;
   model: string;
   api_key_env: string;
+  ca_bundle_path?: string;
   request_timeout_secs: number;
   priority: number;
   capabilities: EndpointCapability[];
@@ -111,7 +113,7 @@ export interface BotifiedServiceConfig {
 export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): BotifiedConfig {
   return {
     version: 1,
-    providers: [providerConfig(input.endpoint, input.task.modelApiKeyEnv)],
+    providers: [providerConfig(input.endpoint, input.task)],
     tools: {
       enabled: enabledTools(input.endpoint),
       execution: {
@@ -185,12 +187,13 @@ export function serializeBotifiedConfig(config: BotifiedConfig): string {
   return JSON.stringify(config, null, 2);
 }
 
-function providerConfig(endpoint: ModelEndpoint, modelApiKeyEnv: string): BotifiedProviderConfig {
+function providerConfig(endpoint: ModelEndpoint, task: BotifiedTaskRuntimeInput): BotifiedProviderConfig {
   return {
     name: endpoint.name,
     base_url: endpoint.baseUrl,
     model: endpoint.model,
-    api_key_env: modelApiKeyEnv,
+    api_key_env: task.modelApiKeyEnv,
+    ...(task.modelCaBundlePath ? { ca_bundle_path: task.modelCaBundlePath } : {}),
     request_timeout_secs: endpoint.requestTimeoutSecs,
     priority: 10,
     capabilities: endpoint.capabilities,

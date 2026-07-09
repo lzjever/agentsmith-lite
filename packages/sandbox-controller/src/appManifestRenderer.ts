@@ -2,6 +2,9 @@ import type { KubernetesResource } from "../../contracts/src/api.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 import type { AppImageRefs } from "./appImageLock.js";
 
+const MODEL_CA_BUNDLE_PATH = "/etc/agentsmith-lite/model-ca/ca.crt";
+const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
+
 export interface AppManifestInput {
   namespace: string;
   imageTag: string;
@@ -15,6 +18,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
   const appDataRoot = resolveAppDataRoot(input.env);
   const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
+  const modelCa = resolveModelCa(input);
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
     "app.kubernetes.io/part-of": "agentsmith-lite",
@@ -53,7 +57,13 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         ...(runtimeTickMs ? { AGENTSMITH_LITE_RUNTIME_TICK_MS: runtimeTickMs } : {}),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
         ...auth.configMapData,
-        ...modelBaseUrlConfig
+        ...modelBaseUrlConfig,
+        ...(modelCa
+          ? {
+              AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: modelCa.configMapName,
+              AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: modelCa.configMapKey
+            }
+          : {})
       }
     },
     {
@@ -83,11 +93,31 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                   { configMapRef: { name: "agentsmith-lite-config" } },
                   { secretRef: { name: "agentsmith-lite-app-secrets" } }
                 ],
+                ...(modelCa
+                  ? {
+                      env: [
+                        {
+                          name: "NODE_EXTRA_CA_CERTS",
+                          value: MODEL_CA_BUNDLE_PATH
+                        }
+                      ]
+                    }
+                  : {}),
                 volumeMounts: [
                   {
                     name: "project-files",
                     mountPath: appDataRoot
-                  }
+                  },
+                  ...(modelCa
+                    ? [
+                        {
+                          name: "model-ca",
+                          mountPath: MODEL_CA_BUNDLE_PATH,
+                          subPath: "ca.crt",
+                          readOnly: true
+                        }
+                      ]
+                    : [])
                 ]
               }
             ],
@@ -97,7 +127,23 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 persistentVolumeClaim: {
                   claimName: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files"
                 }
-              }
+              },
+              ...(modelCa
+                ? [
+                    {
+                      name: "model-ca",
+                      configMap: {
+                        name: modelCa.configMapName,
+                        items: [
+                          {
+                            key: modelCa.configMapKey,
+                            path: "ca.crt"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                : [])
             ]
           }
         }
@@ -205,6 +251,32 @@ function resolveAppDataRoot(env: Record<string, string>): string {
     throw new Error("AGENTSMITH_LITE_DATA_DIR must be an absolute path");
   }
   return dataRoot;
+}
+
+function resolveModelCa(input: AppManifestInput): { configMapName: string; configMapKey: string } | undefined {
+  for (const key of ["AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP", "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY"]) {
+    if (Object.hasOwn(input.secrets, key)) {
+      throw new Error(`model CA config key ${key} is not allowed in app Secret`);
+    }
+  }
+  for (const key of Object.keys({ ...input.env, ...input.secrets })) {
+    if (key === "AGENTSMITH_LITE_MODEL_CA_PEM" || key === "AGENTSMITH_LITE_MODEL_CA_CERT" || key === "AGENTSMITH_LITE_MODEL_CA_CERTIFICATE") {
+      throw new Error(`raw model CA key ${key} is not allowed in app manifests`);
+    }
+  }
+
+  const configMapName = input.env.AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP?.trim();
+  const configuredKey = input.env.AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY?.trim();
+  if (!configMapName && configuredKey) {
+    throw new Error("AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP is required when AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY is set");
+  }
+  if (!configMapName) {
+    return undefined;
+  }
+  return {
+    configMapName,
+    configMapKey: configuredKey || DEFAULT_MODEL_CA_CONFIG_KEY
+  };
 }
 
 function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels: Record<string, string>): KubernetesResource | undefined {

@@ -56,6 +56,8 @@ pub struct RuntimeProviderConfig {
     pub base_url: String,
     pub model: String,
     pub api_key_env: String,
+    #[serde(default)]
+    pub ca_bundle_path: Option<PathBuf>,
     pub request_timeout_secs: u64,
     pub priority: i32,
     pub capabilities: Vec<ProviderCapability>,
@@ -551,6 +553,12 @@ impl RuntimeProviderConfig {
             &format!("provider {} api_key_env", self.name),
             &self.api_key_env,
         )?;
+        if let Some(ca_bundle_path) = &self.ca_bundle_path {
+            validate_non_empty_path(
+                &format!("provider {} ca_bundle_path", self.name),
+                ca_bundle_path,
+            )?;
+        }
         if self.request_timeout_secs == 0 {
             return Err(ConfigError::new(format!(
                 "provider {} request_timeout_secs must be greater than 0",
@@ -597,6 +605,7 @@ impl RuntimeProviderConfig {
             capabilities: self.capabilities.clone(),
             config: OpenAiCompatibleConfig::new(&self.name, &self.base_url, &self.model)
                 .with_api_key(api_key)
+                .with_optional_ca_bundle_path(self.ca_bundle_path.clone())
                 .with_request_timeout(Duration::from_secs(self.request_timeout_secs))
                 .with_thinking(self.thinking.clone()),
         })
@@ -1301,4 +1310,59 @@ fn is_loopback_host(host: &str) -> bool {
         return true;
     }
     host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ca_bundle_path_resolves_into_openai_compatible_provider_config() {
+        let provider = RuntimeProviderConfig {
+            name: "local-openai".to_owned(),
+            base_url: "https://models.local.test/v1".to_owned(),
+            model: "gpt-compatible".to_owned(),
+            api_key_env: "MODEL_API_KEY".to_owned(),
+            ca_bundle_path: Some(PathBuf::from("/etc/agentsmith-lite/model-ca/ca.crt")),
+            request_timeout_secs: 30,
+            priority: 10,
+            capabilities: vec![ProviderCapability::Text, ProviderCapability::ToolCalls],
+            thinking: ThinkingConfig::default(),
+        };
+        provider.validate().expect("CA bundle path should validate");
+
+        let resolved = provider
+            .resolve(&HashMap::from([(
+                "MODEL_API_KEY".to_owned(),
+                "sk-test-value".to_owned(),
+            )]))
+            .expect("provider should resolve");
+
+        assert_eq!(
+            resolved.config.ca_bundle_path,
+            Some(PathBuf::from("/etc/agentsmith-lite/model-ca/ca.crt"))
+        );
+        assert_eq!(resolved.config.api_key.as_deref(), Some("sk-test-value"));
+    }
+
+    #[test]
+    fn ca_bundle_path_must_not_be_empty() {
+        let provider = RuntimeProviderConfig {
+            name: "local-openai".to_owned(),
+            base_url: "https://models.local.test/v1".to_owned(),
+            model: "gpt-compatible".to_owned(),
+            api_key_env: "MODEL_API_KEY".to_owned(),
+            ca_bundle_path: Some(PathBuf::new()),
+            request_timeout_secs: 30,
+            priority: 10,
+            capabilities: vec![ProviderCapability::Text],
+            thinking: ThinkingConfig::default(),
+        };
+
+        let error = provider
+            .validate()
+            .expect_err("empty CA bundle path should fail validation");
+
+        assert!(error.message().contains("ca_bundle_path"));
+    }
 }
