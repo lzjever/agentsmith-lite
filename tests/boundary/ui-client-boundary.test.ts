@@ -126,6 +126,24 @@ describe("web ui client boundary", () => {
       /deleteProjectFile\(entry\.path\)/,
       "browser UI must delete the current project file entry path"
     );
+    assert.match(
+      source,
+      /function\s+renderWorkspaces\(workspaces,\s*currentProject,\s*data\)[\s\S]*workspace\.projects\.forEach\(\(project\)[\s\S]*document\.createElement\("button"\)/,
+      "browser UI must render project selection controls from workspace.projects"
+    );
+    assert.match(
+      source,
+      /projectButton\.addEventListener\("click",\s*\(\)\s*=>\s*selectProject\(project\.id,\s*data\)\)/,
+      "project selection must route clicks to the selected project id and current dashboard data"
+    );
+    assert.match(
+      source,
+      /function\s+selectProject\(projectId,\s*data\)[\s\S]*state\.projectId\s*=\s*projectId[\s\S]*renderDashboard\(data\)/,
+      "project selection must update browser state and refresh from existing dashboard-derived data"
+    );
+    const selectProjectSource = extractFunctionBody(source, "selectProject");
+    assert.ok(selectProjectSource, "browser UI must define a project selection helper");
+    assert.doesNotMatch(selectProjectSource, /\bfetch\(|\bapi\(/, "project selection must not make extra API calls");
   });
 });
 
@@ -153,4 +171,24 @@ function extractFirstArgTargets(text: string, callName: "api" | "fetch"): string
     }
   }
   return targets;
+}
+
+function extractFunctionBody(text: string, functionName: string): string {
+  const startPattern = new RegExp(`function\\s+${functionName}\\([^)]*\\)\\s*\\{`);
+  const match = startPattern.exec(text);
+  if (!match || match.index === undefined) {
+    return "";
+  }
+  let depth = 0;
+  for (let index = match.index + match[0].length - 1; index < text.length; index += 1) {
+    if (text[index] === "{") {
+      depth += 1;
+    } else if (text[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(match.index, index + 1);
+      }
+    }
+  }
+  return "";
 }

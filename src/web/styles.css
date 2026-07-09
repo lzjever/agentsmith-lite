@@ -178,6 +178,12 @@ button:disabled {
   color: var(--ink);
 }
 
+.secondary-button.selected {
+  border-color: var(--teal);
+  background: #f2fbf9;
+  color: var(--teal);
+}
+
 .danger-button {
   background: var(--rose);
 }

@@ -277,7 +277,7 @@ function renderDashboard(data) {
     state.selectedTaskId = state.tasks[0]?.id ?? null;
   }
 
-  renderWorkspaces(data.workspaces, currentProject);
+  renderWorkspaces(data.workspaces, currentProject, data);
   renderEndpoints(state.endpoints);
   renderTasks(state.tasks);
   renderTimeline(state.tasks);
@@ -287,16 +287,51 @@ function renderDashboard(data) {
   return { project: currentProject, endpoints: state.endpoints, tasks: state.tasks };
 }
 
-function renderWorkspaces(workspaces, currentProject) {
+function renderWorkspaces(workspaces, currentProject, data) {
   const workspacesEl = document.querySelector("#workspaces");
   const currentProjectEl = document.querySelector("#current-project");
   currentProjectEl.textContent = currentProject
     ? `${currentProject.workspaceName} / ${currentProject.name}`
     : "No project";
-  workspacesEl.replaceChildren(...(workspaces.length > 0 ? workspaces.map((workspace) => item(
-    workspace.name,
-    `${workspace.projects.length} project${workspace.projects.length === 1 ? "" : "s"}`
-  )) : [item("No workspace", "Create demo project")]));
+  workspacesEl.replaceChildren(...(workspaces.length > 0 ? workspaces.map((workspace) => {
+    const node = item(
+      workspace.name,
+      `${workspace.projects.length} project${workspace.projects.length === 1 ? "" : "s"}`
+    );
+    if (workspace.projects.length === 0) {
+      return node;
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "item-actions";
+    workspace.projects.forEach((project) => {
+      const projectButton = document.createElement("button");
+      projectButton.type = "button";
+      projectButton.className = "secondary-button";
+      projectButton.textContent = project.name;
+      projectButton.addEventListener("click", () => selectProject(project.id, data));
+      if (project.id === currentProject?.id) {
+        projectButton.classList.add("selected");
+      }
+      actions.append(projectButton);
+    });
+    node.append(actions);
+    return node;
+  }) : [item("No workspace", "Create demo project")]));
+}
+
+async function selectProject(projectId, data) {
+  if (state.projectId === projectId) {
+    return;
+  }
+
+  state.projectId = projectId;
+  const current = renderDashboard(data);
+  await Promise.all([
+    refreshProjectFiles(),
+    refreshTaskEvents(current.tasks),
+    refreshTaskArtifacts(current.tasks)
+  ]);
 }
 
 function renderEndpoints(endpoints) {
