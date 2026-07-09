@@ -23,12 +23,12 @@
 - Keycloak/OIDC 是生产身份路径；built-in admin 只作为当前本地开发和过渡检查路径。
 - Web UI 和未来产品 TUI 只能作为 API client。
 - Server side 拥有 auth、endpoint 调用、file path 安全、task lifecycle、artifact 投影、sandbox cleanup。
-- 不建设 evidence、report、release、rehearsal、gate、质量矩阵、诊断文档生成或审计记录体系。
-- 禁止把脱离具体业务路径的笼统检查包装成测试、脚本、验收、阶段或文档概念；保留检查必须按具体业务路径命名，例如 `check-product-workflow` 或 `check-substrates-install`，不要创造新的抽象验收名。
-- 只保留服务当前业务改动或边界安全的精确窄检查；检查必须由开发者主动选择、stdout/stderr 输出、失败退出非零，不用笼统健康、验收或一把梭证明来包装。
+- 不建设 evidence、report、release、rehearsal、gate、质量矩阵、诊断文档生成、审计记录体系、宽泛健康证明、默认通过项、总体验收/证明入口或换名后的治理 gate。
+- 禁止把脱离具体业务路径的笼统检查包装成测试、脚本、验收、阶段或文档概念；保留检查必须按具体业务路径命名，例如 `check-product-workflow` 或 `check-substrates-install`，不要创造新的抽象验收名，也不要把一把梭验证换名成当前检查。
+- 只保留服务当前业务改动或边界安全的精确窄检查；检查必须由开发者主动选择、stdout/stderr 输出、失败退出非零，不用笼统健康、验收、一把梭证明、默认主线通过项或换名治理入口来包装。
 - 不测试计划文档措辞，不测试测试设施本身。
 - e2e/visual 只在用户人工主动要求时手动运行，不作为默认流程。
-- 最终交付只要求本地单机 K8s 核心闭环通过；当前改动相关检查必须精确、窄、由开发者主动选择，不能成为默认主线通过项、发布判断或外部云证明。
+- 最终交付只要求本地单机 K8s 核心闭环通过；当前改动相关检查必须精确、窄、由开发者主动选择，不能成为默认主线通过项、发布判断、换名后的治理 gate 或外部云证明。
 
 ## 产品边界
 
@@ -64,7 +64,7 @@ AgentSmith Lite 是私有化智能体平台的最小产品内核。它把 Botifi
 | Runtime | Botified vendored source pin、runner image、runtime config、HTTP client。 |
 | Sandbox | K8s manifest render/apply/status/reap；JuiceFS PVC mount；最小 RBAC；TTL cleanup。 |
 | Packaging | app image、runner image、manifest render/apply/status/down、digest-pinned app offline bundle。 |
-| Tests | 与当前改动相关的 unit/contract/behavior tests；按具体业务路径命名、由开发者主动选择的精确边界检查。 |
+| Tests | 与当前改动相关的 unit/contract/behavior tests；按具体业务路径命名、由开发者主动选择的精确边界检查；不设总入口、默认通过项或换名治理 gate。 |
 
 Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是长期对话产品。
 
@@ -78,14 +78,14 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - Web UI active task 自动刷新已覆盖晚到 events/artifacts 自动出现，仍只通过产品 API 读取 task events/artifacts。
 - Botified runner image 可在 sandbox pod 中启动；Botified bash 能在 JuiceFS 挂载中写文件并发布 artifact；API 能读取 events、列出 artifacts、下载 artifact 内容。
 - cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
-- `scripts/deploy/check-product-workflow.sh` / `.mjs` 仍只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；它不是默认流程、发布判断或全局通过证明。
+- `scripts/deploy/check-product-workflow.sh` / `.mjs` 仍只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；它不是默认流程、发布判断、全局通过证明，也不能被其他入口包装成默认通过项。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 
 仍需注意的现实：
 
 - Keycloak bootstrap 创建的本地登录用户只用于本地/operator 登录；真实产品路径应走 Web UI + OIDC session。
 - README/OPERATOR 中剩余 built-in admin 或 operator 语言需要继续收敛到 OIDC 产品路径。
-- 手动验证只说明 local single-node K8s 产品闭环当前可跑，不扩展成多环境发布证明或默认测试流程。
+- 手动验证只说明 local single-node K8s 产品闭环当前可跑，不扩展成多环境发布证明、总体验收入口或默认测试流程。
 - Cleanup 必须继续保持 runId/label fencing，不能扩大到非 app-owned resources。
 
 ## Immediate Next Work
@@ -102,7 +102,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 3. **Docs and commands stay small**
    - README/OPERATOR 只保留可执行命令、OIDC 产品路径和核心边界。
-   - 新命令必须直接服务产品闭环，stdout/stderr 清晰，失败非零。
+   - 新命令必须直接服务产品闭环，stdout/stderr 清晰，失败非零，且不能包装成默认通过项、总入口或换名治理 gate。
    - 删除与核心闭环无关的 prose tests、长矩阵、默认产物生成、报告/证据/流程包装。
    - e2e/visual 如需使用，只能作为手动、独立、具体产品路径检查，不进入默认测试或发布流程。
 
@@ -110,8 +110,8 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 - 删除或降级 evidence ledger、release report、GA report、rehearsal、quality matrix、生成式检查报告和各种 gate 产物。
 - 删除默认写入的 `*-report.json`、运行报告、诊断文档生成、证据归档参数。
-- 删除笼统测试/脚本/阶段概念、笼统健康/验收名称、泛化检查名称、默认发布流程和一把梭证明式命令心智。
-- 需要检查时，只保留按具体业务路径命名、由开发者按当前改动主动选择的精确窄检查，stdout/stderr 输出，失败退出非零。
+- 删除笼统测试/脚本/阶段概念、笼统健康/验收名称、泛化检查名称、默认通过项、默认发布流程、总体验收/证明入口、换名治理 gate 和一把梭证明式命令心智。
+- 需要检查时，只保留按具体业务路径命名、由开发者按当前改动主动选择的精确窄检查，stdout/stderr 输出，失败退出非零；运行时必要诊断、错误信息、产品 API 语义和 Botified/沙箱日志不属于治理产物。
 - 删除测试治理系统本身的测试、断言计划文档措辞的测试，以及与核心闭环无关的长矩阵、跨环境证明、外部云证明。
 - offline cache/app bundle 只是部署输入，不是证据系统。
 
@@ -121,5 +121,5 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - 优先修产品代码，不用流程包装失败。
 - 测试覆盖随风险增长：窄改动用窄测试，跨模块行为用 API/service tests。
 - 不运行无关 e2e/visual；只有用户人工主动要求时才作为手动诊断触发。
-- 当前改动相关检查只覆盖本地单机 K8s 核心闭环和当前改动风险，由开发者主动选择，不升级成发布 gate、报告、矩阵、默认主线通过项或验收框架。
+- 当前改动相关检查只覆盖本地单机 K8s 核心闭环和当前改动风险，由开发者主动选择，不升级成发布 gate、报告、矩阵、默认主线通过项、总体验收入口、证明入口或换名治理 gate。
 - 保持 app repo 与 substrates repo 边界清晰：substrates 提供运行基座，app 提供产品服务和 sandbox 业务逻辑。
