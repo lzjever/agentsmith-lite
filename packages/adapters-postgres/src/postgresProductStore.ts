@@ -106,6 +106,11 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapSession(rows[0]) : null;
   }
 
+  async deleteSession(id: string): Promise<boolean> {
+    const result = await this.pool.query("delete from auth_sessions where id = $1", [id]);
+    return result.rowCount === 1;
+  }
+
   async createWorkspace(workspace: Workspace): Promise<Workspace> {
     await this.pool.query(
       `insert into workspaces (id, name, owner_user_id, created_at, updated_at)

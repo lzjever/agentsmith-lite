@@ -82,6 +82,10 @@ export class InMemoryProductStore implements ProductStore {
     return clone(this.sessions.get(id) ?? null);
   }
 
+  async deleteSession(id: string): Promise<boolean> {
+    return this.sessions.delete(id);
+  }
+
   async createWorkspace(workspace: Workspace): Promise<Workspace> {
     this.workspaces.set(workspace.id, clone(workspace));
     return clone(workspace);

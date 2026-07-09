@@ -32,6 +32,7 @@
     "check:botified-runner-image": "npm run build && node scripts/botified/check-runner.mjs --container-image agentsmith-lite/botified-runner:check",
     "e2e:operator-lifecycle": "npm run build && node e2e/operator-lifecycle/operator-lifecycle.mjs",
     "e2e:web-product": "npm run build && node e2e/web-product/web-product.mjs",
+    "e2e:web-product-oidc": "npm run build && node e2e/web-product-oidc/web-product-oidc.mjs",
     "visual:screenshot": "npm run build && node scripts/visual/screenshot.mjs"
   },
   "devDependencies": {

@@ -138,6 +138,13 @@ export class AuthService {
     }
   }
 
+  async logout(sessionId: string | null): Promise<void> {
+    if (!sessionId) {
+      throw new UnauthorizedError();
+    }
+    await this.store.deleteSession(sessionId);
+  }
+
   private async createSession(userId: string): Promise<AuthSession> {
     const created = new Date();
     const expires = new Date(created.getTime() + 1000 * 60 * 60 * 12);

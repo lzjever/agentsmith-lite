@@ -17,7 +17,9 @@ const healthEl = document.querySelector("#health");
 const loginEl = document.querySelector("#login");
 const dashboardEl = document.querySelector("#dashboard");
 const statusMessageEl = document.querySelector("#status-message");
+const loginTitleEl = document.querySelector("#login-title");
 const loginForm = document.querySelector("#login-form");
+const logoutButton = document.querySelector("#logout-button");
 const workspaceProjectForm = document.querySelector("#workspace-project-form");
 const endpointForm = document.querySelector("#endpoint-form");
 const chatForm = document.querySelector("#chat-form");
@@ -57,6 +59,26 @@ loginForm.addEventListener("submit", async (event) => {
     await refreshDashboard();
   } catch (error) {
     setStatus(errorMessage(error), "error");
+  }
+});
+
+logoutButton.addEventListener("click", async () => {
+  try {
+    logoutButton.disabled = true;
+    await api("/api/auth/logout", {
+      method: "POST",
+      csrf: state.csrfToken
+    });
+    clearSessionState();
+    chatReplyEl.textContent = "";
+    chatReplyEl.classList.add("hidden");
+    loginEl.classList.remove("hidden");
+    dashboardEl.classList.add("hidden");
+    setStatus("Signed out.", "success");
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  } finally {
+    logoutButton.disabled = false;
   }
 });
 
@@ -230,7 +252,8 @@ async function refreshHealth() {
 async function refreshBootstrap() {
   const bootstrap = await api("/api/bootstrap");
   state.authMode = bootstrap.authMode ?? "builtin_admin";
-  loginForm.querySelector("button").textContent = state.authMode === "oidc" ? "Sign in" : "Sign in";
+  loginTitleEl.textContent = state.authMode === "oidc" ? "Sign in" : "Admin Login";
+  loginForm.querySelector("button").textContent = "Sign in";
   for (const field of loginForm.querySelectorAll("label")) {
     field.classList.toggle("hidden", state.authMode === "oidc");
   }
@@ -239,6 +262,7 @@ async function refreshBootstrap() {
 async function refreshDashboard() {
   const response = await fetch("/api/dashboard");
   if (response.status === 401) {
+    clearSessionState();
     loginEl.classList.remove("hidden");
     dashboardEl.classList.add("hidden");
     return;
@@ -262,6 +286,18 @@ async function refreshDashboard() {
     refreshTaskEvents(current.tasks),
     refreshTaskArtifacts(current.tasks)
   ]);
+}
+
+function clearSessionState() {
+  state.csrfToken = null;
+  state.workspaceId = null;
+  state.projectId = null;
+  state.endpointId = null;
+  state.selectedTaskId = null;
+  state.endpoints = [];
+  state.tasks = [];
+  state.taskEvents.clear();
+  state.taskEventErrors.clear();
 }
 
 function renderDashboard(data) {

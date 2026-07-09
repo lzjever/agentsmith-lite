@@ -18,7 +18,7 @@
       <p id="status-message" class="status-message hidden"></p>
 
       <section id="login" class="panel">
-        <h2>Admin Login</h2>
+        <h2 id="login-title">Sign in</h2>
         <form id="login-form">
           <label>
             Email
@@ -33,6 +33,13 @@
       </section>
 
       <section id="dashboard" class="dashboard hidden">
+        <div class="panel dashboard-session">
+          <div>
+            <h2>Dashboard</h2>
+            <p class="metric">Product workspace session</p>
+          </div>
+          <button id="logout-button" class="secondary-button" type="button">Sign out</button>
+        </div>
         <div class="panel">
           <div class="section-title">
             <h2>Workspaces</h2>

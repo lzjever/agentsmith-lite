@@ -74,6 +74,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 - 使用 substrates 输出的 env/secrets 渲染和部署 app 已跑通；API/Web、schema bootstrap、JuiceFS PVC、sandbox RBAC 在本地单机 K8s 环境可用。
 - Keycloak/OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已通过手动验证；app 消费 substrates 输出的 issuer/client/secret/backchannel。
+- Web UI logout、服务端 session revoke、`e2e:web-product-oidc` 手动浏览器路径已覆盖 OIDC login/callback -> workspace/project -> endpoint -> task -> artifact download -> project file upload/download/delete -> logout。
 - Botified runner image 可在 sandbox pod 中启动；Botified bash 能在 JuiceFS 挂载中写文件并发布 artifact；API 能读取 events、列出 artifacts、下载 artifact 内容。
 - cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
 - `scripts/deploy/check-product-workflow.sh` / `.mjs` 仍只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；它不是默认流程、发布判断或全局通过证明。
@@ -88,17 +89,16 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 ## Immediate Next Work
 
-1. **Real Web UI/OIDC product loop**
-   - 用户从真实 Web UI 进入 Keycloak/OIDC login/callback/session/logout。
-   - UI 完成 workspace/project/endpoint/task/files/artifacts 最小操作面。
-   - UI 能创建 project、配置 endpoint、发起 task、查看 events、列出并下载 project files 和 task artifacts。
-   - UI 不导入 app internals，不调用 `/api/operator/*`。
-   - 继续用 boundary test 固定 API-client-only 约束。
+1. **Product API/UI polish from the verified loop**
+   - 从已验证的 OIDC 浏览器产品路径收敛小问题，不再把 login/callback -> product actions -> logout 当作整体未完成项。
+   - 改善 task 晚到 events/artifacts 的 dashboard refresh 行为，保持实现贴近当前任务路径。
+   - 收敛 project file list/download/delete 的路径、文件名和错误文案语义。
+   - session、cookie、path-prefix follow-up 只围绕 OIDC browser path 保持短小修正。
 
-2. **Product API polish from the verified loop**
-   - 真实 Web UI 路径中发现的 session、CSRF、endpoint、file、task、artifact 状态问题，优先在服务端/API contract 中修正。
-   - task/cancel/reap 的 UI 展示只反映具体资源当前状态，不引入笼统健康、验收或发布判断。
-   - 继续保持 cleanup runId/label/UID fence，并只在相关逻辑变化时补小测试。
+2. **Cleanup and sandbox fence**
+   - cleanup 继续保持 runId/label/UID fence，cancel/TTL/reap 只作用于 app-owned resources。
+   - UI/API polish 不引入 `/api/operator/*` 浏览器路径，也不直连 K8s、Botified、DB 或 provider。
+   - 相关逻辑变化时只补当前业务路径的小测试。
 
 3. **Docs and commands stay small**
    - README/OPERATOR 只保留可执行命令、OIDC 产品路径和核心边界。

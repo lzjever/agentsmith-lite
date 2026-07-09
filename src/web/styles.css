@@ -105,6 +105,19 @@ h2 {
   gap: 16px;
 }
 
+.dashboard-session {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dashboard-session h2,
+.dashboard-session .metric {
+  margin: 0;
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -292,6 +305,11 @@ button:disabled {
 
   .dashboard {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-session {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .form-grid {

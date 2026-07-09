@@ -92,6 +92,11 @@ describe("api OIDC auth", () => {
     });
     assert.equal(logout.status, 200);
     assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
+
+    const oldSession = await fetch(baseUrl + "/api/me", {
+      headers: { cookie: login.sessionCookie }
+    });
+    assert.equal(oldSession.status, 401);
   });
 
   it("lets allowlisted OIDC users access operator APIs", async () => {

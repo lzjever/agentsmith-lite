@@ -37,13 +37,20 @@ describe("web ui client boundary", () => {
     const apiTargets = checked.flatMap(([file, text]) =>
       extractFirstArgTargets(text, "api").map((target) => ({ call: "api", file, target }))
     );
+    const hrefTargets = checked.flatMap(([file, text]) =>
+      extractAssignedTargets(text, "href").map((target) => ({ call: "href", file, target }))
+    );
     const nonApiTargets = [...fetchTargets, ...apiTargets]
       .filter(({ target }) => !target.startsWith("/api/"))
+      .map(({ call, file, target }) => `${file}: ${call}(${target})`);
+    const operatorTargets = [...fetchTargets, ...apiTargets, ...hrefTargets]
+      .filter(({ target }) => target.startsWith("/api/operator/"))
       .map(({ call, file, target }) => `${file}: ${call}(${target})`);
 
     assert.ok(fetchTargets.length > 0);
     assert.ok(apiTargets.length > 0);
     assert.deepEqual(nonApiTargets, []);
+    assert.deepEqual(operatorTargets, [], "browser UI must not call or link to operator APIs");
     assert.ok(
       checked.some(([, text]) => text.includes("/api/tasks/") && text.includes("/artifacts")),
       "browser UI must load task artifacts through the AgentSmith Lite API"
@@ -61,6 +68,23 @@ describe("web ui client boundary", () => {
       source,
       /workspaceProjectForm\.addEventListener\("submit",\s*async\s*\(event\)\s*=>\s*\{[\s\S]*?const\s+form\s*=\s*new FormData\(workspaceProjectForm\)[\s\S]*?name:\s*formString\(form,\s*"workspaceName"\)[\s\S]*?name:\s*formString\(form,\s*"projectName"\)[\s\S]*?state\.workspaceId\s*=\s*workspace\.id[\s\S]*?state\.projectId\s*=\s*project\.id[\s\S]*?refreshDashboard\(\)/,
       "browser UI must create workspace/project from user-entered form values and refresh the dashboard"
+    );
+    assert.match(source, /<h2 id="login-title">Sign in<\/h2>/, "OIDC login page must not default to Admin Login");
+    assert.match(
+      source,
+      /loginTitleEl\.textContent\s*=\s*state\.authMode\s*===\s*"oidc"\s*\?\s*"Sign in"\s*:\s*"Admin Login"/,
+      "browser UI must use product login language for OIDC and admin language only for built-in auth"
+    );
+    assert.match(source, /id="logout-button"[\s\S]*>\s*(Sign out|Logout)\s*<\/button>/, "dashboard must expose a clear logout control");
+    assert.match(
+      source,
+      /logoutButton\.addEventListener\("click",\s*async\s*\(\)\s*=>\s*\{[\s\S]*?api\("\/api\/auth\/logout",[\s\S]*?method:\s*"POST"[\s\S]*?csrf:\s*state\.csrfToken[\s\S]*?clearSessionState\(\)[\s\S]*?loginEl\.classList\.remove\("hidden"\)[\s\S]*?dashboardEl\.classList\.add\("hidden"\)/,
+      "logout must call the product logout API with CSRF, clear browser session state, and return to login"
+    );
+    assert.match(
+      source,
+      /function\s+clearSessionState\(\)[\s\S]*?state\.csrfToken\s*=\s*null[\s\S]*?state\.workspaceId\s*=\s*null[\s\S]*?state\.projectId\s*=\s*null[\s\S]*?state\.endpointId\s*=\s*null[\s\S]*?state\.selectedTaskId\s*=\s*null[\s\S]*?state\.endpoints\s*=\s*\[][\s\S]*?state\.tasks\s*=\s*\[][\s\S]*?state\.taskEvents\.clear\(\)[\s\S]*?state\.taskEventErrors\.clear\(\)/,
+      "logout must clear CSRF and dashboard-derived browser state"
     );
     const requiredWorkflowRoutes = [
       {
@@ -176,6 +200,23 @@ async function listFiles(dir: string): Promise<string[]> {
 
 function extractFirstArgTargets(text: string, callName: "api" | "fetch"): string[] {
   const pattern = new RegExp(`\\b${callName}\\(\\s*(["'\`])`, "g");
+  const targets: string[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const quote = match[1];
+    if (!quote) {
+      continue;
+    }
+    const start = (match.index ?? 0) + match[0].length;
+    const end = text.indexOf(quote, start);
+    if (end !== -1) {
+      targets.push(text.slice(start, end));
+    }
+  }
+  return targets;
+}
+
+function extractAssignedTargets(text: string, propertyName: string): string[] {
+  const pattern = new RegExp(`\\b${propertyName}\\s*=\\s*(["'\`])`, "g");
   const targets: string[] = [];
   for (const match of text.matchAll(pattern)) {
     const quote = match[1];

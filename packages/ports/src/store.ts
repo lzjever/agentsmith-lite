@@ -140,6 +140,7 @@ export interface ProductStore {
 
   createSession(session: AuthSession): Promise<AuthSession>;
   findSession(id: string): Promise<AuthSession | null>;
+  deleteSession(id: string): Promise<boolean>;
 
   createWorkspace(workspace: Workspace): Promise<Workspace>;
   listWorkspacesForUser(userId: string): Promise<Workspace[]>;

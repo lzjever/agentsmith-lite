@@ -227,6 +227,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   }
 
   if (method === "POST" && url.pathname === "/api/auth/logout") {
+    await services.auth.logout(sessionId);
     res.setHeader("set-cookie", [
       "asl_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
     ]);

@@ -30,6 +30,26 @@ describe("product services", () => {
     assert.equal(listed[0]?.projects[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
   });
 
+  it("revokes built-in admin sessions on logout", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password"
+    });
+    const session = await services.auth.loginAfterBootstrap("admin-password");
+
+    assert.equal((await services.auth.requireSession(session.sessionId)).id, session.user.id);
+
+    await services.auth.logout(session.sessionId);
+
+    await assert.rejects(
+      () => services.auth.requireSession(session.sessionId),
+      /Unauthorized/
+    );
+    assert.equal(await store.findSession(session.sessionId), null);
+  });
+
   it("logs in a verified external principal as a stable local member user", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({
