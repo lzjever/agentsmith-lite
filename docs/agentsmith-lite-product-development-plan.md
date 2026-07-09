@@ -70,51 +70,41 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 ## App Repo 现状
 
-当前 app repo 已经收敛到更直接的产品检查：
+当前 app repo 的本地单机 K8s 产品闭环已通过手动验证：
 
-- Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 auth/session、project、endpoint、chat、file、task、cancel、reap 等产品路径，stdout 输出，失败非零；它只是开发者主动选择的业务路径检查，不是默认流程或全局通过证明。
-- Deploy render/apply 只保留 manifest/env、schema bootstrap Job、API rollout 这类直接路径检查，stdout/stderr 输出，失败非零；不得生成诊断文档或报告文件。
-- OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已完成；app 消费 substrates 输出的 issuer/client/secret/backchannel。
-- Botified runner check 保留本地进程和 runner image 两层，覆盖 runner readiness、messages、timeline、file、state、abort。
-- API product workflow test 覆盖 login、workspace、project、endpoint、chat、file CRUD、task resources。
+- 使用 substrates 输出的 env/secrets 渲染和部署 app 已跑通；API/Web、schema bootstrap、JuiceFS PVC、sandbox RBAC 在本地单机 K8s 环境可用。
+- Keycloak/OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已通过手动验证；app 消费 substrates 输出的 issuer/client/secret/backchannel。
+- Botified runner image 可在 sandbox pod 中启动；Botified bash 能在 JuiceFS 挂载中写文件并发布 artifact；API 能读取 events、列出 artifacts、下载 artifact 内容。
+- cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
+- `scripts/deploy/check-product-workflow.sh` / `.mjs` 仍只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；它不是默认流程、发布判断或全局通过证明。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 
 仍需注意的现实：
 
-- Keycloak bootstrap 创建的本地登录用户只用于本地/operator 登录，不进入 app runtime。
-- README/OPERATOR 仍描述 built-in admin 本地路径；OIDC/Keycloak app integration 已完成，后续只做文档收敛和真实部署验证。
-- K8s/Botified/JuiceFS 的完整 artifact 流需要 local substrate 环境实际跑通。
+- Keycloak bootstrap 创建的本地登录用户只用于本地/operator 登录；真实产品路径应走 Web UI + OIDC session。
+- README/OPERATOR 中剩余 built-in admin 或 operator 语言需要继续收敛到 OIDC 产品路径。
+- 手动验证只说明 local single-node K8s 产品闭环当前可跑，不扩展成多环境发布证明或默认测试流程。
 - Cleanup 必须继续保持 runId/label fencing，不能扩大到非 app-owned resources。
 
 ## Immediate Next Work
 
-1. **Local K8s deploy loop**
-   - 使用 substrates 输出 env/secrets 渲染并部署 app。
-   - 确认 API/Web readiness、schema bootstrap、JuiceFS PVC、sandbox RBAC。
-   - 让 product workflow check 能对 live app 完成 auth/session、project、endpoint、file 基础路径。
-   - 验证 OIDC session 使用 public issuer，server-side backchannel 使用 in-cluster URL。
-
-2. **Botified task artifact loop**
-   - 确认 runner image 可在 sandbox pod 中启动。
-   - 通过 Botified bash 写入文件并 publish artifact。
-   - API 能读取 events、列出 artifacts、下载 artifact 内容。
-   - 增加只覆盖 task artifact 投影和下载路径的行为测试。
-
-3. **Cancel / TTL / Reap**
-   - cancel 调用 Botified abort，并标记 task/run state。
-   - TTL tick 只选中 app-owned expired resources。
-   - reap 支持 runId scoped dry-run/apply，并使用 label/UID fence。
-   - 补齐 cleanup 不越界的 targeted tests。
-
-4. **Web UI API client**
+1. **Real Web UI/OIDC product loop**
+   - 用户从真实 Web UI 进入 Keycloak/OIDC login/callback/session/logout。
    - UI 完成 workspace/project/endpoint/task/files/artifacts 最小操作面。
+   - UI 能创建 project、配置 endpoint、发起 task、查看 events、列出并下载 project files 和 task artifacts。
    - UI 不导入 app internals，不调用 `/api/operator/*`。
    - 继续用 boundary test 固定 API-client-only 约束。
 
-5. **Docs and commands stay small**
-   - README/OPERATOR 只保留可执行命令和核心边界。
+2. **Product API polish from the verified loop**
+   - 真实 Web UI 路径中发现的 session、CSRF、endpoint、file、task、artifact 状态问题，优先在服务端/API contract 中修正。
+   - task/cancel/reap 的 UI 展示只反映具体资源当前状态，不引入笼统健康、验收或发布判断。
+   - 继续保持 cleanup runId/label/UID fence，并只在相关逻辑变化时补小测试。
+
+3. **Docs and commands stay small**
+   - README/OPERATOR 只保留可执行命令、OIDC 产品路径和核心边界。
    - 新命令必须直接服务产品闭环，stdout/stderr 清晰，失败非零。
    - 删除与核心闭环无关的 prose tests、长矩阵、默认产物生成、报告/证据/流程包装。
+   - e2e/visual 如需使用，只能作为手动、独立、具体产品路径检查，不进入默认测试或发布流程。
 
 ## 禁止和清理
 

@@ -36,8 +36,20 @@
         <div class="panel">
           <div class="section-title">
             <h2>Workspaces</h2>
-            <button id="seed">Create Demo</button>
           </div>
+          <form id="workspace-project-form" class="stacked-form workspace-project-form">
+            <div class="form-grid">
+              <label>
+                Workspace name
+                <input name="workspaceName" required />
+              </label>
+              <label>
+                Project name
+                <input name="projectName" required />
+              </label>
+            </div>
+            <button type="submit">Create workspace/project</button>
+          </form>
           <p id="current-project" class="metric">No project</p>
           <div id="workspaces" class="list"></div>
         </div>

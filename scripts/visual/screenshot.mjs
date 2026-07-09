@@ -1,12 +1,13 @@
 import { chromium } from "@playwright/test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createApiServer } from "../../dist/packages/api-entry-node/src/server.js";
 
 const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-visual-"));
-const artifactBytes = new TextEncoder().encode("visual artifact");
+const artifactBytes = Buffer.from("visual artifact", "utf8");
 const server = await createApiServer({
   port: 0,
   dataRoot,
@@ -18,42 +19,101 @@ const server = await createApiServer({
 
 const executablePath = process.env.CHROME_PATH ?? (existsSync("/usr/bin/google-chrome-stable") ? "/usr/bin/google-chrome-stable" : undefined);
 const browser = await chromium.launch({ executablePath, headless: true });
+
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  await context.request.post(server.baseUrl + "/api/auth/bootstrap", { data: { password: "admin-password" } });
-  const login = await context.request.post(server.baseUrl + "/api/auth/login", {
-    data: { email: "admin@agentsmith-lite.local", password: "admin-password" }
-  });
-  const csrfToken = (await login.json()).csrfToken;
-  const workspace = await requestJson(context, "POST", "/api/workspaces", {
-    headers: { "x-csrf-token": csrfToken },
-    data: { name: "Visual Workspace" }
-  });
-  const project = await requestJson(context, "POST", `/api/workspaces/${workspace.id}/projects`, {
-    headers: { "x-csrf-token": csrfToken },
-    data: { name: "Visual Project" }
-  });
-  const endpoint = await requestJson(context, "POST", `/api/projects/${project.id}/endpoints`, {
-    headers: { "x-csrf-token": csrfToken },
-    data: {
-      name: "Visual Endpoint",
-      protocol: "openai_chat_completions",
-      baseUrl: "https://models.example.com/v1",
-      model: "gpt-compatible",
-      apiKeySecretRef: "secret/visual",
-      capabilities: ["text", "tool_calls"],
-      requestTimeoutSecs: 30
-    }
-  });
-  await requestJson(context, "POST", `/api/projects/${project.id}/tasks`, {
-    headers: { "x-csrf-token": csrfToken },
-    data: { endpointId: endpoint.id, prompt: "Visual task" }
-  });
   const page = await context.newPage();
   await page.goto(server.baseUrl + "/", { waitUntil: "networkidle" });
-  await page.waitForSelector("#artifacts");
-  const artifactText = await page.locator("#artifacts").textContent();
-  assert(artifactText?.includes("visual-artifact.txt"), "dashboard artifact section missing seeded artifact");
+
+  await page.locator("#login").waitFor({ state: "visible" });
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/api/auth/login") && response.request().method() === "POST"),
+    page.locator("#login-form button[type='submit']").click()
+  ]);
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+
+  await page.locator("#workspace-project-form input[name='workspaceName']").fill("Visual Workspace");
+  await page.locator("#workspace-project-form input[name='projectName']").fill("Visual Project");
+  await Promise.all([
+    page.waitForResponse((response) =>
+      response.url().endsWith("/api/workspaces") && response.request().method() === "POST"
+    ),
+    page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/api\/workspaces\/[^/]+\/projects$/.test(url.pathname) && response.request().method() === "POST";
+    }),
+    page.locator("#workspace-project-form button[type='submit']").click()
+  ]);
+  await waitForText(page, "#current-project", "Visual Workspace / Visual Project");
+
+  await page.locator("#endpoint-form input[name='name']").fill("Visual Endpoint");
+  await page.locator("#endpoint-form input[name='model']").fill("gpt-compatible");
+  await page.locator("#endpoint-form input[name='baseUrl']").fill("https://models.example.com/v1");
+  await page.locator("#endpoint-form input[name='secretRef']").fill("secret/visual");
+  await page.locator("#endpoint-form input[name='requestTimeoutSecs']").fill("30");
+  await submitAndWait(page, "#endpoint-form button[type='submit']", (response) => {
+    const url = new URL(response.url());
+    return /\/api\/projects\/[^/]+\/endpoints$/.test(url.pathname) && response.request().method() === "POST";
+  });
+  await waitForText(page, "#endpoints", "Visual Endpoint");
+
+  await page.locator("#task-form textarea[name='prompt']").fill("Visual task");
+  await submitAndWait(page, "#task-form button[type='submit']", (response) => {
+    const url = new URL(response.url());
+    return /\/api\/projects\/[^/]+\/tasks$/.test(url.pathname) && response.request().method() === "POST";
+  });
+  await waitForText(page, "#artifacts", "visual-artifact.txt");
+  await waitForText(page, "#tasks", "completed");
+  await waitForText(page, "#timeline-count", "completed");
+  await waitForText(page, "#timeline", "turn completed");
+  const artifactHref = await page.locator("#artifacts .download-link").first().getAttribute("href");
+  assert.match(artifactHref ?? "", /^\/api\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/);
+
+  await page.locator("#project-file-form input[name='path']").fill("files/visual-note.txt");
+  await page.locator("#project-file-form textarea[name='content']").fill("hello from visual screenshot");
+  await submitAndWait(page, "#project-file-form button[type='submit']", (response) => {
+    const url = new URL(response.url());
+    return /\/api\/projects\/[^/]+\/files$/.test(url.pathname) && response.request().method() === "POST";
+  });
+  await waitForText(page, "#files-count", "1 entry");
+  await waitForText(page, "#files", "files/visual-note.txt");
+  const fileHref = await page.locator("#files .download-link").first().getAttribute("href");
+  assert.match(fileHref ?? "", /^\/api\/projects\/[^/]+\/files\/download\?path=files%2Fvisual-note\.txt$/);
+  assert.doesNotMatch(fileHref ?? "", /(?:https?:\/\/|provider|botified|internal)/i);
+
+  await assertNoPanelOverlap(page);
+  await mkdir("out/visual", { recursive: true });
+  await page.screenshot({ path: "out/visual/agentsmith-lite-dashboard.png", fullPage: true });
+  console.log("Screenshot: out/visual/agentsmith-lite-dashboard.png");
+
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.waitForTimeout(100);
+  await assertNoPanelOverlap(page);
+  await page.screenshot({ path: "out/visual/agentsmith-lite-dashboard-mobile.png", fullPage: true });
+  console.log("Screenshot: out/visual/agentsmith-lite-dashboard-mobile.png");
+} finally {
+  await browser.close();
+  await server.close();
+  await rm(dataRoot, { recursive: true, force: true });
+}
+
+async function submitAndWait(page, selector, predicate) {
+  const [response] = await Promise.all([
+    page.waitForResponse(predicate),
+    page.locator(selector).click()
+  ]);
+  assert(response.ok(), `${selector} request failed with ${response.status()}`);
+  return response;
+}
+
+async function waitForText(page, selector, expected) {
+  await page.waitForFunction(
+    ({ selector, expected }) => document.querySelector(selector)?.textContent?.includes(expected),
+    { selector, expected }
+  );
+}
+
+async function assertNoPanelOverlap(page) {
   const overlaps = await page.evaluate(() => {
     const boxes = [...document.querySelectorAll(".panel")]
       .map((element) => {
@@ -81,55 +141,11 @@ try {
     }
     return hits;
   });
-  assert(overlaps.length === 0, `dashboard panels overlap: ${overlaps.join("; ")}`);
-  await mkdir("out/visual", { recursive: true });
-  await page.screenshot({ path: "out/visual/agentsmith-lite-dashboard.png", fullPage: true });
-  console.log("Screenshot: out/visual/agentsmith-lite-dashboard.png");
-} finally {
-  await browser.close();
-  await server.close();
-  await rm(dataRoot, { recursive: true, force: true });
-}
-
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
-
-async function requestJson(context, method, pathname, options) {
-  const response = await context.request.fetch(server.baseUrl + pathname, {
-    method,
-    ...options
-  });
-  const text = await response.text();
-  if (!response.ok()) {
-    throw new Error(`${method} ${pathname} failed with ${response.status()}: ${text}`);
-  }
-  return text ? JSON.parse(text) : {};
+  assert.deepEqual(overlaps, [], `dashboard panels overlap: ${overlaps.join("; ")}`);
 }
 
 function fakeBotifiedClient(bytes) {
-  const reads = [
-    {
-      status: "ok",
-      events: [
-        {
-          cursor: "c1",
-          seq: 1,
-          session_id: "s1",
-          type: "file.published",
-          payload: {
-            file_id: "visual_file_1",
-            filename: "visual-artifact.txt",
-            mime_type: "text/plain",
-            size_bytes: bytes.byteLength,
-            sha256: "d".repeat(64),
-            download_url: "http://botified.internal/v1/files/visual_file_1?service_key=visual-service-key"
-          }
-        }
-      ],
-      nextCursor: "c1"
-    }
-  ];
+  let published = false;
   return {
     async health() {
       return { status: "ok" };
@@ -138,15 +154,45 @@ function fakeBotifiedClient(bytes) {
       return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
     },
     async readTimeline(_baseUrl, _serviceKey, cursor) {
-      const next = reads.shift();
-      if (next) return next;
+      if (!published) {
+        published = true;
+        return {
+          status: "ok",
+          events: [
+            {
+              cursor: "c1",
+              seq: 1,
+              session_id: "s1",
+              type: "file.published",
+              payload: {
+                file_id: "visual_file_1",
+                filename: "visual-artifact.txt",
+                mime_type: "text/plain",
+                size_bytes: bytes.byteLength,
+                sha256: "d".repeat(64),
+                download_url: "http://botified.internal/v1/files/visual_file_1?service_key=visual-service-key"
+              }
+            },
+            {
+              cursor: "c2",
+              seq: 2,
+              session_id: "s1",
+              type: "turn.completed",
+              payload: {
+                status: "completed"
+              }
+            }
+          ],
+          nextCursor: "c2"
+        };
+      }
       return cursor ? { status: "ok", events: [], nextCursor: cursor } : { status: "ok", events: [] };
     },
     async uploadFile() {
       return { files: [] };
     },
     async downloadFile(_baseUrl, _serviceKey, fileId) {
-      assert(fileId === "visual_file_1", "unexpected Botified file id");
+      assert.equal(fileId, "visual_file_1", "unexpected Botified file id");
       return {
         bytes,
         filename: "visual-artifact.txt",

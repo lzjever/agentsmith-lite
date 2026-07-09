@@ -54,7 +54,25 @@ describe("web ui client boundary", () => {
     );
 
     const source = checked.map(([, text]) => text).join("\n");
+    assert.doesNotMatch(source, /Create Demo|Demo Workspace|Sandbox Project/, "browser UI must not hard-code demo workspace/project creation");
+    assert.match(source, /<form id="workspace-project-form"[\s\S]*name="workspaceName"[\s\S]*name="projectName"/);
+    assert.match(source, /const\s+workspaceProjectForm\s*=\s*document\.querySelector\("#workspace-project-form"\)/);
+    assert.match(
+      source,
+      /workspaceProjectForm\.addEventListener\("submit",\s*async\s*\(event\)\s*=>\s*\{[\s\S]*?const\s+form\s*=\s*new FormData\(workspaceProjectForm\)[\s\S]*?name:\s*formString\(form,\s*"workspaceName"\)[\s\S]*?name:\s*formString\(form,\s*"projectName"\)[\s\S]*?state\.workspaceId\s*=\s*workspace\.id[\s\S]*?state\.projectId\s*=\s*project\.id[\s\S]*?refreshDashboard\(\)/,
+      "browser UI must create workspace/project from user-entered form values and refresh the dashboard"
+    );
     const requiredWorkflowRoutes = [
+      {
+        name: "workspace create",
+        route: /\/api\/workspaces/,
+        method: /api\("\/api\/workspaces",[\s\S]*?method:\s*"POST"[\s\S]*?csrf:\s*state\.csrfToken/
+      },
+      {
+        name: "project create",
+        route: /\/api\/workspaces\/\$\{[^}]+}\/projects/,
+        method: /api\(`\/api\/workspaces\/\$\{[^}]+}\/projects`,[\s\S]*?method:\s*"POST"[\s\S]*?csrf:\s*state\.csrfToken/
+      },
       {
         name: "endpoint create",
         route: /\/api\/projects\/\$\{[^}]+}\/endpoints/,

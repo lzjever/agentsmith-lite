@@ -18,7 +18,7 @@ const loginEl = document.querySelector("#login");
 const dashboardEl = document.querySelector("#dashboard");
 const statusMessageEl = document.querySelector("#status-message");
 const loginForm = document.querySelector("#login-form");
-const seedButton = document.querySelector("#seed");
+const workspaceProjectForm = document.querySelector("#workspace-project-form");
 const endpointForm = document.querySelector("#endpoint-form");
 const chatForm = document.querySelector("#chat-form");
 const taskForm = document.querySelector("#task-form");
@@ -60,24 +60,30 @@ loginForm.addEventListener("submit", async (event) => {
   }
 });
 
-seedButton.addEventListener("click", async () => {
+workspaceProjectForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(workspaceProjectForm);
   try {
+    setFormDisabled(workspaceProjectForm, true);
     const workspace = await api("/api/workspaces", {
       method: "POST",
       csrf: state.csrfToken,
-      body: { name: "Demo Workspace" }
+      body: { name: formString(form, "workspaceName") }
     });
     const project = await api(`/api/workspaces/${workspace.id}/projects`, {
       method: "POST",
       csrf: state.csrfToken,
-      body: { name: "Sandbox Project" }
+      body: { name: formString(form, "projectName") }
     });
     state.workspaceId = workspace.id;
     state.projectId = project.id;
-    setStatus("Demo project created.", "success");
+    workspaceProjectForm.reset();
+    setStatus("Project created.", "success");
     await refreshDashboard();
   } catch (error) {
     setStatus(errorMessage(error), "error");
+  } finally {
+    setFormDisabled(workspaceProjectForm, false);
   }
 });
 
@@ -317,7 +323,7 @@ function renderWorkspaces(workspaces, currentProject, data) {
     });
     node.append(actions);
     return node;
-  }) : [item("No workspace", "Create demo project")]));
+  }) : [item("No workspace", "Create a workspace/project")]));
 }
 
 async function selectProject(projectId, data) {
@@ -471,7 +477,7 @@ async function refreshProjectFiles() {
   const filesCount = document.querySelector("#files-count");
   if (!state.projectId) {
     filesCount.textContent = "0 entries";
-    files.replaceChildren(item("No project", "Create a demo project first"));
+    files.replaceChildren(item("No project", "Create a project first"));
     return;
   }
   try {
