@@ -80,26 +80,33 @@ try {
   assert(artifactPath, "artifact download did not produce a local file");
   assert.equal(await readFile(artifactPath, "utf8"), "web product artifact");
 
-  await page.locator("#project-file-form input[name='path']").fill("files/web-product.txt");
-  await page.locator("#project-file-form textarea[name='content']").fill("hello from web product e2e");
+  const projectFilePath = "files/web/nested/web-product.txt";
+  const projectFileContent = "hello from web product e2e";
+  await page.locator("#project-file-form input[name='path']").fill(projectFilePath);
+  await page.locator("#project-file-form textarea[name='content']").fill(projectFileContent);
   const uploadResponse = await submitAndWait(page, "#project-file-form button[type='submit']", (response) => {
     const url = new URL(response.url());
     return /\/api\/projects\/[^/]+\/files$/.test(url.pathname) && response.request().method() === "POST";
   });
   assert(uploadResponse.ok(), "project file upload failed");
-  await waitForText(page, "#files", "files/web-product.txt");
+  await waitForText(page, "#files", "files/web");
+  await openProjectDirectory(page, "files/web");
+  await waitForText(page, "#files", "files/web/nested");
+  await openProjectDirectory(page, "files/web/nested");
+  await waitForText(page, "#files", projectFilePath);
 
   const fileDownload = await clickDownload(page, "#files .download-link");
   const filePath = await fileDownload.path();
   assert(filePath, "project file download did not produce a local file");
-  assert((await readFile(filePath, "utf8")).includes("hello from web product e2e"), "project file download missing uploaded content");
+  assert.equal(fileDownload.suggestedFilename(), "web-product.txt");
+  assert.equal(await readFile(filePath, "utf8"), projectFileContent);
 
-  const deleteResponse = await submitAndWait(page, "#files .danger-button", (response) => {
+  const deleteResponse = await submitAndWait(page, projectFileActionSelector(projectFilePath, ".danger-button"), (response) => {
     const url = new URL(response.url());
     return /\/api\/projects\/[^/]+\/files$/.test(url.pathname) && response.request().method() === "DELETE";
   });
   assert(deleteResponse.ok(), "project file delete failed");
-  await page.waitForFunction(() => !document.querySelector("#files")?.textContent?.includes("files/web-product.txt"));
+  await page.waitForFunction((filePath) => !document.querySelector("#files")?.textContent?.includes(filePath), projectFilePath);
 
   assert.deepEqual(pageErrors, []);
   console.log("e2e:web-product passed");
@@ -123,6 +130,14 @@ async function clickDownload(page, selector) {
     page.locator(selector).first().click()
   ]);
   return download;
+}
+
+async function openProjectDirectory(page, directoryPath) {
+  await page.locator("#files .item", { hasText: directoryPath }).first().locator("button", { hasText: "Open" }).click();
+}
+
+function projectFileActionSelector(filePath, actionSelector) {
+  return `#files .item:has-text("${filePath}") ${actionSelector}`;
 }
 
 async function waitForText(page, selector, expected) {

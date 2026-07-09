@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { FileService } from "../../packages/application/src/fileService.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 
 describe("file CRUD service", () => {
   it("uploads, lists, downloads, and deletes UTF-8 project files under files/", async () => {
@@ -25,7 +26,11 @@ describe("file CRUD service", () => {
       assert.deepEqual(nested.entries.map((entry) => [entry.path, entry.type, entry.size]), [["files/notes/plan.md", "file", 16]]);
 
       const downloaded = await service.downloadTextFile(root, "files/notes/plan.md");
-      assert.deepEqual(downloaded, { path: "files/notes/plan.md", content: "hello from files" });
+      assert.deepEqual(downloaded, {
+        path: "files/notes/plan.md",
+        filename: "plan.md",
+        content: "hello from files"
+      });
 
       assert.deepEqual(await service.deleteFile(root, "files/notes/plan.md"), { deleted: true });
       assert.deepEqual((await service.listFiles(root, "files/notes")).entries, []);
@@ -53,7 +58,34 @@ describe("file CRUD service", () => {
       );
       await assert.rejects(
         () => service.deleteFile(root, "files"),
-        /Cannot delete the files root/
+        (error) => productError(error, 400, /Cannot delete the files root/)
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects directory downloads and only deletes regular files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
+    try {
+      const service = new FileService();
+      await mkdir(path.join(root, "files", "notes"), { recursive: true });
+
+      await assert.rejects(
+        () => service.downloadTextFile(root, "files/notes"),
+        (error) => productError(error, 400, /Path is a directory/)
+      );
+      await assert.rejects(
+        () => service.deleteFile(root, "files/notes"),
+        (error) => productError(error, 400, /Path is not a regular file/)
+      );
+      await assert.rejects(
+        () => service.deleteFile(root, "files/missing.txt"),
+        (error) => productError(error, 404, /File not found/)
+      );
+      await assert.rejects(
+        () => service.deleteFile(root, "files"),
+        (error) => productError(error, 400, /Cannot delete the files root/)
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -87,4 +119,30 @@ describe("file CRUD service", () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  it("rejects deletion through a symlink parent inside project files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
+    try {
+      await mkdir(path.join(root, "files", "safe"), { recursive: true });
+      const targetPath = path.join(root, "files", "safe", "target.txt");
+      await writeFile(targetPath, "keep me");
+      await symlink(path.join(root, "files", "safe"), path.join(root, "files", "link"));
+
+      const service = new FileService();
+      await assert.rejects(
+        () => service.deleteFile(root, "files/link/target.txt"),
+        (error) => productError(error, 400, /Path uses a symlink/)
+      );
+      assert.equal(await readFile(targetPath, "utf8"), "keep me");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
+
+function productError(error: unknown, statusCode: number, message: RegExp): boolean {
+  assert.ok(error instanceof ProductError);
+  assert.equal(error.statusCode, statusCode);
+  assert.match(error.message, message);
+  return true;
+}

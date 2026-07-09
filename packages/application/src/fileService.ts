@@ -46,14 +46,14 @@ export class FileService {
     const normalizedPath = this.normalizeProjectFilesPath(input, options);
     return {
       normalizedPath,
-      absolutePath: await this.paths.resolveSafeProjectPath(projectRoot, normalizedPath)
+      absolutePath: await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath)
     };
   }
 
   async uploadTextFile(projectRoot: string, input: UploadProjectFileInput): Promise<ProjectFileWriteResponse> {
     const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
     await mkdir(path.dirname(absolutePath), { recursive: true });
-    await this.paths.resolveSafeProjectPath(projectRoot, normalizedPath);
+    await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
     await writeFile(absolutePath, input.content, "utf8");
     return {
       path: normalizedPath,
@@ -121,8 +121,12 @@ export class FileService {
       if (entryStat.isDirectory()) {
         throw new ProductError("Path is a directory");
       }
+      if (!entryStat.isFile()) {
+        throw new ProductError("Path is not a regular file");
+      }
       return {
         path: normalizedPath,
+        filename: path.posix.basename(normalizedPath),
         content: await readFile(absolutePath, "utf8")
       };
     } catch (error) {
@@ -140,6 +144,18 @@ export class FileService {
     const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
     if (normalizedPath === "files") {
       throw new ProductError("Cannot delete the files root");
+    }
+    let entryStat;
+    try {
+      entryStat = await lstat(absolutePath);
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new ProductError("File not found", 404);
+      }
+      throw error;
+    }
+    if (!entryStat.isFile()) {
+      throw new ProductError("Path is not a regular file");
     }
     try {
       await rm(absolutePath);

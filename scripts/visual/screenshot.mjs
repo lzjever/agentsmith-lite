@@ -69,16 +69,26 @@ try {
   const artifactHref = await page.locator("#artifacts .download-link").first().getAttribute("href");
   assert.match(artifactHref ?? "", /^\/api\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/);
 
-  await page.locator("#project-file-form input[name='path']").fill("files/visual-note.txt");
+  const visualFilePath = "files/visual/nested/visual-note.txt";
+  await page.locator("#project-file-form input[name='path']").fill(visualFilePath);
   await page.locator("#project-file-form textarea[name='content']").fill("hello from visual screenshot");
   await submitAndWait(page, "#project-file-form button[type='submit']", (response) => {
     const url = new URL(response.url());
     return /\/api\/projects\/[^/]+\/files$/.test(url.pathname) && response.request().method() === "POST";
   });
-  await waitForText(page, "#files-count", "1 entry");
-  await waitForText(page, "#files", "files/visual-note.txt");
-  const fileHref = await page.locator("#files .download-link").first().getAttribute("href");
-  assert.match(fileHref ?? "", /^\/api\/projects\/[^/]+\/files\/download\?path=files%2Fvisual-note\.txt$/);
+  await waitForText(page, "#files-count", "files · 1 entry");
+  await waitForText(page, "#files", "files/visual");
+  await openProjectDirectory(page, "files/visual");
+  await waitForText(page, "#files-count", "files/visual · 1 entry");
+  await waitForText(page, "#files", "Parent directory");
+  await waitForText(page, "#files", "files/visual/nested");
+  await openProjectDirectory(page, "files/visual/nested");
+  await waitForText(page, "#files-count", "files/visual/nested · 1 entry");
+  await waitForText(page, "#files", "Parent directory");
+  await waitForText(page, "#files", visualFilePath);
+  await assertProjectFileNestedControls(page, visualFilePath);
+  const fileHref = await page.locator("#files .item", { hasText: visualFilePath }).locator(".download-link").getAttribute("href");
+  assert.match(fileHref ?? "", /^\/api\/projects\/[^/]+\/files\/download\?path=files%2Fvisual%2Fnested%2Fvisual-note\.txt$/);
   assert.doesNotMatch(fileHref ?? "", /(?:https?:\/\/|provider|botified|internal)/i);
 
   await assertNoPanelOverlap(page);
@@ -111,6 +121,22 @@ async function waitForText(page, selector, expected) {
     ({ selector, expected }) => document.querySelector(selector)?.textContent?.includes(expected),
     { selector, expected }
   );
+}
+
+async function openProjectDirectory(page, directoryPath) {
+  await page.locator("#files .item", { hasText: directoryPath }).first().locator("button", { hasText: "Open" }).click();
+}
+
+async function assertProjectFileNestedControls(page, filePath) {
+  const parentRow = page.locator("#files .item", { hasText: "Parent directory" }).first();
+  await expectVisible(parentRow.locator("button", { hasText: "Up" }));
+  const fileRow = page.locator("#files .item", { hasText: filePath }).first();
+  await expectVisible(fileRow.locator(".download-link", { hasText: "Download" }));
+  await expectVisible(fileRow.locator("button", { hasText: "Delete" }));
+}
+
+async function expectVisible(locator) {
+  assert.equal(await locator.isVisible(), true);
 }
 
 async function assertNoPanelOverlap(page) {

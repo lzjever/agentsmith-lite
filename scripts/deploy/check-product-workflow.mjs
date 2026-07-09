@@ -166,12 +166,12 @@ async function main() {
     throw new Error("uploaded workflow check file was not listed");
   }
 
-  const downloaded = await workflow.requestJson(
+  const downloaded = await workflow.requestText(
     "GET",
     `/api/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(workflowNames.filePath)}`,
     { auth: true }
   );
-  if (downloaded.path !== workflowNames.filePath || downloaded.content !== FILE_CONTENT) {
+  if (downloaded !== FILE_CONTENT) {
     throw new Error("downloaded workflow check file did not match uploaded content");
   }
 

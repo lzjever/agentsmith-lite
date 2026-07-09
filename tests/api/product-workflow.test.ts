@@ -71,23 +71,25 @@ describe("api product workflow", () => {
       endpointId: endpoint.id,
       messages: [{ role: "user", content: "hello" }]
     }, cookie, csrf);
+    const filePath = "files/docs/readme.md";
     const fileContent = "hello from API product workflow";
     const fileValidation = await postJson(`/api/projects/${project.id}/files/validate`, {
-      path: "files/readme.md"
+      path: filePath
     }, cookie, csrf);
     const uploadedFile = await requestJson("POST", `/api/projects/${project.id}/files`, {
-      path: "files/readme.md",
+      path: filePath,
       content: fileContent
     }, cookie, csrf);
-    const listedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
-    const downloadedFile = await requestJson(
+    const listedRootFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
+    const listedNestedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
+    const downloadedFile = await request(
       "GET",
-      `/api/projects/${project.id}/files/download?path=${encodeURIComponent("files/readme.md")}`,
+      `/api/projects/${project.id}/files/download?path=${encodeURIComponent(filePath)}`,
       undefined,
       cookie
     );
     const deletedFile = await requestJson("DELETE", `/api/projects/${project.id}/files`, {
-      path: "files/readme.md"
+      path: filePath
     }, cookie, csrf);
     const task = await postJson(`/api/projects/${project.id}/tasks`, {
       prompt: "write a file",
@@ -108,10 +110,21 @@ describe("api product workflow", () => {
       model: "gpt-compatible",
       protocol: "openai_chat_completions"
     });
-    assert.equal(fileValidation.normalizedPath, "files/readme.md");
-    assert.deepEqual(uploadedFile, { path: "files/readme.md", bytes: Buffer.byteLength(fileContent) });
-    assert.equal(listedFiles.entries.some((entry: { path: string }) => entry.path === "files/readme.md"), true);
-    assert.deepEqual(downloadedFile, { path: "files/readme.md", content: fileContent });
+    assert.deepEqual(fileValidation, { normalizedPath: filePath });
+    assert.equal("absolutePath" in fileValidation, false);
+    assert.deepEqual(uploadedFile, { path: filePath, bytes: Buffer.byteLength(fileContent) });
+    assert.equal(listedRootFiles.entries.some((entry: { path: string; type: string }) =>
+      entry.path === "files/docs" && entry.type === "directory"
+    ), true);
+    assert.equal(listedNestedFiles.entries.some((entry: { path: string; type: string }) =>
+      entry.path === filePath && entry.type === "file"
+    ), true);
+    assert.equal(downloadedFile.status, 200);
+    assert.equal(downloadedFile.headers.get("content-type"), "application/octet-stream");
+    assert.equal(downloadedFile.headers.get("content-length"), String(Buffer.byteLength(fileContent)));
+    assert.equal(downloadedFile.headers.get("content-disposition"), "attachment; filename=\"readme.md\"");
+    assert.equal(downloadedFile.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(await downloadedFile.text(), fileContent);
     assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "running");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);
@@ -148,6 +161,14 @@ describe("api product workflow", () => {
   }
 
   async function requestJson(method: string, pathname: string, body: unknown, cookie: string, csrf?: string) {
+    const response = await request(method, pathname, body, cookie, csrf);
+    if (response.status !== 200) {
+      assert.fail(await response.text());
+    }
+    return response.json();
+  }
+
+  async function request(method: string, pathname: string, body: unknown, cookie: string, csrf?: string) {
     const headers: Record<string, string> = { "content-type": "application/json", cookie };
     if (csrf) {
       headers["x-csrf-token"] = csrf;
@@ -156,11 +177,7 @@ describe("api product workflow", () => {
     if (body) {
       requestInit.body = JSON.stringify(body);
     }
-    const response = await fetch(baseUrl + pathname, requestInit);
-    if (response.status !== 200) {
-      assert.fail(await response.text());
-    }
-    return response.json();
+    return fetch(baseUrl + pathname, requestInit);
   }
 });
 

@@ -303,7 +303,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       if (segments[4] === "validate" && method === "POST") {
         const body = await readJson(req);
         const resolved = await services.files.resolveProjectFilesPath(projectRoot, asString(body.path), { allowFilesRoot: true });
-        return sendJson(res, 200, { normalizedPath: resolved.normalizedPath, absolutePath: resolved.absolutePath });
+        return sendJson(res, 200, { normalizedPath: resolved.normalizedPath });
       }
       if (!segments[4] && method === "GET") {
         return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
@@ -316,7 +316,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
         return sendJson(res, 200, await services.files.deleteFile(projectRoot, asString(body.path)));
       }
       if (segments[4] === "download" && method === "GET") {
-        return sendJson(res, 200, await services.files.downloadTextFile(projectRoot, requiredSearchParam(url, "path")));
+        return sendProjectFileDownload(res, await services.files.downloadTextFile(projectRoot, requiredSearchParam(url, "path")));
       }
     }
     if (segments[3] === "tasks") {
@@ -444,6 +444,20 @@ function sendArtifactDownload(
     "x-content-type-options": "nosniff"
   });
   res.end(download.bytes);
+}
+
+function sendProjectFileDownload(
+  res: ServerResponse,
+  download: Awaited<ReturnType<Services["files"]["downloadTextFile"]>>
+): void {
+  const bytes = Buffer.from(download.content, "utf8");
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(bytes.byteLength),
+    "content-disposition": `attachment; filename="${headerFilename(download.filename)}"`,
+    "x-content-type-options": "nosniff"
+  });
+  res.end(bytes);
 }
 
 function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {

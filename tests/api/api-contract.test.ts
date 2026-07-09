@@ -67,7 +67,7 @@ function extractServerRoutes(source: string): string[] {
 
   for (const line of routeApiSource.split(/\r?\n/)) {
     const activeContext = stack[stack.length - 1] ?? root;
-    if (/\breturn\s+(?:sendJson|sendArtifactDownload|sendRedirect)\(/.test(line)) {
+    if (/\breturn\s+(?:sendJson|sendArtifactDownload|sendProjectFileDownload|sendRedirect)\(/.test(line)) {
       routes.push(...routesForContext(activeContext));
     }
 

@@ -138,8 +138,8 @@ describe("web ui client boundary", () => {
       },
       {
         name: "project file list",
-        route: /\/api\/projects\/\$\{[^}]+}\/files\?path=files/,
-        method: /api\(`\/api\/projects\/\$\{[^}]+}\/files\?path=files`\)/
+        route: /\/api\/projects\/\$\{[^}]+}\/files\?path=\$\{encodeURIComponent\(state\.projectFilesPath\)}/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/files\?path=\$\{encodeURIComponent\(state\.projectFilesPath\)}`\)/
       },
       {
         name: "project file download",
@@ -258,7 +258,7 @@ function isProductApiTarget(target: string): boolean {
     /^\/api\/projects\/\$\{[^}]+}\/endpoints$/,
     /^\/api\/projects\/\$\{[^}]+}\/chat$/,
     /^\/api\/projects\/\$\{[^}]+}\/tasks$/,
-    /^\/api\/projects\/\$\{[^}]+}\/files(?:\?path=files)?$/,
+    /^\/api\/projects\/\$\{[^}]+}\/files(?:\?path=(?:files|\$\{encodeURIComponent\(state\.projectFilesPath\)}))?$/,
     /^\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}$/,
     /^\/api\/tasks\/\$\{[^}]+}\/events$/,
     /^\/api\/tasks\/\$\{[^}]+}\/artifacts$/,

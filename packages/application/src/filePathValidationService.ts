@@ -35,6 +35,39 @@ export class FilePathValidationService {
     }
     return candidate;
   }
+
+  async resolveSafeProjectPathNoSymlinks(projectRoot: string, input: string): Promise<string> {
+    const candidate = await this.resolveSafeProjectPath(projectRoot, input);
+    await assertNoSymlinkExistingPrefix(await realpath(projectRoot), candidate);
+    return candidate;
+  }
+}
+
+async function assertNoSymlinkExistingPrefix(root: string, candidate: string): Promise<void> {
+  const relative = path.relative(root, candidate);
+  if (relative === "") {
+    return;
+  }
+
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    if (!segment) {
+      continue;
+    }
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch (error) {
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new ProductError("Path uses a symlink");
+    }
+  }
 }
 
 async function realpathExistingPrefix(candidate: string): Promise<string> {
@@ -65,3 +98,6 @@ function isWithin(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}

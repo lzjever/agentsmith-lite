@@ -3,6 +3,7 @@ const state = {
   csrfToken: null,
   workspaceId: null,
   projectId: null,
+  projectFilesPath: "files",
   endpointId: null,
   selectedTaskId: null,
   sessionEpoch: 0,
@@ -106,6 +107,7 @@ workspaceProjectForm.addEventListener("submit", async (event) => {
     });
     state.workspaceId = workspace.id;
     state.projectId = project.id;
+    state.projectFilesPath = "files";
     workspaceProjectForm.reset();
     setStatus("Project created.", "success");
     await refreshDashboard();
@@ -281,7 +283,7 @@ async function refreshDashboard() {
     return;
   }
   if (!response.ok) {
-    setStatus(await response.text(), "error");
+    setStatus(await responseErrorMessage(response), "error");
     return;
   }
 
@@ -316,6 +318,7 @@ function clearSessionState() {
   state.csrfToken = null;
   state.workspaceId = null;
   state.projectId = null;
+  state.projectFilesPath = "files";
   state.endpointId = null;
   state.selectedTaskId = null;
   state.endpoints = [];
@@ -331,11 +334,15 @@ function handleUnauthorizedSession() {
 }
 
 function renderDashboard(data) {
+  const previousProjectId = state.projectId;
   const projects = data.workspaces.flatMap((workspace) =>
     workspace.projects.map((project) => ({ ...project, workspaceName: workspace.name }))
   );
   if (!state.projectId || !projects.some((project) => project.id === state.projectId)) {
     state.projectId = projects[0]?.id ?? null;
+  }
+  if (state.projectId !== previousProjectId) {
+    state.projectFilesPath = "files";
   }
   const currentProject = projects.find((project) => project.id === state.projectId) ?? null;
   state.workspaceId = currentProject?.workspaceId ?? null;
@@ -398,6 +405,7 @@ async function selectProject(projectId, data) {
   }
 
   state.projectId = projectId;
+  state.projectFilesPath = "files";
   const current = renderDashboard(data);
   await Promise.all([
     refreshProjectFiles(),
@@ -609,11 +617,14 @@ async function refreshProjectFiles() {
     return;
   }
   try {
-    const listed = await api(`/api/projects/${state.projectId}/files?path=files`);
-    filesCount.textContent = `${listed.entries.length} entr${listed.entries.length === 1 ? "y" : "ies"}`;
-    files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) =>
-      projectFileItem(entry)
-    ) : [item("files/", "0 entries")]));
+    const listed = await api(`/api/projects/${state.projectId}/files?path=${encodeURIComponent(state.projectFilesPath)}`);
+    const entries = Array.isArray(listed.entries) ? listed.entries : [];
+    filesCount.textContent = `${state.projectFilesPath} · ${entries.length} entr${entries.length === 1 ? "y" : "ies"}`;
+    const rows = [
+      ...(state.projectFilesPath === "files" ? [] : [projectFileParentItem()]),
+      ...entries.map((entry) => projectFileItem(entry))
+    ];
+    files.replaceChildren(...(rows.length > 0 ? rows : [item(state.projectFilesPath, "0 entries")]));
   } catch (error) {
     filesCount.textContent = "Unavailable";
     files.replaceChildren(item("Files unavailable", errorMessage(error)));
@@ -711,17 +722,23 @@ function artifactItem(task, artifact) {
 
 function projectFileItem(entry) {
   const node = item(entry.path, entry.type === "file" ? `${entry.size} bytes` : "directory");
-  if (entry.type !== "file") {
-    return node;
-  }
-
   const actions = document.createElement("div");
   actions.className = "item-actions";
+
+  if (entry.type === "directory") {
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "secondary-button";
+    openButton.textContent = "Open";
+    openButton.addEventListener("click", () => openProjectDirectory(entry.path));
+    actions.append(openButton);
+    node.append(actions);
+    return node;
+  }
 
   const link = document.createElement("a");
   link.className = "download-link";
   link.href = `/api/projects/${state.projectId}/files/download?path=${encodeURIComponent(entry.path)}`;
-  link.download = entry.path.split("/").at(-1) || entry.path;
   link.textContent = "Download";
   actions.append(link);
 
@@ -736,6 +753,26 @@ function projectFileItem(entry) {
   return node;
 }
 
+function projectFileParentItem() {
+  const parent = projectFileParentPath(state.projectFilesPath);
+  const node = item("Parent directory", parent);
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+  const upButton = document.createElement("button");
+  upButton.type = "button";
+  upButton.className = "secondary-button";
+  upButton.textContent = "Up";
+  upButton.addEventListener("click", () => openProjectDirectory(parent));
+  actions.append(upButton);
+  node.append(actions);
+  return node;
+}
+
+async function openProjectDirectory(path) {
+  state.projectFilesPath = path;
+  await refreshProjectFiles();
+}
+
 async function deleteProjectFile(path) {
   try {
     await api(`/api/projects/${state.projectId}/files`, {
@@ -748,6 +785,14 @@ async function deleteProjectFile(path) {
   } catch (error) {
     setStatus(errorMessage(error), "error");
   }
+}
+
+function projectFileParentPath(input) {
+  const parts = String(input).split("/").filter(Boolean);
+  if (parts.length <= 1) {
+    return "files";
+  }
+  return parts.slice(0, -1).join("/");
 }
 
 function formString(form, name) {
@@ -824,7 +869,7 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   if (!response.ok) {
-    const error = new Error(await response.text());
+    const error = new Error(await responseErrorMessage(response));
     error.status = response.status;
     if (response.status === 401) {
       handleUnauthorizedSession();
@@ -832,6 +877,24 @@ async function api(path, options = {}) {
     throw error;
   }
   return response.json();
+}
+
+async function responseErrorMessage(response) {
+  const text = await response.text();
+  if (response.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const body = JSON.parse(text);
+      if (typeof body?.error === "string") {
+        return body.error;
+      }
+      if (typeof body?.error?.message === "string") {
+        return body.error.message;
+      }
+    } catch {
+      return text;
+    }
+  }
+  return text;
 }
 
 function isUnauthorizedError(error) {

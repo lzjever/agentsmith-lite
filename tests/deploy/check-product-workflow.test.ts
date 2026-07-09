@@ -755,7 +755,9 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       req.method === "GET" &&
       req.url === `/api/projects/${options.projectId}/files/download?path=${encodeURIComponent(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}`
     ) {
-      res.end(JSON.stringify({ path: workflowNames.filePath, content: workflowFileContent }));
+      res.setHeader("content-type", "application/octet-stream");
+      res.setHeader("content-disposition", `attachment; filename="${path.basename(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}"`);
+      res.end(workflowFileContent);
     } else if (req.method === "DELETE" && req.url === `/api/projects/${options.projectId}/files`) {
       assert.deepEqual(parsedBody, { path: requiredWorkflowName(workflowNames.filePath, "workflow file path") });
       res.end(JSON.stringify({ deleted: true }));

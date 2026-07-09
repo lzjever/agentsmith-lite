@@ -212,6 +212,7 @@ export interface ProjectFileWriteResponse {
 
 export interface ProjectFileContentResponse {
   path: string;
+  filename: string;
   content: string;
 }
 
