@@ -22,19 +22,19 @@ Aggressively remove existing and new governance overhead:
 - evidence/report/rehearsal/release/gate/matrix systems;
 - default `*-report.json` outputs and report-only fields;
 - diagnostic document generation;
-- umbrella validation concepts and pass/fail summaries detached from real product paths;
-- default release validation gates or broad product health proofs;
+- umbrella validation names, all-clear labels, and pass/fail summaries detached from real product paths;
+- default release validation gates or broad product proof concepts;
 - tests that test the testing or release machinery;
 - tests that assert docs prose;
 - generated archives or indexes that are not needed to run the product.
 
-Scripts should do the work, print concise stdout/stderr, and fail with a non-zero exit code. Do not add report generation as a substitute for fixing the failing code path.
+Scripts should do the work, print concise stdout/stderr, and fail with a non-zero exit code. Name useful checks after the concrete product path they exercise, not after generic readiness or acceptance concepts. Do not add report generation as a substitute for fixing the failing code path.
 
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
-- Choose the minimum verification for the current change; do not treat checks as a default release gate or general acceptance proof.
+- Choose the minimum verification for the current change; do not treat checks as a default release gate, general acceptance proof, or broad all-clear.
 - Do not run broad unrelated suites by default.
 - e2e and visual checks are manual diagnostics only. Run them only when the user explicitly asks or a specific UI/cross-component risk justifies it.
 - Do not test tests, screenshots, report shape, or governance commands.
