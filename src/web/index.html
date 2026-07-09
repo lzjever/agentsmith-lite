@@ -117,10 +117,18 @@
           <div id="artifacts" class="list"></div>
         </div>
         <div class="panel">
-          <div class="section-title">
-            <h2>Project Files</h2>
-            <button id="upload-file">Upload Demo</button>
-          </div>
+          <h2>Project Files</h2>
+          <form id="project-file-form" class="stacked-form">
+            <label>
+              Path
+              <input name="path" placeholder="files/readme.md" required />
+            </label>
+            <label>
+              Content
+              <textarea name="content" rows="4" required></textarea>
+            </label>
+            <button type="submit">Upload file</button>
+          </form>
           <p id="files-count" class="metric">0 entries</p>
           <div id="files" class="list"></div>
         </div>

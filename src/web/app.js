@@ -22,10 +22,10 @@ const seedButton = document.querySelector("#seed");
 const endpointForm = document.querySelector("#endpoint-form");
 const chatForm = document.querySelector("#chat-form");
 const taskForm = document.querySelector("#task-form");
+const projectFileForm = document.querySelector("#project-file-form");
 const chatEndpointSelect = document.querySelector("#chat-endpoint");
 const taskEndpointSelect = document.querySelector("#task-endpoint");
 const chatReplyEl = document.querySelector("#chat-reply");
-const uploadFileButton = document.querySelector("#upload-file");
 
 await refreshBootstrap();
 await refreshHealth();
@@ -192,20 +192,25 @@ taskEndpointSelect.addEventListener("change", () => {
   syncEndpointSelects();
 });
 
-uploadFileButton.addEventListener("click", async () => {
-  if (!state.projectId) return;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+projectFileForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.projectId) {
+    setStatus("Create a project first.", "error");
+    return;
+  }
+
+  const form = new FormData(projectFileForm);
+  const path = String(form.get("path") ?? "");
+  const content = String(form.get("content") ?? "");
   try {
     await api(`/api/projects/${state.projectId}/files`, {
       method: "POST",
       csrf: state.csrfToken,
-      body: {
-        path: `files/demo-${stamp}.txt`,
-        content: `Created ${stamp}`
-      }
+      body: { path, content }
     });
-    setStatus("Demo file uploaded.", "success");
-    await refreshDashboard();
+    projectFileForm.reset();
+    setStatus("Project file uploaded.", "success");
+    await refreshProjectFiles();
   } catch (error) {
     setStatus(errorMessage(error), "error");
   }
@@ -429,7 +434,6 @@ function renderTimeline(tasks) {
 async function refreshProjectFiles() {
   const files = document.querySelector("#files");
   const filesCount = document.querySelector("#files-count");
-  uploadFileButton.disabled = !state.projectId;
   if (!state.projectId) {
     filesCount.textContent = "0 entries";
     files.replaceChildren(item("No project", "Create a demo project first"));
@@ -499,7 +503,7 @@ function syncWorkflowControls(hasProject, hasEndpoint) {
   setFormDisabled(endpointForm, !hasProject);
   setFormDisabled(chatForm, !hasProject || !hasEndpoint);
   setFormDisabled(taskForm, !hasProject || !hasEndpoint);
-  uploadFileButton.disabled = !hasProject;
+  setFormDisabled(projectFileForm, !hasProject);
 }
 
 function setFormDisabled(form, disabled) {

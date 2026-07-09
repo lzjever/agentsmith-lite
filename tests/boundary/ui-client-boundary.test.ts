@@ -101,6 +101,11 @@ describe("web ui client boundary", () => {
         method: /href\s*=\s*`\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}[^`]*`/
       },
       {
+        name: "project file upload",
+        route: /\/api\/projects\/\$\{[^}]+}\/files/,
+        method: /const\s+form\s*=\s*new FormData\(projectFileForm\)[\s\S]*?const\s+path\s*=\s*String\(form\.get\("path"\)\s*\?\?\s*""\)[\s\S]*?const\s+content\s*=\s*String\(form\.get\("content"\)\s*\?\?\s*""\)[\s\S]*?api\(`\/api\/projects\/\$\{[^}]+}\/files`,[\s\S]*?method:\s*"POST"[\s\S]*?csrf:\s*state\.csrfToken[\s\S]*?body:\s*\{[\s\S]*?path[\s\S]*?content[\s\S]*?}/
+      },
+      {
         name: "project file delete",
         route: /\/api\/projects\/\$\{[^}]+}\/files/,
         method: /api\(`\/api\/projects\/\$\{[^}]+}\/files`,[\s\S]*?method:\s*"DELETE"[\s\S]*?csrf:\s*state\.csrfToken[\s\S]*?body:\s*\{[\s\S]*?path[\s\S]*?}/
