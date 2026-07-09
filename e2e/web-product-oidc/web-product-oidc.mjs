@@ -9,6 +9,7 @@ import { createApiServer } from "../../dist/packages/api-entry-node/src/server.j
 const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-web-product-oidc-"));
 const artifactBytes = Buffer.from("oidc web product artifact", "utf8");
 const oidcCalls = [];
+const botified = fakeBotifiedClient(artifactBytes);
 const server = await createApiServer({
   port: 0,
   dataRoot,
@@ -16,7 +17,7 @@ const server = await createApiServer({
   builtinAdminPassword: "builtin-password-must-not-work",
   sessionSecret: "web-product-oidc-session-secret-at-least-32-chars",
   oidcClient: fakeOidcClient(oidcCalls),
-  botifiedClient: fakeBotifiedClient(artifactBytes),
+  botifiedClient: botified,
   botifiedServiceKeyFactory: () => "web-product-oidc-service-key"
 });
 
@@ -104,7 +105,13 @@ try {
   });
   assert(taskResponse.ok(), "task creation failed");
   await assertText(page, "#tasks", "Create an OIDC browser artifact");
+  await page.waitForFunction(() =>
+    document.querySelector("#artifacts-count")?.textContent === "0 files" &&
+    !document.querySelector("#artifacts")?.textContent?.includes("oidc-browser-artifact.txt")
+  );
   await assertText(page, "#artifacts", "oidc-browser-artifact.txt");
+  assert.equal(botified.emptyTimelineReads, 3, "fake Botified did not delay the artifact timeline");
+  assert(botified.readTimelineCalls >= 4, "browser did not keep refreshing the active task timeline");
 
   const artifactDownload = await clickDownload(page, "#artifacts .download-link");
   const artifactPath = await artifactDownload.path();
@@ -216,8 +223,16 @@ function fakeOidcClient(calls) {
 }
 
 function fakeBotifiedClient(bytes) {
+  let readTimelineCalls = 0;
+  let emptyTimelineReads = 0;
   let published = false;
   return {
+    get readTimelineCalls() {
+      return readTimelineCalls;
+    },
+    get emptyTimelineReads() {
+      return emptyTimelineReads;
+    },
     async health() {
       return { status: "ok" };
     },
@@ -225,6 +240,11 @@ function fakeBotifiedClient(bytes) {
       return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
     },
     async readTimeline(_baseUrl, _serviceKey, cursor) {
+      readTimelineCalls += 1;
+      if (readTimelineCalls <= 3) {
+        emptyTimelineReads += 1;
+        return cursor ? { status: "ok", events: [], nextCursor: cursor } : { status: "ok", events: [] };
+      }
       if (!published) {
         published = true;
         return {

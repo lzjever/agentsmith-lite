@@ -46,11 +46,15 @@ describe("web ui client boundary", () => {
     const operatorTargets = [...fetchTargets, ...apiTargets, ...hrefTargets]
       .filter(({ target }) => target.startsWith("/api/operator/"))
       .map(({ call, file, target }) => `${file}: ${call}(${target})`);
+    const nonProductApiTargets = [...fetchTargets, ...apiTargets, ...hrefTargets]
+      .filter(({ target }) => target.startsWith("/api/") && !isProductApiTarget(target))
+      .map(({ call, file, target }) => `${file}: ${call}(${target})`);
 
     assert.ok(fetchTargets.length > 0);
     assert.ok(apiTargets.length > 0);
     assert.deepEqual(nonApiTargets, []);
     assert.deepEqual(operatorTargets, [], "browser UI must not call or link to operator APIs");
+    assert.deepEqual(nonProductApiTargets, [], "browser UI /api/ targets must stay on product API routes");
     assert.ok(
       checked.some(([, text]) => text.includes("/api/tasks/") && text.includes("/artifacts")),
       "browser UI must load task artifacts through the AgentSmith Lite API"
@@ -180,12 +184,19 @@ describe("web ui client boundary", () => {
     );
     assert.match(
       source,
-      /function\s+selectProject\(projectId,\s*data\)[\s\S]*state\.projectId\s*=\s*projectId[\s\S]*renderDashboard\(data\)/,
+      /function\s+selectProject\(projectId,\s*data\)[\s\S]*state\.projectId\s*=\s*projectId[\s\S]*renderDashboard\(data\)[\s\S]*refreshTaskResults\(current\.tasks\)/,
       "project selection must update browser state and refresh from existing dashboard-derived data"
     );
-    const selectProjectSource = extractFunctionBody(source, "selectProject");
-    assert.ok(selectProjectSource, "browser UI must define a project selection helper");
-    assert.doesNotMatch(selectProjectSource, /\bfetch\(|\bapi\(/, "project selection must not make extra API calls");
+    assert.match(
+      source,
+      /async\s+function\s+refreshTaskResults\(tasks\)[\s\S]*await\s+refreshTaskEvents\(tasks\)[\s\S]*await\s+refreshTaskArtifacts\(tasks\)/,
+      "browser UI must refresh task events before artifacts through one task-result helper"
+    );
+    assert.match(
+      source,
+      /async\s+function\s+refreshDashboard\(\)[\s\S]*refreshTaskResults\(current\.tasks\)/,
+      "dashboard refresh must use the shared task-result helper"
+    );
   });
 });
 
@@ -232,22 +243,26 @@ function extractAssignedTargets(text: string, propertyName: string): string[] {
   return targets;
 }
 
-function extractFunctionBody(text: string, functionName: string): string {
-  const startPattern = new RegExp(`function\\s+${functionName}\\([^)]*\\)\\s*\\{`);
-  const match = startPattern.exec(text);
-  if (!match || match.index === undefined) {
-    return "";
-  }
-  let depth = 0;
-  for (let index = match.index + match[0].length - 1; index < text.length; index += 1) {
-    if (text[index] === "{") {
-      depth += 1;
-    } else if (text[index] === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return text.slice(match.index, index + 1);
-      }
-    }
-  }
-  return "";
+function isProductApiTarget(target: string): boolean {
+  return [
+    /^\/api\/bootstrap$/,
+    /^\/api\/health$/,
+    /^\/api\/dashboard$/,
+    /^\/api\/me$/,
+    /^\/api\/auth\/bootstrap$/,
+    /^\/api\/auth\/login$/,
+    /^\/api\/auth\/logout$/,
+    /^\/api\/auth\/oidc\/start$/,
+    /^\/api\/workspaces$/,
+    /^\/api\/workspaces\/\$\{[^}]+}\/projects$/,
+    /^\/api\/projects\/\$\{[^}]+}\/endpoints$/,
+    /^\/api\/projects\/\$\{[^}]+}\/chat$/,
+    /^\/api\/projects\/\$\{[^}]+}\/tasks$/,
+    /^\/api\/projects\/\$\{[^}]+}\/files(?:\?path=files)?$/,
+    /^\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}$/,
+    /^\/api\/tasks\/\$\{[^}]+}\/events$/,
+    /^\/api\/tasks\/\$\{[^}]+}\/artifacts$/,
+    /^\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download$/,
+    /^\/api\/tasks\/\$\{[^}]+}\/cancel$/
+  ].some((pattern) => pattern.test(target));
 }

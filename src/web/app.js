@@ -5,13 +5,20 @@ const state = {
   projectId: null,
   endpointId: null,
   selectedTaskId: null,
+  sessionEpoch: 0,
   endpoints: [],
   tasks: [],
   taskEvents: new Map(),
   taskEventErrors: new Map()
 };
 
+const activeTaskStatuses = new Set(["queued", "starting", "running", "stopping"]);
 const cancellableTaskStatuses = new Set(["starting", "running", "stopping"]);
+const activeTaskRefreshIntervalMs = 1500;
+const activeTaskRefresh = {
+  timer: null,
+  inFlight: false
+};
 
 const healthEl = document.querySelector("#health");
 const loginEl = document.querySelector("#login");
@@ -244,6 +251,10 @@ projectFileForm.addEventListener("submit", async (event) => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  syncActiveTaskRefresh();
+});
+
 async function refreshHealth() {
   const health = await api("/api/health");
   healthEl.textContent = `${health.status} · v${health.version}`;
@@ -260,11 +271,13 @@ async function refreshBootstrap() {
 }
 
 async function refreshDashboard() {
+  const sessionEpoch = state.sessionEpoch;
   const response = await fetch("/api/dashboard");
+  if (sessionEpoch !== state.sessionEpoch) {
+    return;
+  }
   if (response.status === 401) {
-    clearSessionState();
-    loginEl.classList.remove("hidden");
-    dashboardEl.classList.add("hidden");
+    handleUnauthorizedSession();
     return;
   }
   if (!response.ok) {
@@ -273,8 +286,14 @@ async function refreshDashboard() {
   }
 
   const dashboard = await response.json();
+  if (sessionEpoch !== state.sessionEpoch) {
+    return;
+  }
   if (!state.csrfToken) {
     const me = await api("/api/me");
+    if (sessionEpoch !== state.sessionEpoch) {
+      return;
+    }
     state.csrfToken = me.csrfToken;
   }
   const current = renderDashboard(dashboard);
@@ -283,12 +302,17 @@ async function refreshDashboard() {
 
   await Promise.all([
     refreshProjectFiles(),
-    refreshTaskEvents(current.tasks),
-    refreshTaskArtifacts(current.tasks)
+    refreshTaskResults(current.tasks)
   ]);
+  if (sessionEpoch !== state.sessionEpoch) {
+    return;
+  }
+  syncActiveTaskRefresh(current.tasks);
 }
 
 function clearSessionState() {
+  state.sessionEpoch += 1;
+  stopActiveTaskRefresh();
   state.csrfToken = null;
   state.workspaceId = null;
   state.projectId = null;
@@ -298,6 +322,12 @@ function clearSessionState() {
   state.tasks = [];
   state.taskEvents.clear();
   state.taskEventErrors.clear();
+}
+
+function handleUnauthorizedSession() {
+  clearSessionState();
+  loginEl.classList.remove("hidden");
+  dashboardEl.classList.add("hidden");
 }
 
 function renderDashboard(data) {
@@ -371,9 +401,9 @@ async function selectProject(projectId, data) {
   const current = renderDashboard(data);
   await Promise.all([
     refreshProjectFiles(),
-    refreshTaskEvents(current.tasks),
-    refreshTaskArtifacts(current.tasks)
+    refreshTaskResults(current.tasks)
   ]);
+  syncActiveTaskRefresh(current.tasks);
 }
 
 function renderEndpoints(endpoints) {
@@ -462,6 +492,65 @@ async function cancelTask(taskId) {
   }
 }
 
+async function refreshTaskResults(tasks) {
+  await refreshTaskEvents(tasks);
+  await refreshTaskArtifacts(tasks);
+}
+
+function syncActiveTaskRefresh(tasks = state.tasks) {
+  if (!shouldRefreshActiveTasks(tasks)) {
+    stopActiveTaskRefresh();
+    return;
+  }
+  if (activeTaskRefresh.timer !== null) {
+    return;
+  }
+
+  activeTaskRefresh.timer = window.setInterval(refreshActiveTasks, activeTaskRefreshIntervalMs);
+}
+
+function stopActiveTaskRefresh() {
+  if (activeTaskRefresh.timer !== null) {
+    window.clearInterval(activeTaskRefresh.timer);
+  }
+  activeTaskRefresh.timer = null;
+}
+
+async function refreshActiveTasks() {
+  if (activeTaskRefresh.inFlight) {
+    return;
+  }
+  if (!shouldRefreshActiveTasks()) {
+    stopActiveTaskRefresh();
+    return;
+  }
+
+  activeTaskRefresh.inFlight = true;
+  const sessionEpoch = state.sessionEpoch;
+  try {
+    await refreshDashboard();
+  } catch (error) {
+    if (!isUnauthorizedError(error)) {
+      setStatus(errorMessage(error), "error");
+    }
+  } finally {
+    activeTaskRefresh.inFlight = false;
+    if (sessionEpoch === state.sessionEpoch) {
+      syncActiveTaskRefresh();
+    }
+  }
+}
+
+function shouldRefreshActiveTasks(tasks = state.tasks) {
+  return dashboardIsVisible() && Boolean(state.projectId) && tasks.some((task) =>
+    task.projectId === state.projectId && activeTaskStatuses.has(task.status)
+  );
+}
+
+function dashboardIsVisible() {
+  return !dashboardEl.classList.contains("hidden") && document.visibilityState === "visible";
+}
+
 async function refreshTaskEvents(tasks) {
   const timelineCountEl = document.querySelector("#timeline-count");
   if (tasks.length === 0) {
@@ -477,6 +566,9 @@ async function refreshTaskEvents(tasks) {
       state.taskEvents.set(task.id, Array.isArray(events) ? events : []);
       state.taskEventErrors.delete(task.id);
     } catch (error) {
+      if (isUnauthorizedError(error)) {
+        return;
+      }
       state.taskEventErrors.set(task.id, errorMessage(error));
     }
   }));
@@ -544,6 +636,12 @@ async function refreshTaskArtifacts(tasks) {
         artifacts: await api(`/api/tasks/${task.id}/artifacts`)
       };
     } catch (error) {
+      if (isUnauthorizedError(error)) {
+        return {
+          task,
+          artifacts: []
+        };
+      }
       return {
         task,
         artifacts: [],
@@ -726,7 +824,16 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   if (!response.ok) {
-    throw new Error(await response.text());
+    const error = new Error(await response.text());
+    error.status = response.status;
+    if (response.status === 401) {
+      handleUnauthorizedSession();
+    }
+    throw error;
   }
   return response.json();
+}
+
+function isUnauthorizedError(error) {
+  return Boolean(error) && typeof error === "object" && error.status === 401;
 }
