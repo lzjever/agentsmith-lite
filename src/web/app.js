@@ -536,13 +536,39 @@ function projectFileItem(entry) {
     return node;
   }
 
+  const actions = document.createElement("div");
+  actions.className = "item-actions";
+
   const link = document.createElement("a");
   link.className = "download-link";
   link.href = `/api/projects/${state.projectId}/files/download?path=${encodeURIComponent(entry.path)}`;
   link.download = entry.path.split("/").at(-1) || entry.path;
   link.textContent = "Download";
-  node.append(link);
+  actions.append(link);
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "danger-button";
+  deleteButton.textContent = "Delete";
+  deleteButton.addEventListener("click", () => deleteProjectFile(entry.path));
+  actions.append(deleteButton);
+
+  node.append(actions);
   return node;
+}
+
+async function deleteProjectFile(path) {
+  try {
+    await api(`/api/projects/${state.projectId}/files`, {
+      method: "DELETE",
+      csrf: state.csrfToken,
+      body: { path }
+    });
+    setStatus("Project file deleted.", "success");
+    await refreshProjectFiles();
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  }
 }
 
 function formString(form, name) {

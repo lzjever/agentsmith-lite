@@ -99,6 +99,11 @@ describe("web ui client boundary", () => {
         name: "project file download",
         route: /\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}/,
         method: /href\s*=\s*`\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}[^`]*`/
+      },
+      {
+        name: "project file delete",
+        route: /\/api\/projects\/\$\{[^}]+}\/files/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/files`,[\s\S]*?method:\s*"DELETE"[\s\S]*?csrf:\s*state\.csrfToken[\s\S]*?body:\s*\{[\s\S]*?path[\s\S]*?}/
       }
     ];
 
@@ -110,6 +115,11 @@ describe("web ui client boundary", () => {
       source,
       /capabilities:\s*\[\s*"text"\s*,\s*"tool_calls"\s*]/,
       "browser UI must create task-ready endpoints with tool_calls capability"
+    );
+    assert.match(
+      source,
+      /deleteProjectFile\(entry\.path\)/,
+      "browser UI must delete the current project file entry path"
     );
   });
 });
