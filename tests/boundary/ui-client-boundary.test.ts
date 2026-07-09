@@ -89,6 +89,16 @@ describe("web ui client boundary", () => {
         name: "artifact download",
         route: /\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download/,
         method: /href\s*=\s*`\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download`/
+      },
+      {
+        name: "project file list",
+        route: /\/api\/projects\/\$\{[^}]+}\/files\?path=files/,
+        method: /api\(`\/api\/projects\/\$\{[^}]+}\/files\?path=files`\)/
+      },
+      {
+        name: "project file download",
+        route: /\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}/,
+        method: /href\s*=\s*`\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}[^`]*`/
       }
     ];
 

@@ -438,10 +438,9 @@ async function refreshProjectFiles() {
   try {
     const listed = await api(`/api/projects/${state.projectId}/files?path=files`);
     filesCount.textContent = `${listed.entries.length} entr${listed.entries.length === 1 ? "y" : "ies"}`;
-    files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) => item(
-      entry.path,
-      entry.type === "file" ? `${entry.size} bytes` : "directory"
-    )) : [item("files/", "0 entries")]));
+    files.replaceChildren(...(listed.entries.length > 0 ? listed.entries.map((entry) =>
+      projectFileItem(entry)
+    ) : [item("files/", "0 entries")]));
   } catch (error) {
     filesCount.textContent = "Unavailable";
     files.replaceChildren(item("Files unavailable", errorMessage(error)));
@@ -526,6 +525,21 @@ function artifactItem(task, artifact) {
   link.className = "download-link";
   link.href = `/api/tasks/${task.id}/artifacts/${artifact.id}/download`;
   link.download = artifact.name;
+  link.textContent = "Download";
+  node.append(link);
+  return node;
+}
+
+function projectFileItem(entry) {
+  const node = item(entry.path, entry.type === "file" ? `${entry.size} bytes` : "directory");
+  if (entry.type !== "file") {
+    return node;
+  }
+
+  const link = document.createElement("a");
+  link.className = "download-link";
+  link.href = `/api/projects/${state.projectId}/files/download?path=${encodeURIComponent(entry.path)}`;
+  link.download = entry.path.split("/").at(-1) || entry.path;
   link.textContent = "Download";
   node.append(link);
   return node;
