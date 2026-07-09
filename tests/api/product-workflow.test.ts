@@ -88,6 +88,31 @@ describe("api product workflow", () => {
       undefined,
       cookie
     );
+    await assertApiError(
+      await request("GET", `/api/projects/${project.id}/files/download`, undefined, cookie),
+      400,
+      "Missing path query parameter"
+    );
+    await assertApiError(
+      await request(
+        "GET",
+        `/api/projects/${project.id}/files/download?path=${encodeURIComponent("files/docs")}`,
+        undefined,
+        cookie
+      ),
+      400,
+      "Path is a directory"
+    );
+    await assertApiError(
+      await request("DELETE", `/api/projects/${project.id}/files`, { path: "files" }, cookie, csrf),
+      400,
+      "Cannot delete the files root"
+    );
+    await assertApiError(
+      await request("DELETE", `/api/projects/${project.id}/files`, { path: "files/missing.txt" }, cookie, csrf),
+      404,
+      "File not found"
+    );
     const deletedFile = await requestJson("DELETE", `/api/projects/${project.id}/files`, {
       path: filePath
     }, cookie, csrf);
@@ -178,6 +203,11 @@ describe("api product workflow", () => {
       requestInit.body = JSON.stringify(body);
     }
     return fetch(baseUrl + pathname, requestInit);
+  }
+
+  async function assertApiError(response: Response, status: number, error: string) {
+    assert.equal(response.status, status);
+    assert.deepEqual(await response.json(), { error });
   }
 });
 
