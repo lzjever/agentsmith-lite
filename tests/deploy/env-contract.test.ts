@@ -87,6 +87,109 @@ describe("deploy env contract", () => {
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
+  it("accepts OIDC admin allowlist config from app env overlays", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-oidc-app-env-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
+    const appEnvFile = path.join(tempDir, "app.env");
+    writeFileSync(
+      envFile,
+      [
+        "KUBE_NAMESPACE=agentsmith-preview",
+        "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(
+      secretsFile,
+      [
+        "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
+        "APP_SESSION_SECRET=app-session-secret-at-least-32-chars",
+        "OIDC_CLIENT_SECRET=oidc-client-secret",
+        ""
+      ].join("\n")
+    );
+    writeFileSync(
+      appEnvFile,
+      [
+        "OIDC_ADMIN_EMAILS=ops@example.test",
+        "OIDC_ADMIN_SUBJECTS=keycloak-ops-subject",
+        ""
+      ].join("\n")
+    );
+
+    const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readAssignments(result.stdout), {
+      KUBE_NAMESPACE: "agentsmith-preview",
+      APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
+      APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
+      OIDC_CLIENT_SECRET: "oidc-client-secret",
+      OIDC_ADMIN_EMAILS: "ops@example.test",
+      OIDC_ADMIN_SUBJECTS: "keycloak-ops-subject"
+    });
+  });
+
+  it("rejects OIDC core metadata from app env overlays", () => {
+    for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-oidc-core-app-env-${key}-`));
+      const envFile = path.join(tempDir, "substrate.env");
+      const secretsFile = path.join(tempDir, "substrate.secrets.env");
+      const appEnvFile = path.join(tempDir, "app.env");
+      writeFileSync(
+        envFile,
+        [
+          "AUTH_MODE=oidc",
+          "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+          "OIDC_BACKCHANNEL_BASE_URL=http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
+          "OIDC_CLIENT_ID=agentsmith-lite",
+          ""
+        ].join("\n")
+      );
+      writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
+      writeFileSync(appEnvFile, `${key}=DO_NOT_PRINT_${key}\n`);
+
+      const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile]);
+
+      assert.notEqual(result.status, 0, key);
+      assert.match(result.stderr, new RegExp(key), key);
+      assert.doesNotMatch(result.stderr + result.stdout, new RegExp(`DO_NOT_PRINT_${key}`), key);
+    }
+  });
+
+  it("rejects OIDC admin allowlist config from substrate env", () => {
+    for (const key of ["OIDC_ADMIN_EMAILS", "OIDC_ADMIN_SUBJECTS"]) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-oidc-admin-substrate-${key}-`));
+      const envFile = path.join(tempDir, "substrate.env");
+      const secretsFile = path.join(tempDir, "substrate.secrets.env");
+      writeFileSync(
+        envFile,
+        [
+          "AUTH_MODE=oidc",
+          "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+          "OIDC_CLIENT_ID=agentsmith-lite",
+          `${key}=DO_NOT_PRINT_${key}`,
+          ""
+        ].join("\n")
+      );
+      writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
+
+      const result = runContract(["export", "--env", envFile, "--secrets", secretsFile]);
+
+      assert.notEqual(result.status, 0, key);
+      assert.match(result.stderr, new RegExp(key), key);
+      assert.doesNotMatch(result.stderr + result.stdout, new RegExp(`DO_NOT_PRINT_${key}`), key);
+    }
+  });
+
   it("rejects malformed auth substrate values without printing their values", () => {
     const cases: Array<{
       name: string;
@@ -121,6 +224,20 @@ describe("deploy env contract", () => {
         secretsContents: "OIDC_CLIENT_SECRET=\n",
         error: /OIDC_CLIENT_ID/,
         leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
+      },
+      {
+        name: "OIDC admin emails in substrate env",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_ADMIN_EMAILS=DO_NOT_PRINT_OIDC_ADMIN_EMAILS\n",
+        secretsContents: "OIDC_CLIENT_SECRET=\n",
+        error: /OIDC_ADMIN_EMAILS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
+      },
+      {
+        name: "OIDC admin subjects in substrate env",
+        envContents: "AUTH_MODE=builtin_admin\nOIDC_ADMIN_SUBJECTS=DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS\n",
+        secretsContents: "OIDC_CLIENT_SECRET=\n",
+        error: /OIDC_ADMIN_SUBJECTS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
       },
       {
         name: "builtin with non-empty OIDC client secret",
@@ -169,6 +286,20 @@ describe("deploy env contract", () => {
         secretsContents: "OIDC_BACKCHANNEL_BASE_URL=DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL\nOIDC_CLIENT_SECRET=secret\n",
         error: /OIDC_BACKCHANNEL_BASE_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
+      },
+      {
+        name: "OIDC admin emails misplaced in secrets",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
+        secretsContents: "OIDC_ADMIN_EMAILS=DO_NOT_PRINT_OIDC_ADMIN_EMAILS\nOIDC_CLIENT_SECRET=secret\n",
+        error: /non-secret config key OIDC_ADMIN_EMAILS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
+      },
+      {
+        name: "OIDC admin subjects misplaced in secrets",
+        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
+        secretsContents: "OIDC_ADMIN_SUBJECTS=DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS\nOIDC_CLIENT_SECRET=secret\n",
+        error: /non-secret config key OIDC_ADMIN_SUBJECTS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
       }
     ];
 

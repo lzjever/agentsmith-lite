@@ -364,6 +364,47 @@ describe("botified runtime integration", () => {
     assert.doesNotMatch(JSON.stringify(projection.events), /bsk_data_secret|sk-data-secret|bsk_error_secret|sk-error-secret/);
   });
 
+  it("projects raw Botified turn and tool completion event names", () => {
+    const projection = projectBotifiedTimelineEvents("task-1", [
+      {
+        version: "botified.timeline.v1",
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "turn.started",
+        data: {}
+      },
+      {
+        version: "botified.timeline.v1",
+        cursor: "c2",
+        seq: 2,
+        session_id: "s1",
+        type: "tool.completed",
+        data: {
+          tool_call_id: "call_bash",
+          tool_name: "bash",
+          command: "printf ok",
+          status: "completed",
+          exit_code: 0
+        }
+      },
+      {
+        version: "botified.timeline.v1",
+        cursor: "c3",
+        seq: 3,
+        session_id: "s1",
+        type: "turn.completed",
+        data: { provider_calls: 3 }
+      }
+    ]);
+
+    assert.deepEqual(projection.events.map((event) => [event.botifiedType, event.kind]), [
+      ["turn.started", "turn_started"],
+      ["tool.completed", "tool_execution"],
+      ["turn.completed", "turn_completed"]
+    ]);
+  });
+
   it("redacts secret-like timeline payload values recursively", () => {
     const projection = projectBotifiedTimelineEvents("task-1", [
       {

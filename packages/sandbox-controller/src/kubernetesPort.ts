@@ -8,6 +8,8 @@ export interface KubernetesResourceRef {
   kind: SandboxCoreResourceKind;
   namespace: string;
   name: string;
+  uid?: string;
+  labels?: Record<string, string>;
 }
 
 export interface KubernetesTransportRequest {
@@ -45,13 +47,13 @@ export interface SandboxKubernetesReadinessPort {
 const FIELD_MANAGER = "agentsmith-lite-sandbox";
 const MANAGED_LABEL_SELECTOR = `${SANDBOX_LABEL_KEYS.managedBy}=${SANDBOX_MANAGED_BY}`;
 
-const RESOURCE_MAPPINGS: Record<SandboxCoreResourceKind, { apiPrefix: string; plural: string }> = {
-  Secret: { apiPrefix: "/api/v1", plural: "secrets" },
-  ConfigMap: { apiPrefix: "/api/v1", plural: "configmaps" },
-  ServiceAccount: { apiPrefix: "/api/v1", plural: "serviceaccounts" },
-  NetworkPolicy: { apiPrefix: "/apis/networking.k8s.io/v1", plural: "networkpolicies" },
-  Service: { apiPrefix: "/api/v1", plural: "services" },
-  Pod: { apiPrefix: "/api/v1", plural: "pods" }
+const RESOURCE_MAPPINGS: Record<SandboxCoreResourceKind, { apiPrefix: string; apiVersion: string; plural: string }> = {
+  Secret: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "secrets" },
+  ConfigMap: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "configmaps" },
+  ServiceAccount: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "serviceaccounts" },
+  NetworkPolicy: { apiPrefix: "/apis/networking.k8s.io/v1", apiVersion: "networking.k8s.io/v1", plural: "networkpolicies" },
+  Service: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "services" },
+  Pod: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "pods" }
 };
 
 const LIST_ORDER: readonly SandboxCoreResourceKind[] = [
@@ -79,9 +81,9 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
         headers: {}
       });
       if (!isSuccess(response.statusCode)) {
-        throw new Error(`Kubernetes list ${kind} failed with HTTP ${response.statusCode}`);
+        throw kubernetesHttpError(`Kubernetes list ${kind} failed with HTTP ${response.statusCode}`, response);
       }
-      const items = asResourceList(response.body).items;
+      const items = asResourceList(response.body, { apiVersion: RESOURCE_MAPPINGS[kind].apiVersion, kind }).items;
       resources.push(...items);
     }
     return resources;
@@ -101,7 +103,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "fence_mismatch";
     }
     if (existing.statusCode !== 404 && !isSuccess(existing.statusCode)) {
-      throw new Error(`Kubernetes get before apply ${ref.kind}/${ref.name} failed with HTTP ${existing.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes get before apply ${ref.kind}/${ref.name} failed with HTTP ${existing.statusCode}`, existing);
     }
 
     const response = await this.transport.request({
@@ -113,7 +115,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       body: JSON.stringify(prepareApplyResource(resource))
     });
     if (!isSuccess(response.statusCode)) {
-      throw new Error(`Kubernetes apply ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes apply ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
     return "applied";
   }
@@ -149,12 +151,19 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "fence_mismatch";
     }
     if (!isSuccess(response.statusCode)) {
-      throw new Error(`Kubernetes patch labels ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes patch labels ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
     return "patched";
   }
 
   async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {
+    if (ref.uid && ref.labels) {
+      if (!hasLabelValues(ref.labels, expectedLabels)) {
+        return "fence_mismatch";
+      }
+      return this.deleteResourceByRef(ref, ref.uid);
+    }
+
     const existing = await this.transport.request({
       method: "GET",
       path: resourcePath(ref),
@@ -164,7 +173,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "not_found";
     }
     if (!isSuccess(existing.statusCode)) {
-      throw new Error(`Kubernetes get before delete ${ref.kind}/${ref.name} failed with HTTP ${existing.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes get before delete ${ref.kind}/${ref.name} failed with HTTP ${existing.statusCode}`, existing);
     }
     const resource = asResource(existing.body);
     if (!hasLabels(resource, expectedLabels)) {
@@ -172,6 +181,10 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
     }
 
     const uid = typeof resource.metadata.uid === "string" ? resource.metadata.uid : null;
+    return this.deleteResourceByRef(ref, uid);
+  }
+
+  private async deleteResourceByRef(ref: KubernetesResourceRef, uid: string | null): Promise<"deleted" | "not_found" | "fence_mismatch"> {
     const response = await this.transport.request({
       method: "DELETE",
       path: resourcePath(ref),
@@ -193,7 +206,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "fence_mismatch";
     }
     if (!isSuccess(response.statusCode)) {
-      throw new Error(`Kubernetes delete ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes delete ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
     return "deleted";
   }
@@ -208,7 +221,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "not_found";
     }
     if (!isSuccess(response.statusCode)) {
-      throw new Error(`Kubernetes get pod readiness ${name} failed with HTTP ${response.statusCode}`);
+      throw kubernetesHttpError(`Kubernetes get pod readiness ${name} failed with HTTP ${response.statusCode}`, response);
     }
     const pod = asResource(response.body);
     if (!hasLabels(pod, expectedLabels)) {
@@ -340,7 +353,9 @@ function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
   return {
     kind: resource.kind,
     namespace: resource.metadata.namespace,
-    name: resource.metadata.name
+    name: resource.metadata.name,
+    labels: { ...resource.metadata.labels },
+    ...(typeof resource.metadata.uid === "string" ? { uid: resource.metadata.uid } : {})
   };
 }
 
@@ -362,25 +377,38 @@ function prepareApplyResource(resource: KubernetesResource): KubernetesResource 
 }
 
 function hasLabels(resource: KubernetesResource, labels: Record<string, string>): boolean {
-  return Object.entries(labels).every(([key, value]) => resource.metadata.labels[key] === value);
+  return hasLabelValues(resource.metadata.labels, labels);
 }
 
-function asResourceList(body: unknown): { items: KubernetesResource[] } {
+function hasLabelValues(actual: Record<string, string>, expected: Record<string, string>): boolean {
+  return Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function asResourceList(
+  body: unknown,
+  defaults?: Pick<KubernetesResource, "apiVersion" | "kind">
+): { items: KubernetesResource[] } {
   const record = asRecord(body);
   if (!Array.isArray(record.items)) {
     return { items: [] };
   }
-  return { items: record.items.map(asResource) };
+  return { items: record.items.map((item) => asResource(item, defaults)) };
 }
 
-function asResource(body: unknown): KubernetesResource {
+function asResource(body: unknown, defaults?: Pick<KubernetesResource, "apiVersion" | "kind">): KubernetesResource {
   const record = asRecord(body);
   const metadata = asRecord(record.metadata);
   const namespace = typeof metadata.namespace === "string" ? { namespace: metadata.namespace } : {};
+  const apiVersion = typeof record.apiVersion === "string" && record.apiVersion.length > 0
+    ? record.apiVersion
+    : defaults?.apiVersion ?? "v1";
+  const kind = typeof record.kind === "string" && record.kind.length > 0
+    ? record.kind
+    : defaults?.kind ?? String(record.kind);
   return {
     ...record,
-    apiVersion: String(record.apiVersion ?? "v1"),
-    kind: String(record.kind),
+    apiVersion,
+    kind,
     metadata: {
       ...metadata,
       name: String(metadata.name),
@@ -408,6 +436,49 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 
 function isSuccess(statusCode: number): boolean {
   return statusCode >= 200 && statusCode < 300;
+}
+
+function kubernetesHttpError(message: string, response: KubernetesTransportResponse): Error {
+  const status = kubernetesStatusBodySummary(response.body);
+  return new Error(status ? `${message}: ${status}` : message);
+}
+
+function kubernetesStatusBodySummary(body: unknown): string | null {
+  const record = asRecord(body);
+  if (record.kind !== "Status") {
+    return null;
+  }
+
+  const kind = safeStatusField(record.kind);
+  const reason = safeStatusField(record.reason);
+  const code = safeStatusField(record.code);
+  const message = safeStatusField(record.message);
+  const fields = [
+    kind ? `kind=${kind}` : null,
+    reason ? `reason=${reason}` : null,
+    code ? `code=${code}` : null,
+    message ? `message=${JSON.stringify(message)}` : null
+  ].filter((field): field is string => field !== null);
+
+  return fields.length > 0 ? `Kubernetes status ${fields.join(" ")}` : null;
+}
+
+function safeStatusField(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    return null;
+  }
+  const text = sanitizeKubernetesStatusText(String(value));
+  return text.length > 0 ? text : null;
+}
+
+function sanitizeKubernetesStatusText(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\bbsk_[A-Za-z0-9_-]+/g, "bsk_<redacted>")
+    .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "sk-<redacted>")
+    .replace(/\bMODEL_API_KEY\b/g, "<redacted>")
+    .slice(0, 400);
 }
 
 function jsonPointerEscape(value: string): string {

@@ -59,6 +59,11 @@ export class InMemoryProductStore implements ProductStore {
     return publicUser(user);
   }
 
+  async updateUser(user: StoredUser): Promise<User> {
+    this.users.set(user.id, clone(user));
+    return publicUser(user);
+  }
+
   async findUserByEmail(email: string): Promise<StoredUser | null> {
     const normalized = email.toLowerCase();
     return clone([...this.users.values()].find((user) => user.email.toLowerCase() === normalized) ?? null);

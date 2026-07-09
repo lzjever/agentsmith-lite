@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-const workflowFilePath = "files/product-workflow-check.txt";
 const workflowFileContent = "hello from deploy product workflow check\n";
-const taskArtifactName = "agentsmith-lite-task-workflow.txt";
 const taskMarker = "AGENTSMITH_LITE_TASK_WORKFLOW_MARKER";
 const defaultRunnerImage = "registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const defaultPvcClaimName = "agentsmith-lite-files";
@@ -295,6 +293,7 @@ printf '{"status":"ok"}\\n'
         task: { status: "skipped" }
       });
       assert.doesNotMatch(result.stdout, /secret\/remote-workflow/);
+      const filePath = requiredWorkflowName(server.workflowNames.filePath, "workflow file path");
       assert.deepEqual(server.requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
         "POST /api/auth/bootstrap",
@@ -305,7 +304,7 @@ printf '{"status":"ok"}\\n'
         "POST /api/projects/project_1/chat",
         "POST /api/projects/project_1/files",
         "GET /api/projects/project_1/files?path=files",
-        "GET /api/projects/project_1/files/download?path=files%2Fproduct-workflow-check.txt",
+        `GET /api/projects/project_1/files/download?path=${encodeURIComponent(filePath)}`,
         "DELETE /api/projects/project_1/files",
         "GET /api/operator/sandbox/status"
       ]);
@@ -313,6 +312,74 @@ printf '{"status":"ok"}\\n'
         assert.equal(request.cookie, "asl_session=workflow-session", `${request.method} ${request.url} missing session cookie`);
         assert.equal(request.csrf, "csrf-workflow", `${request.method} ${request.url} missing csrf token`);
       }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("check-product-workflow.mjs uses one short run suffix for resource names", async () => {
+    const adminPassword = "repeat-admin-secret";
+    const server = await startWorkflowServer({
+      adminPassword,
+      workspaceId: "workspace_repeat",
+      projectId: "project_repeat",
+      endpointId: "endpoint_repeat",
+      endpointBaseUrl: "https://models.repeat.test/v1",
+      endpointModel: "repeat-model",
+      endpointSecretRef: "secret/repeat-workflow"
+    });
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/check-product-workflow.mjs",
+        "--base-url",
+        server.baseUrl,
+        "--endpoint-base-url",
+        "https://models.repeat.test/v1",
+        "--endpoint-model",
+        "repeat-model",
+        "--endpoint-secret-ref",
+        "secret/repeat-workflow"
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const workspaceBody = parsedRequestBody<{ name?: string }>(server.requests, "POST", "/api/workspaces");
+      const suffixMatch = /^Deploy Product Workflow ([0-9a-f]{8})$/.exec(workspaceBody.name ?? "");
+      assert.ok(suffixMatch, `workspace name missing run suffix: ${workspaceBody.name ?? "<missing>"}`);
+      const runSuffix = suffixMatch[1];
+      assert.equal(
+        parsedRequestBody<{ name?: string }>(
+          server.requests,
+          "POST",
+          "/api/workspaces/workspace_repeat/projects"
+        ).name,
+        `API Product Workflow ${runSuffix}`
+      );
+      assert.equal(
+        parsedRequestBody<{ name?: string }>(
+          server.requests,
+          "POST",
+          "/api/projects/project_repeat/endpoints"
+        ).name,
+        `Deploy Product Workflow Endpoint ${runSuffix}`
+      );
+      assert.equal(
+        parsedRequestBody<{ path?: string }>(
+          server.requests,
+          "POST",
+          "/api/projects/project_repeat/files"
+        ).path,
+        `files/product-workflow-check-${runSuffix}.txt`
+      );
+      assert.ok(
+        server.requests.some((request) =>
+          request.method === "GET" &&
+          request.url === `/api/projects/project_repeat/files/download?path=files%2Fproduct-workflow-check-${runSuffix}.txt`
+        ),
+        "download request did not use suffixed workflow file path"
+      );
     } finally {
       await server.close();
     }
@@ -355,6 +422,7 @@ printf '{"status":"ok"}\\n'
       const summary = JSON.parse(result.stdout) as ProductWorkflowSummary;
       assert.equal(summary.status, "ok");
       assert.equal(summary.workspaceId, "workspace_oidc");
+      const filePath = requiredWorkflowName(server.workflowNames.filePath, "workflow file path");
       assert.deepEqual(server.requests.map((request) => `${request.method} ${request.url}`), [
         "GET /api/health",
         "POST /api/workspaces",
@@ -363,7 +431,7 @@ printf '{"status":"ok"}\\n'
         "POST /api/projects/project_oidc/chat",
         "POST /api/projects/project_oidc/files",
         "GET /api/projects/project_oidc/files?path=files",
-        "GET /api/projects/project_oidc/files/download?path=files%2Fproduct-workflow-check.txt",
+        `GET /api/projects/project_oidc/files/download?path=${encodeURIComponent(filePath)}`,
         "DELETE /api/projects/project_oidc/files",
         "GET /api/operator/sandbox/status"
       ]);
@@ -379,6 +447,8 @@ printf '{"status":"ok"}\\n'
   it("check-product-workflow.mjs verifies task artifacts and optional read-only K8s run resources", async () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-k8s-run-resources-"));
     const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
+    const sequenceFile = path.join(tempDir, "workflow-sequence.txt");
+    const artifactPollStartedFile = path.join(tempDir, "artifact-poll-started");
     const fakeKubectl = writeFakeKubectl(tempDir);
     const server = await startWorkflowServer({
       adminPassword: "task-admin-secret",
@@ -392,7 +462,9 @@ printf '{"status":"ok"}\\n'
         taskId: "task_artifact",
         runId: "run_artifact",
         subPath: "workspaces/workspace_task/projects/project_task"
-      }
+      },
+      sequenceFile,
+      artifactPollStartedFile
     });
 
     try {
@@ -412,6 +484,8 @@ printf '{"status":"ok"}\\n'
         BUILTIN_ADMIN_INITIAL_PASSWORD: "task-admin-secret",
         KUBECTL_BIN: fakeKubectl,
         FAKE_KUBECTL_CALLS: kubectlCalls,
+        FAKE_WORKFLOW_SEQUENCE: sequenceFile,
+        FAKE_ARTIFACT_POLL_STARTED: artifactPollStartedFile,
         KUBECONFIG_PATH: "/tmp/k8s-run-resources.kubeconfig",
         KUBE_CONTEXT: "kind-agentsmith",
         KUBE_NAMESPACE: "agentsmith-preview"
@@ -422,11 +496,14 @@ printf '{"status":"ok"}\\n'
       assert.equal(summary.task.status, "completed");
       assert.equal(summary.task.taskId, "task_artifact");
       assert.equal(summary.task.runId, "run_artifact");
-      assert.equal(summary.task.artifactName, taskArtifactName);
+      assert.equal(summary.task.artifactName, requiredWorkflowName(server.workflowNames.taskArtifactName, "task artifact name"));
       assert.equal(summary.task.markerObserved, true);
       assert.equal(summary.task.sandboxContract.runnerContainer, "botified-runner");
+      assert.equal(summary.task.sandboxContract.runnerImage, defaultRunnerImage);
       assert.equal(summary.task.runScopedStatus.runId, "run_artifact");
       assert.deepEqual(summary.task.k8sRunResources.resources.Pod.names, ["asl-task-k8s"]);
+      assert.equal(summary.task.k8sRunResources.pods[0].runnerImage, defaultRunnerImage);
+      assert.equal(summary.task.k8sRunResources.pods[0].runnerImageID, `docker-pullable://${defaultRunnerImage}`);
       assert.doesNotMatch(result.stdout, /secret\/task-workflow|task-admin-secret|runtime accepted|AGENTSMITH_LITE_TASK_WORKFLOW_MARKER/);
 
       const calls = readFileSync(kubectlCalls, "utf8").trim().split("\n");
@@ -437,12 +514,25 @@ printf '{"status":"ok"}\\n'
         assert.match(call, / -l agentsmith-lite\/run-id=run_artifact /);
         assert.doesNotMatch(call, /\b(exec|logs|attach|port-forward|apply|delete|patch|create)\b/);
       }
+      const sequence = readFileSync(sequenceFile, "utf8").trim().split("\n");
+      const taskCreateIndex = sequence.indexOf("http POST /api/projects/project_task/tasks");
+      const podObserveIndex = sequence.findIndex((line) => line.startsWith("kubectl ") && line.includes(" get pods "));
+      const artifactEventsIndex = sequence.indexOf("http GET /api/tasks/task_artifact/events");
+      assert.ok(taskCreateIndex >= 0, `missing task create in sequence:\n${sequence.join("\n")}`);
+      assert.ok(podObserveIndex >= 0, `missing pod observation in sequence:\n${sequence.join("\n")}`);
+      assert.ok(artifactEventsIndex >= 0, `missing artifact event poll in sequence:\n${sequence.join("\n")}`);
+      assert.ok(taskCreateIndex < podObserveIndex, `pod observation ran before task create:\n${sequence.join("\n")}`);
+      assert.ok(podObserveIndex < artifactEventsIndex, `pod observation ran after artifact polling started:\n${sequence.join("\n")}`);
     } finally {
       await server.close();
     }
   });
 
   it("check-product-workflow.mjs cancels and reaps only the returned run id for task reclaim apply", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-reclaim-k8s-run-resources-"));
+    const kubectlCalls = path.join(tempDir, "kubectl-calls.txt");
+    const sequenceFile = path.join(tempDir, "workflow-sequence.txt");
+    const fakeKubectl = writeFakeKubectl(tempDir);
     const server = await startWorkflowServer({
       adminPassword: "reclaim-admin-secret",
       workspaceId: "workspace_reclaim",
@@ -455,7 +545,8 @@ printf '{"status":"ok"}\\n'
         taskId: "task_reclaim",
         runId: "run_reclaim",
         subPath: "workspaces/workspace_reclaim/projects/project_reclaim"
-      }
+      },
+      sequenceFile
     });
 
     try {
@@ -470,9 +561,16 @@ printf '{"status":"ok"}\\n'
         "--endpoint-secret-ref",
         "secret/reclaim-workflow",
         "--check-task-reclaim",
-        "--check-task-reclaim-reap-apply"
+        "--check-task-reclaim-reap-apply",
+        "--check-k8s-run-resources"
       ], {
-        BUILTIN_ADMIN_INITIAL_PASSWORD: "reclaim-admin-secret"
+        BUILTIN_ADMIN_INITIAL_PASSWORD: "reclaim-admin-secret",
+        KUBECTL_BIN: fakeKubectl,
+        FAKE_KUBECTL_CALLS: kubectlCalls,
+        FAKE_WORKFLOW_SEQUENCE: sequenceFile,
+        KUBECONFIG_PATH: "/tmp/k8s-reclaim-run-resources.kubeconfig",
+        KUBE_CONTEXT: "kind-agentsmith",
+        KUBE_NAMESPACE: "agentsmith-preview"
       });
 
       assert.equal(result.status, 0, result.stderr);
@@ -483,12 +581,41 @@ printf '{"status":"ok"}\\n'
       assert.equal(summary.taskReclaim.runId, "run_reclaim");
       assert.equal(summary.taskReclaim.reapScope.scopedToRunId, true);
       assert.equal(summary.taskReclaim.reapScope.applyEnabled, true);
+      assert.deepEqual(summary.taskReclaim.k8sRunResources.beforeReap.resources.Pod.names, ["asl-task-k8s-reclaim"]);
+      assert.equal(
+        summary.taskReclaim.k8sRunResources.beforeReap.pods[0].subPath,
+        "workspaces/workspace_reclaim/projects/project_reclaim"
+      );
+      assert.deepEqual(summary.taskReclaim.k8sRunResources.afterDryRun.resources.Pod.names, []);
+      assert.deepEqual(summary.taskReclaim.k8sRunResources.afterDryRun.pods, []);
+      assert.deepEqual(summary.taskReclaim.k8sRunResources.afterApply.resources.Pod.names, []);
       assert.deepEqual(server.requests.filter((request) => request.url === "/api/operator/sandbox/reap").map((request) => JSON.parse(request.body)), [
         { runId: "run_reclaim" },
         { runId: "run_reclaim", apply: true },
         { runId: "run_reclaim" }
       ]);
       assert.equal(server.requests.some((request) => request.body.includes('"apply":true') && !request.body.includes("run_reclaim")), false);
+      const calls = readFileSync(kubectlCalls, "utf8").trim().split("\n");
+      assert.equal(calls.length, 18);
+      for (const call of calls) {
+        assert.match(call, /^--kubeconfig \/tmp\/k8s-reclaim-run-resources\.kubeconfig --context kind-agentsmith get /);
+        assert.match(call, / -n agentsmith-preview /);
+        assert.match(call, / -l agentsmith-lite\/run-id=run_reclaim /);
+        assert.doesNotMatch(call, /\b(exec|logs|attach|port-forward|apply|delete|patch|create)\b/);
+      }
+      const sequence = readFileSync(sequenceFile, "utf8").trim().split("\n");
+      const taskCreateIndex = sequence.indexOf("http POST /api/projects/project_reclaim/tasks");
+      const firstPodObserveIndex = sequence.findIndex((line) =>
+        line.startsWith("kubectl ") &&
+        line.includes(" get pods ") &&
+        line.includes("agentsmith-lite/run-id=run_reclaim")
+      );
+      const cancelIndex = sequence.indexOf("http POST /api/tasks/task_reclaim/cancel");
+      assert.ok(taskCreateIndex >= 0, `missing task create in sequence:\n${sequence.join("\n")}`);
+      assert.ok(firstPodObserveIndex >= 0, `missing reclaim pod observation in sequence:\n${sequence.join("\n")}`);
+      assert.ok(cancelIndex >= 0, `missing task cancel in sequence:\n${sequence.join("\n")}`);
+      assert.ok(taskCreateIndex < firstPodObserveIndex, `pod observation ran before task create:\n${sequence.join("\n")}`);
+      assert.ok(firstPodObserveIndex < cancelIndex, `pod observation ran after task cancel:\n${sequence.join("\n")}`);
     } finally {
       await server.close();
     }
@@ -553,6 +680,7 @@ printf '{"status":"ok"}\\n'
 
 async function startWorkflowServer(options: WorkflowServerOptions): Promise<WorkflowServer> {
   const requests: WorkflowRequest[] = [];
+  const workflowNames: Partial<WorkflowRunNames> = {};
   let reapCalls = 0;
   const server = createServer(async (req, res) => {
     const body = await readRequestBody(req);
@@ -563,6 +691,9 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       csrf: req.headers["x-csrf-token"]?.toString(),
       body
     });
+    if (options.sequenceFile) {
+      appendFileSync(options.sequenceFile, `http ${req.method ?? ""} ${req.url ?? ""}\n`);
+    }
     const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
 
     res.setHeader("content-type", "application/json");
@@ -579,14 +710,24 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       res.setHeader("set-cookie", "asl_session=workflow-session; HttpOnly; Path=/");
       res.end(JSON.stringify({ csrfToken: "csrf-workflow" }));
     } else if (req.method === "POST" && req.url === "/api/workspaces") {
-      assert.deepEqual(parsedBody, { name: "Deploy Product Workflow" });
-      res.end(JSON.stringify({ id: options.workspaceId, name: "Deploy Product Workflow" }));
+      const workspaceName = stringBodyField(parsedBody, "name");
+      const suffixMatch = /^Deploy Product Workflow ([0-9a-f]{8})$/.exec(workspaceName);
+      assert.ok(suffixMatch, `workspace name missing run suffix: ${workspaceName}`);
+      const suffix = suffixMatch[1];
+      assert.ok(suffix, "workflow run suffix missing from workspace name");
+      workflowNames.suffix = suffix;
+      workflowNames.workspaceName = workspaceName;
+      workflowNames.projectName = `API Product Workflow ${workflowNames.suffix}`;
+      workflowNames.endpointName = `Deploy Product Workflow Endpoint ${workflowNames.suffix}`;
+      workflowNames.filePath = `files/product-workflow-check-${workflowNames.suffix}.txt`;
+      workflowNames.taskArtifactName = `agentsmith-lite-task-workflow-${workflowNames.suffix}.txt`;
+      res.end(JSON.stringify({ id: options.workspaceId, name: workflowNames.workspaceName }));
     } else if (req.method === "POST" && req.url === `/api/workspaces/${options.workspaceId}/projects`) {
-      assert.deepEqual(parsedBody, { name: "API Product Workflow" });
-      res.end(JSON.stringify({ id: options.projectId, workspaceId: options.workspaceId, name: "API Product Workflow" }));
+      assert.deepEqual(parsedBody, { name: requiredWorkflowName(workflowNames.projectName, "project name") });
+      res.end(JSON.stringify({ id: options.projectId, workspaceId: options.workspaceId, name: workflowNames.projectName }));
     } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/endpoints`) {
       assert.deepEqual(parsedBody, {
-        name: "Deploy Product Workflow Endpoint",
+        name: requiredWorkflowName(workflowNames.endpointName, "endpoint name"),
         protocol: "openai_chat_completions",
         baseUrl: options.endpointBaseUrl,
         model: options.endpointModel,
@@ -602,17 +743,21 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       });
       res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
     } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/files`) {
+      const filePath = requiredWorkflowName(workflowNames.filePath, "workflow file path");
       assert.deepEqual(parsedBody, {
-        path: workflowFilePath,
+        path: filePath,
         content: workflowFileContent
       });
-      res.end(JSON.stringify({ path: workflowFilePath, bytes: Buffer.byteLength(workflowFileContent) }));
+      res.end(JSON.stringify({ path: filePath, bytes: Buffer.byteLength(workflowFileContent) }));
     } else if (req.method === "GET" && req.url === `/api/projects/${options.projectId}/files?path=files`) {
-      res.end(JSON.stringify({ entries: [{ path: workflowFilePath, type: "file" }] }));
-    } else if (req.method === "GET" && req.url === `/api/projects/${options.projectId}/files/download?path=files%2Fproduct-workflow-check.txt`) {
-      res.end(JSON.stringify({ path: workflowFilePath, content: workflowFileContent }));
+      res.end(JSON.stringify({ entries: [{ path: requiredWorkflowName(workflowNames.filePath, "workflow file path"), type: "file" }] }));
+    } else if (
+      req.method === "GET" &&
+      req.url === `/api/projects/${options.projectId}/files/download?path=${encodeURIComponent(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}`
+    ) {
+      res.end(JSON.stringify({ path: workflowNames.filePath, content: workflowFileContent }));
     } else if (req.method === "DELETE" && req.url === `/api/projects/${options.projectId}/files`) {
-      assert.deepEqual(parsedBody, { path: workflowFilePath });
+      assert.deepEqual(parsedBody, { path: requiredWorkflowName(workflowNames.filePath, "workflow file path") });
       res.end(JSON.stringify({ deleted: true }));
     } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
       res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
@@ -625,6 +770,7 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       assert.equal(typeof parsedBody.prompt, "string");
       assert.equal(JSON.stringify(parsedBody).includes(options.endpointSecretRef), false);
       if (options.artifactTask && (parsedBody.prompt as string).includes("publish_file")) {
+        assert.match(parsedBody.prompt as string, new RegExp(escapeRegExp(requiredWorkflowName(workflowNames.taskArtifactName, "task artifact name"))));
         res.end(JSON.stringify(taskCreateResponse(options.artifactTask)));
       } else if (options.reclaimTask) {
         res.end(JSON.stringify(taskCreateResponse(options.reclaimTask)));
@@ -633,9 +779,18 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
         res.end(JSON.stringify({ error: "unexpected task create" }));
       }
     } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/events`) {
+      if (options.artifactPollStartedFile) {
+        writeFileSync(options.artifactPollStartedFile, "started\n");
+      }
       res.end(JSON.stringify([{ id: "event_completed", taskId: options.artifactTask.taskId, kind: "turn_completed" }]));
     } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/artifacts`) {
-      res.end(JSON.stringify([{ id: "artifact_task", taskId: options.artifactTask.taskId, fileId: "file_task", name: taskArtifactName, bytes: 51 }]));
+      res.end(JSON.stringify([{
+        id: "artifact_task",
+        taskId: options.artifactTask.taskId,
+        fileId: "file_task",
+        name: requiredWorkflowName(workflowNames.taskArtifactName, "task artifact name"),
+        bytes: 51
+      }]));
     } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/artifacts/artifact_task/download`) {
       res.setHeader("content-type", "application/octet-stream");
       res.end(`runtime accepted\n${taskMarker}\n`);
@@ -664,6 +819,7 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
   return {
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     requests,
+    workflowNames,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   };
 }
@@ -757,6 +913,9 @@ function writeFakeKubectl(tempDir: string): string {
   writeFileSync(fakeKubectl, `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+if [ -n "\${FAKE_WORKFLOW_SEQUENCE:-}" ]; then
+  printf 'kubectl %s\\n' "$*" >> "$FAKE_WORKFLOW_SEQUENCE"
+fi
 for arg in "$@"; do
   case "$arg" in
     exec|logs|attach|port-forward|apply|delete|patch|create)
@@ -764,19 +923,42 @@ for arg in "$@"; do
       ;;
   esac
 done
+run_id=
 resource=
 previous=
 for arg in "$@"; do
+  case "$arg" in
+    agentsmith-lite/run-id=*) run_id="\${arg#agentsmith-lite/run-id=}" ;;
+  esac
   if [ "$previous" = "get" ]; then
     resource="$arg"
-    break
   fi
   previous="$arg"
 done
+if [ "$resource" = "pods" ] && [ -n "\${FAKE_ARTIFACT_POLL_STARTED:-}" ] && [ -e "$FAKE_ARTIFACT_POLL_STARTED" ]; then
+  printf '{"items":[]}\\n'
+  exit 0
+fi
+pod_name="asl-task-k8s"
+sub_path="workspaces/workspace_task/projects/project_task"
+case "\${run_id:-}" in
+  run_reclaim)
+    pod_name="asl-task-k8s-reclaim"
+    sub_path="workspaces/workspace_reclaim/projects/project_reclaim"
+    ;;
+esac
+if [ "$resource" = "pods" ] && [ "$run_id" = "run_reclaim" ]; then
+  reclaim_pods_seen="$(dirname "$0")/reclaim-pods-seen"
+  if [ -e "$reclaim_pods_seen" ]; then
+    printf '{"items":[]}\\n'
+    exit 0
+  fi
+  : > "$reclaim_pods_seen"
+fi
 case "$resource" in
   pods)
-    cat <<'JSON'
-{"items":[{"metadata":{"name":"asl-task-k8s","labels":{"agentsmith-lite/run-id":"run_artifact"}},"status":{"phase":"Running","containerStatuses":[{"name":"botified-runner","ready":true,"image":"registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111","imageID":"docker-pullable://registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},"spec":{"containers":[{"name":"botified-runner","image":"registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111","volumeMounts":[{"name":"project-files","mountPath":"/workspace/project","subPath":"workspaces/workspace_task/projects/project_task"}]}],"volumes":[{"name":"project-files","persistentVolumeClaim":{"claimName":"agentsmith-lite-files"}}]}}]}
+    cat <<JSON
+{"items":[{"metadata":{"name":"$pod_name","labels":{"agentsmith-lite/run-id":"$run_id"}},"status":{"phase":"Running","containerStatuses":[{"name":"botified-runner","ready":true,"image":"registry.example.test/agentsmith/botified-runner:kind-normalized","imageID":"docker-pullable://registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},"spec":{"containers":[{"name":"botified-runner","image":"registry.example.test/agentsmith/botified-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111","volumeMounts":[{"name":"project-files","mountPath":"/workspace/project","subPath":"$sub_path"}]}],"volumes":[{"name":"project-files","persistentVolumeClaim":{"claimName":"agentsmith-lite-files"}}]}}]}
 JSON
     ;;
   secrets) printf 'secret/asl-task-secret\\n' ;;
@@ -845,6 +1027,27 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function parsedRequestBody<T>(requests: WorkflowRequest[], method: string, url: string): T {
+  const request = requests.find((entry) => entry.method === method && entry.url === url);
+  assert.ok(request, `missing request ${method} ${url}`);
+  return JSON.parse(request.body) as T;
+}
+
+function stringBodyField(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string") {
+    throw new Error(`${field} missing from request body`);
+  }
+  return value;
+}
+
+function requiredWorkflowName(value: string | undefined, name: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${name} missing`);
+  }
+  return value;
+}
+
 interface WorkflowRequest {
   method: string | undefined;
   url: string | undefined;
@@ -869,12 +1072,24 @@ interface WorkflowServerOptions {
   endpointSecretRef: string;
   artifactTask?: WorkflowTaskFixture;
   reclaimTask?: WorkflowTaskFixture;
+  sequenceFile?: string;
+  artifactPollStartedFile?: string;
 }
 
 interface WorkflowServer {
   baseUrl: string;
   requests: WorkflowRequest[];
+  workflowNames: Partial<WorkflowRunNames>;
   close: () => Promise<void>;
+}
+
+interface WorkflowRunNames {
+  suffix: string;
+  workspaceName: string;
+  projectName: string;
+  endpointName: string;
+  filePath: string;
+  taskArtifactName: string;
 }
 
 interface ProductWorkflowSummary {

@@ -25,6 +25,7 @@ import type {
   SandboxKubernetesMutationPort,
   SandboxKubernetesReadinessPort
 } from "../../packages/sandbox-controller/src/kubernetesPort.js";
+import { sandboxResourceNamesForTask, sandboxServiceNameForTask } from "../../packages/sandbox-controller/src/resourceNames.js";
 
 describe("task service Botified orchestration", () => {
   it("sends the prompt through Botified, stores projected events, and keeps service keys server-side", async () => {
@@ -58,7 +59,7 @@ describe("task service Botified orchestration", () => {
     assert.equal(task.status, "running");
     assert.deepEqual(botified.postMessageCalls, [
       {
-        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        baseUrl: botifiedBaseUrlForTask(task.id),
         serviceKey: "test-service-key",
         message: "build it"
       }
@@ -242,9 +243,10 @@ describe("task service Botified orchestration", () => {
     const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
     const resolver = new FakeCredentialResolver({
       apiKey: "sk-real-model-key",
-      baseUrl: "https://models.example.com/v1/"
+      baseUrl: "https://agentsmith-lite-local-openai.agentsmith.svc.cluster.local/v1/"
     });
     const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      endpointBaseUrl: "https://agentsmith-lite-local-openai.agentsmith.svc.cluster.local/v1",
       modelCredentialResolver: resolver,
       modelCa: {
         configMapName: "local-model-ca",
@@ -264,6 +266,7 @@ describe("task service Botified orchestration", () => {
       endpointId
     });
 
+    const expectedResourceNames = sandboxResourceNamesForTask(task.id);
     assert.equal(task.status, "running");
     assert.deepEqual(resolver.calls, ["secret/openai"]);
     assert.deepEqual(livePort.appliedResources.map((resource) => resource.kind), [
@@ -275,8 +278,24 @@ describe("task service Botified orchestration", () => {
       "Pod"
     ]);
     assert.deepEqual(livePort.deletedRefs, []);
-    assert.ok(operations.lastIndexOf("apply:Pod") < operations.indexOf("readiness:asl-task-" + task.id));
-    assert.ok(operations.indexOf("readiness:asl-task-" + task.id) < operations.indexOf("post"));
+    assert.ok(operations.lastIndexOf("apply:Pod") < operations.indexOf(`readiness:${expectedResourceNames.pod}`));
+    assert.ok(operations.indexOf(`readiness:${expectedResourceNames.pod}`) < operations.indexOf("post"));
+    for (const resource of livePort.appliedResources) {
+      assertDnsLabel(resource.metadata.name);
+      assert.equal(resource.metadata.labels["agentsmith-lite/task-id"], task.id);
+      assert.equal(resource.metadata.labels["agentsmith-lite/run-id"], task.runId);
+    }
+    assert.deepEqual(
+      Object.fromEntries(livePort.appliedResources.map((resource) => [resource.kind, resource.metadata.name])),
+      {
+        Secret: expectedResourceNames.secret,
+        ConfigMap: expectedResourceNames.configMap,
+        ServiceAccount: expectedResourceNames.serviceAccount,
+        NetworkPolicy: expectedResourceNames.networkPolicy,
+        Service: expectedResourceNames.service,
+        Pod: expectedResourceNames.pod
+      }
+    );
 
     const appliedSecret = livePort.appliedResources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
     assert.deepEqual(appliedSecret?.stringData, {
@@ -285,14 +304,21 @@ describe("task service Botified orchestration", () => {
     });
     const appliedConfig = livePort.appliedResources.find((resource) => resource.kind === "ConfigMap") as ConfigMapResource | undefined;
     const generatedConfig = JSON.parse(appliedConfig?.data["botified-config.yaml"] ?? "{}") as {
-      service?: { port?: number };
-      providers?: Array<{ api_key_env?: string; ca_bundle_path?: string }>;
+      runtime?: { cwd?: string; data_dir?: string };
+      service?: { host?: string; port?: number };
+      providers?: Array<{ base_url?: string; api_key_env?: string; ca_bundle_path?: string }>;
     };
+    assert.equal(generatedConfig.runtime?.cwd, `/workspace/project/tasks/${task.id}/home`);
+    assert.equal(generatedConfig.runtime?.data_dir, `/workspace/project/tasks/${task.id}/botified`);
+    assert.equal(generatedConfig.service?.host, "0.0.0.0");
     assert.equal(generatedConfig.service?.port, 3099);
+    assert.equal(generatedConfig.providers?.[0]?.base_url, "https://agentsmith-lite-local-openai.agentsmith.svc.cluster.local/v1");
     assert.equal(generatedConfig.providers?.[0]?.api_key_env, "MODEL_API_KEY");
     assert.equal(generatedConfig.providers?.[0]?.ca_bundle_path, "/etc/agentsmith-lite/model-ca/ca.crt");
     assert.equal(JSON.stringify(generatedConfig).includes("sk-real-model-key"), false);
     assert.equal(JSON.stringify(generatedConfig).includes("BEGIN CERTIFICATE"), false);
+    assert.equal(botified.postMessageCalls[0]?.baseUrl, botifiedBaseUrlForTask(task.id));
+    assert.equal(botified.readTimelineCalls[0]?.baseUrl, botifiedBaseUrlForTask(task.id));
     const appliedPod = livePort.appliedResources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
     const appliedContainer = appliedPod?.spec.containers[0];
     assert.ok(
@@ -310,6 +336,20 @@ describe("task service Botified orchestration", () => {
       )
     );
 
+    const appliedNetworkPolicy = livePort.appliedResources.find((resource) => resource.kind === "NetworkPolicy") as
+      | NetworkPolicyResource
+      | undefined;
+    const modelEgress = appliedNetworkPolicy?.spec.egress.find(hasAgentsmithLocalOpenAiDestination);
+    assert.ok(modelEgress, "live sandbox should allow the configured local OpenAI provider service pods");
+    assert.deepEqual(modelEgress.ports, [
+      { protocol: "TCP", port: 443 },
+      { protocol: "TCP", port: 8443 }
+    ]);
+    assert.equal(
+      appliedNetworkPolicy?.spec.egress.some((rule) => hasUnscopedDestination(rule) && hasPort(rule, "TCP", 443)),
+      false
+    );
+
     const publicSecret = task.sandbox.resources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
     assert.deepEqual(publicSecret?.stringData, {
       BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
@@ -324,6 +364,8 @@ describe("task service Botified orchestration", () => {
     const sandboxRun = await store.sandboxRuns.get(task.runId);
     assert.equal(sandboxRun?.phase, "running");
     assert.equal(sandboxRun?.cleanupStatus, "active");
+    assert.deepEqual(sandboxRun?.resourceNames, expectedResourceNames);
+    assert.equal(sandboxRun?.serviceKeySecretRef.name, expectedResourceNames.secret);
     assert.ok(sandboxRun?.expiresAt, "live sandbox run should persist a max lifetime deadline");
     assert.ok(sandboxRun?.idleExpiresAt, "live sandbox run should persist an idle deadline");
     assert.equal(Date.parse(sandboxRun.expiresAt) - Date.parse(sandboxRun.createdAt), 2 * 60 * 60 * 1000);
@@ -616,11 +658,11 @@ describe("task service Botified orchestration", () => {
       }
     });
 
-    await services.tasks.createTask(userId, projectId, { prompt: "wait for me", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "wait for me", endpointId });
 
     assert.deepEqual(livePort.sleeps, [25]);
     assert.deepEqual(operations.filter((operation) => operation.startsWith("readiness:")).length, 2);
-    assert.ok(operations.lastIndexOf("readiness:asl-task-" + livePort.taskId) < operations.indexOf("post"));
+    assert.ok(operations.lastIndexOf(`readiness:${sandboxResourceNamesForTask(task.id).pod}`) < operations.indexOf("post"));
   });
 
   it("marks the task failed and best-effort cleans up when readiness fails or times out", async () => {
@@ -797,7 +839,7 @@ describe("task service Botified orchestration", () => {
 
     assert.equal(cancelled.status, "stopping");
     assert.deepEqual(botified.abortCalls.map((call) => call.baseUrl), [
-      `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`
+      botifiedBaseUrlForTask(task.id)
     ]);
     assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
@@ -827,6 +869,34 @@ describe("task service Botified orchestration", () => {
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
   });
 
+  it("does not mark stopping or reap when Botified declines abort", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }], {
+      abortResult: { aborted: false }
+    });
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "abort declined", endpointId });
+
+    await assert.rejects(() => services.tasks.cancelTask(userId, task.id), /Botified did not abort task/);
+
+    const [storedTask] = await store.listTasksForProject(projectId);
+    const sandboxRun = await store.sandboxRuns.get(task.runId);
+    assert.equal(storedTask?.status, "running");
+    assert.equal(sandboxRun?.phase, "running");
+    assert.equal(sandboxRun?.cleanupStatus, "active");
+    assert.deepEqual(livePort.deletedRefs, []);
+    assert.deepEqual(livePort.patchedRefs, []);
+  });
+
   it("requests live cleanup when terminal timeline events are projected", async () => {
     const botified = new FakeBotifiedClient([
       {
@@ -854,6 +924,228 @@ describe("task service Botified orchestration", () => {
     assert.equal(task.status, "completed");
     assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("returns stored terminal events after live cleanup without fetching a deleted sandbox", async () => {
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          { cursor: "c1", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+        ],
+        nextCursor: "c1"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "finish fast", endpointId });
+    botified.readTimelineError = new Error("fetch failed");
+
+    const events = await services.tasks.listTaskEvents(userId, task.id);
+
+    assert.equal(task.status, "completed");
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+    assert.deepEqual(events.map((event) => [event.cursor, event.kind]), [["c1", "turn_completed"]]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor"]);
+  });
+
+  it("cleans a durable terminal live run before reading stored data when Botified is gone", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "already finished", endpointId });
+    const storedAt = "2026-01-01T00:00:01.000Z";
+    await store.appendTaskEvents([
+      {
+        id: "event-stored-terminal",
+        taskId: task.id,
+        kind: "turn_completed",
+        cursor: "stored-c1",
+        botifiedSeq: 1,
+        botifiedType: "cycle.completed",
+        sessionId: "s1",
+        payload: { ok: true },
+        createdAt: storedAt
+      }
+    ]);
+    await store.appendTaskArtifacts([
+      {
+        id: "artifact-stored-terminal",
+        taskId: task.id,
+        fileId: "stored_file_1",
+        name: "stored.txt",
+        bytes: 12,
+        createdAt: storedAt
+      }
+    ]);
+    await store.updateTask({ ...task, status: "completed", updatedAt: storedAt });
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
+    botified.readTimelineError = new BotifiedHttpError({
+      status: 404,
+      code: "runtime_gone",
+      message: "pod is gone",
+      retryable: false,
+      responseBody: { error: { code: "runtime_gone" } }
+    });
+
+    const events = await services.tasks.listTaskEvents(userId, task.id);
+    const artifacts = await services.tasks.listTaskArtifacts(userId, task.id);
+
+    assert.deepEqual(events.map((event) => [event.cursor, event.kind]), [["stored-c1", "turn_completed"]]);
+    assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [["stored_file_1", "stored.txt", 12]]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor"]);
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("continues syncing a cleaned live run until terminal events and artifacts are persisted", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-cleaned-sync-"));
+    const artifactBytes = new TextEncoder().encode("artifact recovered after run cleanup");
+    const botified = new FakeBotifiedClient([
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c1",
+            seq: 1,
+            session_id: "s1",
+            type: "service.status",
+            data: { state: "running", queue_length: 0 }
+          },
+          {
+            cursor: "c2",
+            seq: 2,
+            session_id: "s1",
+            type: "cycle.started",
+            data: { cycle_id: "cycle_1" }
+          },
+          {
+            cursor: "c3",
+            seq: 3,
+            session_id: "s1",
+            type: "command_execution.started",
+            data: {
+              tool_call_id: "call_bash",
+              command: "printf recovered > recovered.txt",
+              status: "in_progress"
+            }
+          },
+          {
+            cursor: "c4",
+            seq: 4,
+            session_id: "s1",
+            type: "service.status",
+            data: { state: "idle", queue_length: 0 }
+          }
+        ],
+        nextCursor: "c4"
+      },
+      {
+        status: "ok",
+        events: [
+          {
+            cursor: "c5",
+            seq: 5,
+            session_id: "s1",
+            type: "command_execution.completed",
+            data: {
+              tool_call_id: "call_bash",
+              command: "printf recovered > recovered.txt",
+              status: "completed",
+              exit_code: 0
+            }
+          },
+          {
+            cursor: "c6",
+            seq: 6,
+            session_id: "s1",
+            type: "file.published",
+            data: {
+              file_id: "recovered_file_1",
+              filename: "recovered.txt",
+              size_bytes: artifactBytes.byteLength
+            }
+          },
+          {
+            cursor: "c7",
+            seq: 7,
+            session_id: "s1",
+            type: "cycle.completed",
+            data: { cycle_id: "cycle_1" }
+          }
+        ],
+        nextCursor: "c7"
+      }
+    ], {
+      downloads: {
+        recovered_file_1: artifactBytes
+      }
+    });
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+
+    try {
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        dataRoot,
+        modelCredentialResolver: new FakeCredentialResolver({
+          apiKey: "sk-real-model-key",
+          baseUrl: "https://models.example.com/v1/"
+        }),
+        liveSandbox: {
+          port: livePort,
+          sleep: livePort.sleep
+        }
+      });
+      const task = await services.tasks.createTask(userId, projectId, { prompt: "recover after cleanup", endpointId });
+      const run = await store.sandboxRuns.get(task.runId);
+      assert.ok(run, "expected live sandbox run");
+      await store.sandboxRuns.updateWithFencing(task.runId, run.fencingToken, {
+        ...run,
+        phase: "cleaned",
+        cleanupStatus: "cleaned",
+        fencingToken: run.fencingToken + 1
+      });
+      const storedTask = await store.findTask(task.id);
+      assert.ok(storedTask, "expected stored task");
+      await store.updateTask({ ...storedTask, status: "cleaned" });
+
+      const events = await services.tasks.listTaskEvents(userId, task.id);
+      const artifacts = await store.listTaskArtifacts(task.id);
+
+      assert.deepEqual(events.map((event) => [event.cursor, event.kind]), [
+        ["c1", "diagnostic"],
+        ["c2", "turn_started"],
+        ["c3", "tool_execution"],
+        ["c4", "diagnostic"],
+        ["c5", "tool_execution"],
+        ["c6", "artifact"],
+        ["c7", "turn_completed"]
+      ]);
+      assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [
+        ["recovered_file_1", "recovered.txt", artifactBytes.byteLength]
+      ]);
+      assert.equal((await store.findTask(task.id))?.status, "completed");
+      assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c4"]);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 
   it("handles Botified timeline reset when a new timeline reuses an old sequence number", async () => {
@@ -969,7 +1261,7 @@ describe("task service Botified orchestration", () => {
 
     assert.deepEqual(botified.readStateCalls, [
       {
-        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        baseUrl: botifiedBaseUrlForTask(task.id),
         serviceKey: "test-service-key"
       }
     ]);
@@ -1080,7 +1372,7 @@ describe("task service Botified orchestration", () => {
     assert.equal(runtimeState?.timelineCursor, "timeline:old:1");
     assert.deepEqual(botified.readStateCalls, [
       {
-        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        baseUrl: botifiedBaseUrlForTask(task.id),
         serviceKey: "test-service-key"
       }
     ]);
@@ -1272,7 +1564,7 @@ describe("task service Botified orchestration", () => {
       assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
       assert.deepEqual(botified.downloadFileCalls, [
         {
-          baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+          baseUrl: botifiedBaseUrlForTask(task.id),
           serviceKey: "test-service-key",
           fileId: "file_real_1"
         }
@@ -1544,16 +1836,47 @@ describe("task service Botified orchestration", () => {
     assert.equal(cancelled.status, "stopping");
     assert.deepEqual(botified.abortCalls, [
       {
-        baseUrl: `http://asl-task-${task.id}.agentsmith.svc.cluster.local:3099`,
+        baseUrl: botifiedBaseUrlForTask(task.id),
         serviceKey: "test-service-key"
       }
     ]);
   });
 });
 
+function botifiedBaseUrlForTask(taskId: string, namespace = "agentsmith", port = 3099): string {
+  return `http://${sandboxServiceNameForTask(taskId)}.${namespace}.svc.cluster.local:${port}`;
+}
+
+function assertDnsLabel(name: string): void {
+  assert.match(name, /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/, `${name} should be a DNS label`);
+  assert.ok(name.length <= 63, `${name} should fit in a DNS label`);
+  assert.equal(name.includes("_"), false, `${name} should not contain underscores`);
+}
+
+function hasPort(rule: NetworkPolicyEgressRule, protocol: string, port: number): boolean {
+  return rule.ports?.some((candidate) => candidate.protocol === protocol && candidate.port === port) ?? false;
+}
+
+function hasUnscopedDestination(rule: NetworkPolicyEgressRule): boolean {
+  return rule.to === undefined || rule.to.length === 0;
+}
+
+function hasAgentsmithLocalOpenAiDestination(rule: NetworkPolicyEgressRule): boolean {
+  return (
+    rule.to?.some(
+      (destination) =>
+        JSON.stringify(destination.namespaceSelector) ===
+          JSON.stringify({ matchLabels: { "kubernetes.io/metadata.name": "agentsmith" } }) &&
+        JSON.stringify(destination.podSelector) ===
+          JSON.stringify({ matchLabels: { "app.kubernetes.io/name": "agentsmith-lite-local-openai" } })
+    ) ?? false
+  );
+}
+
 interface SetupOptions {
   serviceKeyFactory?: () => string | undefined;
   dataRoot?: string;
+  endpointBaseUrl?: string;
   endpointCapabilities?: Array<"text" | "image" | "tool_calls">;
   modelCredentialResolver?: ModelCredentialResolver;
   liveSandbox?: CreateApplicationServicesInput["liveSandbox"];
@@ -1587,7 +1910,7 @@ async function setupTaskServices(botified: FakeBotifiedClient, optionsOrFactory:
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, {
     name: "openai-compatible",
     protocol: "openai_chat_completions",
-    baseUrl: "https://models.example.com/v1",
+    baseUrl: options.endpointBaseUrl ?? "https://models.example.com/v1",
     model: "gpt-compatible",
     apiKeySecretRef: "secret/openai",
     capabilities: options.endpointCapabilities ?? ["text", "tool_calls"],
@@ -1703,6 +2026,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       postResult?: BotifiedPostMessageResult;
       postError?: Error;
       abortError?: Error;
+      abortResult?: BotifiedAbortResult;
       stateReads?: BotifiedRuntimeStateResult[];
       downloads?: Record<string, Uint8Array>;
       downloadFailures?: Record<string, Error[]>;
@@ -1768,7 +2092,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     if (this.options.abortError) {
       throw this.options.abortError;
     }
-    return { aborted: true };
+    return this.options.abortResult ?? { aborted: true };
   }
 }
 
@@ -1903,6 +2227,21 @@ interface SecretResource extends KubernetesResource {
 
 interface ConfigMapResource extends KubernetesResource {
   data: Record<string, string>;
+}
+
+interface NetworkPolicyResource extends KubernetesResource {
+  spec: {
+    egress: NetworkPolicyEgressRule[];
+  };
+}
+
+interface NetworkPolicyEgressRule {
+  to?: Array<{
+    namespaceSelector?: Record<string, unknown>;
+    podSelector?: Record<string, unknown>;
+    ipBlock?: Record<string, unknown>;
+  }>;
+  ports?: Array<{ protocol: string; port: number }>;
 }
 
 interface PodResource extends KubernetesResource {

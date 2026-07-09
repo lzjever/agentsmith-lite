@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 import { renderAppManifests } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
@@ -117,6 +116,8 @@ describe("app manifest rendering", () => {
         OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
         OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         OIDC_CLIENT_ID: "agentsmith-lite",
+        OIDC_ADMIN_EMAILS: "ops@example.test",
+        OIDC_ADMIN_SUBJECTS: "keycloak-ops-subject",
         AGENTSMITH_LITE_SANDBOX_MODE: "live",
         AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
@@ -174,12 +175,16 @@ describe("app manifest rendering", () => {
     assert.equal(configMapData?.OIDC_ISSUER_URL, "https://keycloak.example.test/realms/agentsmith");
     assert.equal(configMapData?.OIDC_BACKCHANNEL_BASE_URL, "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith");
     assert.equal(configMapData?.OIDC_CLIENT_ID, "agentsmith-lite");
+    assert.equal(configMapData?.OIDC_ADMIN_EMAILS, "ops@example.test");
+    assert.equal(configMapData?.OIDC_ADMIN_SUBJECTS, "keycloak-ops-subject");
     assert.equal(configMapData?.OIDC_CLIENT_SECRET, undefined);
     assert.equal(secretData?.OIDC_CLIENT_SECRET, "oidc-client-secret");
     assert.equal(secretData?.BUILTIN_ADMIN_INITIAL_PASSWORD, undefined);
     assert.equal(secretData?.OIDC_ISSUER_URL, undefined);
     assert.equal(secretData?.OIDC_BACKCHANNEL_BASE_URL, undefined);
     assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
+    assert.equal(secretData?.OIDC_ADMIN_EMAILS, undefined);
+    assert.equal(secretData?.OIDC_ADMIN_SUBJECTS, undefined);
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
     assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
@@ -282,6 +287,13 @@ describe("app manifest rendering", () => {
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
       {
+        name: "OIDC admin emails in secrets",
+        env: {},
+        secrets: { OIDC_ADMIN_EMAILS: "DO_NOT_PRINT_OIDC_ADMIN_EMAILS" },
+        error: /OIDC_ADMIN_EMAILS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
+      },
+      {
         name: "OIDC mode missing secret",
         env: {
           AUTH_MODE: "oidc",
@@ -311,6 +323,16 @@ describe("app manifest rendering", () => {
         secrets: {},
         error: /OIDC_BACKCHANNEL_BASE_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
+      },
+      {
+        name: "builtin mode with non-empty OIDC admin subjects",
+        env: {
+          AUTH_MODE: "builtin_admin",
+          OIDC_ADMIN_SUBJECTS: "DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS"
+        },
+        secrets: {},
+        error: /OIDC_ADMIN_SUBJECTS/,
+        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
       }
     ];
 
@@ -470,14 +492,6 @@ describe("app manifest rendering", () => {
       "clusterrolebindings"
     ]) {
       assert.equal(resources.includes(forbidden), false, `${forbidden} must not be granted`);
-    }
-  });
-
-  it("keeps the deploy doctor aligned with forbidden sandbox RBAC resources", () => {
-    const doctor = readFileSync("scripts/deploy/doctor.sh", "utf8");
-
-    for (const forbidden of ["watch", "--subresource=exec", "persistentvolumes", "persistentvolumeclaims"]) {
-      assert.match(doctor, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
   });
 

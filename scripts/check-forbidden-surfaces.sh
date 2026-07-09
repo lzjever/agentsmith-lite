@@ -12,10 +12,6 @@ done
 is_allowed_active_hit() {
   local hit="$1"
   case "$hit" in
-    # The doctor script names pods/exec only as a negative RBAC probe.
-    "scripts/deploy/doctor.sh:"*"for resource in pods/exec persistentvolumes persistentvolumeclaims clusterroles; do")
-      return 0
-      ;;
     "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_USER"'*|\
     "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_PASSWORD"'*|\
     "scripts/deploy/env-contract.mjs:"*'"KEYCLOAK_DB_DATABASE"'*|\

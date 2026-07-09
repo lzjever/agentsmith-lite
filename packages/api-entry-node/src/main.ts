@@ -36,6 +36,8 @@ const server = await createApiServer({
   sessionSecret,
   ...(process.env.APP_PUBLIC_BASE_URL ? { publicBaseUrl: process.env.APP_PUBLIC_BASE_URL } : {}),
   ...(oidcClient ? { oidcClient } : {}),
+  ...(authConfig.oidc?.adminEmails ? { oidcAdminEmails: authConfig.oidc.adminEmails } : {}),
+  ...(authConfig.oidc?.adminSubjects ? { oidcAdminSubjects: authConfig.oidc.adminSubjects } : {}),
   namespace: process.env.KUBE_NAMESPACE ?? "agentsmith",
   pvcName: process.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
   botifiedRunnerImage: process.env.BOTIFIED_RUNNER_IMAGE ?? "agentsmith-lite/botified-runner:dev",

@@ -20,6 +20,8 @@ export interface CreateApplicationServicesInput {
   dataRoot: string;
   builtinAdminPassword: string;
   sessionSecret?: string;
+  oidcAdminEmails?: string[];
+  oidcAdminSubjects?: string[];
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
@@ -48,7 +50,10 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const sessionSecret = input.liveSandbox
     ? requireLiveSandboxSessionSecret(input.sessionSecret)
     : input.sessionSecret ?? DEFAULT_SESSION_SECRET;
-  const auth = new AuthService(input.store, builtinAdminPassword, sessionSecret);
+  const auth = new AuthService(input.store, builtinAdminPassword, sessionSecret, {
+    emails: input.oidcAdminEmails ?? [],
+    subjects: input.oidcAdminSubjects ?? []
+  });
   const modelCredentialResolver = input.modelCredentialResolver ?? new EnvModelCredentialResolver();
   const chat = new ChatService(
     endpoints,

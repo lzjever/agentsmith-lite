@@ -29,6 +29,8 @@ export interface ApiServerOptions {
   sessionSecret?: string;
   publicBaseUrl?: string;
   oidcClient?: OidcClientAdapter;
+  oidcAdminEmails?: string[];
+  oidcAdminSubjects?: string[];
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
@@ -74,6 +76,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     dataRoot: options.dataRoot,
     builtinAdminPassword: options.builtinAdminPassword,
     sessionSecret: effectiveSessionSecret,
+    ...(options.oidcAdminEmails ? { oidcAdminEmails: options.oidcAdminEmails } : {}),
+    ...(options.oidcAdminSubjects ? { oidcAdminSubjects: options.oidcAdminSubjects } : {}),
     ...(options.namespace ? { namespace: options.namespace } : {}),
     ...(options.pvcName ? { pvcName: options.pvcName } : {}),
     ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {}),

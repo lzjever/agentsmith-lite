@@ -42,6 +42,33 @@ describe("sandbox Kubernetes port", () => {
     assert.equal(transport.requests.some((request) => request.path === "/api/v1/namespaces"), false, "namespaces must not be listed");
   });
 
+  it("normalizes list items without per-item kind or apiVersion from each lifecycle endpoint", async () => {
+    const transport = recordingTransport((request) => ({
+      statusCode: 200,
+      body: {
+        items: [{
+          metadata: {
+            name: `${listResourceName(request.path)}-from-list`,
+            namespace: "agentsmith",
+            labels: identityLabels
+          }
+        }]
+      }
+    }));
+    const port = new SandboxKubernetesPort({ transport });
+
+    const resources = await port.listManagedResources("agentsmith");
+
+    assert.deepEqual(resources.map((resource) => `${resource.apiVersion}:${resource.kind}:${resource.metadata.name}`), [
+      "v1:Secret:secrets-from-list",
+      "v1:ConfigMap:configmaps-from-list",
+      "v1:ServiceAccount:serviceaccounts-from-list",
+      "networking.k8s.io/v1:NetworkPolicy:networkpolicies-from-list",
+      "v1:Service:services-from-list",
+      "v1:Pod:pods-from-list"
+    ]);
+  });
+
   it("applies resources with server-side apply, converts Secret stringData, and fences existing label mismatches", async () => {
     const transport = recordingTransport((request) => {
       if (request.method === "GET") {
@@ -169,6 +196,78 @@ describe("sandbox Kubernetes port", () => {
     const fencedPort = new SandboxKubernetesPort({ transport: mismatched });
     assert.equal(await fencedPort.deleteResource({ kind: "Pod", namespace: "agentsmith", name: "asl-task-t1" }, identityLabels), "fence_mismatch");
     assert.deepEqual(mismatched.requests.map((request) => request.method), ["GET"]);
+  });
+
+  it("deletes an observed Service by UID without re-reading the Service endpoint", async () => {
+    const transport = recordingTransport((request) => {
+      if (request.method === "GET") {
+        return { statusCode: 400, body: { kind: "Status", message: "service get rejected" } };
+      }
+      const deleteOptions = JSON.parse(String(request.body)) as Record<string, unknown>;
+      if (
+        deleteOptions.apiVersion !== "v1" ||
+        deleteOptions.kind !== "DeleteOptions" ||
+        (deleteOptions.preconditions as Record<string, unknown> | undefined)?.uid !== "service-uid-1"
+      ) {
+        return { statusCode: 400, body: { kind: "Status", message: "invalid delete options" } };
+      }
+      return { statusCode: 200 };
+    });
+    const port = new SandboxKubernetesPort({ transport });
+    const observedRef = {
+      kind: "Service",
+      namespace: "agentsmith",
+      name: "asl-task-t1",
+      uid: "service-uid-1",
+      labels: identityLabels
+    } as KubernetesResourceRef;
+
+    assert.equal(await port.deleteResource(observedRef, identityLabels), "deleted");
+
+    assert.deepEqual(transport.requests.map((request) => `${request.method} ${request.path}`), [
+      "DELETE /api/v1/namespaces/agentsmith/services/asl-task-t1"
+    ]);
+    assert.deepEqual(JSON.parse(String(transport.requests[0]?.body)), {
+      apiVersion: "v1",
+      kind: "DeleteOptions",
+      preconditions: { uid: "service-uid-1" }
+    });
+  });
+
+  it("includes sanitized Kubernetes Status details when Service delete returns HTTP 400", async () => {
+    const transport = recordingTransport(() => ({
+      statusCode: 400,
+      body: {
+        kind: "Status",
+        reason: "BadRequest",
+        code: 400,
+        message: "invalid delete options for Bearer bsk_runtime_secret and sk-real-model-key",
+        details: {
+          causes: [{ message: "hidden detail sk-real-detail-key" }]
+        }
+      }
+    }));
+    const port = new SandboxKubernetesPort({ transport });
+
+    await assert.rejects(
+      port.deleteResource({
+        kind: "Service",
+        namespace: "agentsmith",
+        name: "asl-task-t1",
+        uid: "service-uid-1",
+        labels: identityLabels
+      }, identityLabels),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Kubernetes delete Service\/asl-task-t1 failed with HTTP 400/);
+        assert.match(error.message, /kind=Status/);
+        assert.match(error.message, /reason=BadRequest/);
+        assert.match(error.message, /code=400/);
+        assert.match(error.message, /message="invalid delete options for Bearer <redacted> and sk-<redacted>"/);
+        assert.doesNotMatch(error.message, /bsk_runtime_secret|sk-real-model-key|hidden detail|sk-real-detail-key|details/);
+        return true;
+      }
+    );
   });
 
   it("maps pod readiness and enforces identity labels", async () => {
@@ -324,6 +423,10 @@ function recordingTransport(
       return handler(request);
     }
   };
+}
+
+function listResourceName(path: string): string {
+  return path.split("?")[0]?.split("/").at(-1) ?? "unknown";
 }
 
 function resource(

@@ -1,25 +1,19 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const ADMIN_EMAIL = "admin@agentsmith-lite.local";
-const WORKSPACE_NAME = "Deploy Product Workflow";
-const PROJECT_NAME = "API Product Workflow";
-const FILE_PATH = "files/product-workflow-check.txt";
+const WORKSPACE_NAME_PREFIX = "Deploy Product Workflow";
+const PROJECT_NAME_PREFIX = "API Product Workflow";
+const ENDPOINT_NAME_PREFIX = "Deploy Product Workflow Endpoint";
+const FILE_NAME_PREFIX = "product-workflow-check";
 const FILE_CONTENT = "hello from deploy product workflow check\n";
-const TASK_ARTIFACT_NAME = "agentsmith-lite-task-workflow.txt";
+const TASK_ARTIFACT_NAME_PREFIX = "agentsmith-lite-task-workflow";
 const TASK_MARKER = "AGENTSMITH_LITE_TASK_WORKFLOW_MARKER";
 const TASK_POLL_INTERVAL_MS = 500;
 const DEFAULT_TASK_TIMEOUT_SECS = 45;
-const TASK_PROMPT = [
-  "Deploy product workflow task artifact check.",
-  "Use bash in the current task home/cwd to create agentsmith-lite-task-workflow.txt.",
-  "The file content must include this exact marker on its own line: AGENTSMITH_LITE_TASK_WORKFLOW_MARKER.",
-  "Then use the Botified publish_file tool to publish that file with filename agentsmith-lite-task-workflow.txt.",
-  "Keep the response brief and do not include credentials or endpoint secret references."
-].join("\n");
 const TASK_RECLAIM_PROMPT = [
   "Deploy product workflow task reclaim check.",
   "Use bash in the current task home/cwd to run a long sleep, for example: sleep 600.",
@@ -104,6 +98,7 @@ async function main() {
   addSensitiveEnvValuesByPrefix(["S3_", "JUICEFS_"]);
 
   const k8sRunResourceObserver = checkK8sRunResources ? createK8sRunResourceObserver() : undefined;
+  const workflowNames = createWorkflowRunNames();
 
   const workflow = new ProductWorkflowClient(args.baseUrl, sessionConfig);
   const health = await workflow.requestJson("GET", "/api/health");
@@ -119,13 +114,13 @@ async function main() {
 
   const workspace = await workflow.requestJson("POST", "/api/workspaces", {
     auth: true,
-    body: { name: WORKSPACE_NAME }
+    body: { name: workflowNames.workspaceName }
   });
   const workspaceId = requireString(workspace.id, "workspace id");
 
   const project = await workflow.requestJson("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/projects`, {
     auth: true,
-    body: { name: PROJECT_NAME }
+    body: { name: workflowNames.projectName }
   });
   const projectId = requireString(project.id, "project id");
 
@@ -135,7 +130,7 @@ async function main() {
     const endpoint = await workflow.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/endpoints`, {
       auth: true,
       body: {
-        name: "Deploy Product Workflow Endpoint",
+        name: workflowNames.endpointName,
         protocol: "openai_chat_completions",
         baseUrl: endpointConfig.baseUrl,
         model: endpointConfig.model,
@@ -158,7 +153,7 @@ async function main() {
   await workflow.requestJson("POST", `/api/projects/${encodeURIComponent(projectId)}/files`, {
     auth: true,
     body: {
-      path: FILE_PATH,
+      path: workflowNames.filePath,
       content: FILE_CONTENT
     }
   });
@@ -167,22 +162,22 @@ async function main() {
     auth: true
   });
   const entries = Array.isArray(files.entries) ? files.entries : [];
-  if (!entries.some((entry) => entry && typeof entry === "object" && entry.path === FILE_PATH)) {
+  if (!entries.some((entry) => entry && typeof entry === "object" && entry.path === workflowNames.filePath)) {
     throw new Error("uploaded workflow check file was not listed");
   }
 
   const downloaded = await workflow.requestJson(
     "GET",
-    `/api/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(FILE_PATH)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(workflowNames.filePath)}`,
     { auth: true }
   );
-  if (downloaded.path !== FILE_PATH || downloaded.content !== FILE_CONTENT) {
+  if (downloaded.path !== workflowNames.filePath || downloaded.content !== FILE_CONTENT) {
     throw new Error("downloaded workflow check file did not match uploaded content");
   }
 
   await workflow.requestJson("DELETE", `/api/projects/${encodeURIComponent(projectId)}/files`, {
     auth: true,
-    body: { path: FILE_PATH }
+    body: { path: workflowNames.filePath }
   });
 
   await workflow.requestJson("GET", "/api/operator/sandbox/status", {
@@ -191,12 +186,14 @@ async function main() {
 
   let task = { status: "skipped" };
   if (taskArtifactCheck) {
-    task = await runTaskArtifactCheck(workflow, projectId, requireString(endpointId, "endpoint id"), taskTimeoutSecs);
-    if (k8sRunResourceObserver) {
-      task.k8sRunResources = await k8sRunResourceObserver.observeRun(task.runId, "task artifact k8s run resource check", {
-        expectedSandboxContract: task.sandboxContract
-      });
-    }
+    task = await runTaskArtifactCheck(
+      workflow,
+      projectId,
+      requireString(endpointId, "endpoint id"),
+      workflowNames.taskArtifactName,
+      taskTimeoutSecs,
+      k8sRunResourceObserver
+    );
   }
 
   const result = {
@@ -221,7 +218,28 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-async function runTaskArtifactCheck(workflow, projectId, endpointId, timeoutSecs) {
+function createWorkflowRunNames() {
+  const suffix = randomUUID().replaceAll("-", "").slice(0, 8);
+  return {
+    workspaceName: `${WORKSPACE_NAME_PREFIX} ${suffix}`,
+    projectName: `${PROJECT_NAME_PREFIX} ${suffix}`,
+    endpointName: `${ENDPOINT_NAME_PREFIX} ${suffix}`,
+    filePath: `files/${FILE_NAME_PREFIX}-${suffix}.txt`,
+    taskArtifactName: `${TASK_ARTIFACT_NAME_PREFIX}-${suffix}.txt`
+  };
+}
+
+function taskArtifactPrompt(artifactName) {
+  return [
+    "Deploy product workflow task artifact check.",
+    `Use bash in the current task home/cwd to create ${artifactName}.`,
+    `The file content must include this exact marker on its own line: ${TASK_MARKER}.`,
+    `Then use the Botified publish_file tool to publish that file with filename ${artifactName}.`,
+    "Keep the response brief and do not include credentials or endpoint secret references."
+  ].join("\n");
+}
+
+async function runTaskArtifactCheck(workflow, projectId, endpointId, artifactName, timeoutSecs, k8sRunResourceObserver) {
   let taskId;
   let createStatus;
   let completed = false;
@@ -230,15 +248,20 @@ async function runTaskArtifactCheck(workflow, projectId, endpointId, timeoutSecs
       auth: true,
       body: {
         endpointId,
-        prompt: TASK_PROMPT
+        prompt: taskArtifactPrompt(artifactName)
       }
     });
     taskId = requireString(create.body.id, "task id");
     const runId = requireString(create.body.runId, "task run id");
     createStatus = requireString(create.body.status, "task create status");
     const sandboxContract = summarizeSandboxContract(create.body, "task artifact check");
+    const k8sRunResources = k8sRunResourceObserver
+      ? await k8sRunResourceObserver.observeRun(runId, "task artifact k8s run resource check", {
+          expectedSandboxContract: sandboxContract
+        })
+      : undefined;
 
-    const verified = await waitForVerifiedTaskArtifact(workflow, taskId, timeoutSecs);
+    const verified = await waitForVerifiedTaskArtifact(workflow, taskId, artifactName, timeoutSecs);
     const runScopedStatus = await getRunScopedStatusSummary(workflow, runId, "task artifact check run-scoped status");
     completed = true;
     return {
@@ -254,6 +277,7 @@ async function runTaskArtifactCheck(workflow, projectId, endpointId, timeoutSecs
       artifactSha256: verified.artifactSha256,
       markerObserved: verified.markerObserved,
       sandboxContract,
+      ...(k8sRunResources ? { k8sRunResources } : {}),
       runScopedStatus
     };
   } catch (error) {
@@ -270,7 +294,7 @@ async function runTaskArtifactCheck(workflow, projectId, endpointId, timeoutSecs
   }
 }
 
-async function waitForVerifiedTaskArtifact(workflow, taskId, timeoutSecs) {
+async function waitForVerifiedTaskArtifact(workflow, taskId, expectedArtifactName, timeoutSecs) {
   const deadline = Date.now() + (timeoutSecs * 1000);
   const observedEvents = createObservedTaskEventSummary();
   while (Date.now() <= deadline) {
@@ -285,7 +309,7 @@ async function waitForVerifiedTaskArtifact(workflow, taskId, timeoutSecs) {
 
     for (const artifact of artifacts) {
       const name = typeof artifact?.name === "string" ? artifact.name : "";
-      if (name !== TASK_ARTIFACT_NAME) {
+      if (name !== expectedArtifactName) {
         continue;
       }
       const artifactId = requireString(artifact.id, "task artifact id");
@@ -337,13 +361,6 @@ async function runTaskReclaimCheck(workflow, projectId, endpointId, reapApply, k
     const runId = requireString(create.body.runId, "task reclaim run id");
     const createStatus = requireString(create.body.status, "task reclaim create status");
     const sandboxContract = summarizeSandboxContract(create.body, "task reclaim");
-
-    cancelAttempted = true;
-    const cancel = await workflow.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
-      auth: true
-    });
-    const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
-    const runScopedStatus = await getRunScopedStatusSummary(workflow, runId, "task reclaim run-scoped status");
     const k8sRunResources = k8sRunResourceObserver
       ? {
           beforeReap: await k8sRunResourceObserver.observeRun(runId, "task reclaim before reap k8s run resource check", {
@@ -352,11 +369,19 @@ async function runTaskReclaimCheck(workflow, projectId, endpointId, reapApply, k
         }
       : undefined;
 
+    cancelAttempted = true;
+    const cancel = await workflow.fetchJson("POST", `/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      auth: true
+    });
+    const cancelStatus = requireString(cancel.body.status, "task reclaim cancel status");
+    const runScopedStatus = await getRunScopedStatusSummary(workflow, runId, "task reclaim run-scoped status");
+
     const reap = {
       dryRun: await runScopedReap(workflow, runId, false, "task reclaim dry-run reap")
     };
     if (k8sRunResourceObserver) {
       k8sRunResources.afterDryRun = await k8sRunResourceObserver.observeRun(runId, "task reclaim after dry-run k8s run resource check", {
+        allowNoPods: true,
         expectedSandboxContract: sandboxContract
       });
     }
@@ -660,7 +685,7 @@ function summarizeK8sPod(pod, runId, context, expectedSandboxContract) {
   const statusContainers = Array.isArray(pod?.status?.containerStatuses) ? pod.status.containerStatuses : [];
   const statusRunner = statusContainers.find((container) => isRecord(container) && container.name === RUNNER_CONTAINER_NAME);
   const runnerImage = requireString(
-    stringRecordField(statusRunner, "image") ?? stringRecordField(specRunner, "image"),
+    stringRecordField(specRunner, "image"),
     `${context} pod ${name} ${RUNNER_CONTAINER_NAME} image`
   );
   const runnerImageID = requireString(
@@ -668,7 +693,7 @@ function summarizeK8sPod(pod, runId, context, expectedSandboxContract) {
     `${context} pod ${name} ${RUNNER_CONTAINER_NAME} imageID`
   );
   if (!DIGEST_PINNED_IMAGE_PATTERN.test(runnerImage)) {
-    throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} image must be digest pinned`);
+    throw new Error(`${context} declared ${RUNNER_CONTAINER_NAME} image must be digest pinned`);
   }
   if (!DIGEST_PATTERN.test(runnerImageID)) {
     throw new Error(`${context} observed ${RUNNER_CONTAINER_NAME} imageID must include digest`);

@@ -30,7 +30,7 @@ describe("product services", () => {
     assert.equal(listed[0]?.projects[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
   });
 
-  it("logs in a verified external principal as a stable local admin user", async () => {
+  it("logs in a verified external principal as a stable local member user", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({
       store,
@@ -53,8 +53,8 @@ describe("product services", () => {
     assert.match(first.user.id, /^user_oidc_/);
     assert.equal(first.user.email, "admin.user@example.test");
     assert.equal(second.user.email, "admin.user@example.test");
-    assert.equal(first.user.role, "admin");
-    assert.equal(second.user.role, "admin");
+    assert.equal(first.user.role, "member");
+    assert.equal(second.user.role, "member");
     assert.match(first.sessionId, /^sess_/);
     assert.match(first.csrfToken, /^csrf_/);
     assert.match(second.sessionId, /^sess_/);
@@ -65,6 +65,39 @@ describe("product services", () => {
       () => services.auth.login("admin.user@example.test", "anything"),
       /Invalid email or password/
     );
+  });
+
+  it("recomputes external principal role from the current OIDC admin allowlist", async () => {
+    const store = createInMemoryProductStore();
+    const adminServices = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password",
+      oidcAdminEmails: ["admin.user@example.test"]
+    });
+
+    const first = await adminServices.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-user-1",
+      email: "Admin.User@Example.Test"
+    });
+
+    assert.equal(first.user.role, "admin");
+
+    const memberServices = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password"
+    });
+    const second = await memberServices.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-user-1",
+      email: "Admin.User@Example.Test"
+    });
+
+    assert.equal(second.user.id, first.user.id);
+    assert.equal(second.user.role, "member");
+    assert.equal((await store.findUserById(first.user.id))?.role, "member");
   });
 
   it("accepts only OpenAI-compatible endpoint configuration and never calls providers while saving", async () => {

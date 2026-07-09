@@ -341,7 +341,14 @@ function resolveAuthConfig(input: AppManifestInput): {
   configMapData: Record<string, string>;
   secretKeys: Set<string>;
 } {
-  for (const key of ["AUTH_MODE", "OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
+  const oidcConfigKeys = [
+    "OIDC_ISSUER_URL",
+    "OIDC_BACKCHANNEL_BASE_URL",
+    "OIDC_CLIENT_ID",
+    "OIDC_ADMIN_EMAILS",
+    "OIDC_ADMIN_SUBJECTS"
+  ];
+  for (const key of ["AUTH_MODE", ...oidcConfigKeys]) {
     if (Object.hasOwn(input.secrets, key)) {
       throw new Error(`auth config key ${key} is not allowed in app Secret`);
     }
@@ -357,7 +364,7 @@ function resolveAuthConfig(input: AppManifestInput): {
 
   const baseSecretKeys = new Set(["POSTGRES_APP_URL", "APP_SESSION_SECRET"]);
   if (authMode === "builtin_admin") {
-    for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
+    for (const key of oidcConfigKeys) {
       if (input.env[key]?.trim()) {
         throw new Error(`${key} must be empty when AUTH_MODE=builtin_admin`);
       }
@@ -372,6 +379,8 @@ function resolveAuthConfig(input: AppManifestInput): {
   const issuerUrl = requireAuthConfig(input.env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
   const backchannelBaseUrl = optionalAuthConfig(input.env.OIDC_BACKCHANNEL_BASE_URL);
   const clientId = requireAuthConfig(input.env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
+  const adminEmails = optionalAuthConfig(input.env.OIDC_ADMIN_EMAILS);
+  const adminSubjects = optionalAuthConfig(input.env.OIDC_ADMIN_SUBJECTS);
   requireAuthConfig(input.secrets.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
   baseSecretKeys.add("OIDC_CLIENT_SECRET");
   return {
@@ -379,7 +388,9 @@ function resolveAuthConfig(input: AppManifestInput): {
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: issuerUrl,
       ...(backchannelBaseUrl ? { OIDC_BACKCHANNEL_BASE_URL: backchannelBaseUrl } : {}),
-      OIDC_CLIENT_ID: clientId
+      OIDC_CLIENT_ID: clientId,
+      ...(adminEmails ? { OIDC_ADMIN_EMAILS: adminEmails } : {}),
+      ...(adminSubjects ? { OIDC_ADMIN_SUBJECTS: adminSubjects } : {})
     },
     secretKeys: baseSecretKeys
   };

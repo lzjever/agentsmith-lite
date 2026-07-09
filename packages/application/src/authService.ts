@@ -1,6 +1,6 @@
 import { createHash, scrypt as scryptCallback, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { AuthSession, StoredUser, User } from "../../contracts/src/api.js";
+import type { AuthSession, StoredUser, User, UserRole } from "../../contracts/src/api.js";
 import { ForbiddenError, UnauthorizedError } from "../../domain/src/errors.js";
 import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -27,12 +27,30 @@ export interface ExternalPrincipal {
   email?: string | undefined;
 }
 
+export interface OidcAdminAllowlist {
+  emails?: readonly string[];
+  subjects?: readonly string[];
+}
+
 export class AuthService {
+  private readonly oidcAdminEmails: Set<string>;
+  private readonly oidcAdminSubjects: Set<string>;
+
   constructor(
     private readonly store: ProductStore,
     private readonly builtinAdminPassword: string,
-    private readonly sessionSecret: string
-  ) {}
+    private readonly sessionSecret: string,
+    oidcAdminAllowlist: OidcAdminAllowlist = {}
+  ) {
+    this.oidcAdminEmails = new Set((oidcAdminAllowlist.emails ?? []).flatMap((email) => {
+      const normalized = normalizeEmail(email);
+      return normalized ? [normalized] : [];
+    }));
+    this.oidcAdminSubjects = new Set((oidcAdminAllowlist.subjects ?? []).flatMap((subject) => {
+      const trimmed = subject.trim();
+      return trimmed ? [trimmed] : [];
+    }));
+  }
 
   async bootstrapBuiltInAdmin(): Promise<{ created: boolean; user: User }> {
     const existing = await this.store.findUserById(BUILTIN_ADMIN_ID);
@@ -72,8 +90,9 @@ export class AuthService {
 
   async loginExternalPrincipal(principal: ExternalPrincipal): Promise<LoginResult> {
     const userId = externalUserId(principal);
+    const role = this.roleForExternalPrincipal(principal);
     const existing = await this.store.findUserById(userId);
-    const storedUser = existing ?? await this.createExternalUser(userId, principal);
+    const storedUser = existing ? await this.ensureExternalUserRole(existing, role) : await this.createExternalUser(userId, principal, role);
     const session = await this.createSession(userId);
     return {
       user: publicUser(storedUser),
@@ -135,18 +154,43 @@ export class AuthService {
     return `sha256:${Buffer.from(this.sessionSecret).toString("base64url").slice(0, 12)}`;
   }
 
-  private async createExternalUser(userId: string, principal: ExternalPrincipal): Promise<StoredUser> {
+  private async createExternalUser(userId: string, principal: ExternalPrincipal, role: UserRole): Promise<StoredUser> {
     const timestamp = nowIso();
     const user: StoredUser = {
       id: userId,
       email: externalEmail(principal),
-      role: "admin",
+      role,
       passwordHash: "external:oidc",
       createdAt: timestamp,
       updatedAt: timestamp
     };
     await this.store.createUser(user);
     return user;
+  }
+
+  private async ensureExternalUserRole(user: StoredUser, role: UserRole): Promise<StoredUser> {
+    if (user.role === role) {
+      return user;
+    }
+    const updated = {
+      ...user,
+      role,
+      updatedAt: nowIso()
+    };
+    await this.store.updateUser(updated);
+    return updated;
+  }
+
+  private roleForExternalPrincipal(principal: ExternalPrincipal): UserRole {
+    const email = normalizeEmail(principal.email);
+    if (email && this.oidcAdminEmails.has(email)) {
+      return "admin";
+    }
+    const subject = requireExternalPrincipalField(principal.subject, "subject");
+    if (this.oidcAdminSubjects.has(subject)) {
+      return "admin";
+    }
+    return "member";
   }
 }
 
@@ -178,13 +222,18 @@ function externalUserId(principal: ExternalPrincipal): string {
 }
 
 function externalEmail(principal: ExternalPrincipal): string {
-  const email = principal.email?.trim().toLowerCase();
+  const email = normalizeEmail(principal.email);
   if (email) {
     return email;
   }
   const subject = requireExternalPrincipalField(principal.subject, "subject");
   const digest = createHash("sha256").update(subject).digest("hex").slice(0, 16);
   return `oidc-${digest}@agentsmith-lite.local`;
+}
+
+function normalizeEmail(value: string | undefined): string | undefined {
+  const email = value?.trim().toLowerCase();
+  return email || undefined;
 }
 
 function requireExternalPrincipalField(value: string, name: string): string {

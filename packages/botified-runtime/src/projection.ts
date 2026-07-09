@@ -166,28 +166,28 @@ function safeNextCursor(cursor: string, current: string | null): string | null {
 }
 
 function mapEventKind(type: string): TaskEventKind {
-  if (type === "input.accepted" || type === "input.rejected") {
+  if (type === "input.accepted" || type === "input.rejected" || type === "message.received" || type === "message.rejected") {
     return "user_input";
   }
-  if (type === "cycle.started") {
+  if (type === "cycle.started" || type === "turn.started") {
     return "turn_started";
   }
-  if (type === "cycle.completed") {
+  if (type === "cycle.completed" || type === "turn.completed") {
     return "turn_completed";
   }
-  if (type === "cycle.failed") {
+  if (type === "cycle.failed" || type === "turn.failed" || type === "turn.cancelled") {
     return "turn_failed";
   }
-  if (type === "assistant_message.completed") {
+  if (type === "assistant_message.completed" || type === "assistant.message") {
     return "assistant_message";
   }
-  if (type.startsWith("command_execution.")) {
+  if (type.startsWith("command_execution.") || type.startsWith("tool.")) {
     return "tool_execution";
   }
   if (type === "file.published") {
     return "artifact";
   }
-  if (type === "service.error") {
+  if (type === "service.error" || type === "agent.error" || type === "agent.aborted") {
     return "runtime_error";
   }
   return "diagnostic";

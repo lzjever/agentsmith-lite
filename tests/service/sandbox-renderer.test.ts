@@ -4,6 +4,67 @@ import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
 describe("sandbox manifest renderer", () => {
+  it("renders Kubernetes-safe resource names while preserving original ids in labels", () => {
+    const taskId = "task_2323854661afae8194cd";
+    const runId = "run_2323854661afae8194cd";
+    const workspaceId = "workspace_live_test";
+    const projectId = "project_live_test";
+    const rendered = renderSandboxResources({
+      namespace: "agentsmith",
+      workspaceId,
+      projectId,
+      taskId,
+      runId,
+      image: "example/botified-runner@sha256:abc",
+      pvcName: "agentsmith-lite-files",
+      projectSubPath: "workspaces/workspace_live_test/projects/project_live_test",
+      botifiedPort: 3099,
+      serviceKeySecretName: `asl-botified-${taskId}`,
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi"
+    });
+
+    const pod = rendered.resources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
+    const secret = rendered.resources.find((resource) => resource.kind === "Secret");
+    const configMap = rendered.resources.find((resource) => resource.kind === "ConfigMap");
+    const serviceAccount = rendered.resources.find((resource) => resource.kind === "ServiceAccount");
+    assert.ok(pod);
+    assert.ok(secret);
+    assert.ok(configMap);
+    assert.ok(serviceAccount);
+
+    for (const resource of rendered.resources) {
+      assertDnsLabel(resource.metadata.name);
+      assert.equal(resource.metadata.labels["agentsmith-lite/workspace-id"], workspaceId);
+      assert.equal(resource.metadata.labels["agentsmith-lite/project-id"], projectId);
+      assert.equal(resource.metadata.labels["agentsmith-lite/task-id"], taskId);
+      assert.equal(resource.metadata.labels["agentsmith-lite/run-id"], runId);
+    }
+
+    assert.equal(pod.spec.serviceAccountName, serviceAccount.metadata.name);
+    assertDnsLabel(pod.spec.serviceAccountName);
+    for (const container of pod.spec.containers) {
+      for (const env of container.env) {
+        const secretName = env.valueFrom?.secretKeyRef?.name;
+        if (secretName) {
+          assert.equal(secretName, secret.metadata.name);
+          assertDnsLabel(secretName);
+        }
+      }
+    }
+    for (const volume of pod.spec.volumes) {
+      if (volume.configMap?.name) {
+        assert.equal(volume.configMap.name, configMap.metadata.name);
+        assertDnsLabel(volume.configMap.name);
+      }
+      if (volume.secret?.secretName) {
+        assertDnsLabel(volume.secret.secretName);
+      }
+    }
+  });
+
   it("renders dry-run pod resources with labels, restricted security, and no exec permission", () => {
     const rendered = renderSandboxResources({
       namespace: "agentsmith",
@@ -29,6 +90,7 @@ describe("sandbox manifest renderer", () => {
     const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy") as
       | NetworkPolicyResource
       | undefined;
+    const service = rendered.resources.find((resource) => resource.kind === "Service") as ServiceResource | undefined;
     const secret = rendered.resources.find((resource) => resource.kind === "Secret") as SecretResource | undefined;
 
     assert.deepEqual(rendered.resources.map((resource) => resource.kind), [
@@ -94,7 +156,26 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.mountPath, "/workspace/project");
     assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
+    assert.ok(service, "Service should be rendered");
+    assert.deepEqual(service.spec.selector, pod?.metadata.labels);
+    assert.deepEqual(service.spec.ports, [{ name: "http", port: 3099, targetPort: "http" }]);
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
+    assert.deepEqual(networkPolicy.spec.podSelector, { matchLabels: pod?.metadata.labels });
+    assert.deepEqual(networkPolicy.spec.ingress, [
+      {
+        from: [
+          {
+            podSelector: {
+              matchLabels: {
+                "app.kubernetes.io/component": "api",
+                "agentsmith-lite/managed-by": "agentsmith-lite"
+              }
+            }
+          }
+        ],
+        ports: [{ protocol: "TCP", port: 3099 }]
+      }
+    ]);
     const dnsEgress = networkPolicy.spec.egress.find(
       (rule) => hasNamespaceSelectorDestination(rule) && hasPort(rule, "UDP", 53)
     );
@@ -132,6 +213,44 @@ describe("sandbox manifest renderer", () => {
     assert.ok(!serialized.includes("persistentvolumes"));
     assert.ok(!serialized.includes("hostPath"));
     assert.ok(!serialized.includes('"privileged":true'));
+  });
+
+  it("narrows model egress for a configured in-cluster OpenAI-compatible service", () => {
+    const input = {
+      namespace: "agentsmith-lite-e2e",
+      workspaceId: "w1",
+      projectId: "p1",
+      taskId: "t1",
+      runId: "r1",
+      image: "example/botified-runner@sha256:abc",
+      pvcName: "agentsmith-lite-files",
+      projectSubPath: "workspaces/w1/projects/p1",
+      botifiedPort: 3099,
+      serviceKeySecretName: "botified-t1",
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi",
+      modelEndpointBaseUrl: "https://agentsmith-lite-local-openai.agentsmith-lite-e2e.svc.cluster.local/v1"
+    };
+
+    const rendered = renderSandboxResources(input);
+
+    const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy") as
+      | NetworkPolicyResource
+      | undefined;
+    assert.ok(networkPolicy);
+    const modelEgress = networkPolicy.spec.egress.find(hasLocalOpenAiDestination);
+    assert.ok(modelEgress, "NetworkPolicy should allow the configured local model service pods");
+    assert.deepEqual(modelEgress.ports, [
+      { protocol: "TCP", port: 443 },
+      { protocol: "TCP", port: 8443 }
+    ]);
+    assert.equal(
+      networkPolicy.spec.egress.some((rule) => hasUnscopedDestination(rule) && hasPort(rule, "TCP", 443)),
+      false,
+      "cluster service model egress should not keep the unscoped external TCP/443 rule"
+    );
   });
 
   it("mounts an optional model CA ConfigMap read-only without relaxing sandbox egress", () => {
@@ -195,6 +314,7 @@ describe("sandbox manifest renderer", () => {
 
 interface PodResource extends KubernetesResource {
   spec: {
+    serviceAccountName: string;
     automountServiceAccountToken: boolean;
     hostNetwork: boolean;
     securityContext: { runAsNonRoot: boolean; runAsUser: number; runAsGroup: number; fsGroup: number };
@@ -208,7 +328,13 @@ interface PodResource extends KubernetesResource {
         privileged?: boolean;
         capabilities: { drop: string[] };
       };
-      env: unknown[];
+      env: Array<{
+        valueFrom?: {
+          secretKeyRef?: {
+            name?: string;
+          };
+        };
+      }>;
       readinessProbe: unknown;
       volumeMounts: Array<{ name: string; mountPath: string; subPath: string; readOnly?: boolean }>;
     }>;
@@ -217,6 +343,9 @@ interface PodResource extends KubernetesResource {
       configMap?: {
         name: string;
         items?: Array<{ key: string; path: string }>;
+      };
+      secret?: {
+        secretName: string;
       };
     }>;
   };
@@ -230,10 +359,26 @@ interface SecretResource extends KubernetesResource {
   stringData: Record<string, string>;
 }
 
+interface ServiceResource extends KubernetesResource {
+  spec: {
+    selector: Record<string, string>;
+    ports: Array<{ name: string; port: number; targetPort: string }>;
+  };
+}
+
 interface NetworkPolicyResource extends KubernetesResource {
   spec: {
+    podSelector: { matchLabels: Record<string, string> };
+    ingress: NetworkPolicyIngressRule[];
     egress: NetworkPolicyEgressRule[];
   };
+}
+
+interface NetworkPolicyIngressRule {
+  from?: Array<{
+    podSelector?: Record<string, unknown>;
+  }>;
+  ports?: Array<{ protocol: string; port: number }>;
 }
 
 interface NetworkPolicyEgressRule {
@@ -260,4 +405,22 @@ function hasNamespaceSelectorDestination(rule: NetworkPolicyEgressRule): boolean
 
 function hasUnscopedDestination(rule: NetworkPolicyEgressRule): boolean {
   return rule.to === undefined || rule.to.length === 0;
+}
+
+function hasLocalOpenAiDestination(rule: NetworkPolicyEgressRule): boolean {
+  return (
+    rule.to?.some(
+      (destination) =>
+        JSON.stringify(destination.namespaceSelector) ===
+          JSON.stringify({ matchLabels: { "kubernetes.io/metadata.name": "agentsmith-lite-e2e" } }) &&
+        JSON.stringify(destination.podSelector) ===
+          JSON.stringify({ matchLabels: { "app.kubernetes.io/name": "agentsmith-lite-local-openai" } })
+    ) ?? false
+  );
+}
+
+function assertDnsLabel(name: string): void {
+  assert.match(name, /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/, `${name} should be a DNS label`);
+  assert.ok(name.length <= 63, `${name} should fit in a DNS label`);
+  assert.equal(name.includes("_"), false, `${name} should not contain underscores`);
 }

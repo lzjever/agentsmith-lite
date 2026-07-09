@@ -65,6 +65,20 @@ export class PostgresProductStore implements ProductStore {
     return publicUser(user);
   }
 
+  async updateUser(user: StoredUser): Promise<User> {
+    await this.pool.query(
+      `update users
+          set email = $2,
+              role = $3,
+              password_hash = $4,
+              created_at = $5,
+              updated_at = $6
+        where id = $1`,
+      [user.id, user.email, user.role, user.passwordHash, user.createdAt, user.updatedAt]
+    );
+    return publicUser(user);
+  }
+
   async findUserByEmail(email: string): Promise<StoredUser | null> {
     const rows = await this.queryRows<UserRow>(
       `select * from users where lower(email) = lower($1) limit 1`,

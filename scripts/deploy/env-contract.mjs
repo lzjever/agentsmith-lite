@@ -41,6 +41,20 @@ const productSecretKeys = new Set([
   "BUILTIN_ADMIN_INITIAL_PASSWORD"
 ]);
 
+const oidcCoreSubstrateEnvKeys = [
+  "OIDC_ISSUER_URL",
+  "OIDC_BACKCHANNEL_BASE_URL",
+  "OIDC_CLIENT_ID"
+];
+const oidcCoreSubstrateEnvKeySet = new Set(oidcCoreSubstrateEnvKeys);
+
+const oidcAdminAllowlistAppEnvKeys = [
+  "OIDC_ADMIN_EMAILS",
+  "OIDC_ADMIN_SUBJECTS"
+];
+const oidcAdminAllowlistAppEnvKeySet = new Set(oidcAdminAllowlistAppEnvKeys);
+const oidcRuntimeEnvKeys = [...oidcCoreSubstrateEnvKeys, ...oidcAdminAllowlistAppEnvKeys];
+
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
   "REGISTRY_URL",
@@ -253,12 +267,27 @@ function classifyAuthMetadataKey(key, kind, value) {
     }
     return "oidc-secret-in-env";
   }
-  if (key === "OIDC_ISSUER_URL" || key === "OIDC_BACKCHANNEL_BASE_URL" || key === "OIDC_CLIENT_ID") {
+  if (oidcCoreSubstrateEnvKeySet.has(key)) {
     if (kind === "env" && value.trim() !== "") {
       return "allow";
     }
     if (kind === "env") {
       return "ignore";
+    }
+    if (kind === "app-env") {
+      return "oidc-core-metadata-in-app-env";
+    }
+    return "oidc-public-metadata-in-secrets";
+  }
+  if (oidcAdminAllowlistAppEnvKeySet.has(key)) {
+    if (kind === "app-env" && value.trim() !== "") {
+      return "allow";
+    }
+    if (kind === "app-env") {
+      return "ignore";
+    }
+    if (kind === "env") {
+      return "app-only-in-substrate";
     }
     return "oidc-public-metadata-in-secrets";
   }
@@ -283,9 +312,9 @@ function validateAuthContract(env, secrets) {
     return;
   }
 
-  for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
+  for (const key of oidcRuntimeEnvKeys) {
     if (env[key]?.trim()) {
-      throw new EnvContractError(`${key} must be empty in substrate env when AUTH_MODE=builtin_admin`);
+      throw new EnvContractError(`${key} must be empty when AUTH_MODE=builtin_admin`);
     }
   }
   if (secrets.OIDC_CLIENT_SECRET?.trim()) {
@@ -344,6 +373,8 @@ function formatKeyError(disposition, key, file, lineNumber) {
       return `auth key ${key} must be set in substrate env as empty, builtin_admin, or oidc at ${location}`;
     case "oidc-secret-in-env":
       return `secret key ${key} is not allowed in env at ${location}`;
+    case "oidc-core-metadata-in-app-env":
+      return `OIDC core metadata key ${key} must come from substrate env at ${location}`;
     case "oidc-public-metadata-in-secrets":
       return `non-secret config key ${key} is not allowed in secrets at ${location}`;
     default:

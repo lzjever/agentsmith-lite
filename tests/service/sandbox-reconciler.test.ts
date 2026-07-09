@@ -9,6 +9,7 @@ import {
   type SandboxRunState
 } from "../../packages/sandbox-controller/src/reconciler.js";
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
+import { sandboxResourceNamesForTask } from "../../packages/sandbox-controller/src/resourceNames.js";
 
 describe("sandbox reconciler", () => {
   it("creates missing run resources, then adopts matching managed resources idempotently", () => {
@@ -55,6 +56,106 @@ describe("sandbox reconciler", () => {
       "adopt_resource:Pod:asl-task-t1",
       "store_run_state:run1:running:desired_observed"
     ]);
+  });
+
+  it("uses DNS-safe fallback names for legacy persisted task resources", () => {
+    const taskId = "task_2323854661afae8194cd";
+    const runId = "run_2323854661afae8194cd";
+    const names = sandboxResourceNamesForTask(taskId);
+    const run = sandboxRun({
+      taskId,
+      runId,
+      resourceNames: {
+        pod: names.pod,
+        service: names.service,
+        configMap: names.configMap,
+        secret: names.secret
+      },
+      serviceKeySecretRef: {
+        name: names.secret,
+        key: "BOTIFIED_SERVICE_KEY"
+      },
+      directories: {
+        taskHome: `/workspace/project/tasks/${taskId}/home`,
+        artifacts: `/workspace/project/tasks/${taskId}/artifacts`,
+        botified: `/workspace/project/tasks/${taskId}/botified`
+      }
+    });
+
+    const first = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: [],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    assert.deepEqual(first.actions.map(actionSummary), [
+      `create_resource:Secret:${names.secret}`,
+      `create_resource:ConfigMap:${names.configMap}`,
+      `create_resource:ServiceAccount:${names.serviceAccount}`,
+      `create_resource:NetworkPolicy:${names.networkPolicy}`,
+      `create_resource:Service:${names.service}`,
+      `create_resource:Pod:${names.pod}`,
+      "store_run_state:run_2323854661afae8194cd:running:desired_observed"
+    ]);
+    for (const action of first.actions) {
+      if (action.type !== "create_resource") {
+        continue;
+      }
+      assert.doesNotMatch(action.name, /_/);
+      assert.deepEqual(pickSandboxLabels(action.resource), sandboxIdentityLabels(run));
+    }
+    const createdPod = first.actions.find((action) => action.type === "create_resource" && action.kind === "Pod");
+    assert.equal(createdPod?.type, "create_resource");
+    assert.equal((createdPod.resource.spec as { serviceAccountName?: string }).serviceAccountName, names.serviceAccount);
+
+    const applied = applySandboxReconcileActions({
+      observedResources: [],
+      actions: first.actions
+    });
+    const second = reconcileSandboxRuns({
+      desiredRuns: [run],
+      observedResources: applied.observedResources,
+      now: new Date("2026-07-04T00:00:01.000Z")
+    });
+    assert.deepEqual(second.actions.map(actionSummary), [
+      `adopt_resource:Secret:${names.secret}`,
+      `adopt_resource:ConfigMap:${names.configMap}`,
+      `adopt_resource:ServiceAccount:${names.serviceAccount}`,
+      `adopt_resource:NetworkPolicy:${names.networkPolicy}`,
+      `adopt_resource:Service:${names.service}`,
+      `adopt_resource:Pod:${names.pod}`,
+      "store_run_state:run_2323854661afae8194cd:running:desired_observed"
+    ]);
+
+    const cleanupRun = sandboxRun({
+      ...run,
+      phase: "stopping",
+      cleanupStatus: "cleanup_requested"
+    });
+    const cleanupPlan = reconcileSandboxRuns({
+      desiredRuns: [cleanupRun],
+      observedResources: applied.observedResources,
+      now: new Date("2026-07-04T00:00:02.000Z")
+    });
+    const deletes = cleanupPlan.actions.filter(isDeleteAction);
+    assert.deepEqual(deletes.map((action) => `${action.kind}:${action.name}`), [
+      `Pod:${names.pod}`,
+      `Service:${names.service}`,
+      `NetworkPolicy:${names.networkPolicy}`,
+      `ConfigMap:${names.configMap}`,
+      `Secret:${names.secret}`,
+      `ServiceAccount:${names.serviceAccount}`
+    ]);
+    for (const action of deletes) {
+      assert.doesNotMatch(action.name, /_/);
+      assert.deepEqual(action.labels, sandboxIdentityLabels(run));
+    }
+
+    const cleaned = applySandboxReconcileActions({
+      observedResources: applied.observedResources,
+      actions: cleanupPlan.actions
+    });
+    assert.equal(cleaned.observedResources.length, 0);
   });
 
   it("marks unknown managed lifecycle resources for cleanup and ignores unowned resources", () => {

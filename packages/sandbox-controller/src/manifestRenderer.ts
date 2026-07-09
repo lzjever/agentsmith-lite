@@ -1,5 +1,6 @@
 import type { KubernetesResource, SandboxRenderResult } from "../../contracts/src/api.js";
 import { sandboxResourceLabels } from "./labels.js";
+import { kubernetesDnsLabelName, sandboxResourceNamesForTask } from "./resourceNames.js";
 
 export interface SandboxResourceNameOverrides {
   pod?: string;
@@ -33,16 +34,19 @@ export interface SandboxRenderInput {
   cpuLimit: string;
   memoryLimit: string;
   modelCa?: SandboxModelCaReference;
+  modelEndpointBaseUrl?: string;
   resourceNames?: SandboxResourceNameOverrides;
 }
 
 export function renderSandboxResources(input: SandboxRenderInput): SandboxRenderResult {
   const labels = sandboxResourceLabels(input);
-  const serviceAccountName = input.resourceNames?.serviceAccount ?? `asl-task-${input.taskId}`;
-  const networkPolicyName = input.resourceNames?.networkPolicy ?? `asl-task-${input.taskId}`;
-  const configName = input.resourceNames?.configMap ?? `asl-task-${input.taskId}-config`;
-  const podName = input.resourceNames?.pod ?? `asl-task-${input.taskId}`;
-  const serviceName = input.resourceNames?.service ?? `asl-task-${input.taskId}`;
+  const generatedNames = sandboxResourceNamesForTask(input.taskId);
+  const serviceAccountName = kubernetesDnsLabelName(input.resourceNames?.serviceAccount ?? generatedNames.serviceAccount);
+  const networkPolicyName = kubernetesDnsLabelName(input.resourceNames?.networkPolicy ?? generatedNames.networkPolicy);
+  const configName = kubernetesDnsLabelName(input.resourceNames?.configMap ?? generatedNames.configMap);
+  const podName = kubernetesDnsLabelName(input.resourceNames?.pod ?? generatedNames.pod);
+  const serviceName = kubernetesDnsLabelName(input.resourceNames?.service ?? generatedNames.service);
+  const serviceKeySecretName = kubernetesDnsLabelName(input.serviceKeySecretName);
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
   const modelApiKeySecretKey = input.modelApiKeySecretKey ?? "MODEL_API_KEY";
   const modelCaVolume = input.modelCa
@@ -83,7 +87,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       apiVersion: "v1",
       kind: "Secret",
       metadata: {
-        name: input.serviceKeySecretName,
+        name: serviceKeySecretName,
         namespace: input.namespace,
         labels
       },
@@ -145,7 +149,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 name: "BOTIFIED_SERVICE_KEY",
                 valueFrom: {
                   secretKeyRef: {
-                    name: input.serviceKeySecretName,
+                    name: serviceKeySecretName,
                     key: serviceKeySecretKey
                   }
                 }
@@ -154,7 +158,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 name: "MODEL_API_KEY",
                 valueFrom: {
                   secretKeyRef: {
-                    name: input.serviceKeySecretName,
+                    name: serviceKeySecretName,
                     key: modelApiKeySecretKey
                   }
                 }
@@ -262,29 +266,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             ]
           }
         ],
-        egress: [
-          {
-            to: [
-              {
-                namespaceSelector: {}
-              }
-            ],
-            ports: [
-              {
-                protocol: "UDP",
-                port: 53
-              }
-            ]
-          },
-          {
-            ports: [
-              {
-                protocol: "TCP",
-                port: 443
-              }
-            ]
-          }
-        ]
+        egress: renderEgressRules(input.modelEndpointBaseUrl)
       }
     }
   ];
@@ -299,4 +281,114 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
 function modelCaFilename(caPath: string): string {
   const parts = caPath.split("/");
   return parts[parts.length - 1] || "ca.crt";
+}
+
+interface NetworkPolicyEgressRule {
+  to?: Array<{
+    namespaceSelector?: Record<string, unknown>;
+    podSelector?: Record<string, unknown>;
+  }>;
+  ports: Array<{ protocol: "TCP" | "UDP"; port: number }>;
+}
+
+interface ClusterServiceEndpoint {
+  serviceName: string;
+  namespace: string;
+}
+
+function renderEgressRules(modelEndpointBaseUrl: string | undefined): NetworkPolicyEgressRule[] {
+  return [dnsEgressRule(), modelEndpointEgressRule(modelEndpointBaseUrl)];
+}
+
+function dnsEgressRule(): NetworkPolicyEgressRule {
+  return {
+    to: [
+      {
+        namespaceSelector: {}
+      }
+    ],
+    ports: [
+      {
+        protocol: "UDP",
+        port: 53
+      }
+    ]
+  };
+}
+
+function modelEndpointEgressRule(modelEndpointBaseUrl: string | undefined): NetworkPolicyEgressRule {
+  const endpoint = parseModelEndpoint(modelEndpointBaseUrl);
+  const clusterService = endpoint ? parseClusterServiceEndpoint(endpoint.hostname) : null;
+  if (endpoint && clusterService) {
+    return {
+      to: [
+        {
+          namespaceSelector: {
+            matchLabels: {
+              "kubernetes.io/metadata.name": clusterService.namespace
+            }
+          },
+          podSelector: {
+            matchLabels: {
+              "app.kubernetes.io/name": clusterService.serviceName
+            }
+          }
+        }
+      ],
+      ports: clusterServiceModelPorts(endpoint.port)
+    };
+  }
+  return {
+    ports: [
+      {
+        protocol: "TCP",
+        port: endpoint?.port ?? 443
+      }
+    ]
+  };
+}
+
+function parseModelEndpoint(modelEndpointBaseUrl: string | undefined): { hostname: string; port: number } | null {
+  if (!modelEndpointBaseUrl) {
+    return null;
+  }
+  try {
+    const parsed = new URL(modelEndpointBaseUrl);
+    const port = parsed.port ? Number(parsed.port) : 443;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return null;
+    }
+    return {
+      hostname: parsed.hostname.replace(/\.$/, "").toLowerCase(),
+      port
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseClusterServiceEndpoint(hostname: string): ClusterServiceEndpoint | null {
+  const parts = hostname.split(".");
+  const serviceName = parts[0];
+  const namespace = parts[1];
+  const isClusterLocalService =
+    parts.length >= 5 && parts[2] === "svc" && parts[3] === "cluster" && parts[4] === "local";
+  const isShortService = parts.length === 3 && parts[2] === "svc";
+  if (!isClusterLocalService && !isShortService) {
+    return null;
+  }
+  if (!isDnsLabel(serviceName) || !isDnsLabel(namespace)) {
+    return null;
+  }
+  return { serviceName, namespace };
+}
+
+function clusterServiceModelPorts(servicePort: number): Array<{ protocol: "TCP"; port: number }> {
+  // Local HTTPS services may be evaluated by NetworkPolicy after Service DNAT to the pod targetPort.
+  const ports = servicePort === 443 ? [443, 8443] : [servicePort];
+  return ports.map((port) => ({ protocol: "TCP", port }));
+}
+
+function isDnsLabel(value: string | undefined): value is string {
+  return typeof value === "string" && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(value) && value.length <= 63;
 }

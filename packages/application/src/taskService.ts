@@ -18,6 +18,7 @@ import {
   type SandboxKubernetesReadinessPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
 import { renderSandboxResources } from "../../sandbox-controller/src/manifestRenderer.js";
+import { sandboxResourceNamesForTask, sandboxServiceNameForTask } from "../../sandbox-controller/src/resourceNames.js";
 import {
   reconcileSandboxRuns,
   type SandboxReconcileAction,
@@ -86,6 +87,7 @@ interface BotifiedTaskRuntimeState {
 }
 
 type BotifiedOperation = "send message" | "read state" | "read timeline" | "download file" | "abort";
+type LiveSandboxCleanupStatus = "none" | "pending" | "cleaned";
 
 export interface TaskArtifactDownload {
   artifact: AgentTaskArtifact;
@@ -168,6 +170,7 @@ export class TaskService {
     const runId = newId("run");
     const timestamp = nowIso();
     const botifiedPort = this.config.botifiedPort ?? 3099;
+    const resourceNames = sandboxResourceNamesForTask(id);
     const serviceKey = this.generateServiceKey({
       namespace: this.config.namespace,
       workspaceId: project.workspaceId,
@@ -186,13 +189,15 @@ export class TaskService {
       pvcName: this.config.pvcName,
       projectSubPath: project.rootPath,
       botifiedPort,
-      serviceKeySecretName: `asl-botified-${id}`,
+      serviceKeySecretName: resourceNames.secret,
       modelApiKeySecretKey: "MODEL_API_KEY",
       cpuRequest: "250m",
       memoryRequest: "512Mi",
       cpuLimit: "1",
       memoryLimit: "1Gi",
-      ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {})
+      ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
+      modelEndpointBaseUrl: endpoint.baseUrl,
+      resourceNames
     });
 
     const task = await this.store.createTask({
@@ -216,7 +221,8 @@ export class TaskService {
           timestamp,
           botifiedPort,
           projectSubPath: project.rootPath,
-          serviceKeySecretName: `asl-botified-${id}`
+          modelEndpointBaseUrl: endpoint.baseUrl,
+          resourceNames
         })
       : null;
 
@@ -292,7 +298,10 @@ export class TaskService {
     const task = await this.requireTaskForUser(userId, taskId);
     const serviceKey = this.serviceKeyForTask(task);
     const state = await this.readRuntimeState(task, serviceKey);
-    await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
+    const abort = await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
+    if (!abort.aborted) {
+      throw new ProductError("Botified did not abort task", 502);
+    }
     const updated = { ...task, status: "stopping" as const, updatedAt: nowIso() };
     const saved = await this.store.updateTask(updated);
     await this.bestEffortRequestRunCleanup(task.runId, "stopping");
@@ -302,12 +311,24 @@ export class TaskService {
 
   async listTaskEvents(userId: string, taskId: string): Promise<AgentTaskEvent[]> {
     const task = await this.requireTaskForUser(userId, taskId);
-    await this.syncTaskTimeline(task);
+    const liveCleanupStatus = await this.liveSandboxCleanupStatus(task);
+    if (await this.cleanupTerminalLiveSandboxBeforeRead(task, liveCleanupStatus)) {
+      return this.store.listTaskEvents(taskId);
+    }
+    if (liveCleanupStatus !== "cleaned") {
+      await this.syncTaskTimeline(task);
+    } else {
+      await this.bestEffortSyncTaskTimeline(task);
+    }
     return this.store.listTaskEvents(taskId);
   }
 
   async listTaskArtifacts(userId: string, taskId: string): Promise<AgentTaskArtifact[]> {
     const task = await this.requireTaskForUser(userId, taskId);
+    const liveCleanupStatus = await this.liveSandboxCleanupStatus(task);
+    if (await this.cleanupTerminalLiveSandboxBeforeRead(task, liveCleanupStatus)) {
+      return this.store.listTaskArtifacts(taskId);
+    }
     await this.bestEffortSyncTaskTimeline(task);
     return this.store.listTaskArtifacts(taskId);
   }
@@ -419,6 +440,28 @@ export class TaskService {
       }
       throw error;
     }
+  }
+
+  private async liveSandboxCleanupStatus(task: AgentTask): Promise<LiveSandboxCleanupStatus> {
+    if (!this.config.liveSandbox) {
+      return "none";
+    }
+    const run = await this.store.sandboxRuns.get(task.runId);
+    if (!run || run.taskId !== task.id) {
+      return "none";
+    }
+    return run.cleanupStatus === "cleaned" || run.phase === "cleaned" ? "cleaned" : "pending";
+  }
+
+  private async cleanupTerminalLiveSandboxBeforeRead(task: AgentTask, liveCleanupStatus: LiveSandboxCleanupStatus): Promise<boolean> {
+    if (!isDurableTaskResultStatus(task.status) || liveCleanupStatus === "none") {
+      return false;
+    }
+    if (liveCleanupStatus === "pending") {
+      await this.bestEffortRequestRunCleanup(task.runId, cleanupPhaseForTaskStatus(task.status));
+      await this.bestEffortReapSandboxRun(task.runId);
+    }
+    return true;
   }
 
   private async updateTaskStatusFromEvents(task: AgentTask, events: AgentTaskEvent[]): Promise<AgentTask> {
@@ -575,7 +618,8 @@ export class TaskService {
     timestamp: string;
     botifiedPort: number;
     projectSubPath: string;
-    serviceKeySecretName: string;
+    modelEndpointBaseUrl: string;
+    resourceNames: SandboxRunState["resourceNames"];
   }): SandboxRunState {
     const paths = this.taskRuntimePaths(input.task);
     return {
@@ -589,16 +633,9 @@ export class TaskService {
       pvcName: this.config.pvcName,
       projectSubPath: input.projectSubPath,
       botifiedPort: input.botifiedPort,
-      resourceNames: {
-        pod: `asl-task-${input.task.id}`,
-        service: `asl-task-${input.task.id}`,
-        configMap: `asl-task-${input.task.id}-config`,
-        secret: input.serviceKeySecretName,
-        serviceAccount: `asl-task-${input.task.id}`,
-        networkPolicy: `asl-task-${input.task.id}`
-      },
+      resourceNames: input.resourceNames,
       serviceKeySecretRef: {
-        name: input.serviceKeySecretName,
+        name: input.resourceNames.secret,
         key: "BOTIFIED_SERVICE_KEY"
       },
       directories: {
@@ -613,6 +650,7 @@ export class TaskService {
         memoryLimit: "1Gi"
       },
       ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
+      modelEndpointBaseUrl: input.modelEndpointBaseUrl,
       fencingToken: 1,
       cleanupStatus: "active",
       createdAt: input.timestamp,
@@ -778,7 +816,7 @@ function createBotifiedServiceKey(secret: string | undefined, input: BotifiedSer
 }
 
 function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string {
-  return `http://asl-task-${input.taskId}.${input.namespace}.svc.cluster.local:${input.port}`;
+  return `http://${sandboxServiceNameForTask(input.taskId)}.${input.namespace}.svc.cluster.local:${input.port}`;
 }
 
 function requireBotifiedServiceKey(serviceKey: string | undefined): asserts serviceKey is string {
@@ -883,6 +921,10 @@ function nextStatusForEvents(current: AgentTaskStatus, events: AgentTaskEvent[])
 
 function isTerminalTaskStatus(status: AgentTaskStatus): boolean {
   return status === "completed" || status === "failed" || status === "expired" || status === "cleaned";
+}
+
+function isDurableTaskResultStatus(status: AgentTaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "expired";
 }
 
 function isActiveTaskStatus(status: AgentTaskStatus): boolean {

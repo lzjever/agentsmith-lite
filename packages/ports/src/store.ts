@@ -67,6 +67,7 @@ export interface PersistedSandboxRunState {
     configMapKey: string;
     path: string;
   };
+  modelEndpointBaseUrl?: string;
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
@@ -133,6 +134,7 @@ export interface ProductStore {
 
   countUsers(): Promise<number>;
   createUser(user: StoredUser): Promise<User>;
+  updateUser(user: StoredUser): Promise<User>;
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findUserById(id: string): Promise<StoredUser | null>;
 

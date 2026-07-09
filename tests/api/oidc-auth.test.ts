@@ -5,12 +5,14 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { OidcClientAdapter } from "../../packages/api-entry-node/src/oidcClient.js";
+import type { ExternalPrincipal } from "../../packages/application/src/authService.js";
 
 describe("api OIDC auth", () => {
   let baseUrl = "";
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
   const oidcCalls: Array<Record<string, string | undefined>> = [];
+  const oidcPrincipals: ExternalPrincipal[] = [];
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-api-oidc-"));
@@ -21,7 +23,8 @@ describe("api OIDC auth", () => {
       builtinAdminPassword: "builtin-password-must-not-work",
       sessionSecret: "oidc-session-secret-at-least-32-chars",
       publicBaseUrl: "https://agentsmith.example.test/app",
-      oidcClient: fakeOidcClient(oidcCalls)
+      oidcClient: fakeOidcClient(oidcCalls, oidcPrincipals),
+      oidcAdminEmails: ["oidc.admin@example.test"]
     });
     baseUrl = api.baseUrl;
     closeServer = api.close;
@@ -32,7 +35,7 @@ describe("api OIDC auth", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it("fails builtin endpoints closed and completes fake OIDC login into the existing session cookie", async () => {
+  it("keeps non-allowlisted OIDC users on product APIs and out of operator APIs", async () => {
     const bootstrap = await fetch(baseUrl + "/api/bootstrap").then((response) => response.json());
     assert.equal(bootstrap.authMode, "oidc");
 
@@ -44,12 +47,91 @@ describe("api OIDC auth", () => {
     });
     assert.equal(builtinLogin.status, 404);
 
+    const login = await loginOidc({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-member-subject",
+      email: "OIDC.Member@Example.Test"
+    });
+    assert.match(login.user.id, /^user_oidc_/);
+    assert.equal(login.user.email, "oidc.member@example.test");
+    assert.equal(login.user.role, "member");
+    assert.match(login.csrfToken, /^csrf_/);
+
+    const operator = await fetch(baseUrl + "/api/operator/sandbox/status", {
+      headers: { cookie: login.sessionCookie }
+    });
+    assert.equal(operator.status, 403);
+
+    const missingCsrf = await fetch(baseUrl + "/api/workspaces", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: login.sessionCookie
+      },
+      body: JSON.stringify({ name: "Missing CSRF" })
+    });
+    assert.equal(missingCsrf.status, 403);
+
+    const workspace = await fetch(baseUrl + "/api/workspaces", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: login.sessionCookie,
+        "x-csrf-token": login.csrfToken
+      },
+      body: JSON.stringify({ name: "OIDC Workspace" })
+    });
+    assert.equal(workspace.status, 200);
+
+    const logout = await fetch(baseUrl + "/api/auth/logout", {
+      method: "POST",
+      headers: {
+        cookie: login.sessionCookie,
+        "x-csrf-token": login.csrfToken
+      }
+    });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
+  });
+
+  it("lets allowlisted OIDC users access operator APIs", async () => {
+    const login = await loginOidc({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "keycloak-admin-subject",
+      email: "OIDC.Admin@Example.Test"
+    });
+
+    assert.equal(login.user.email, "oidc.admin@example.test");
+    assert.equal(login.user.role, "admin");
+
+    const operator = await fetch(baseUrl + "/api/operator/sandbox/status", {
+      headers: { cookie: login.sessionCookie }
+    });
+    assert.equal(operator.status, 200);
+  });
+
+  async function post(pathname: string, body: unknown) {
+    return fetch(baseUrl + pathname, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function loginOidc(principal: ExternalPrincipal): Promise<{
+    sessionCookie: string;
+    csrfToken: string;
+    user: { id: string; email: string; role: string };
+  }> {
+    oidcPrincipals.push(principal);
+
     const start = await fetch(baseUrl + "/api/auth/oidc/start", { redirect: "manual" });
     assert.equal(start.status, 302);
     assert.equal(start.headers.get("location"), "https://idp.example.test/auth?state=oidc-state-test");
     const transactionCookie = cookieFromSetCookie(start.headers.get("set-cookie"));
     assert.ok(transactionCookie.startsWith("asl_oidc_tx="));
-    assert.equal(oidcCalls[0]?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
+    const authorizationCall = oidcCalls.at(-1);
+    assert.equal(authorizationCall?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
 
     const callback = await fetch(baseUrl + "/api/auth/oidc/callback?code=callback-code&state=oidc-state-test", {
       headers: { cookie: transactionCookie },
@@ -61,63 +143,26 @@ describe("api OIDC auth", () => {
     const sessionCookie = cookieFromSetCookie(callbackCookies);
     assert.ok(sessionCookie.startsWith("asl_session="));
     assert.match(callbackCookies, /asl_oidc_tx=;/);
-    assert.equal(oidcCalls[1]?.state, "oidc-state-test");
-    assert.equal(oidcCalls[1]?.codeVerifier, "oidc-code-verifier-test");
-    assert.equal(oidcCalls[1]?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
-    assert.match(oidcCalls[1]?.callbackUrl ?? "", /code=callback-code/);
+    const callbackCall = oidcCalls.at(-1);
+    assert.equal(callbackCall?.state, "oidc-state-test");
+    assert.equal(callbackCall?.codeVerifier, "oidc-code-verifier-test");
+    assert.equal(callbackCall?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
+    assert.match(callbackCall?.callbackUrl ?? "", /code=callback-code/);
 
     const meResponse = await fetch(baseUrl + "/api/me", {
       headers: { cookie: sessionCookie }
     });
     assert.equal(meResponse.status, 200);
     const me = await meResponse.json();
-    assert.match(me.user.id, /^user_oidc_/);
-    assert.equal(me.user.email, "oidc.admin@example.test");
-    assert.equal(me.user.role, "admin");
-    assert.match(me.csrfToken, /^csrf_/);
-
-    const missingCsrf = await fetch(baseUrl + "/api/workspaces", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: sessionCookie
-      },
-      body: JSON.stringify({ name: "Missing CSRF" })
-    });
-    assert.equal(missingCsrf.status, 403);
-
-    const workspace = await fetch(baseUrl + "/api/workspaces", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: sessionCookie,
-        "x-csrf-token": me.csrfToken
-      },
-      body: JSON.stringify({ name: "OIDC Workspace" })
-    });
-    assert.equal(workspace.status, 200);
-
-    const logout = await fetch(baseUrl + "/api/auth/logout", {
-      method: "POST",
-      headers: {
-        cookie: sessionCookie,
-        "x-csrf-token": me.csrfToken
-      }
-    });
-    assert.equal(logout.status, 200);
-    assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
-  });
-
-  async function post(pathname: string, body: unknown) {
-    return fetch(baseUrl + pathname, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    return {
+      sessionCookie,
+      csrfToken: me.csrfToken,
+      user: me.user
+    };
   }
 });
 
-function fakeOidcClient(calls: Array<Record<string, string | undefined>>): OidcClientAdapter {
+function fakeOidcClient(calls: Array<Record<string, string | undefined>>, principals: ExternalPrincipal[]): OidcClientAdapter {
   return {
     async createAuthorizationRequest(input) {
       calls.push({ redirectUri: input.redirectUri });
@@ -136,11 +181,9 @@ function fakeOidcClient(calls: Array<Record<string, string | undefined>>): OidcC
         codeVerifier: input.codeVerifier,
         nonce: input.nonce
       });
-      return {
-        issuer: "https://keycloak.example.test/realms/agentsmith",
-        subject: "keycloak-admin-subject",
-        email: "OIDC.Admin@Example.Test"
-      };
+      const principal = principals.shift();
+      assert.ok(principal, "fake OIDC principal is required");
+      return principal;
     }
   };
 }

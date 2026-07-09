@@ -23,6 +23,9 @@ export type SandboxLifecycleKubernetesPort = SandboxKubernetesMutationPort & San
 
 export const DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
+const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
+const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS = 200;
 
 export interface SandboxLifecycleServiceConfig {
   namespace: string;
@@ -30,6 +33,8 @@ export interface SandboxLifecycleServiceConfig {
   port?: SandboxLifecycleKubernetesPort;
   runtimeDirectoryCleaner?: RuntimeDirectoryCleaner;
   now?: () => Date;
+  deleteResourceErrorConfirmAttempts?: number;
+  deleteResourceErrorConfirmDelayMs?: number;
 }
 
 export interface SandboxLifecycleScope {
@@ -315,15 +320,29 @@ export class SandboxLifecycleService {
   ): Promise<string[]> {
     const errors: string[] = [];
     for (const action of actions) {
-      try {
-        if (action.type === "delete_resource") {
-          const result = await port.deleteResource(resourceRef(action.resource), action.labels);
-          if (result === "fence_mismatch") {
-            errors.push(`Kubernetes delete fence mismatch for ${action.kind}/${action.name}`);
-            return errors;
-          }
-          continue;
+      if (action.type === "delete_resource") {
+        let ref: KubernetesResourceRef;
+        try {
+          ref = resourceRef(action.resource);
+        } catch (error) {
+          errors.push(errorMessage(error));
+          return errors;
         }
+        try {
+          const result = await port.deleteResource(ref, action.labels);
+          if (result !== "fence_mismatch") {
+            continue;
+          }
+          errors.push(`Kubernetes delete fence mismatch for ${action.kind}/${action.name}`);
+        } catch (error) {
+          if (await this.deleteTargetGoneOrTerminatingAfterFreshObserves(port, action)) {
+            continue;
+          }
+          errors.push(errorMessage(error));
+        }
+        return errors;
+      }
+      try {
         if (action.type === "mark_cleanup") {
           const result = await port.patchLabels(resourceRef(action.resource), action.labels, {
             "agentsmith-lite/cleanup-status": "pending"
@@ -341,6 +360,32 @@ export class SandboxLifecycleService {
       }
     }
     return errors;
+  }
+
+  private async deleteTargetGoneOrTerminatingAfterFreshObserves(
+    port: SandboxLifecycleKubernetesPort,
+    action: Extract<SandboxReconcileAction, { type: "delete_resource" }>
+  ): Promise<boolean> {
+    const attempts = resolveDeleteResourceErrorConfirmAttempts(this.config.deleteResourceErrorConfirmAttempts);
+    const delayMs = resolveDeleteResourceErrorConfirmDelayMs(this.config.deleteResourceErrorConfirmDelayMs);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (attempt > 1) {
+        await sleep(delayMs);
+      }
+      try {
+        const resources = await port.listManagedResources(this.config.namespace);
+        const targetState = deleteTargetStateFromFreshObserve(resources, action);
+        if (targetState === "gone_or_terminating") {
+          return true;
+        }
+        if (targetState === "fence_mismatch") {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+    return false;
   }
 
   private async persistRunTransition(run: SandboxRunState): Promise<{
@@ -633,6 +678,65 @@ function filterObservedResourcesForScope(
   return resources.filter((resource) => resource.metadata.labels[SANDBOX_LABEL_KEYS.runId] === scope.runId);
 }
 
+type DeleteTargetFreshObserveState = "gone_or_terminating" | "active" | "fence_mismatch";
+
+function deleteTargetStateFromFreshObserve(
+  resources: KubernetesResource[],
+  action: Extract<SandboxReconcileAction, { type: "delete_resource" }>
+): DeleteTargetFreshObserveState {
+  const namespace = action.resource.metadata.namespace;
+  if (!namespace) {
+    return "fence_mismatch";
+  }
+  const matchingRefs = resources.filter((resource) => isSameDeleteActionRef(resource, action, namespace));
+  if (matchingRefs.length === 0) {
+    return "gone_or_terminating";
+  }
+  const actionUid = deleteActionUid(action);
+  for (const resource of matchingRefs) {
+    if (!hasLabelValues(resource.metadata.labels, action.labels)) {
+      return "fence_mismatch";
+    }
+    if (actionUid && resourceUid(resource) !== actionUid) {
+      return "fence_mismatch";
+    }
+    if (!hasDeletionTimestamp(resource)) {
+      return "active";
+    }
+  }
+  return "gone_or_terminating";
+}
+
+function isSameDeleteActionRef(
+  resource: KubernetesResource,
+  action: Extract<SandboxReconcileAction, { type: "delete_resource" }>,
+  namespace: string
+): boolean {
+  return (
+    resource.kind === action.kind &&
+    resource.metadata.name === action.name &&
+    resource.metadata.namespace === namespace
+  );
+}
+
+function hasLabelValues(actual: Record<string, string>, expected: Record<string, string>): boolean {
+  return Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function hasDeletionTimestamp(resource: KubernetesResource): boolean {
+  const value = resource.metadata.deletionTimestamp;
+  return typeof value === "string" && value.length > 0;
+}
+
+function deleteActionUid(action: Extract<SandboxReconcileAction, { type: "delete_resource" }>): string | null {
+  return resourceUid(action.resource);
+}
+
+function resourceUid(resource: KubernetesResource): string | null {
+  const value = resource.metadata.uid;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function actionSummary(action: SandboxReconcileAction): SandboxLifecycleActionSummary {
   switch (action.type) {
     case "create_resource":
@@ -672,7 +776,9 @@ function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
   return {
     kind: resource.kind as SandboxCoreResourceKind,
     namespace: resource.metadata.namespace,
-    name: resource.metadata.name
+    name: resource.metadata.name,
+    labels: { ...resource.metadata.labels },
+    ...(typeof resource.metadata.uid === "string" ? { uid: resource.metadata.uid } : {})
   };
 }
 
@@ -697,6 +803,29 @@ function runWasExpired(run: PersistedSandboxRunState, now: Date): boolean {
 
 function isExpired(value: string | null | undefined, now: Date): boolean {
   return typeof value === "string" && Date.parse(value) <= now.getTime();
+}
+
+function resolveDeleteResourceErrorConfirmAttempts(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS;
+  }
+  return Math.min(MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS, Math.max(1, Math.floor(value)));
+}
+
+function resolveDeleteResourceErrorConfirmDelayMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  if (delayMs <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
 }
 
 function extendedIdleExpiresAt(currentIdleExpiresAt: string | null | undefined, now: Date, idleTimeoutMs: number): string {

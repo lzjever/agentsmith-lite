@@ -7,6 +7,7 @@ import {
   sandboxIdentityLabels as identityLabels
 } from "./labels.js";
 import { renderSandboxResources } from "./manifestRenderer.js";
+import { sandboxResourceNamesForTask } from "./resourceNames.js";
 
 export { sandboxIdentityLabels } from "./labels.js";
 
@@ -59,6 +60,7 @@ export interface SandboxRunState extends SandboxIdentity {
   directories: SandboxRunDirectories;
   resourceLimits: SandboxRunResourceLimits;
   modelCa?: SandboxRunModelCaReference;
+  modelEndpointBaseUrl?: string;
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
@@ -340,6 +342,7 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     cpuLimit: run.resourceLimits.cpuLimit,
     memoryLimit: run.resourceLimits.memoryLimit,
     ...(run.modelCa ? { modelCa: run.modelCa } : {}),
+    ...(run.modelEndpointBaseUrl ? { modelEndpointBaseUrl: run.modelEndpointBaseUrl } : {}),
     resourceNames
   }).resources;
 }
@@ -351,9 +354,9 @@ function expectedCoreResourceName(run: SandboxRunState, kind: SandboxCoreResourc
     case "ConfigMap":
       return run.resourceNames.configMap;
     case "ServiceAccount":
-      return run.resourceNames.serviceAccount ?? `asl-task-${run.taskId}`;
+      return run.resourceNames.serviceAccount ?? sandboxResourceNamesForTask(run.taskId).serviceAccount;
     case "NetworkPolicy":
-      return run.resourceNames.networkPolicy ?? `asl-task-${run.taskId}`;
+      return run.resourceNames.networkPolicy ?? sandboxResourceNamesForTask(run.taskId).networkPolicy;
     case "Pod":
       return run.resourceNames.pod;
     case "Service":

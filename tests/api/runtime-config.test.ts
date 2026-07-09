@@ -35,22 +35,42 @@ describe("runtime config", () => {
       OIDC_ISSUER_URL: "",
       OIDC_CLIENT_ID: "",
       OIDC_CLIENT_SECRET: "",
-      OIDC_BACKCHANNEL_BASE_URL: ""
+      OIDC_BACKCHANNEL_BASE_URL: "",
+      OIDC_ADMIN_EMAILS: "",
+      OIDC_ADMIN_SUBJECTS: ""
     }), { mode: "builtin_admin" });
+
+    for (const key of [
+      "OIDC_ISSUER_URL",
+      "OIDC_BACKCHANNEL_BASE_URL",
+      "OIDC_CLIENT_ID",
+      "OIDC_CLIENT_SECRET",
+      "OIDC_ADMIN_EMAILS",
+      "OIDC_ADMIN_SUBJECTS"
+    ]) {
+      assert.throws(
+        () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin", [key]: "DO_NOT_PRINT_OIDC_VALUE" }),
+        new RegExp(`${key} must be empty when AUTH_MODE=builtin_admin`)
+      );
+    }
 
     assert.deepEqual(parseRuntimeAuthConfig({
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: " https://keycloak.example.test/realms/agentsmith ",
       OIDC_BACKCHANNEL_BASE_URL: " http://keycloak.keycloak.svc.cluster.local/realms/agentsmith ",
       OIDC_CLIENT_ID: " agentsmith-lite ",
-      OIDC_CLIENT_SECRET: " client-secret "
+      OIDC_CLIENT_SECRET: " client-secret ",
+      OIDC_ADMIN_EMAILS: " OIDC.Admin@Example.Test, ops@example.test ,, ",
+      OIDC_ADMIN_SUBJECTS: " keycloak-admin-subject, service-account-admin "
     }), {
       mode: "oidc",
       oidc: {
         issuerUrl: "https://keycloak.example.test/realms/agentsmith",
         backchannelBaseUrl: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         clientId: "agentsmith-lite",
-        clientSecret: "client-secret"
+        clientSecret: "client-secret",
+        adminEmails: ["oidc.admin@example.test", "ops@example.test"],
+        adminSubjects: ["keycloak-admin-subject", "service-account-admin"]
       }
     });
 
@@ -67,10 +87,6 @@ describe("runtime config", () => {
       );
     }
 
-    assert.throws(
-      () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin", OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.local" }),
-      /OIDC_BACKCHANNEL_BASE_URL/
-    );
   });
 
   it("parses sandbox mode fail-closed except for empty dry-run defaults", () => {

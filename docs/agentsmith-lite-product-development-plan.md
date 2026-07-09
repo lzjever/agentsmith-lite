@@ -24,9 +24,11 @@
 - Web UI 和未来产品 TUI 只能作为 API client。
 - Server side 拥有 auth、endpoint 调用、file path 安全、task lifecycle、artifact 投影、sandbox cleanup。
 - 不建设 evidence、report、release、rehearsal、gate、质量矩阵、诊断文档生成或审计记录体系。
-- 只保留短小、直接、服务当前业务改动或边界安全的检查；检查必须由开发者主动选择、按具体业务路径命名、stdout/stderr 输出、失败退出非零，不用笼统健康、验收或一把梭证明来包装。
+- 禁止把脱离具体业务路径的笼统检查包装成测试、脚本、验收、阶段或文档概念；保留检查必须按具体业务路径命名，例如 `check-product-workflow` 或 `check-substrates-install`，不要创造新的抽象验收名。
+- 只保留短小、直接、服务当前业务改动或边界安全的检查；检查必须由开发者主动选择、stdout/stderr 输出、失败退出非零，不用笼统健康、验收或一把梭证明来包装。
 - 不测试计划文档措辞，不测试测试设施本身。
-- e2e/visual 只在用户明确要求或 UI/cross-component 改动确实需要时手动运行，不作为默认流程。
+- e2e/visual 只在用户人工主动要求时手动运行，不作为默认流程。
+- 最终交付只要求本地单机 K8s 核心闭环通过；发布前最多保留少量 quick checks，治理不是主线，也不需要多环境 release gate 或外部云证明。
 
 ## 产品边界
 
@@ -71,7 +73,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 当前 app repo 已经收敛到更直接的产品检查：
 
 - Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 auth/session、project、endpoint、chat、file、task、cancel、reap 等产品路径，stdout 输出，失败非零；它只是开发者主动选择的业务路径检查，不是默认流程或全局通过证明。
-- App doctor 只允许做 manifest/env 和可选 K8s read-only facts 的直接排错，stdout/stderr 输出，失败非零；不得生成诊断文档或报告文件。
+- Deploy render/apply 只保留 manifest/env、schema bootstrap Job、API rollout 这类直接路径检查，stdout/stderr 输出，失败非零；不得生成诊断文档或报告文件。
 - OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已完成；app 消费 substrates 输出的 issuer/client/secret/backchannel。
 - Botified runner check 保留本地进程和 runner image 两层，覆盖 runner readiness、messages、timeline、file、state、abort。
 - API product workflow test 覆盖 login、workspace、project、endpoint、chat、file CRUD、task resources。
@@ -118,7 +120,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 - 删除或降级 evidence ledger、release report、GA report、rehearsal、quality matrix、生成式检查报告和各种 gate 产物。
 - 删除默认写入的 `*-report.json`、运行报告、诊断文档生成、证据归档参数。
-- 删除笼统健康/验收名称、泛化检查名称、默认发布流程和一把梭证明式命令心智。
+- 删除笼统测试/脚本/阶段概念、笼统健康/验收名称、泛化检查名称、默认发布流程和一把梭证明式命令心智。
 - 需要检查时，只保留按具体业务路径命名、由开发者按当前改动主动选择的快速检查，stdout/stderr 输出，失败退出非零。
 - 删除测试治理系统本身的测试、断言计划文档措辞的测试，以及与核心闭环无关的长矩阵、跨环境证明、外部云证明。
 - offline cache/app bundle 只是部署输入，不是证据系统。
@@ -128,5 +130,6 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - 小步实现，每一步对应一个核心业务结果。
 - 优先修产品代码，不用流程包装失败。
 - 测试覆盖随风险增长：窄改动用窄测试，跨模块行为用 API/service tests。
-- 不运行无关 e2e/visual；需要时明确手动触发。
+- 不运行无关 e2e/visual；只有用户人工主动要求时才作为手动诊断触发。
+- 交付前 quick checks 只覆盖本地单机 K8s 核心闭环和当前改动风险，不升级成发布 gate、报告、矩阵或验收框架。
 - 保持 app repo 与 substrates repo 边界清晰：substrates 提供运行基座，app 提供产品服务和 sandbox 业务逻辑。
