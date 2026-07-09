@@ -140,7 +140,7 @@ async function main() {
         baseUrl: endpointConfig.baseUrl,
         model: endpointConfig.model,
         apiKeySecretRef: endpointConfig.secretRef,
-        capabilities: ["text"],
+        capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30
       }
     });

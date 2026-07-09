@@ -591,7 +591,7 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
         baseUrl: options.endpointBaseUrl,
         model: options.endpointModel,
         apiKeySecretRef: options.endpointSecretRef,
-        capabilities: ["text"],
+        capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30
       });
       res.end(JSON.stringify({ id: options.endpointId }));

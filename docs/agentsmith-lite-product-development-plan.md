@@ -23,9 +23,10 @@
 - Keycloak/OIDC 是生产身份路径；built-in admin 只作为当前本地开发和过渡检查路径。
 - Web UI 和未来产品 TUI 只能作为 API client。
 - Server side 拥有 auth、endpoint 调用、file path 安全、task lifecycle、artifact 投影、sandbox cleanup。
-- 只保留短小、直接、服务核心业务或边界安全的检查。
+- 不建设 evidence、report、release、rehearsal、gate、质量矩阵、诊断文档生成或审计记录体系。
+- 只保留短小、直接、服务当前业务改动或边界安全的检查；检查必须由开发者主动选择、按业务场景命名、stdout/stderr 输出、失败退出非零。
 - 不测试计划文档措辞，不测试测试设施本身。
-- e2e/visual 只在用户明确要求或 UI/cross-component 改动确实需要时手动运行。
+- e2e/visual 只在用户明确要求或 UI/cross-component 改动确实需要时手动运行，不作为默认流程。
 
 ## 产品边界
 
@@ -61,7 +62,7 @@ AgentSmith Lite 是私有化智能体平台的最小产品内核。它把 Botifi
 | Runtime | Botified vendored source pin、runner image、runtime config、HTTP client。 |
 | Sandbox | K8s manifest render/apply/status/reap；JuiceFS PVC mount；最小 RBAC；TTL cleanup。 |
 | Packaging | app image、runner image、manifest render/apply/status/down、digest-pinned app offline bundle。 |
-| Tests | 与当前改动相关的 unit/contract/behavior tests；forbidden surface 快速检查。 |
+| Tests | 与当前改动相关的 unit/contract/behavior tests；按业务场景命名的边界快速检查。 |
 
 Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是长期对话产品。
 
@@ -69,10 +70,10 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 
 当前 app repo 已经收敛到更直接的产品检查：
 
-- Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 health/auth/project/endpoint/chat/file/task/cancel/reap，stdout 输出，失败非零。
-- App doctor 只做静态 manifest/env 和可选 K8s read-only facts 检查，stdout/stderr 输出，失败非零。
+- Deploy workflow check 为 `scripts/deploy/check-product-workflow.sh` / `.mjs`，覆盖 auth/session、project、endpoint、chat、file、task、cancel、reap 等产品路径，stdout 输出，失败非零；它只是开发者主动选择的业务场景检查，不是默认流程。
+- App doctor 只允许做 manifest/env 和可选 K8s read-only facts 的直接排错，stdout/stderr 输出，失败非零；不得生成诊断文档或报告文件。
 - OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已完成；app 消费 substrates 输出的 issuer/client/secret/backchannel。
-- Botified runner check 保留本地进程和 runner image 两层，覆盖 health/messages/timeline/file/state/abort。
+- Botified runner check 保留本地进程和 runner image 两层，覆盖 runner readiness、messages、timeline、file、state、abort。
 - API product workflow test 覆盖 login、workspace、project、endpoint、chat、file CRUD、task resources。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 
@@ -88,7 +89,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 1. **Local K8s deploy loop**
    - 使用 substrates 输出 env/secrets 渲染并部署 app。
    - 确认 API/Web readiness、schema bootstrap、JuiceFS PVC、sandbox RBAC。
-   - 让 product workflow check 能对 live app 完成 health/auth/project/endpoint/file 基础路径。
+   - 让 product workflow check 能对 live app 完成 auth/session、project、endpoint、file 基础路径。
    - 验证 OIDC session 使用 public issuer，server-side backchannel 使用 in-cluster URL。
 
 2. **Botified task artifact loop**
@@ -111,7 +112,16 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 5. **Docs and commands stay small**
    - README/OPERATOR 只保留可执行命令和核心边界。
    - 新命令必须直接服务产品闭环，stdout/stderr 清晰，失败非零。
-   - 删除与核心闭环无关的 prose tests、长矩阵、默认产物生成。
+   - 删除与核心闭环无关的 prose tests、长矩阵、默认产物生成、报告/证据/流程包装。
+
+## 禁止和清理
+
+- 删除或降级 evidence ledger、release report、GA report、rehearsal、quality matrix、生成式检查报告和各种 gate 产物。
+- 删除默认写入的 `*-report.json`、运行报告、诊断文档生成、证据归档参数。
+- 删除笼统健康/验收名称、泛化检查名称、默认发布流程和“一把梭证明”式命令心智。
+- 需要检查时，只保留按业务场景命名、由开发者按当前改动主动选择的快速检查。
+- 删除测试治理系统本身的测试、断言计划文档措辞的测试，以及与核心闭环无关的长矩阵、跨环境证明、外部云证明。
+- offline cache/app bundle 只是部署输入，不是证据系统。
 
 ## 工作方式
 
