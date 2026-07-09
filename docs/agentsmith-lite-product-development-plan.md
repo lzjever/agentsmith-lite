@@ -6,7 +6,7 @@
 
 ## 当前最高原则
 
-本计划只服务一个目标：尽快跑通本地单机 K8s 上的核心业务闭环，并用少量、直接、和改动相关的检查确认它能跑。
+本计划只服务一个目标：尽快跑通本地单机 K8s 上的核心业务闭环，并用由开发者按当前改动主动选择的精确窄检查确认它能跑。
 
 当前工作重点是删除治理 overhead，把精力拉回产品本体：
 
@@ -25,10 +25,10 @@
 - Server side 拥有 auth、endpoint 调用、file path 安全、task lifecycle、artifact 投影、sandbox cleanup。
 - 不建设 evidence、report、release、rehearsal、gate、质量矩阵、诊断文档生成或审计记录体系。
 - 禁止把脱离具体业务路径的笼统检查包装成测试、脚本、验收、阶段或文档概念；保留检查必须按具体业务路径命名，例如 `check-product-workflow` 或 `check-substrates-install`，不要创造新的抽象验收名。
-- 只保留短小、直接、服务当前业务改动或边界安全的检查；检查必须由开发者主动选择、stdout/stderr 输出、失败退出非零，不用笼统健康、验收或一把梭证明来包装。
+- 只保留服务当前业务改动或边界安全的精确窄检查；检查必须由开发者主动选择、stdout/stderr 输出、失败退出非零，不用笼统健康、验收或一把梭证明来包装。
 - 不测试计划文档措辞，不测试测试设施本身。
 - e2e/visual 只在用户人工主动要求时手动运行，不作为默认流程。
-- 最终交付只要求本地单机 K8s 核心闭环通过；发布前最多保留少量 quick checks，治理不是主线，也不需要多环境 release gate 或外部云证明。
+- 最终交付只要求本地单机 K8s 核心闭环通过；当前改动相关检查必须精确、窄、由开发者主动选择，不能成为默认主线通过项、发布判断或外部云证明。
 
 ## 产品边界
 
@@ -64,7 +64,7 @@ AgentSmith Lite 是私有化智能体平台的最小产品内核。它把 Botifi
 | Runtime | Botified vendored source pin、runner image、runtime config、HTTP client。 |
 | Sandbox | K8s manifest render/apply/status/reap；JuiceFS PVC mount；最小 RBAC；TTL cleanup。 |
 | Packaging | app image、runner image、manifest render/apply/status/down、digest-pinned app offline bundle。 |
-| Tests | 与当前改动相关的 unit/contract/behavior tests；按具体业务路径命名的边界快速检查。 |
+| Tests | 与当前改动相关的 unit/contract/behavior tests；按具体业务路径命名、由开发者主动选择的精确边界检查。 |
 
 Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是长期对话产品。
 
@@ -111,7 +111,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - 删除或降级 evidence ledger、release report、GA report、rehearsal、quality matrix、生成式检查报告和各种 gate 产物。
 - 删除默认写入的 `*-report.json`、运行报告、诊断文档生成、证据归档参数。
 - 删除笼统测试/脚本/阶段概念、笼统健康/验收名称、泛化检查名称、默认发布流程和一把梭证明式命令心智。
-- 需要检查时，只保留按具体业务路径命名、由开发者按当前改动主动选择的快速检查，stdout/stderr 输出，失败退出非零。
+- 需要检查时，只保留按具体业务路径命名、由开发者按当前改动主动选择的精确窄检查，stdout/stderr 输出，失败退出非零。
 - 删除测试治理系统本身的测试、断言计划文档措辞的测试，以及与核心闭环无关的长矩阵、跨环境证明、外部云证明。
 - offline cache/app bundle 只是部署输入，不是证据系统。
 
@@ -121,5 +121,5 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - 优先修产品代码，不用流程包装失败。
 - 测试覆盖随风险增长：窄改动用窄测试，跨模块行为用 API/service tests。
 - 不运行无关 e2e/visual；只有用户人工主动要求时才作为手动诊断触发。
-- 交付前 quick checks 只覆盖本地单机 K8s 核心闭环和当前改动风险，不升级成发布 gate、报告、矩阵或验收框架。
+- 当前改动相关检查只覆盖本地单机 K8s 核心闭环和当前改动风险，由开发者主动选择，不升级成发布 gate、报告、矩阵、默认主线通过项或验收框架。
 - 保持 app repo 与 substrates repo 边界清晰：substrates 提供运行基座，app 提供产品服务和 sandbox 业务逻辑。
