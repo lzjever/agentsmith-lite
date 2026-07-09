@@ -1,5 +1,4 @@
-import { createReadStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -28,6 +27,7 @@ export interface ApiServerOptions {
   builtinAdminPassword: string;
   sessionSecret?: string;
   publicBaseUrl?: string;
+  publicBasePath?: string;
   oidcClient?: OidcClientAdapter;
   oidcAdminEmails?: string[];
   oidcAdminSubjects?: string[];
@@ -96,20 +96,29 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
+  const appBasePath = appBasePathFromOptions(options.publicBaseUrl, options.publicBasePath);
 
   const server = http.createServer(async (req, res) => {
     try {
       const requestUrl = new URL(req.url ?? "/", "http://localhost");
-      if (requestUrl.pathname.startsWith("/api/")) {
-        await routeApi(req, res, requestUrl, services, {
+      if (appBasePath && (req.method === "GET" || req.method === "HEAD") && requestUrl.pathname === appBasePath) {
+        return sendRedirect(res, 302, `${appBasePath}/`);
+      }
+      const routedUrl = routeUrlForAppBasePath(requestUrl, appBasePath);
+      if (!routedUrl) {
+        throw new ProductError("Route not found", 404);
+      }
+      if (routedUrl.pathname === "/api" || routedUrl.pathname.startsWith("/api/")) {
+        await routeApi(req, res, routedUrl, services, {
           authMode,
           bootstrapPassword: options.builtinAdminPassword,
           sessionSecret: effectiveSessionSecret,
+          appBasePath,
           ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
           ...(options.oidcClient ? { oidcClient: options.oidcClient } : {})
         });
       } else {
-        await serveWeb(req, res, requestUrl);
+        await serveWeb(req, res, routedUrl);
       }
     } catch (error) {
       handleError(res, error);
@@ -139,6 +148,7 @@ interface AuthRouteContext {
   authMode: AuthMode;
   bootstrapPassword: string;
   sessionSecret: string;
+  appBasePath: string;
   publicBaseUrl?: string;
   oidcClient?: OidcClientAdapter;
 }
@@ -146,6 +156,10 @@ interface AuthRouteContext {
 async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, services: Services, auth: AuthRouteContext): Promise<void> {
   const method = req.method ?? "GET";
   const segments = url.pathname.split("/").filter(Boolean);
+
+  if (url.pathname === "/api") {
+    throw new ProductError("Route not found", 404);
+  }
 
   if (method === "GET" && url.pathname === "/api/health") {
     return sendJson(res, 200, { status: "ok", version: "0.1.0" });
@@ -173,7 +187,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     const body = await readJson(req);
     const result = await services.auth.login(asString(body.email), asString(body.password));
     res.setHeader("set-cookie", [
-      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=43200`
     ]);
     return sendJson(res, 200, result);
   }
@@ -182,7 +196,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     if (auth.authMode !== "oidc" || !auth.oidcClient) {
       throw new ProductError("Route not found", 404);
     }
-    const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl);
+    const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl, auth.appBasePath);
     const authorization = await auth.oidcClient.createAuthorizationRequest({ redirectUri });
     res.setHeader("set-cookie", [
       `asl_oidc_tx=${encodeOidcTransaction({
@@ -191,7 +205,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
         nonce: authorization.nonce,
         redirectUri,
         createdAt: Date.now()
-      }, auth.sessionSecret)}; HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=600`
+      }, auth.sessionSecret)}; HttpOnly; SameSite=Lax; Path=${oidcTransactionCookiePath(auth.appBasePath)}; Max-Age=600`
     ]);
     return sendRedirect(res, 302, authorization.authorizationUrl);
   }
@@ -209,10 +223,10 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       nonce: transaction.nonce
     }));
     res.setHeader("set-cookie", [
-      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`,
-      "asl_oidc_tx=; HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=0"
+      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=43200`,
+      `asl_oidc_tx=; HttpOnly; SameSite=Lax; Path=${oidcTransactionCookiePath(auth.appBasePath)}; Max-Age=0`
     ]);
-    return sendRedirect(res, 302, "/");
+    return sendRedirect(res, 302, appHomePath(auth.appBasePath));
   }
 
   const sessionId = getCookie(req, "asl_session");
@@ -229,7 +243,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   if (method === "POST" && url.pathname === "/api/auth/logout") {
     await services.auth.logout(sessionId);
     res.setHeader("set-cookie", [
-      "asl_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+      `asl_session=; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=0`
     ]);
     return sendJson(res, 200, { loggedOut: true });
   }
@@ -368,19 +382,69 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   throw new ProductError("Route not found", 404);
 }
 
+function appBasePathFromOptions(publicBaseUrl: string | undefined, publicBasePath: string | undefined): string {
+  if (publicBasePath !== undefined) {
+    return normalizeAppBasePath(publicBasePath);
+  }
+  return appBasePathFromPublicBaseUrl(publicBaseUrl);
+}
+
+function appBasePathFromPublicBaseUrl(publicBaseUrl: string | undefined): string {
+  const value = publicBaseUrl?.trim();
+  if (!value) {
+    return "";
+  }
+  const parsed = new URL(value);
+  return normalizeAppBasePath(parsed.pathname);
+}
+
+function normalizeAppBasePath(pathname: string): string {
+  const withLeadingSlash = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  const withoutTrailingSlash = withLeadingSlash.replace(/\/+$/, "");
+  return withoutTrailingSlash === "" ? "" : withoutTrailingSlash;
+}
+
+function routeUrlForAppBasePath(url: URL, appBasePath: string): URL | null {
+  if (!appBasePath) {
+    return url;
+  }
+  if (url.pathname !== appBasePath && !url.pathname.startsWith(`${appBasePath}/`)) {
+    return null;
+  }
+  const routed = new URL(url.toString());
+  routed.pathname = url.pathname === appBasePath ? "/" : url.pathname.slice(appBasePath.length);
+  return routed;
+}
+
+function sessionCookiePath(appBasePath: string): string {
+  return appBasePath || "/";
+}
+
+function oidcTransactionCookiePath(appBasePath: string): string {
+  return `${appBasePath}/api/auth/oidc`;
+}
+
+function appHomePath(appBasePath: string): string {
+  return appBasePath ? `${appBasePath}/` : "/";
+}
+
 async function serveWeb(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const webRoot = findWebRoot();
   const requested = url.pathname === "/" ? "/index.html" : url.pathname;
   const safe = path.normalize(requested).replace(/^(\.\.[/\\])+/, "");
   const filePath = path.join(webRoot, safe);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filePath);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      throw new ProductError("Route not found", 404);
+    }
+    throw error;
+  }
   const contentType = contentTypeFor(filePath);
   res.writeHead(200, { "content-type": contentType });
-  await new Promise<void>((resolve, reject) => {
-    createReadStream(filePath)
-      .on("error", reject)
-      .on("end", resolve)
-      .pipe(res);
-  });
+  res.end(bytes);
 }
 
 function findWebRoot(): string {
@@ -598,14 +662,19 @@ function isOidcTransaction(value: unknown): value is OidcTransaction {
     Number.isFinite(candidate.createdAt);
 }
 
-function oidcRedirectUri(req: IncomingMessage, publicBaseUrl: string | undefined): string {
+function oidcRedirectUri(req: IncomingMessage, publicBaseUrl: string | undefined, appBasePath: string): string {
   const baseUrl = publicBaseUrl?.trim() || requestOrigin(req);
   const parsed = new URL(baseUrl);
-  const prefix = parsed.pathname.replace(/\/$/, "");
-  parsed.pathname = `${prefix}/api/auth/oidc/callback`;
+  parsed.pathname = `${appBasePath}/api/auth/oidc/callback`;
   parsed.search = "";
   parsed.hash = "";
   return parsed.toString();
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error &&
+    "code" in error &&
+    ["ENOENT", "ENOTDIR", "EISDIR"].includes(String((error as { code?: unknown }).code));
 }
 
 function requestOrigin(req: IncomingMessage): string {

@@ -16,6 +16,9 @@ export interface AppManifestInput {
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
   const auth = resolveAuthConfig(input);
   const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
+  const parsedPublicBaseUrl = parsePublicBaseUrl(publicBaseUrl);
+  const publicBasePath = normalizedPublicBasePath(parsedPublicBaseUrl.pathname);
+  const apiHealthPath = publicPathFor(publicBasePath, "/api/health");
   const appDataRoot = resolveAppDataRoot(input.env);
   const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
   const modelCa = resolveModelCa(input);
@@ -39,7 +42,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   }
   const appImage = input.imageRefs?.app ?? `agentsmith-lite/app:${input.imageTag}`;
   const runnerImage = input.imageRefs?.botifiedRunner ?? input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`;
-  const ingress = renderAppIngress(input, publicBaseUrl, apiLabels);
+  const ingress = renderAppIngress(input, parsedPublicBaseUrl, publicBasePath, apiLabels);
 
   return [
     {
@@ -89,6 +92,9 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 name: "api",
                 image: appImage,
                 ports: [{ containerPort: 3000 }],
+                readinessProbe: apiHealthProbe(apiHealthPath),
+                livenessProbe: apiHealthProbe(apiHealthPath),
+                startupProbe: apiHealthProbe(apiHealthPath),
                 envFrom: [
                   { configMapRef: { name: "agentsmith-lite-config" } },
                   { secretRef: { name: "agentsmith-lite-app-secrets" } }
@@ -279,18 +285,36 @@ function resolveModelCa(input: AppManifestInput): { configMapName: string; confi
   };
 }
 
-function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels: Record<string, string>): KubernetesResource | undefined {
-  let parsed: URL;
+function parsePublicBaseUrl(publicBaseUrl: string): URL {
   try {
-    parsed = new URL(publicBaseUrl);
+    const parsed = new URL(publicBaseUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("APP_PUBLIC_BASE_URL must be an http or https URL");
+    }
+    return parsed;
   } catch {
     throw new Error("APP_PUBLIC_BASE_URL must be an http or https URL");
   }
+}
 
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("APP_PUBLIC_BASE_URL must be an http or https URL");
-  }
+function normalizedPublicBasePath(publicPathname: string): string {
+  return publicPathname.replace(/\/+$/, "") || "/";
+}
 
+function publicPathFor(publicBasePath: string, routePath: string): string {
+  return publicBasePath === "/" ? routePath : `${publicBasePath}${routePath}`;
+}
+
+function apiHealthProbe(path: string): { httpGet: { path: string; port: number } } {
+  return {
+    httpGet: {
+      path,
+      port: 3000
+    }
+  };
+}
+
+function renderAppIngress(input: AppManifestInput, parsed: URL, publicBasePath: string, labels: Record<string, string>): KubernetesResource | undefined {
   const host = parsed.hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
   if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
     return undefined;
@@ -305,7 +329,7 @@ function renderAppIngress(input: AppManifestInput, publicBaseUrl: string, labels
         http: {
           paths: [
             {
-              path: parsed.pathname || "/",
+              path: publicBasePath,
               pathType: "Prefix",
               backend: {
                 service: {

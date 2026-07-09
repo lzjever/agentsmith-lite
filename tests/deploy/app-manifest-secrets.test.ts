@@ -89,6 +89,30 @@ describe("app manifest rendering", () => {
     }
   });
 
+  it("renders API health probes under the public base path", () => {
+    assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com/app"), {
+      readiness: "/app/api/health",
+      liveness: "/app/api/health",
+      startup: "/app/api/health"
+    });
+    assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com"), {
+      readiness: "/api/health",
+      liveness: "/api/health",
+      startup: "/api/health"
+    });
+  });
+
+  it("normalizes trailing slashes in the public base path for Ingress and API health probes", () => {
+    const publicBaseUrl = "https://agentsmith.example.com/app//";
+
+    assert.equal(apiIngressPath(publicBaseUrl), "/app");
+    assert.deepEqual(apiHealthProbePaths(publicBaseUrl), {
+      readiness: "/app/api/health",
+      liveness: "/app/api/health",
+      startup: "/app/api/health"
+    });
+  });
+
   it("rejects non-http public base URLs", () => {
     assert.throws(
       () =>
@@ -528,6 +552,41 @@ describe("app manifest rendering", () => {
   });
 });
 
+function apiHealthProbePaths(publicBaseUrl: string): { readiness: string | undefined; liveness: string | undefined; startup: string | undefined } {
+  const manifests = renderAppManifests({
+    namespace: "agentsmith",
+    imageTag: "dev",
+    env: {
+      APP_PUBLIC_BASE_URL: publicBaseUrl
+    },
+    secrets: {}
+  });
+  const deployment = manifests.find(
+    (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+  ) as DeploymentResource | undefined;
+  const container = deployment?.spec.template.spec.containers.find((candidate) => candidate.name === "api");
+  return {
+    readiness: container?.readinessProbe?.httpGet.path,
+    liveness: container?.livenessProbe?.httpGet.path,
+    startup: container?.startupProbe?.httpGet.path
+  };
+}
+
+function apiIngressPath(publicBaseUrl: string): string | undefined {
+  const manifests = renderAppManifests({
+    namespace: "agentsmith",
+    imageTag: "dev",
+    env: {
+      APP_PUBLIC_BASE_URL: publicBaseUrl
+    },
+    secrets: {}
+  });
+  const ingress = manifests.find((manifest) => manifest.kind === "Ingress" && manifest.metadata.name === "agentsmith-lite-api") as
+    | IngressResource
+    | undefined;
+  return ingress?.spec.rules[0]?.http.paths[0]?.path;
+}
+
 interface RoleResource {
   kind: "Role";
   metadata: {
@@ -577,8 +636,12 @@ interface DeploymentResource {
     template: {
       spec: {
         containers: Array<{
+          name: string;
           env?: Array<{ name: string; value: string }>;
           volumeMounts: Array<{ name?: string; mountPath: string; subPath?: string; readOnly?: boolean }>;
+          readinessProbe?: HealthProbe;
+          livenessProbe?: HealthProbe;
+          startupProbe?: HealthProbe;
         }>;
         volumes: Array<{
           name: string;
@@ -589,6 +652,13 @@ interface DeploymentResource {
         }>;
       };
     };
+  };
+}
+
+interface HealthProbe {
+  httpGet: {
+    path: string;
+    port: number;
   };
 }
 

@@ -7,12 +7,14 @@ import path from "node:path";
 import { createApiServer } from "../../dist/packages/api-entry-node/src/server.js";
 
 const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-visual-"));
+const appBasePath = "/app";
 const artifactBytes = Buffer.from("visual artifact", "utf8");
 const server = await createApiServer({
   port: 0,
   dataRoot,
   builtinAdminPassword: "admin-password",
   sessionSecret: "visual-session-secret",
+  publicBasePath: appBasePath,
   botifiedClient: fakeBotifiedClient(artifactBytes),
   botifiedServiceKeyFactory: () => "visual-service-key"
 });
@@ -23,7 +25,7 @@ const browser = await chromium.launch({ executablePath, headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
-  await page.goto(server.baseUrl + "/", { waitUntil: "networkidle" });
+  await page.goto(server.baseUrl + `${appBasePath}/`, { waitUntil: "networkidle" });
 
   await page.locator("#login").waitFor({ state: "visible" });
   await Promise.all([
@@ -67,7 +69,7 @@ try {
   await waitForText(page, "#timeline-count", "completed");
   await waitForText(page, "#timeline", "turn completed");
   const artifactHref = await page.locator("#artifacts .download-link").first().getAttribute("href");
-  assert.match(artifactHref ?? "", /^\/api\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/);
+  assert.match(artifactHref ?? "", /^\/app\/api\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/);
 
   const visualFilePath = "files/visual/nested/visual-note.txt";
   await page.locator("#project-file-form input[name='path']").fill(visualFilePath);
@@ -88,7 +90,7 @@ try {
   await waitForText(page, "#files", visualFilePath);
   await assertProjectFileNestedControls(page, visualFilePath);
   const fileHref = await page.locator("#files .item", { hasText: visualFilePath }).locator(".download-link").getAttribute("href");
-  assert.match(fileHref ?? "", /^\/api\/projects\/[^/]+\/files\/download\?path=files%2Fvisual%2Fnested%2Fvisual-note\.txt$/);
+  assert.match(fileHref ?? "", /^\/app\/api\/projects\/[^/]+\/files\/download\?path=files%2Fvisual%2Fnested%2Fvisual-note\.txt$/);
   assert.doesNotMatch(fileHref ?? "", /(?:https?:\/\/|provider|botified|internal)/i);
 
   await assertNoPanelOverlap(page);

@@ -7,6 +7,7 @@ import path from "node:path";
 import { createApiServer } from "../../dist/packages/api-entry-node/src/server.js";
 
 const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-web-product-oidc-"));
+const appBasePath = "/app";
 const artifactBytes = Buffer.from("oidc web product artifact", "utf8");
 const oidcCalls = [];
 const botified = fakeBotifiedClient(artifactBytes);
@@ -16,10 +17,12 @@ const server = await createApiServer({
   authMode: "oidc",
   builtinAdminPassword: "builtin-password-must-not-work",
   sessionSecret: "web-product-oidc-session-secret-at-least-32-chars",
+  publicBasePath: appBasePath,
   oidcClient: fakeOidcClient(oidcCalls),
   botifiedClient: botified,
   botifiedServiceKeyFactory: () => "web-product-oidc-service-key"
 });
+const publicBaseUrl = `${server.baseUrl}${appBasePath}`;
 
 const executablePath = process.env.CHROME_PATH ?? (existsSync("/usr/bin/google-chrome-stable") ? "/usr/bin/google-chrome-stable" : undefined);
 const browser = await chromium.launch({ executablePath, headless: true });
@@ -32,34 +35,38 @@ try {
   const page = await context.newPage();
   const pageErrors = [];
   const operatorRequests = [];
+  const rootApiRequests = [];
   const oidcFlow = [];
 
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
-    if (pathname.startsWith("/api/operator/")) {
+    if (pathname.startsWith("/api/")) {
+      rootApiRequests.push(`${request.method()} ${pathname}`);
+    }
+    if (pathname.includes("/api/operator/")) {
       operatorRequests.push(`${request.method()} ${pathname}`);
     }
   });
   page.on("response", (response) => {
     const pathname = new URL(response.url()).pathname;
-    if (["/api/auth/oidc/start", "/api/auth/oidc/callback", "/api/dashboard"].includes(pathname)) {
+    if ([`${appBasePath}/api/auth/oidc/start`, `${appBasePath}/api/auth/oidc/callback`, `${appBasePath}/api/dashboard`].includes(pathname)) {
       oidcFlow.push(pathname);
     }
   });
 
-  await page.goto(server.baseUrl + "/", { waitUntil: "networkidle" });
+  await page.goto(server.baseUrl + `${appBasePath}/`, { waitUntil: "networkidle" });
   await page.locator("#login").waitFor({ state: "visible" });
   await assertText(page, "#login-title", "Sign in");
   oidcFlow.length = 0;
 
   const startResponsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url());
-    return url.pathname === "/api/auth/oidc/start";
+    return url.pathname === `${appBasePath}/api/auth/oidc/start`;
   });
   const callbackResponsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url());
-    return url.pathname === "/api/auth/oidc/callback";
+    return url.pathname === `${appBasePath}/api/auth/oidc/callback`;
   });
   await page.locator("#login-form button[type='submit']").click();
   const startResponse = await startResponsePromise;
@@ -67,9 +74,15 @@ try {
   assert.equal(startResponse.status(), 302, "OIDC start did not redirect");
   assert.equal(callbackResponse.status(), 302, "OIDC callback did not redirect to the app");
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  assert.deepEqual(oidcFlow.slice(0, 3), ["/api/auth/oidc/start", "/api/auth/oidc/callback", "/api/dashboard"]);
+  assert.deepEqual(oidcFlow.slice(0, 3), [
+    `${appBasePath}/api/auth/oidc/start`,
+    `${appBasePath}/api/auth/oidc/callback`,
+    `${appBasePath}/api/dashboard`
+  ]);
   assert.equal(oidcCalls[0]?.step, "start");
+  assert.equal(oidcCalls[0]?.redirectUri, `${publicBaseUrl}/api/auth/oidc/callback`);
   assert.equal(oidcCalls[1]?.step, "callback");
+  assert.equal(oidcCalls[1]?.redirectUri, `${publicBaseUrl}/api/auth/oidc/callback`);
 
   await page.locator("#workspace-project-form input[name='workspaceName']").fill("OIDC Browser Workspace");
   await page.locator("#workspace-project-form input[name='projectName']").fill("OIDC Browser Project");
@@ -157,11 +170,12 @@ try {
   await assertText(page, "#login-title", "Sign in");
 
   const oldSessionDashboard = await page.evaluate(async () => {
-    const response = await fetch("/api/dashboard");
+    const response = await fetch("api/dashboard");
     return response.status;
   });
   assert.equal(oldSessionDashboard, 401, "logout left an authenticated browser session");
   assert.deepEqual(operatorRequests, []);
+  assert.deepEqual(rootApiRequests, []);
   assert.deepEqual(pageErrors, []);
   console.log("e2e:web-product-oidc passed");
 } finally {

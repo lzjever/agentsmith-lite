@@ -8,6 +8,7 @@ import type { OidcClientAdapter } from "../../packages/api-entry-node/src/oidcCl
 import type { ExternalPrincipal } from "../../packages/application/src/authService.js";
 
 describe("api OIDC auth", () => {
+  const appBasePath = "/app";
   let baseUrl = "";
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
@@ -22,7 +23,7 @@ describe("api OIDC auth", () => {
       authMode: "oidc",
       builtinAdminPassword: "builtin-password-must-not-work",
       sessionSecret: "oidc-session-secret-at-least-32-chars",
-      publicBaseUrl: "https://agentsmith.example.test/app",
+      publicBaseUrl: "https://agentsmith.example.test/app//",
       oidcClient: fakeOidcClient(oidcCalls, oidcPrincipals),
       oidcAdminEmails: ["oidc.admin@example.test"]
     });
@@ -35,8 +36,43 @@ describe("api OIDC auth", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
+  it("serves prefixed APIs and web assets from the public base URL path", async () => {
+    const bootstrapResponse = await fetch(baseUrl + apiPath("/api/bootstrap"));
+    assert.equal(bootstrapResponse.status, 200);
+    assert.equal((await bootstrapResponse.json()).authMode, "oidc");
+
+    const index = await fetch(baseUrl + `${appBasePath}/`);
+    assert.equal(index.status, 200);
+    const indexHtml = await index.text();
+    assert.match(indexHtml, /href="styles\.css"/);
+    assert.match(indexHtml, /src="app\.js"/);
+
+    const script = await fetch(baseUrl + `${appBasePath}/app.js`);
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type") ?? "", /text\/javascript/);
+
+    const styles = await fetch(baseUrl + `${appBasePath}/styles.css`);
+    assert.equal(styles.status, 200);
+    assert.match(styles.headers.get("content-type") ?? "", /text\/css/);
+
+    const missingAsset = await fetch(baseUrl + `${appBasePath}/missing.js`);
+    assert.equal(missingAsset.status, 404);
+
+    const apiRoot = await fetch(baseUrl + apiPath("/api"));
+    assert.equal(apiRoot.status, 404);
+    assert.match(apiRoot.headers.get("content-type") ?? "", /application\/json/);
+  });
+
+  it("does not expose root paths when the public base URL has an app prefix", async () => {
+    const rootIndex = await fetch(baseUrl + "/");
+    assert.equal(rootIndex.status, 404);
+
+    const rootBootstrap = await fetch(baseUrl + "/api/bootstrap");
+    assert.equal(rootBootstrap.status, 404);
+  });
+
   it("keeps non-allowlisted OIDC users on product APIs and out of operator APIs", async () => {
-    const bootstrap = await fetch(baseUrl + "/api/bootstrap").then((response) => response.json());
+    const bootstrap = await fetch(baseUrl + apiPath("/api/bootstrap")).then((response) => response.json());
     assert.equal(bootstrap.authMode, "oidc");
 
     const builtinBootstrap = await post("/api/auth/bootstrap", { password: "builtin-password-must-not-work" });
@@ -57,12 +93,12 @@ describe("api OIDC auth", () => {
     assert.equal(login.user.role, "member");
     assert.match(login.csrfToken, /^csrf_/);
 
-    const operator = await fetch(baseUrl + "/api/operator/sandbox/status", {
+    const operator = await fetch(baseUrl + apiPath("/api/operator/sandbox/status"), {
       headers: { cookie: login.sessionCookie }
     });
     assert.equal(operator.status, 403);
 
-    const missingCsrf = await fetch(baseUrl + "/api/workspaces", {
+    const missingCsrf = await fetch(baseUrl + apiPath("/api/workspaces"), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -72,7 +108,7 @@ describe("api OIDC auth", () => {
     });
     assert.equal(missingCsrf.status, 403);
 
-    const workspace = await fetch(baseUrl + "/api/workspaces", {
+    const workspace = await fetch(baseUrl + apiPath("/api/workspaces"), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -83,7 +119,7 @@ describe("api OIDC auth", () => {
     });
     assert.equal(workspace.status, 200);
 
-    const logout = await fetch(baseUrl + "/api/auth/logout", {
+    const logout = await fetch(baseUrl + apiPath("/api/auth/logout"), {
       method: "POST",
       headers: {
         cookie: login.sessionCookie,
@@ -92,8 +128,9 @@ describe("api OIDC auth", () => {
     });
     assert.equal(logout.status, 200);
     assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
+    assert.match(logout.headers.get("set-cookie") ?? "", /Path=\/app/);
 
-    const oldSession = await fetch(baseUrl + "/api/me", {
+    const oldSession = await fetch(baseUrl + apiPath("/api/me"), {
       headers: { cookie: login.sessionCookie }
     });
     assert.equal(oldSession.status, 401);
@@ -109,14 +146,14 @@ describe("api OIDC auth", () => {
     assert.equal(login.user.email, "oidc.admin@example.test");
     assert.equal(login.user.role, "admin");
 
-    const operator = await fetch(baseUrl + "/api/operator/sandbox/status", {
+    const operator = await fetch(baseUrl + apiPath("/api/operator/sandbox/status"), {
       headers: { cookie: login.sessionCookie }
     });
     assert.equal(operator.status, 200);
   });
 
   async function post(pathname: string, body: unknown) {
-    return fetch(baseUrl + pathname, {
+    return fetch(baseUrl + apiPath(pathname), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
@@ -130,31 +167,34 @@ describe("api OIDC auth", () => {
   }> {
     oidcPrincipals.push(principal);
 
-    const start = await fetch(baseUrl + "/api/auth/oidc/start", { redirect: "manual" });
+    const start = await fetch(baseUrl + apiPath("/api/auth/oidc/start"), { redirect: "manual" });
     assert.equal(start.status, 302);
     assert.equal(start.headers.get("location"), "https://idp.example.test/auth?state=oidc-state-test");
+    assert.match(start.headers.get("set-cookie") ?? "", /asl_oidc_tx=.*Path=\/app\/api\/auth\/oidc/);
     const transactionCookie = cookieFromSetCookie(start.headers.get("set-cookie"));
     assert.ok(transactionCookie.startsWith("asl_oidc_tx="));
     const authorizationCall = oidcCalls.at(-1);
     assert.equal(authorizationCall?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
 
-    const callback = await fetch(baseUrl + "/api/auth/oidc/callback?code=callback-code&state=oidc-state-test", {
+    const callback = await fetch(baseUrl + apiPath("/api/auth/oidc/callback?code=callback-code&state=oidc-state-test"), {
       headers: { cookie: transactionCookie },
       redirect: "manual"
     });
     assert.equal(callback.status, 302);
-    assert.equal(callback.headers.get("location"), "/");
+    assert.equal(callback.headers.get("location"), "/app/");
     const callbackCookies = callback.headers.get("set-cookie") ?? "";
     const sessionCookie = cookieFromSetCookie(callbackCookies);
     assert.ok(sessionCookie.startsWith("asl_session="));
+    assert.match(callbackCookies, /asl_session=.*Path=\/app/);
     assert.match(callbackCookies, /asl_oidc_tx=;/);
+    assert.match(callbackCookies, /asl_oidc_tx=;.*Path=\/app\/api\/auth\/oidc/);
     const callbackCall = oidcCalls.at(-1);
     assert.equal(callbackCall?.state, "oidc-state-test");
     assert.equal(callbackCall?.codeVerifier, "oidc-code-verifier-test");
     assert.equal(callbackCall?.redirectUri, "https://agentsmith.example.test/app/api/auth/oidc/callback");
     assert.match(callbackCall?.callbackUrl ?? "", /code=callback-code/);
 
-    const meResponse = await fetch(baseUrl + "/api/me", {
+    const meResponse = await fetch(baseUrl + apiPath("/api/me"), {
       headers: { cookie: sessionCookie }
     });
     assert.equal(meResponse.status, 200);
@@ -164,6 +204,10 @@ describe("api OIDC auth", () => {
       csrfToken: me.csrfToken,
       user: me.user
     };
+  }
+
+  function apiPath(pathname: string): string {
+    return `${appBasePath}${pathname}`;
   }
 });
 

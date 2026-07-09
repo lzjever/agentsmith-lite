@@ -231,7 +231,13 @@ function numberValue(value) {
 }
 
 function joinUrl(baseUrl, pathname) {
-  return new URL(pathname, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
+  const base = new URL(baseUrl);
+  const request = new URL(pathname, "http://agentsmith-lite.local");
+  const basePath = base.pathname.replace(/\/+$/, "");
+  base.pathname = `${basePath}${request.pathname}`;
+  base.search = request.search;
+  base.hash = "";
+  return base.toString();
 }
 
 function errorMessage(error) {

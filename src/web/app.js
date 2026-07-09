@@ -13,6 +13,7 @@ const state = {
   taskEventErrors: new Map()
 };
 
+const appBasePath = currentAppBasePath();
 const activeTaskStatuses = new Set(["queued", "starting", "running", "stopping"]);
 const cancellableTaskStatuses = new Set(["starting", "running", "stopping"]);
 const activeTaskRefreshIntervalMs = 1500;
@@ -44,7 +45,7 @@ await refreshDashboard();
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.authMode === "oidc") {
-    window.location.href = "/api/auth/oidc/start";
+    window.location.href = apiUrl("/api/auth/oidc/start");
     return;
   }
   const form = new FormData(loginForm);
@@ -274,7 +275,7 @@ async function refreshBootstrap() {
 
 async function refreshDashboard() {
   const sessionEpoch = state.sessionEpoch;
-  const response = await fetch("/api/dashboard");
+  const response = await fetch(apiUrl("/api/dashboard"));
   if (sessionEpoch !== state.sessionEpoch) {
     return;
   }
@@ -713,7 +714,7 @@ function artifactItem(task, artifact) {
   const node = item(artifact.name, `${formatBytes(artifact.bytes)} · ${task.status}`);
   const link = document.createElement("a");
   link.className = "download-link";
-  link.href = `/api/tasks/${task.id}/artifacts/${artifact.id}/download`;
+  link.href = apiUrl(`/api/tasks/${task.id}/artifacts/${artifact.id}/download`);
   link.download = artifact.name;
   link.textContent = "Download";
   node.append(link);
@@ -738,7 +739,7 @@ function projectFileItem(entry) {
 
   const link = document.createElement("a");
   link.className = "download-link";
-  link.href = `/api/projects/${state.projectId}/files/download?path=${encodeURIComponent(entry.path)}`;
+  link.href = apiUrl(`/api/projects/${state.projectId}/files/download?path=${encodeURIComponent(entry.path)}`);
   link.textContent = "Download";
   actions.append(link);
 
@@ -858,12 +859,29 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function currentAppBasePath() {
+  const script = document.querySelector('script[type="module"][src$="app.js"]');
+  if (script instanceof HTMLScriptElement) {
+    const scriptPath = new URL(script.src).pathname;
+    return scriptPath.endsWith("/app.js") ? scriptPath.slice(0, -"/app.js".length) : "";
+  }
+  const pathname = window.location.pathname.replace(/\/+$/, "");
+  return pathname === "/" ? "" : pathname;
+}
+
+function apiUrl(path) {
+  if (!path.startsWith("/api/")) {
+    throw new Error("Product API paths must start with /api/");
+  }
+  return `${appBasePath}${path}`;
+}
+
 async function api(path, options = {}) {
   const headers = { "content-type": "application/json" };
   if (options.csrf) {
     headers["x-csrf-token"] = options.csrf;
   }
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method: options.method ?? "GET",
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined

@@ -317,6 +317,52 @@ printf '{"status":"ok"}\\n'
     }
   });
 
+  it("check-product-workflow.mjs preserves the public base URL path prefix", async () => {
+    const adminPassword = "prefixed-admin-secret";
+    const server = await startWorkflowServer({
+      adminPassword,
+      workspaceId: "workspace_prefix",
+      projectId: "project_prefix",
+      endpointId: "endpoint_prefix",
+      endpointBaseUrl: "https://models.prefix.test/v1",
+      endpointModel: "prefix-model",
+      endpointSecretRef: "secret/prefix-workflow",
+      basePath: "/app"
+    });
+    const publicBaseUrl = `${server.baseUrl}/app`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/check-product-workflow.mjs",
+        "--base-url",
+        publicBaseUrl
+      ], {
+        BUILTIN_ADMIN_INITIAL_PASSWORD: adminPassword
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const summary = JSON.parse(result.stdout) as ProductWorkflowSummary;
+      assert.equal(summary.baseUrl, publicBaseUrl);
+      assert.equal(summary.workspaceId, "workspace_prefix");
+      assert.equal(summary.projectId, "project_prefix");
+      const filePath = requiredWorkflowName(server.workflowNames.filePath, "workflow file path");
+      assert.deepEqual(server.requests.map((request) => `${request.method} ${request.url}`), [
+        "GET /app/api/health",
+        "POST /app/api/auth/bootstrap",
+        "POST /app/api/auth/login",
+        "POST /app/api/workspaces",
+        "POST /app/api/workspaces/workspace_prefix/projects",
+        "POST /app/api/projects/project_prefix/files",
+        "GET /app/api/projects/project_prefix/files?path=files",
+        `GET /app/api/projects/project_prefix/files/download?path=${encodeURIComponent(filePath)}`,
+        "DELETE /app/api/projects/project_prefix/files",
+        "GET /app/api/operator/sandbox/status"
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("check-product-workflow.mjs uses one short run suffix for resource names", async () => {
     const adminPassword = "repeat-admin-secret";
     const server = await startWorkflowServer({
@@ -682,6 +728,7 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
   const requests: WorkflowRequest[] = [];
   const workflowNames: Partial<WorkflowRunNames> = {};
   let reapCalls = 0;
+  const apiRoute = (pathname: string) => `${options.basePath ?? ""}${pathname}`;
   const server = createServer(async (req, res) => {
     const body = await readRequestBody(req);
     requests.push({
@@ -697,19 +744,19 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
     const parsedBody = body ? JSON.parse(body) as Record<string, unknown> : {};
 
     res.setHeader("content-type", "application/json");
-    if (req.method === "GET" && req.url === "/api/health") {
+    if (req.method === "GET" && req.url === apiRoute("/api/health")) {
       res.end(JSON.stringify({ status: "ok", version: "test" }));
-    } else if (req.method === "POST" && req.url === "/api/auth/bootstrap") {
+    } else if (req.method === "POST" && req.url === apiRoute("/api/auth/bootstrap")) {
       assert.deepEqual(parsedBody, { password: options.adminPassword });
       res.end(JSON.stringify({ created: true }));
-    } else if (req.method === "POST" && req.url === "/api/auth/login") {
+    } else if (req.method === "POST" && req.url === apiRoute("/api/auth/login")) {
       assert.deepEqual(parsedBody, {
         email: "admin@agentsmith-lite.local",
         password: options.adminPassword
       });
       res.setHeader("set-cookie", "asl_session=workflow-session; HttpOnly; Path=/");
       res.end(JSON.stringify({ csrfToken: "csrf-workflow" }));
-    } else if (req.method === "POST" && req.url === "/api/workspaces") {
+    } else if (req.method === "POST" && req.url === apiRoute("/api/workspaces")) {
       const workspaceName = stringBodyField(parsedBody, "name");
       const suffixMatch = /^Deploy Product Workflow ([0-9a-f]{8})$/.exec(workspaceName);
       assert.ok(suffixMatch, `workspace name missing run suffix: ${workspaceName}`);
@@ -722,10 +769,10 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
       workflowNames.filePath = `files/product-workflow-check-${workflowNames.suffix}.txt`;
       workflowNames.taskArtifactName = `agentsmith-lite-task-workflow-${workflowNames.suffix}.txt`;
       res.end(JSON.stringify({ id: options.workspaceId, name: workflowNames.workspaceName }));
-    } else if (req.method === "POST" && req.url === `/api/workspaces/${options.workspaceId}/projects`) {
+    } else if (req.method === "POST" && req.url === apiRoute(`/api/workspaces/${options.workspaceId}/projects`)) {
       assert.deepEqual(parsedBody, { name: requiredWorkflowName(workflowNames.projectName, "project name") });
       res.end(JSON.stringify({ id: options.projectId, workspaceId: options.workspaceId, name: workflowNames.projectName }));
-    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/endpoints`) {
+    } else if (req.method === "POST" && req.url === apiRoute(`/api/projects/${options.projectId}/endpoints`)) {
       assert.deepEqual(parsedBody, {
         name: requiredWorkflowName(workflowNames.endpointName, "endpoint name"),
         protocol: "openai_chat_completions",
@@ -736,38 +783,38 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
         requestTimeoutSecs: 30
       });
       res.end(JSON.stringify({ id: options.endpointId }));
-    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/chat`) {
+    } else if (req.method === "POST" && req.url === apiRoute(`/api/projects/${options.projectId}/chat`)) {
       assert.deepEqual(parsedBody, {
         endpointId: options.endpointId,
         messages: [{ role: "user", content: "deploy product workflow" }]
       });
       res.end(JSON.stringify({ message: { role: "assistant", content: "ok" } }));
-    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/files`) {
+    } else if (req.method === "POST" && req.url === apiRoute(`/api/projects/${options.projectId}/files`)) {
       const filePath = requiredWorkflowName(workflowNames.filePath, "workflow file path");
       assert.deepEqual(parsedBody, {
         path: filePath,
         content: workflowFileContent
       });
       res.end(JSON.stringify({ path: filePath, bytes: Buffer.byteLength(workflowFileContent) }));
-    } else if (req.method === "GET" && req.url === `/api/projects/${options.projectId}/files?path=files`) {
+    } else if (req.method === "GET" && req.url === apiRoute(`/api/projects/${options.projectId}/files?path=files`)) {
       res.end(JSON.stringify({ entries: [{ path: requiredWorkflowName(workflowNames.filePath, "workflow file path"), type: "file" }] }));
     } else if (
       req.method === "GET" &&
-      req.url === `/api/projects/${options.projectId}/files/download?path=${encodeURIComponent(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}`
+      req.url === apiRoute(`/api/projects/${options.projectId}/files/download?path=${encodeURIComponent(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}`)
     ) {
       res.setHeader("content-type", "application/octet-stream");
       res.setHeader("content-disposition", `attachment; filename="${path.basename(requiredWorkflowName(workflowNames.filePath, "workflow file path"))}"`);
       res.end(workflowFileContent);
-    } else if (req.method === "DELETE" && req.url === `/api/projects/${options.projectId}/files`) {
+    } else if (req.method === "DELETE" && req.url === apiRoute(`/api/projects/${options.projectId}/files`)) {
       assert.deepEqual(parsedBody, { path: requiredWorkflowName(workflowNames.filePath, "workflow file path") });
       res.end(JSON.stringify({ deleted: true }));
-    } else if (req.method === "GET" && req.url === "/api/operator/sandbox/status") {
+    } else if (req.method === "GET" && req.url === apiRoute("/api/operator/sandbox/status")) {
       res.end(JSON.stringify({ namespace: "agentsmith", activeTaskCount: 0, runCounts: {}, observedResourceCounts: {} }));
-    } else if (options.artifactTask && req.method === "GET" && req.url === `/api/operator/sandbox/status?runId=${options.artifactTask.runId}`) {
+    } else if (options.artifactTask && req.method === "GET" && req.url === apiRoute(`/api/operator/sandbox/status?runId=${options.artifactTask.runId}`)) {
       res.end(JSON.stringify(statusResponse(options.artifactTask.runId, { activeTaskCount: 1, observedResourceCounts: { Pod: 1, Secret: 1 }, cleanupTargetCount: 2 })));
-    } else if (options.reclaimTask && req.method === "GET" && req.url === `/api/operator/sandbox/status?runId=${options.reclaimTask.runId}`) {
+    } else if (options.reclaimTask && req.method === "GET" && req.url === apiRoute(`/api/operator/sandbox/status?runId=${options.reclaimTask.runId}`)) {
       res.end(JSON.stringify(statusResponse(options.reclaimTask.runId, { activeTaskCount: 1, runCounts: { stopping: 1 }, observedResourceCounts: { Pod: 1 }, cleanupTargetCount: 1 })));
-    } else if (req.method === "POST" && req.url === `/api/projects/${options.projectId}/tasks`) {
+    } else if (req.method === "POST" && req.url === apiRoute(`/api/projects/${options.projectId}/tasks`)) {
       assert.equal(parsedBody.endpointId, options.endpointId);
       assert.equal(typeof parsedBody.prompt, "string");
       assert.equal(JSON.stringify(parsedBody).includes(options.endpointSecretRef), false);
@@ -780,12 +827,12 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
         res.statusCode = 500;
         res.end(JSON.stringify({ error: "unexpected task create" }));
       }
-    } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/events`) {
+    } else if (options.artifactTask && req.method === "GET" && req.url === apiRoute(`/api/tasks/${options.artifactTask.taskId}/events`)) {
       if (options.artifactPollStartedFile) {
         writeFileSync(options.artifactPollStartedFile, "started\n");
       }
       res.end(JSON.stringify([{ id: "event_completed", taskId: options.artifactTask.taskId, kind: "turn_completed" }]));
-    } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/artifacts`) {
+    } else if (options.artifactTask && req.method === "GET" && req.url === apiRoute(`/api/tasks/${options.artifactTask.taskId}/artifacts`)) {
       res.end(JSON.stringify([{
         id: "artifact_task",
         taskId: options.artifactTask.taskId,
@@ -793,13 +840,13 @@ async function startWorkflowServer(options: WorkflowServerOptions): Promise<Work
         name: requiredWorkflowName(workflowNames.taskArtifactName, "task artifact name"),
         bytes: 51
       }]));
-    } else if (options.artifactTask && req.method === "GET" && req.url === `/api/tasks/${options.artifactTask.taskId}/artifacts/artifact_task/download`) {
+    } else if (options.artifactTask && req.method === "GET" && req.url === apiRoute(`/api/tasks/${options.artifactTask.taskId}/artifacts/artifact_task/download`)) {
       res.setHeader("content-type", "application/octet-stream");
       res.end(`runtime accepted\n${taskMarker}\n`);
-    } else if (options.reclaimTask && req.method === "POST" && req.url === `/api/tasks/${options.reclaimTask.taskId}/cancel`) {
+    } else if (options.reclaimTask && req.method === "POST" && req.url === apiRoute(`/api/tasks/${options.reclaimTask.taskId}/cancel`)) {
       assert.equal(body, "");
       res.end(JSON.stringify({ id: options.reclaimTask.taskId, runId: options.reclaimTask.runId, status: "stopping" }));
-    } else if (req.method === "POST" && req.url === "/api/operator/sandbox/reap") {
+    } else if (req.method === "POST" && req.url === apiRoute("/api/operator/sandbox/reap")) {
       reapCalls += 1;
       assert.ok(options.reclaimTask, "reap should only run for reclaim task tests");
       if (reapCalls === 1) {
@@ -1072,6 +1119,7 @@ interface WorkflowServerOptions {
   endpointBaseUrl: string;
   endpointModel: string;
   endpointSecretRef: string;
+  basePath?: string;
   artifactTask?: WorkflowTaskFixture;
   reclaimTask?: WorkflowTaskFixture;
   sequenceFile?: string;

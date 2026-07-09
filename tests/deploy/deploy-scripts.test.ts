@@ -11,6 +11,7 @@ describe("deploy status/down scripts", () => {
   it("operator-sandbox.mjs sends API auth and formats cleanup plan targets", async () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-helper-api-"));
     const cookieFile = path.join(tempDir, "cookie.txt");
+    const apiBasePath = "/app";
     writeFileSync(cookieFile, "asl_session=test-session\n");
     const requests: Array<{
       method: string | undefined;
@@ -30,10 +31,10 @@ describe("deploy status/down scripts", () => {
       });
       res.setHeader("content-type", "application/json");
       const applyCleanup = body ? JSON.parse(body).apply === true : false;
-      res.end(JSON.stringify(operatorSandboxResponse(req.url === "/api/operator/sandbox/reap" && !applyCleanup)));
+      res.end(JSON.stringify(operatorSandboxResponse(req.url === `${apiBasePath}/api/operator/sandbox/reap` && !applyCleanup)));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}${apiBasePath}`;
 
     try {
       const status = await runNode([
@@ -121,11 +122,11 @@ describe("deploy status/down scripts", () => {
     }
 
     assert.deepEqual(requests.map((request) => [request.method, request.url]), [
-      ["GET", "/api/operator/sandbox/status"],
-      ["GET", "/api/operator/sandbox/status?runId=run1"],
-      ["POST", "/api/operator/sandbox/reap"],
-      ["POST", "/api/operator/sandbox/reap"],
-      ["POST", "/api/operator/sandbox/reap"]
+      ["GET", "/app/api/operator/sandbox/status"],
+      ["GET", "/app/api/operator/sandbox/status?runId=run1"],
+      ["POST", "/app/api/operator/sandbox/reap"],
+      ["POST", "/app/api/operator/sandbox/reap"],
+      ["POST", "/app/api/operator/sandbox/reap"]
     ]);
     assert.equal(requests[0]?.cookie, "asl_session=test-session");
     assert.equal(requests[0]?.body, "");
@@ -162,6 +163,36 @@ describe("deploy status/down scripts", () => {
 
     assert.equal(result.status, 2);
     assert.match(result.stderr, /--dry-run and --apply cannot be used together/);
+  });
+
+  it("operator-sandbox.mjs keeps root base URL requests unprefixed", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-helper-root-api-"));
+    const cookieFile = path.join(tempDir, "cookie.txt");
+    writeFileSync(cookieFile, "asl_session=test-session\n");
+    const requests: Array<{ method: string | undefined; url: string | undefined }> = [];
+    const server = createServer((req, res) => {
+      requests.push({ method: req.method, url: req.url });
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(operatorSandboxResponse(false)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const result = await runNode([
+        "scripts/deploy/operator-sandbox.mjs",
+        "status",
+        "--base-url",
+        baseUrl,
+        "--cookie-file",
+        cookieFile
+      ]);
+      assert.equal(result.status, 0, result.stderr);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+
+    assert.deepEqual(requests, [{ method: "GET", url: "/api/operator/sandbox/status" }]);
   });
 
   it("status.sh --resources requires API auth instead of falling back to kubectl-only status", () => {

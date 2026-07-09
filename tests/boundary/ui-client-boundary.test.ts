@@ -49,12 +49,18 @@ describe("web ui client boundary", () => {
     const nonProductApiTargets = [...fetchTargets, ...apiTargets, ...hrefTargets]
       .filter(({ target }) => target.startsWith("/api/") && !isProductApiTarget(target))
       .map(({ call, file, target }) => `${file}: ${call}(${target})`);
+    const source = checked.map(([, text]) => text).join("\n");
 
-    assert.ok(fetchTargets.length > 0);
     assert.ok(apiTargets.length > 0);
     assert.deepEqual(nonApiTargets, []);
     assert.deepEqual(operatorTargets, [], "browser UI must not call or link to operator APIs");
     assert.deepEqual(nonProductApiTargets, [], "browser UI /api/ targets must stay on product API routes");
+    assert.match(source, /function\s+apiUrl\(path\)/, "browser UI must route API paths through one base-path helper");
+    assert.match(source, /fetch\(apiUrl\(path\)/, "browser UI fetches must preserve the current app base path");
+    assert.match(source, /window\.location\.href\s*=\s*apiUrl\("\/api\/auth\/oidc\/start"\)/);
+    assert.doesNotMatch(source, /fetch\(\s*(["'`])\/api\//, "browser UI fetch must not hard-code root /api URLs");
+    assert.doesNotMatch(source, /href\s*=\s*(["'`])\/api\//, "browser UI links must not hard-code root /api URLs");
+    assert.doesNotMatch(source, /window\.location\.href\s*=\s*(["'`])\/api\//, "OIDC start must not hard-code root /api URLs");
     assert.ok(
       checked.some(([, text]) => text.includes("/api/tasks/") && text.includes("/artifacts")),
       "browser UI must load task artifacts through the AgentSmith Lite API"
@@ -64,7 +70,6 @@ describe("web ui client boundary", () => {
       "browser UI must expose product artifact download links"
     );
 
-    const source = checked.map(([, text]) => text).join("\n");
     assert.doesNotMatch(source, /Create Demo|Demo Workspace|Sandbox Project/, "browser UI must not hard-code demo workspace/project creation");
     assert.match(source, /<form id="workspace-project-form"[\s\S]*name="workspaceName"[\s\S]*name="projectName"/);
     assert.match(source, /const\s+workspaceProjectForm\s*=\s*document\.querySelector\("#workspace-project-form"\)/);
@@ -134,7 +139,7 @@ describe("web ui client boundary", () => {
       {
         name: "artifact download",
         route: /\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download/,
-        method: /href\s*=\s*`\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download`/
+        method: /href\s*=\s*apiUrl\(`\/api\/tasks\/\$\{[^}]+}\/artifacts\/\$\{[^}]+}\/download`\)/
       },
       {
         name: "project file list",
@@ -144,7 +149,7 @@ describe("web ui client boundary", () => {
       {
         name: "project file download",
         route: /\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}/,
-        method: /href\s*=\s*`\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}[^`]*`/
+        method: /href\s*=\s*apiUrl\(`\/api\/projects\/\$\{[^}]+}\/files\/download\?path=\$\{encodeURIComponent\([^)]*entry\.path[^)]*\)}[^`]*`\)/
       },
       {
         name: "project file upload",
