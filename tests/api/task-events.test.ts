@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 import {
   BotifiedHttpError,
@@ -43,7 +44,7 @@ describe("task events API", () => {
             type: "file.published",
             payload: {
               file_id: "f1",
-              filename: "notes.md",
+              filename: "../bad/报告\"\r\n.txt",
               mime_type: "text/markdown",
               size_bytes: artifactBytes.byteLength,
               sha256: "b".repeat(64),
@@ -81,7 +82,7 @@ describe("task events API", () => {
       artifact.name,
       artifact.bytes,
       artifact.sha256
-    ]), [["f1", "notes.md", artifactBytes.byteLength, "b".repeat(64)]]);
+    ]), [["f1", "-.txt", artifactBytes.byteLength, "b".repeat(64)]]);
     assert.equal(botified.postMessageCalls[0]?.serviceKey, "api-service-key");
     assert.equal(botified.downloadFileCalls[0]?.serviceKey, "api-service-key");
     assert.doesNotMatch(leakedJson, /api-service-key|botified\.internal|download_url|\/v1\/files/);
@@ -92,11 +93,60 @@ describe("task events API", () => {
     const download = await auth.request("GET", `/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
     assert.equal(download.status, 200);
     assert.equal(download.headers.get("content-type"), "application/octet-stream");
-    assert.match(download.headers.get("content-disposition") ?? "", /filename="notes\.md"/);
-    assert.equal(await download.text(), "api artifact bytes");
+    assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
+    assert.equal(download.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(download.headers.get("content-disposition"), "attachment; filename=\"-.txt\"");
+    const headerFilename = /^attachment; filename="([^"]+)"$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
+    assert.doesNotMatch(headerFilename, /[\r\n\\"/\u0080-\uffff]/);
+    assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
     const downloadHeaders: string[] = [];
     download.headers.forEach((value, key) => downloadHeaders.push(`${key}: ${value}`));
     assert.doesNotMatch(JSON.stringify(downloadHeaders), /api-service-key|botified\.internal|download_url|\/v1\/files/);
+  });
+
+  it("uses a safe download header for persisted artifact names with path and control characters", async () => {
+    const artifactBytes = new TextEncoder().encode("persisted artifact bytes");
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    api = await createApiServer({
+      port: 0,
+      dataRoot,
+      builtinAdminPassword: "admin-password",
+      botifiedClient: botified,
+      botifiedServiceKeyFactory: () => "api-service-key",
+      store
+    });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const task = await auth.requestJson("POST", `/api/projects/${auth.projectId}/tasks`, {
+      prompt: "download old artifact",
+      endpointId: auth.endpointId
+    });
+    const artifact = {
+      id: "art_header",
+      taskId: task.id as string,
+      fileId: "f1",
+      name: "../bad/报告\"\r\n.txt",
+      bytes: artifactBytes.byteLength,
+      sha256: "c".repeat(64),
+      createdAt: new Date(0).toISOString()
+    };
+    await store.appendTaskArtifacts([artifact]);
+    const project = await store.findProject(auth.projectId);
+    assert.ok(project);
+    const artifactDir = path.resolve(dataRoot, project.rootPath, "tasks", task.id as string, "artifacts");
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(path.join(artifactDir, "art_header--.txt"), artifactBytes);
+
+    const download = await auth.request("GET", `/api/tasks/${task.id}/artifacts/${artifact.id}/download`);
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("content-type"), "application/octet-stream");
+    assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
+    assert.equal(download.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(download.headers.get("content-disposition"), "attachment; filename=\"_____.txt\"");
+    const filename = /^attachment; filename="([^"]+)"$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
+    assert.doesNotMatch(filename, /[\r\n\\"/\u0080-\uffff]/);
+    assert.doesNotMatch(download.headers.get("content-disposition") ?? "", /api-service-key|botified\.internal|download_url|service_key/);
+    assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
   });
 
   it("aborts through the Botified port and returns abort failures as structured errors", async () => {

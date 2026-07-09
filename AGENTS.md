@@ -15,37 +15,34 @@ This repo owns product code only:
 
 Work should move the local single-node K8s product loop forward. Do not spend cycles building governance systems.
 
-## Delete Governance Overhead
+## Keep Work Product-Led
 
-Aggressively remove existing and new governance overhead:
+Keep only code, docs, scripts, and tests that help the product run or help a
+developer fix a concrete product path. Delete process-only material instead of
+renaming it.
 
-- evidence/report/rehearsal/release/gate/matrix systems;
-- default `*-report.json` outputs and report-only fields;
-- diagnostic document generation;
-- generic test/script/stage/document concepts detached from concrete product paths;
-- umbrella validation names, all-clear labels, and pass/fail summaries detached from real product paths;
-- default release validation gates, renamed governance gate entry points, default pass/fail wrappers, or broad product proof concepts;
-- tests that test the testing or release machinery;
-- tests that assert docs prose;
-- generated archives or indexes that are not needed to run the product.
+- Do not build process artifacts, matrices, archives, or workflow systems around the work.
+- Do not add generic test/script/stage/document concepts detached from product behavior.
+- Do not test tests, generated screenshots, prose wording, or command wrappers.
+- Runtime diagnostics, product API errors, and Botified/sandbox logs are product behavior when they help operate the core loop.
 
-Scripts should do the work, print concise stdout/stderr, and fail with a non-zero exit code. Name developer-selected checks after the concrete product path they exercise, such as `check-product-workflow`, not after generic readiness, acceptance, or broad all-clear concepts. Do not add report generation as a substitute for fixing the failing code path, and do not keep a broad product proof by renaming it. Runtime diagnostics, product API errors, and Botified/sandbox logs are product behavior and should stay when useful.
+Developer-selected checks should be narrow, named after the product path they
+exercise, print concise stdout/stderr, and exit non-zero on failure.
 
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
-- Choose precise, narrow verification for the current change, selected deliberately by the developer; do not treat checks as a default release gate, general acceptance proof, broad all-clear, renamed gate, or default mainline pass/fail.
+- Choose precise, narrow verification for the current change, selected deliberately by the developer.
 - Do not run broad unrelated suites by default.
-- e2e and visual checks are manual diagnostics only. Run them only when the user explicitly asks.
-- Keep only current-change checks tied to concrete product paths and run by developer choice; do not add an umbrella acceptance framework, overall proof entry point, or default mainline pass/fail check under another name.
-- Do not test tests, screenshots, report shape, or governance commands.
+- e2e and visual checks are manual diagnostics only; run them only when the user explicitly asks.
+- Do not create a default product-wide verification path. If a check is useful, keep it tied to the current business path.
 
 ## Product Boundaries
 
 - All business logic belongs on the server.
 - Web UI and future product TUI only call product APIs.
-- TUI may import generated product API types or a thin HTTP client only.
+- TUI may import generated product API types or a thin HTTP client only; it must not carry agent business logic.
 - TUI must not import `application`, `ports`, `sandbox-controller`, `botified-runtime`, `openai-compatible-client`, `adapters-postgres`, or K8s clients.
 - TUI must not call `/api/operator/*`.
 - No LLMUP, Codex runner core, JVS, WebDAV, file mount/sync daemon, AFSCP, or ASBCP.

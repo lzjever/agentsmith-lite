@@ -465,7 +465,8 @@ function contentTypeFor(filePath: string): string {
 }
 
 function headerFilename(input: string): string {
-  const cleaned = input
+  const base = path.posix.basename(input.replace(/\\/g, "/"));
+  const cleaned = base
     .replace(/[\r\n"\\]/g, "_")
     .replace(/[^\x20-\x7e]/g, "_")
     .trim();
