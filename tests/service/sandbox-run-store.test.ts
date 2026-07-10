@@ -4,6 +4,50 @@ import { createLocalInMemoryProductStore } from "../../packages/adapters-postgre
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
 
 describe("sandbox run store", () => {
+  it("persists bounded terminal runner failure metadata without Kubernetes status text", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ terminalFailure: { reason: "runner_terminated", exitCode: 19 } });
+
+    await store.sandboxRuns.put(run);
+
+    assert.deepEqual((await store.sandboxRuns.get(run.runId))?.terminalFailure, {
+      reason: "runner_terminated",
+      exitCode: 19
+    });
+  });
+
+  it("rejects malformed persisted terminal failure metadata", async () => {
+    const store = createLocalInMemoryProductStore();
+
+    await assert.rejects(
+      () => store.sandboxRuns.put({
+        ...sandboxRun(),
+        terminalFailure: {
+          reason: "unknown_failure",
+          exitCode: 999,
+          syncAttempts: -1,
+          syncStatus: "forever"
+        }
+      } as unknown as SandboxRunState),
+      /terminalFailure/
+    );
+    assert.equal(await store.jsonDocs.get("sandbox_run_state", "run1"), null);
+  });
+
+  it("rejects incoherent terminal failure settlement combinations", async () => {
+    const store = createLocalInMemoryProductStore();
+    for (const terminalFailure of [
+      { reason: "pod_failed", syncAttempts: 3, syncStatus: "pending", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: "unavailable" },
+      { reason: "pod_failed", syncAttempts: 2, syncStatus: "unavailable", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: "unavailable" },
+      { reason: "pod_failed", syncStatus: "synced", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: null }
+    ]) {
+      await assert.rejects(
+        () => store.sandboxRuns.put({ ...sandboxRun(), terminalFailure } as unknown as SandboxRunState),
+        /terminalFailure/
+      );
+    }
+  });
+
   it("persists typed run state through the sandbox_run_state JSON collection", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();

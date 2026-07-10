@@ -135,6 +135,16 @@ export class InMemoryProductStore implements ProductStore {
     return clone(task);
   }
 
+  async updateTaskStatusIfNonterminal(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
+    const current = this.tasks.get(taskId);
+    if (!current || !isActiveTaskStatus(current.status)) {
+      return null;
+    }
+    const updated = { ...current, status, updatedAt };
+    this.tasks.set(taskId, clone(updated));
+    return clone(updated);
+  }
+
   async listActiveTasks(): Promise<AgentTask[]> {
     return [...this.tasks.values()].filter((task) => isActiveTaskStatus(task.status)).map(clone);
   }

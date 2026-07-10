@@ -2,6 +2,7 @@ import type {
   AgentTask,
   AgentTaskArtifact,
   AgentTaskEvent,
+  AgentTaskStatus,
   AuthSession,
   ModelEndpoint,
   Project,
@@ -25,6 +26,17 @@ export interface PostgresJsonDocStore {
 
 export type PersistedSandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
 export type PersistedSandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
+export type PersistedSandboxTerminalFailureReason = "pod_failed" | "runner_terminated" | "runner_crash_loop_back_off";
+export type PersistedSandboxTerminalFailureSyncStatus = "pending" | "synced" | "unavailable";
+
+export interface PersistedSandboxTerminalFailure {
+  reason: PersistedSandboxTerminalFailureReason;
+  exitCode?: number;
+  syncAttempts?: number;
+  syncStatus?: PersistedSandboxTerminalFailureSyncStatus;
+  lastSyncAt?: string;
+  lastSyncError?: string | null;
+}
 
 export interface PersistedSandboxRunResourceNames {
   pod: string;
@@ -71,6 +83,7 @@ export interface PersistedSandboxRunState {
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
+  terminalFailure?: PersistedSandboxTerminalFailure | null;
   fencingToken: number;
   cleanupStatus: PersistedSandboxCleanupStatus;
   cleanupAttempts?: number;
@@ -156,6 +169,7 @@ export interface ProductStore {
 
   createTask(task: AgentTask): Promise<AgentTask>;
   updateTask(task: AgentTask): Promise<AgentTask>;
+  updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<AgentTask | null>;
   listActiveTasks(): Promise<AgentTask[]>;
   listTasksForProject(projectId: string): Promise<AgentTask[]>;
   findTask(id: string): Promise<AgentTask | null>;

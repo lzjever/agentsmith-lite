@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { SandboxLifecycleService } from "../../packages/application/src/sandboxLifecycleService.js";
+import { SandboxLifecycleService, type RuntimeDirectoryCleaner } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { SandboxKubernetesPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 import type {
@@ -19,6 +19,307 @@ import {
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
 describe("sandbox lifecycle service", () => {
+  it("does not overwrite a completion that races cleanup-complete task advancement", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const cleaner: RuntimeDirectoryCleaner = {
+      async removeRuntimePath() {
+        const task = await store.findTask(run.taskId);
+        assert.ok(task);
+        await store.updateTask({ ...task, status: "completed", updatedAt: "2026-07-04T00:00:01.000Z" });
+      }
+    };
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort([]),
+      runtimeDirectoryCleaner: cleaner,
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.equal((await store.findTask(run.taskId))?.status, "completed");
+  });
+
+  it("does not increment a terminal sync retry after another actor settles it", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
+    const sandboxRuns = store.sandboxRuns;
+    const updateWithFencing = sandboxRuns.updateWithFencing.bind(sandboxRuns);
+    let settledByOtherActor = false;
+    sandboxRuns.updateWithFencing = async (runId, token, next) => {
+      if (!settledByOtherActor && next.terminalFailure?.syncStatus === "pending") {
+        settledByOtherActor = true;
+        const current = await sandboxRuns.get(runId);
+        assert.ok(current);
+        await updateWithFencing(runId, current.fencingToken, {
+          ...current,
+          terminalFailure: {
+            ...current.terminalFailure,
+            reason: current.terminalFailure?.reason ?? "pod_failed",
+            syncAttempts: 1,
+            syncStatus: "synced",
+            lastSyncAt: "2026-07-04T00:00:01.000Z",
+            lastSyncError: null
+          },
+          fencingToken: current.fencingToken + 1,
+          updatedAt: "2026-07-04T00:00:01.000Z"
+        });
+        return null;
+      }
+      return updateWithFencing(runId, token, next);
+    };
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort(resources),
+      terminalFailureSync: {
+        async syncTerminalFailureRun() {
+          return { status: "unavailable", message: "transport unavailable" };
+        }
+      },
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    const stored = await store.sandboxRuns.get(run.runId);
+    assert.equal(stored?.terminalFailure?.syncStatus, "synced");
+    assert.equal(stored?.terminalFailure?.syncAttempts, 1);
+  });
+
+  it("preserves newer active run fields and never revives a concurrently cleaned run during terminal-failure persistence", async () => {
+    for (const variant of ["activity", "cleaned"] as const) {
+      const store = createLocalInMemoryProductStore();
+      const run = sandboxRun();
+      await store.createTask(taskForRun(run, "running"));
+      await store.sandboxRuns.put(run);
+      const resources = createdResourcesForRun(run);
+      const pod = resources.find((resource) => resource.kind === "Pod");
+      assert.ok(pod);
+      pod.status = { phase: "Failed" };
+      const port = new FakeLifecyclePort(resources, {
+        async onFirstList() {
+          const current = await store.sandboxRuns.get(run.runId);
+          assert.ok(current);
+          await store.sandboxRuns.updateWithFencing(run.runId, current.fencingToken, {
+            ...current,
+            ...(variant === "activity"
+              ? {
+                  timelineCursor: "newer-cursor",
+                  idleExpiresAt: "2026-07-04T00:45:00.000Z",
+                  phase: "running" as const,
+                  cleanupStatus: "active" as const
+                }
+              : {
+                  phase: "cleaned" as const,
+                  cleanupStatus: "cleaned" as const
+                }),
+            fencingToken: current.fencingToken + 1,
+            updatedAt: "2026-07-04T00:00:01.000Z"
+          });
+        }
+      });
+      const service = new SandboxLifecycleService(store, {
+        dataRoot: "/workspace",
+        namespace: run.namespace,
+        port,
+        now: () => new Date("2026-07-04T00:00:00.000Z")
+      });
+
+      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+      const stored = await store.sandboxRuns.get(run.runId);
+
+      assert.deepEqual(result.errors, []);
+      if (variant === "activity") {
+        assert.equal(stored?.timelineCursor, "newer-cursor");
+        assert.equal(stored?.idleExpiresAt, "2026-07-04T00:45:00.000Z");
+        assert.equal(stored?.terminalFailure?.reason, "pod_failed");
+        assert.equal(stored?.terminalFailure?.syncStatus, "synced");
+      } else {
+        assert.equal(stored?.cleanupStatus, "cleaned");
+        assert.equal(stored?.terminalFailure, undefined);
+      }
+    }
+  });
+
+  it("redacts terminal-failure sync callback errors before returning them", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
+    const port = new FakeLifecyclePort(resources);
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port,
+      terminalFailureSync: {
+        async syncTerminalFailureRun() {
+          throw new Error("sync failed Bearer bsk_callback_secret MODEL_API_KEY=actual-secret API_KEY: api-secret X-Api-Key: hyphen-secret model-api-key=lower-hyphen-secret TOKEN=token-secret password='password-secret' detail=kept");
+        }
+      },
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    const message = result.errors[0] ?? "";
+    const persisted = await store.sandboxRuns.get(run.runId);
+    assert.match(message, /Bearer <redacted>/);
+    assert.match(message, /MODEL_API_KEY=<redacted>/);
+    assert.match(message, /API_KEY=<redacted>/);
+    assert.match(message, /X-Api-Key=<redacted>/);
+    assert.match(message, /model-api-key=<redacted>/);
+    assert.match(message, /TOKEN=<redacted>/);
+    assert.match(message, /password=<redacted>/i);
+    assert.match(message, /detail=kept/);
+    assert.doesNotMatch(message, /actual-secret|api-secret|hyphen-secret|lower-hyphen-secret|token-secret|password-secret|bsk_callback_secret/);
+    assert.equal(persisted?.terminalFailure?.lastSyncError, message);
+    assert.deepEqual(port.deletedRefs, []);
+  });
+
+  it("runs one final terminal-failure sync before deleting the Pod and retains its persisted artifact", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
+    const operations: string[] = [];
+    const port = new FakeLifecyclePort(resources, { operations });
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port,
+      terminalFailureSync: {
+        async syncTerminalFailureRun(runId) {
+          operations.push(`sync:${runId}`);
+          await store.appendTaskArtifacts([{
+            id: "artifact-final",
+            taskId: run.taskId,
+            fileId: "file-final",
+            name: "final.txt",
+            bytes: 5,
+            createdAt: "2026-07-04T00:00:00.000Z"
+          }]);
+          return { status: "synced" };
+        }
+      },
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual((await store.listTaskArtifacts(run.taskId)).map((artifact) => artifact.fileId), ["file-final"]);
+    assert.ok(operations.indexOf(`sync:${run.runId}`) < operations.indexOf("delete:Pod"));
+    assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("does not replace a completion recorded during terminal-failure sync with failed", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort(resources),
+      terminalFailureSync: {
+        async syncTerminalFailureRun() {
+          const task = await store.findTask(run.taskId);
+          assert.ok(task);
+          await store.updateTask({ ...task, status: "completed", updatedAt: "2026-07-04T00:00:01.000Z" });
+          return { status: "synced" };
+        }
+      },
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.equal((await store.findTask(run.taskId))?.status, "completed");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("does not replace an already terminal task when recovering a failed Pod", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "completed"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort(resources),
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.equal((await store.findTask(run.taskId))?.status, "completed");
+  });
+
+  it("fails a nonterminal task and cleans a full-identity failed runner Pod without deleting artifacts", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const resources = createdResourcesForRun(run);
+    const pod = resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = {
+      containerStatuses: [{
+        name: "botified-runner",
+        state: { terminated: { exitCode: 41 } }
+      }]
+    };
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort(resources),
+      runtimeDirectoryCleaner: cleaner,
+      now: () => new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.deepEqual(result.errors, []);
+    assert.equal((await store.findTask(run.taskId))?.status, "failed");
+    const stored = await store.sandboxRuns.get(run.runId);
+    assert.equal(stored?.cleanupStatus, "cleaned");
+    assert.equal(stored?.terminalFailure?.reason, "runner_terminated");
+    assert.equal(stored?.terminalFailure?.exitCode, 41);
+    assert.equal(stored?.terminalFailure?.syncStatus, "synced");
+    assert.deepEqual(cleaner.removedPaths, [
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+    ]);
+  });
+
   it("returns persisted and observed state without exposing secrets", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
@@ -670,6 +971,7 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
   readonly listResults: KubernetesResource[][] = [];
   private resources: KubernetesResource[];
   private pendingObserveSnapshots: KubernetesResource[][] = [];
+  private didRunFirstListHook = false;
 
   constructor(
     resources: KubernetesResource[],
@@ -679,12 +981,18 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
       deleteErrorAfterDelete?: Error | ((ref: KubernetesResourceRef) => Error | null);
       afterDeleteErrorObserveSnapshots?: KubernetesResource[][];
       keepResourcesAfterDelete?: boolean;
+      operations?: string[];
+      onFirstList?: () => Promise<void>;
     } = {}
   ) {
     this.resources = resources.map((resource) => structuredClone(resource));
   }
 
   async listManagedResources(): Promise<KubernetesResource[]> {
+    if (!this.didRunFirstListHook) {
+      this.didRunFirstListHook = true;
+      await this.options.onFirstList?.();
+    }
     const resources = this.pendingObserveSnapshots.shift() ?? this.resources;
     const result = resources.map((resource) => structuredClone(resource));
     this.listResults.push(result);
@@ -701,6 +1009,7 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
     expectedLabels: Record<string, string>
   ): Promise<"deleted" | "not_found" | "fence_mismatch"> {
     this.deletedRefs.push(structuredClone(ref));
+    this.options.operations?.push(`delete:${ref.kind}`);
     const deleteErrorAfterDelete = resolveDeleteErrorAfterDelete(this.options.deleteErrorAfterDelete, ref);
     if (deleteErrorAfterDelete) {
       this.resources = this.resources.filter((resource) => !sameRef(resource, ref) || !hasLabels(resource, expectedLabels) || !hasRefUid(resource, ref));

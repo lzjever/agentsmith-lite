@@ -25,6 +25,80 @@ import type {
 } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 
 describe("live sandbox runtime service", () => {
+  it("keeps a pending terminal failure nonterminal so a later sync can complete and persist its artifact", async () => {
+    const botified = new FakeBotifiedClient([
+      { status: "ok", events: [], nextCursor: "c0" },
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      {
+        status: "ok",
+        events: [
+          { cursor: "c1", seq: 1, session_id: "s1", type: "file.published", payload: { file_id: "recovered-file", filename: "recovered.txt", size_bytes: 0 } },
+          { cursor: "c2", seq: 2, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+        ],
+        nextCursor: "c2"
+      }
+    ]);
+    const livePort = new FakeLiveSandboxPort();
+    const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "recover after crash", endpointId });
+    livePort.markPodFailed();
+    const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
+
+    await runtime.tickOnce();
+    assert.equal((await store.findTask(task.id))?.status, "running");
+    assert.equal((await store.sandboxRuns.get(task.runId))?.terminalFailure?.syncStatus, "pending");
+
+    await runtime.tickOnce();
+    assert.equal((await store.findTask(task.id))?.status, "completed");
+    assert.deepEqual((await store.listTaskArtifacts(task.id)).map((artifact) => artifact.fileId), ["recovered-file"]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("retries a factory-wired unavailable final sync, then reclaims the failed Pod with settlement state", async () => {
+    const botified = new FakeBotifiedClient([
+      { status: "ok", events: [], nextCursor: "c0" },
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable")
+    ]);
+    const livePort = new FakeLiveSandboxPort();
+    const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "crash after ready", endpointId });
+    livePort.markPodFailed();
+    const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
+
+    await runtime.tickOnce();
+    const firstRun = await store.sandboxRuns.get(task.runId);
+    assert.equal(firstRun?.terminalFailure?.reason, "pod_failed");
+    assert.equal(firstRun?.terminalFailure?.syncAttempts, 1);
+    assert.equal(firstRun?.terminalFailure?.syncStatus, "pending");
+    assert.match(firstRun?.terminalFailure?.lastSyncError ?? "", /Botified transport unavailable/);
+    assert.deepEqual(livePort.deletedRefs, []);
+
+    await runtime.tickOnce();
+    assert.equal((await store.sandboxRuns.get(task.runId))?.terminalFailure?.syncAttempts, 2);
+    assert.deepEqual(livePort.deletedRefs, []);
+
+    await runtime.tickOnce();
+    const run = await store.sandboxRuns.get(task.runId);
+    assert.equal(run?.terminalFailure?.syncStatus, "unavailable");
+    assert.equal(run?.terminalFailure?.syncAttempts, 3);
+    assert.equal((await store.findTask(task.id))?.status, "failed");
+    assert.equal(run?.cleanupStatus, "cleaned");
+    assert.deepEqual(livePort.deletedRefs.map((ref: KubernetesResourceRef) => ref.kind), [
+      "Pod",
+      "Service",
+      "NetworkPolicy",
+      "ConfigMap",
+      "Secret",
+      "ServiceAccount"
+    ]);
+  });
+
   it("syncs active task timelines and reaps terminal sandboxes in one tick", async () => {
     const botified = new FakeBotifiedClient([
       { status: "ok", events: [], nextCursor: "c0" },
@@ -320,6 +394,12 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
 
   async getPodReadiness(): Promise<PodReadiness> {
     return this.readiness.shift() ?? "ready";
+  }
+
+  markPodFailed(): void {
+    const pod = this.resources.find((resource) => resource.kind === "Pod");
+    assert.ok(pod);
+    pod.status = { phase: "Failed" };
   }
 }
 

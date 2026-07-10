@@ -13,6 +13,12 @@ export { sandboxIdentityLabels } from "./labels.js";
 export type SandboxCoreResourceKind = "Secret" | "ConfigMap" | "ServiceAccount" | "NetworkPolicy" | "Service" | "Pod";
 export type SandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
 export type SandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
+export type SandboxTerminalFailureReason = "pod_failed" | "runner_terminated" | "runner_crash_loop_back_off";
+
+export interface SandboxTerminalFailure {
+  reason: SandboxTerminalFailureReason;
+  exitCode?: number;
+}
 
 export interface SandboxRunResourceNames {
   pod: string;
@@ -63,6 +69,7 @@ export interface SandboxRunState extends SandboxIdentity {
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
+  terminalFailure?: SandboxTerminalFailure | null;
   fencingToken: number;
   cleanupStatus: SandboxCleanupStatus;
   cleanupAttempts?: number;
@@ -115,7 +122,7 @@ export type SandboxReconcileAction =
   | {
       type: "store_run_state";
       run: SandboxRunState;
-      reason: "desired_observed" | "cleanup_in_progress" | "cleanup_complete";
+      reason: "desired_observed" | "terminal_runner_failure" | "cleanup_in_progress" | "cleanup_complete";
     };
 
 export interface ApplySandboxReconcileActionsInput {
@@ -163,6 +170,19 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
       continue;
     }
     if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") {
+      continue;
+    }
+    const terminalFailure = terminalFailureForExpectedRunnerPod(run, observedResources);
+    if (terminalFailure) {
+      actions.push({
+        type: "store_run_state",
+        run: nextRunState(run, {
+          phase: "stopping",
+          cleanupStatus: "cleanup_requested",
+          terminalFailure
+        }),
+        reason: "terminal_runner_failure"
+      });
       continue;
     }
 
@@ -399,13 +419,61 @@ function isExpired(value: string | null | undefined, now: Date): boolean {
 
 function nextRunState(
   run: SandboxRunState,
-  updates: Pick<SandboxRunState, "phase" | "cleanupStatus">
+  updates: Pick<SandboxRunState, "phase" | "cleanupStatus" | "terminalFailure">
 ): SandboxRunState {
   return {
     ...structuredClone(run),
     phase: updates.phase,
-    cleanupStatus: updates.cleanupStatus
+    cleanupStatus: updates.cleanupStatus,
+    ...(updates.terminalFailure ? { terminalFailure: updates.terminalFailure } : {})
   };
+}
+
+function terminalFailureForExpectedRunnerPod(
+  run: SandboxRunState,
+  observedResources: KubernetesResource[]
+): SandboxTerminalFailure | null {
+  const pod = observedResources.find((resource) =>
+    resource.kind === "Pod" &&
+    resource.metadata.namespace === run.namespace &&
+    resource.metadata.name === run.resourceNames.pod &&
+    hasRunIdentity(resource, run)
+  );
+  if (!pod) {
+    return null;
+  }
+  const status = asRecord(pod.status);
+  if (status?.phase === "Failed") {
+    return { reason: "pod_failed" };
+  }
+  const containerStatuses = Array.isArray(status?.containerStatuses) ? status.containerStatuses : [];
+  const runner = containerStatuses.find((candidate) => asRecord(candidate)?.name === "botified-runner");
+  const state = asRecord(asRecord(runner)?.state);
+  const terminated = asRecord(state?.terminated);
+  if (isNonZeroExitCode(terminated?.exitCode)) {
+    const exitCode = boundedNonZeroExitCode(terminated?.exitCode);
+    return {
+      reason: "runner_terminated",
+      ...(exitCode !== null ? { exitCode } : {})
+    };
+  }
+  const waiting = asRecord(state?.waiting);
+  if (waiting?.reason === "CrashLoopBackOff") {
+    return { reason: "runner_crash_loop_back_off" };
+  }
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function boundedNonZeroExitCode(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 255 ? value : null;
+}
+
+function isNonZeroExitCode(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value !== 0;
 }
 
 function isAgentsmithManaged(resource: KubernetesResource): boolean {

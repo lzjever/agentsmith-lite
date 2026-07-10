@@ -31,7 +31,8 @@ import {
   refreshSandboxRunActivity,
   requestSandboxRunCleanup,
   type SandboxKubernetesInventoryPort,
-  type SandboxLifecycleService
+  type SandboxLifecycleService,
+  type SandboxTerminalFailureSyncResult
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 
@@ -379,7 +380,33 @@ export class TaskService {
     return task;
   }
 
-  private async syncTaskTimeline(task: AgentTask): Promise<AgentTask> {
+  async syncTerminalFailureRun(runId: string): Promise<SandboxTerminalFailureSyncResult> {
+    const run = await this.store.sandboxRuns.get(runId);
+    if (!run?.terminalFailure) {
+      return { status: "synced" };
+    }
+    const task = await this.store.findTask(run.taskId);
+    if (!task || task.runId !== run.runId) {
+      return { status: "synced" };
+    }
+    try {
+      await this.syncTaskTimeline(task, {
+        updateRunLifecycle: false,
+        preserveTerminalStatus: true
+      });
+      return { status: "synced" };
+    } catch (error) {
+      if (error instanceof BotifiedTaskPortError) {
+        return { status: "unavailable", message: error.message };
+      }
+      throw error;
+    }
+  }
+
+  private async syncTaskTimeline(
+    task: AgentTask,
+    options: { updateRunLifecycle?: boolean; preserveTerminalStatus?: boolean } = {}
+  ): Promise<AgentTask> {
     const serviceKey = this.serviceKeyForTask(task);
     const state = await this.readRuntimeState(task, serviceKey);
     const existing = await this.store.listTaskEvents(task.id);
@@ -426,14 +453,21 @@ export class TaskService {
       lastSyncedAt: nowIso()
     });
 
-    const updated = await this.updateTaskStatusFromEvents(task, projection.events);
-    await this.updateRunLifecycleAfterTimelineSync(updated, projection.events);
+    const updated = options.preserveTerminalStatus && isTerminalTaskStatus(task.status)
+      ? task
+      : await this.updateTaskStatusFromEvents(task, projection.events);
+    if (options.updateRunLifecycle !== false) {
+      await this.updateRunLifecycleAfterTimelineSync(updated, projection.events);
+    }
     return updated;
   }
 
-  private async bestEffortSyncTaskTimeline(task: AgentTask): Promise<void> {
+  private async bestEffortSyncTaskTimeline(
+    task: AgentTask,
+    options: { updateRunLifecycle?: boolean; preserveTerminalStatus?: boolean } = {}
+  ): Promise<void> {
     try {
-      await this.syncTaskTimeline(task);
+      await this.syncTaskTimeline(task, options);
     } catch (error) {
       if (error instanceof BotifiedTaskPortError) {
         return;
@@ -469,7 +503,10 @@ export class TaskService {
     if (status === task.status) {
       return task;
     }
-    return this.store.updateTask({ ...task, status, updatedAt: nowIso() });
+    if (task.status === "cleaned") {
+      return this.store.updateTask({ ...task, status, updatedAt: nowIso() });
+    }
+    return (await this.store.updateTaskStatusIfNonterminal(task.id, status, nowIso())) ?? await this.store.findTask(task.id) ?? task;
   }
 
   private async readRuntimeState(task: AgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {

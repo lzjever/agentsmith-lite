@@ -63,10 +63,16 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   );
   const namespace = input.namespace ?? "agentsmith";
   const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
+  let tasks: TaskService;
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
     dataRoot: input.dataRoot,
     namespace,
-    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {})
+    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {}),
+    terminalFailureSync: {
+      async syncTerminalFailureRun(runId) {
+        return tasks.syncTerminalFailureRun(runId);
+      }
+    }
   });
   const taskConfig = {
     dataRoot: input.dataRoot,
@@ -84,7 +90,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})
   };
-  const tasks = new TaskService(
+  tasks = new TaskService(
     input.store,
     workspaces,
     endpoints,

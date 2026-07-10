@@ -2,7 +2,11 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { AgentTaskStatus, KubernetesResource } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
-import type { ProductStore, PersistedSandboxRunState } from "../../ports/src/store.js";
+import type {
+  PersistedSandboxRunState,
+  PersistedSandboxTerminalFailure,
+  ProductStore
+} from "../../ports/src/store.js";
 import {
   type KubernetesResourceRef,
   type SandboxKubernetesMutationPort
@@ -26,6 +30,8 @@ export const DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
 const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
 const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS = 200;
+const TERMINAL_FAILURE_TRANSITION_ATTEMPTS = 2;
+const MAX_TERMINAL_FAILURE_SYNC_ATTEMPTS = 3;
 
 export interface SandboxLifecycleServiceConfig {
   namespace: string;
@@ -35,7 +41,16 @@ export interface SandboxLifecycleServiceConfig {
   now?: () => Date;
   deleteResourceErrorConfirmAttempts?: number;
   deleteResourceErrorConfirmDelayMs?: number;
+  terminalFailureSync?: SandboxTerminalFailureSyncPort;
 }
+
+export interface SandboxTerminalFailureSyncPort {
+  syncTerminalFailureRun(runId: string): Promise<SandboxTerminalFailureSyncResult>;
+}
+
+export type SandboxTerminalFailureSyncResult =
+  | { status: "synced" }
+  | { status: "unavailable"; message: string };
 
 export interface SandboxLifecycleScope {
   runId?: string;
@@ -180,7 +195,25 @@ export class SandboxLifecycleService {
       throw new ProductError("Sandbox lifecycle Kubernetes port is not configured", 409);
     }
 
-    const mutationErrors = await this.applyCleanupActions(this.config.port, plan.actions);
+    const terminalFailureTransitionErrors = await this.persistTerminalFailureTransitions(plan.actions, result);
+    if (terminalFailureTransitionErrors.length > 0) {
+      result.errors.push(...terminalFailureTransitionErrors);
+      return result;
+    }
+
+    const cleanupRuns = await this.loadRuns(input);
+    const terminalFailureSyncErrors = await this.syncTerminalFailureRuns(cleanupRuns.activeRuns);
+    if (terminalFailureSyncErrors.length > 0) {
+      result.errors.push(...terminalFailureSyncErrors);
+      return result;
+    }
+    const cleanupReconcilePlan = this.plan(cleanupRuns.activeRuns, observed.resources);
+    result.cleanupPlan = this.cleanupPlan(cleanupRuns.activeRuns, cleanupReconcilePlan.actions, cleanupRuns.allRuns);
+    result.recentCleanupFailures = result.cleanupPlan.recentFailures;
+    if (plan.actions.some((action) => action.type === "store_run_state" && action.reason === "terminal_runner_failure")) {
+      result.actionSummary.push(...cleanupReconcilePlan.actions.map(actionSummary));
+    }
+    const mutationErrors = await this.applyCleanupActions(this.config.port, cleanupReconcilePlan.actions);
     result.errors.push(...mutationErrors);
     if (mutationErrors.length > 0) {
       return result;
@@ -192,8 +225,9 @@ export class SandboxLifecycleService {
     if (refreshed.errors.length > 0) {
       return result;
     }
-    const finalPlan = this.plan(runs.activeRuns, refreshed.resources);
-    const finalCleanupPlan = this.cleanupPlan(runs.activeRuns, finalPlan.actions, runs.allRuns);
+    const finalRuns = await this.loadRuns(input);
+    const finalPlan = this.plan(finalRuns.activeRuns, refreshed.resources);
+    const finalCleanupPlan = this.cleanupPlan(finalRuns.activeRuns, finalPlan.actions, finalRuns.allRuns);
     result.cleanupPlan = finalCleanupPlan;
     result.recentCleanupFailures = finalCleanupPlan.recentFailures;
     result.actionSummary.push(...finalPlan.actions.map(actionSummary));
@@ -383,6 +417,133 @@ export class SandboxLifecycleService {
     return stored ? { previous: current, stored } : null;
   }
 
+  private async persistTerminalFailureTransitions(
+    actions: SandboxReconcileAction[],
+    result: SandboxReapResult
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    for (const action of actions) {
+      if (action.type !== "store_run_state" || action.reason !== "terminal_runner_failure") {
+        continue;
+      }
+      const transition = await this.persistTerminalFailureTransition(action.run);
+      if (transition === "conflict") {
+        errors.push(`Sandbox run ${action.run.runId} fencing token changed before terminal failure could be stored`);
+        continue;
+      }
+      if (transition !== "skipped") {
+        result.storedRunIds.push(transition.stored.runId);
+      }
+    }
+    return errors;
+  }
+
+  private async syncTerminalFailureRuns(runs: SandboxRunState[]): Promise<string[]> {
+    for (const run of runs) {
+      if (!run.terminalFailure) {
+        continue;
+      }
+      const current = await this.store.sandboxRuns.get(run.runId);
+      if (!current?.terminalFailure || !isActiveRun(current)) {
+        continue;
+      }
+      if (current.terminalFailure.syncStatus === "synced" || current.terminalFailure.syncStatus === "unavailable") {
+        await this.markTerminalFailureTaskFailed(current);
+        continue;
+      }
+      let outcome: SandboxTerminalFailureSyncResult;
+      try {
+        outcome = await this.config.terminalFailureSync?.syncTerminalFailureRun(run.runId) ?? { status: "synced" };
+      } catch (error) {
+        outcome = { status: "unavailable", message: errorMessage(error) };
+      }
+      const settlement = await this.persistTerminalFailureSyncOutcome(current.runId, outcome);
+      if (settlement === "conflict") {
+        return [`Sandbox run ${current.runId} fencing token changed before terminal failure sync could be stored`];
+      }
+      if (settlement === "skipped") {
+        continue;
+      }
+      if (settlement.waiting) {
+        return [settlement.error];
+      }
+      await this.markTerminalFailureTaskFailed(settlement.run);
+    }
+    return [];
+  }
+
+  private async persistTerminalFailureSyncOutcome(
+    runId: string,
+    outcome: SandboxTerminalFailureSyncResult
+  ): Promise<{ run: PersistedSandboxRunState; waiting: boolean; error: string } | "skipped" | "conflict"> {
+    for (let attempt = 0; attempt < TERMINAL_FAILURE_TRANSITION_ATTEMPTS; attempt += 1) {
+      const current = await this.store.sandboxRuns.get(runId);
+      if (!current?.terminalFailure || !isActiveRun(current)) {
+        return "skipped";
+      }
+      if (current.terminalFailure.syncStatus === "synced" || current.terminalFailure.syncStatus === "unavailable") {
+        return { run: current, waiting: false, error: "" };
+      }
+      const syncAttempts = (current.terminalFailure.syncAttempts ?? 0) + 1;
+      const unavailable = outcome.status === "unavailable";
+      const waiting = unavailable && syncAttempts < MAX_TERMINAL_FAILURE_SYNC_ATTEMPTS;
+      const error = unavailable ? sanitizeCleanupError(outcome.message) : "";
+      const now = (this.config.now?.() ?? new Date()).toISOString();
+      const terminalFailure: PersistedSandboxTerminalFailure = {
+        ...current.terminalFailure,
+        syncAttempts,
+        syncStatus: unavailable ? (waiting ? "pending" : "unavailable") : "synced",
+        lastSyncAt: now,
+        lastSyncError: unavailable ? error : null
+      };
+      const stored = await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
+        ...current,
+        terminalFailure,
+        fencingToken: current.fencingToken + 1,
+        updatedAt: now
+      });
+      if (stored) {
+        return { run: stored, waiting, error };
+      }
+    }
+    return "conflict";
+  }
+
+  private async markTerminalFailureTaskFailed(run: PersistedSandboxRunState): Promise<void> {
+    await this.store.updateTaskStatusIfNonterminal(
+      run.taskId,
+      "failed",
+      (this.config.now?.() ?? new Date()).toISOString()
+    );
+  }
+
+  private async persistTerminalFailureTransition(
+    actionRun: SandboxRunState
+  ): Promise<{ previous: PersistedSandboxRunState; stored: PersistedSandboxRunState } | "skipped" | "conflict"> {
+    if (!actionRun.terminalFailure) {
+      return "skipped";
+    }
+    for (let attempt = 0; attempt < TERMINAL_FAILURE_TRANSITION_ATTEMPTS; attempt += 1) {
+      const current = await this.store.sandboxRuns.get(actionRun.runId);
+      if (!current || !isTerminalFailureEligibleRun(current)) {
+        return "skipped";
+      }
+      const now = (this.config.now?.() ?? new Date()).toISOString();
+      const stored = await this.store.sandboxRuns.updateWithFencing(actionRun.runId, current.fencingToken, {
+        ...current,
+        phase: "stopping",
+        cleanupStatus: "cleanup_requested",
+        terminalFailure: structuredClone(actionRun.terminalFailure),
+        fencingToken: current.fencingToken + 1,
+        updatedAt: now
+      });
+      if (stored) {
+        return { previous: current, stored };
+      }
+    }
+    return "conflict";
+  }
+
   private async removeRuntimeCleanupCandidates(run: SandboxRunState): Promise<{ target: string; message: string } | null> {
     const cleaner = this.config.runtimeDirectoryCleaner ?? defaultRuntimeDirectoryCleaner;
     for (const directory of runtimeDirectoryTargets(run, this.config.dataRoot)) {
@@ -434,20 +595,16 @@ export class SandboxLifecycleService {
     previous: PersistedSandboxRunState,
     stored: PersistedSandboxRunState
   ): Promise<void> {
-    if (stored.cleanupStatus !== "cleaned" && stored.phase !== "cleaned") {
-      return;
-    }
     const task = await this.store.findTask(stored.taskId);
     if (!task || isTerminalTaskStatus(task.status)) {
       return;
     }
     const now = this.config.now?.() ?? new Date();
+    if (stored.cleanupStatus !== "cleaned" && stored.phase !== "cleaned") {
+      return;
+    }
     const status: AgentTaskStatus = runWasExpired(previous, now) ? "expired" : "cleaned";
-    await this.store.updateTask({
-      ...task,
-      status,
-      updatedAt: now.toISOString()
-    });
+    await this.store.updateTaskStatusIfNonterminal(stored.taskId, status, now.toISOString());
   }
 }
 
@@ -493,6 +650,10 @@ export async function refreshSandboxRunActivity(
 
 function isActiveRun(run: PersistedSandboxRunState): boolean {
   return run.cleanupStatus !== "cleaned" && run.phase !== "cleaned";
+}
+
+function isTerminalFailureEligibleRun(run: PersistedSandboxRunState): boolean {
+  return run.cleanupStatus === "active" && (run.phase === "queued" || run.phase === "starting" || run.phase === "running");
 }
 
 const defaultRuntimeDirectoryCleaner: RuntimeDirectoryCleaner = {
@@ -603,9 +764,13 @@ function assertRuntimePathInsideDataRoot(dataRoot: string, runtimePath: string):
 function sanitizeCleanupError(message: string): string {
   return message
     .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(
+      /\b([A-Za-z0-9_-]*?(?:API[-_]?KEY|TOKEN|PASSWORD|PASSWD|SECRET))\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=<redacted>"
+    )
     .replace(/\bbsk_[A-Za-z0-9_-]+/g, "<redacted>")
     .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "<redacted>")
-    .replace(/\bMODEL_API_KEY\b/g, "<redacted>")
+    .replace(/\bMODEL_API_KEY\b(?!\s*(?:=|:))/g, "<redacted>")
     .slice(0, 300);
 }
 

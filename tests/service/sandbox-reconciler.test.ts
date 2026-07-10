@@ -12,6 +12,65 @@ import { renderSandboxResources } from "../../packages/sandbox-controller/src/ma
 import { sandboxResourceNamesForTask } from "../../packages/sandbox-controller/src/resourceNames.js";
 
 describe("sandbox reconciler", () => {
+  it("classifies a full-identity runner Pod terminal failure before it can be re-adopted", () => {
+    const run = sandboxRun();
+    for (const [status, expected] of [
+      [{ phase: "Failed" }, { reason: "pod_failed" }],
+      [{ containerStatuses: [{ name: "botified-runner", state: { terminated: { exitCode: 23 } } }] }, { reason: "runner_terminated", exitCode: 23 }],
+      [{ containerStatuses: [{ name: "botified-runner", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }]
+    ] as const) {
+      const pod = renderedResource(run, "Pod");
+      pod.status = status;
+      const plan = reconcileSandboxRuns({
+        namespace: run.namespace,
+        desiredRuns: [run],
+        observedResources: [pod],
+        now: new Date("2026-07-04T00:00:00.000Z")
+      });
+
+      const transition = plan.actions.find(isStoreAction);
+      assert.equal(transition?.reason, "terminal_runner_failure");
+      assert.equal(transition?.run.phase, "stopping");
+      assert.equal(transition?.run.cleanupStatus, "cleanup_requested");
+      assert.deepEqual(transition?.run.terminalFailure, expected);
+      assert.equal(plan.actions.some((action) => action.type === "adopt_resource" && action.kind === "Pod"), false);
+    }
+
+    const pod = renderedResource(run, "Pod");
+    pod.status = {
+      containerStatuses: [{ name: "botified-runner", state: { terminated: { exitCode: 999 } } }]
+    };
+    const plan = reconcileSandboxRuns({
+      namespace: run.namespace,
+      desiredRuns: [run],
+      observedResources: [pod],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+    assert.deepEqual(plan.actions.find(isStoreAction)?.run.terminalFailure, { reason: "runner_terminated" });
+  });
+
+  it("ignores terminal Pod status unless namespace, expected name, and full identity all match", () => {
+    const run = sandboxRun();
+    const exactPod = renderedResource(run, "Pod");
+    exactPod.status = { phase: "Failed" };
+    const wrongNamespace = structuredClone(exactPod);
+    wrongNamespace.metadata.namespace = "other-namespace";
+    const wrongName = structuredClone(exactPod);
+    wrongName.metadata.name = "different-pod";
+    const wrongLabels = structuredClone(exactPod);
+    wrongLabels.metadata.labels["agentsmith-lite/run-id"] = "other-run";
+
+    for (const pod of [wrongNamespace, wrongName, wrongLabels]) {
+      const plan = reconcileSandboxRuns({
+        namespace: run.namespace,
+        desiredRuns: [run],
+        observedResources: [pod],
+        now: new Date("2026-07-04T00:00:00.000Z")
+      });
+      assert.equal(plan.actions.some((action) => action.type === "store_run_state" && action.reason === "terminal_runner_failure"), false);
+    }
+  });
+
   it("creates missing run resources, then adopts matching managed resources idempotently", () => {
     const run = sandboxRun();
     const first = reconcileSandboxRuns({
