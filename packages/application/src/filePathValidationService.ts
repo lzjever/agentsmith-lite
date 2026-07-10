@@ -62,6 +62,9 @@ async function assertNoSymlinkExistingPrefix(root: string, candidate: string): P
       if (isNotFound(error)) {
         return;
       }
+      if (isNotDirectory(error)) {
+        throw new ProductError("Path is not a directory");
+      }
       throw error;
     }
     if (stat.isSymbolicLink()) {
@@ -100,4 +103,8 @@ function isWithin(root: string, candidate: string): boolean {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function isNotDirectory(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
 }

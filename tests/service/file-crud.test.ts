@@ -92,6 +92,30 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("maps malformed intermediate file paths to product errors", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
+    try {
+      const service = new FileService();
+      await mkdir(path.join(root, "files"), { recursive: true });
+      await writeFile(path.join(root, "files", "plain.txt"), "not a directory");
+
+      await assert.rejects(
+        () => service.listFiles(root, "files/plain.txt/child"),
+        (error) => productError(error, 400, /Path is not a directory/)
+      );
+      await assert.rejects(
+        () => service.downloadTextFile(root, "files/plain.txt/child.txt"),
+        (error) => productError(error, 400, /Path is not a directory/)
+      );
+      await assert.rejects(
+        () => service.deleteFile(root, "files/plain.txt/child.txt"),
+        (error) => productError(error, 400, /Path is not a directory/)
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not follow symlinks while listing and rejects symlink escapes", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     const outside = await mkdtemp(path.join(tmpdir(), "asl-outside-"));
