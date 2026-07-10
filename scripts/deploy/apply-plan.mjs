@@ -12,7 +12,17 @@ if (args.images_lock) {
   const imageRefs = parseAppImagesLock(await readFile(args.images_lock, "utf8"));
   validateAppManifestImagesAgainstLock(await readManifestText(args.out), imageRefs);
 }
-const plan = createAppDeployPlan({ out: args.out, timeout: args.timeout, env });
+const appDeployPlan = createAppDeployPlan({ out: args.out, timeout: args.timeout, env });
+const apiRolloutStatus = appDeployPlan.at(-1);
+if (!apiRolloutStatus) {
+  throw new Error("app deploy plan is missing API rollout status");
+}
+const kubectlGlobalArgs = apiRolloutStatus.args.slice(0, -4);
+const plan = [
+  ...appDeployPlan.slice(0, -1),
+  { executable: "kubectl", args: [...kubectlGlobalArgs, "rollout", "restart", "deploy/agentsmith-lite-api"] },
+  apiRolloutStatus
+];
 
 if (args.dry_run) {
   for (const command of plan) {

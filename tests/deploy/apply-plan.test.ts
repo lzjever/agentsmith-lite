@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -170,7 +170,42 @@ describe("deploy apply plan", () => {
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith delete job/agentsmith-lite-schema-bootstrap --ignore-not-found",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith apply -f out/manifests",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap --timeout=45s",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout restart deploy/agentsmith-lite-api",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api --timeout=45s"
+    ]);
+  });
+
+  it("restarts and waits for the API deployment after applying app config", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-apply-config-rollout-"));
+    const envFile = path.join(tempDir, "deploy.env");
+    const callsFile = path.join(tempDir, "kubectl-calls.log");
+    writeFileSync(
+      envFile,
+      [
+        "KUBECONFIG_PATH=/tmp/agentsmith.kubeconfig",
+        "KUBE_CONTEXT=kind-agentsmith",
+        "KUBE_NAMESPACE=agentsmith",
+        ""
+      ].join("\n")
+    );
+    writeFakeKubectl(tempDir, callsFile);
+
+    const result = spawnSync("bash", ["scripts/deploy/apply.sh", "--env", envFile, "--out", "out/manifests", "--timeout", "45s"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${tempDir}:${process.env.PATH ?? ""}`
+      }
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(callsFile, "utf8").trim().split("\n"), [
+      "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith delete job/agentsmith-lite-schema-bootstrap --ignore-not-found",
+      "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith apply -f out/manifests",
+      "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap --timeout=45s",
+      "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout restart deploy/agentsmith-lite-api",
+      "--kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api --timeout=45s"
     ]);
   });
 
@@ -210,6 +245,7 @@ describe("deploy apply plan", () => {
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith delete job/agentsmith-lite-schema-bootstrap --ignore-not-found",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith apply -f out/manifests",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap --timeout=45s",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout restart deploy/agentsmith-lite-api",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api --timeout=45s"
     ]);
   });
@@ -254,6 +290,7 @@ describe("deploy apply plan", () => {
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith delete job/agentsmith-lite-schema-bootstrap --ignore-not-found",
       `kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith apply -f ${outDir}`,
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith wait --for=condition=complete job/agentsmith-lite-schema-bootstrap --timeout=45s",
+      "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout restart deploy/agentsmith-lite-api",
       "kubectl --kubeconfig /tmp/agentsmith.kubeconfig --context kind-agentsmith --namespace agentsmith rollout status deploy/agentsmith-lite-api --timeout=45s"
     ]);
   });
@@ -299,3 +336,12 @@ describe("deploy apply plan", () => {
     assert.doesNotMatch(result.stderr + result.stdout, /DO_NOT_PRINT_NAMESPACE_TYPO/);
   });
 });
+
+function writeFakeKubectl(tempDir: string, callsFile: string): void {
+  const kubectl = path.join(tempDir, "kubectl");
+  writeFileSync(kubectl, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "${callsFile}"
+`);
+  chmodSync(kubectl, 0o755);
+}

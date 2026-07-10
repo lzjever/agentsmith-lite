@@ -65,7 +65,7 @@ scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env \
 scripts/deploy/apply.sh --env substrate.env --out out/manifests
 ```
 
-This uses the existing `agentsmith-lite/app:dev` and `agentsmith-lite/botified-runner:dev` references, which the renderer uses with Kubernetes `IfNotPresent` behavior. The explicit substrate kubeconfig, context, and namespace scope the API deployment probe and restart. Each re-import restarts `deployment/agentsmith-lite-api` only when it already exists, so the first import can precede render/apply; the runner image is used by future sandbox Pods. It is local development only: it neither pushes to a registry nor creates or imports an offline digest bundle.
+To execute a sandbox task, set `AGENTSMITH_LITE_SANDBOX_MODE=live` in `app.env` before rendering. `dry-run` is the intentional default and does not execute the task pod. This uses the existing `agentsmith-lite/app:dev` and `agentsmith-lite/botified-runner:dev` references, which the renderer uses with Kubernetes `IfNotPresent` behavior. The explicit substrate kubeconfig, context, and namespace scope the API deployment probe and restart. Each re-import restarts `deployment/agentsmith-lite-api` only when it already exists, so the first import can precede render/apply; the runner image is used by future sandbox Pods. It is local development only: it neither pushes to a registry nor creates or imports an offline digest bundle.
 
 ```bash
 scripts/build-images.sh --tag dev --push --images-lock dist/images.lock
