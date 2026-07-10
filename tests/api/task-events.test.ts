@@ -221,7 +221,6 @@ describe("task events API", () => {
             liveSandbox: {
               port: {
                 applyResource: async () => "applied" as const,
-                patchLabels: async () => "patched" as const,
                 deleteResource: async () => "deleted" as const,
                 getPodReadiness: async () => "ready" as const,
                 listManagedResources: async () => []
@@ -245,7 +244,6 @@ describe("task events API", () => {
     const liveSandbox = {
       port: {
         applyResource: async () => "applied" as const,
-        patchLabels: async () => "patched" as const,
         deleteResource: async () => "deleted" as const,
         getPodReadiness: async () => "ready" as const,
         listManagedResources: async () => []
@@ -290,7 +288,6 @@ describe("task events API", () => {
     const liveSandbox = {
       port: {
         applyResource: async () => "applied" as const,
-        patchLabels: async () => "patched" as const,
         deleteResource: async () => "deleted" as const,
         getPodReadiness: async () => "ready" as const,
         listManagedResources: async () => []

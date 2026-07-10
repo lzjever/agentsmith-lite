@@ -42,19 +42,19 @@ The API Role remains in app manifests, not per-run sandbox output. It intentiona
 
 ## Reconciler And Appliers
 
-`reconcileSandboxRuns` takes desired runs plus observed fake Kubernetes resources and emits deterministic actions:
+`reconcileSandboxRuns` takes a required observation namespace, desired runs, and observed Kubernetes resources. It only reconciles observations in that namespace and emits deterministic actions:
 
 - create missing lifecycle resources: Secret, ConfigMap, ServiceAccount, NetworkPolicy, Service, Pod.
 - adopt observed resources whose kind/name/namespace and immutable labels match the desired run.
-- mark unknown Agentsmith-managed resources for cleanup while ignoring unowned resources.
+- delete unmatched Agentsmith-managed resources only when their full immutable identity is present; ignore partial-identity and unowned resources.
 - delete stopping, expired, or idle-expired resources in Pod -> Service -> NetworkPolicy -> ConfigMap -> Secret -> ServiceAccount order.
 - emit idempotent store-state actions for observed desired state and cleanup transitions.
 
 `applySandboxReconcileActions` is an in-memory fake applier for tests. It only mutates resources when the action labels match the resource labels, which preserves the same label fence the real Kubernetes client must use later.
 
-`SandboxKubernetesPort` is an in-cluster-only Kubernetes HTTP port for the same six lifecycle resources. It lists by `agentsmith-lite/managed-by=agentsmith-lite`, applies with server-side apply, patches cleanup labels with JSON Patch `test` fencing, deletes with UID preconditions when present, and reads Pod readiness with the same immutable label fence. It intentionally has no exec/log/attach/port-forward, PVC/PV, CRD/operator, watch loop, or privileged operator surface.
+`SandboxKubernetesPort` is an in-cluster-only Kubernetes HTTP port for the same six lifecycle resources. It lists by `agentsmith-lite/managed-by=agentsmith-lite`, applies with server-side apply, deletes with immutable-label fencing and UID preconditions when present, and reads Pod readiness with the same immutable label fence. It intentionally has no exec/log/attach/port-forward, PVC/PV, CRD/operator, watch loop, or privileged operator surface.
 
-`applySandboxReconcileActionsToKubernetes` maps create/delete/mark-cleanup actions to that port. Adopt and store-state actions remain no-op for live Kubernetes mutation.
+`applySandboxReconcileActionsToKubernetes` maps create/delete actions to that port. Adopt and store-state actions remain no-op for live Kubernetes mutation.
 
 TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SANDBOX_MODE=live` has wired a real Kubernetes port. Default local development remains dry-run and does not resolve model credentials, apply Kubernetes resources, or wait for Pod readiness. Live API startup requires `POSTGRES_APP_URL` so sandbox lifecycle state cannot silently run on the local in-memory store.
 
@@ -63,9 +63,9 @@ TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SAN
 `SandboxLifecycleService` provides two explicit operations:
 
 - `getSandboxStatus({ runId? })` reads active tasks, persisted run state, observed K8s resources, runtime directory state, and recent cleanup failures without mutating anything. Passing `runId` scopes those counts, observations, and cleanup-plan summaries to one sandbox run.
-- `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete/mark-cleanup actions, then re-observes resources. Only after K8s cleanup is complete does it remove runtime cleanup candidates (`home` and `botified`), retain durable `artifacts`, and persist cleaned store-state transitions with fencing.
+- `reapSandboxRunsOnce({ dryRun | apply, runId? })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. In dry-run mode it returns the planned summary only. In apply mode it executes delete actions, then re-observes resources. Only after K8s cleanup is complete does it remove runtime cleanup candidates (`home` and `botified`), retain durable `artifacts`, and persist cleaned store-state transitions with fencing.
 
-Both operations return the same server-generated `cleanupPlan.targets[]` shape as the lifecycle source of truth. Targets include non-secret K8s/store summaries (`delete_resource`, `mark_cleanup`, `store_run_state`) plus runtime directory targets that distinguish cleanup candidates from retained artifacts. Directory cleanup is performed only in the service layer after `dataRoot` containment checks. Cleanup failures are recorded back into the run state as bounded, redacted recent failure metadata and prevent the run from being marked cleaned.
+Both operations return the same server-generated `cleanupPlan.targets[]` shape as the lifecycle source of truth. Targets include non-secret K8s/store summaries (`delete_resource`, `store_run_state`) plus runtime directory targets that distinguish cleanup candidates from retained artifacts. Directory cleanup is performed only in the service layer after `dataRoot` containment checks. Cleanup failures are recorded back into the run state as bounded, redacted recent failure metadata and prevent the run from being marked cleaned.
 
 The product API exposes these as admin-only endpoints:
 

@@ -15,6 +15,7 @@ describe("sandbox reconciler", () => {
   it("creates missing run resources, then adopts matching managed resources idempotently", () => {
     const run = sandboxRun();
     const first = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -42,6 +43,7 @@ describe("sandbox reconciler", () => {
       actions: first.actions
     });
     const second = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: applied.observedResources,
       now: new Date("2026-07-04T00:00:01.000Z")
@@ -83,6 +85,7 @@ describe("sandbox reconciler", () => {
     });
 
     const first = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -113,6 +116,7 @@ describe("sandbox reconciler", () => {
       actions: first.actions
     });
     const second = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: applied.observedResources,
       now: new Date("2026-07-04T00:00:01.000Z")
@@ -133,6 +137,7 @@ describe("sandbox reconciler", () => {
       cleanupStatus: "cleanup_requested"
     });
     const cleanupPlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [cleanupRun],
       observedResources: applied.observedResources,
       now: new Date("2026-07-04T00:00:02.000Z")
@@ -158,7 +163,7 @@ describe("sandbox reconciler", () => {
     assert.equal(cleaned.observedResources.length, 0);
   });
 
-  it("marks unknown managed lifecycle resources for cleanup and ignores unowned resources", () => {
+  it("deletes full-identity orphaned resources with label fencing and leaves partial or unowned resources alone", () => {
     const run = sandboxRun();
     const desiredNetworkPolicy = renderedResource(run, "NetworkPolicy");
     const unknownServiceAccount = observedResource("ServiceAccount", "asl-task-old", {
@@ -182,44 +187,96 @@ describe("sandbox reconciler", () => {
       "agentsmith-lite/task-id": "orphan",
       "agentsmith-lite/run-id": "orphan-run"
     });
+    const crossNamespaceOrphan = observedResource("Service", "asl-task-cross-namespace", {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1",
+      "agentsmith-lite/project-id": "p1",
+      "agentsmith-lite/task-id": "cross-namespace",
+      "agentsmith-lite/run-id": "cross-namespace-run"
+    });
+    crossNamespaceOrphan.metadata.namespace = "other-namespace";
+    const partialIdentity = observedResource("Pod", "partial-identity", {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1"
+    });
     const unowned = observedResource("Pod", "not-ours", {
       "app.kubernetes.io/name": "someone-else"
     });
 
     const plan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
-      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, unowned],
+      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, crossNamespaceOrphan, partialIdentity, unowned],
       now: new Date("2026-07-04T00:00:00.000Z")
     });
 
-    assert.deepEqual(plan.actions.filter((action) => action.type === "mark_cleanup").map(actionSummary), [
-      "mark_cleanup:ServiceAccount:asl-task-old",
-      "mark_cleanup:NetworkPolicy:asl-task-old",
-      "mark_cleanup:Pod:asl-task-orphan"
+    const deletes = plan.actions.filter(isDeleteAction);
+    assert.deepEqual(deletes.map(actionSummary), [
+      "delete_resource:Pod:asl-task-orphan",
+      "delete_resource:NetworkPolicy:asl-task-old",
+      "delete_resource:ServiceAccount:asl-task-old"
     ]);
+    for (const action of deletes) {
+      assert.deepEqual(action.labels, pickSandboxLabels(action.resource));
+    }
 
     const applied = applySandboxReconcileActions({
-      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, unowned],
+      observedResources: [desiredNetworkPolicy, unknownServiceAccount, unknownNetworkPolicy, orphan, crossNamespaceOrphan, partialIdentity, unowned],
       actions: plan.actions
     });
     const preserved = applied.observedResources.find((resource) => resource.kind === "NetworkPolicy");
-    const markedServiceAccount = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-old" && resource.kind === "ServiceAccount");
-    const markedNetworkPolicy = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-old" && resource.kind === "NetworkPolicy");
-    const marked = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-orphan");
+    const retainedPartialIdentity = applied.observedResources.find((resource) => resource.metadata.name === "partial-identity");
+    const retainedCrossNamespace = applied.observedResources.find((resource) => resource.metadata.name === "asl-task-cross-namespace");
     const ignored = applied.observedResources.find((resource) => resource.metadata.name === "not-ours");
     assert.ok(preserved, "desired NetworkPolicy should not be treated as unknown");
-    assert.equal(markedServiceAccount?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
-    assert.equal(markedNetworkPolicy?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
-    assert.equal(marked?.metadata.labels["agentsmith-lite/cleanup-status"], "pending");
-    assert.equal(ignored?.metadata.labels["agentsmith-lite/cleanup-status"], undefined);
+    assert.ok(retainedPartialIdentity, "partial identity resource should be retained");
+    assert.ok(retainedCrossNamespace, "out-of-scope resource should be retained");
+    assert.ok(ignored, "unowned resource should be retained");
   });
 
-  it("does not adopt or delete resources whose identity labels do not fully match", () => {
+  it("deletes zero-desired-run full-identity orphans in delete order within the observation namespace", () => {
+    const labels = {
+      "agentsmith-lite/managed-by": "agentsmith-lite",
+      "agentsmith-lite/workspace-id": "w1",
+      "agentsmith-lite/project-id": "p1",
+      "agentsmith-lite/task-id": "orphan",
+      "agentsmith-lite/run-id": "orphan-run"
+    };
+    const crossNamespaceService = observedResource("Service", "cross-namespace", labels);
+    crossNamespaceService.metadata.namespace = "other-namespace";
+
+    const plan = reconcileSandboxRuns({
+      namespace: "agentsmith",
+      desiredRuns: [],
+      observedResources: [
+        observedResource("ServiceAccount", "service-account", labels),
+        observedResource("Secret", "secret", labels),
+        observedResource("Pod", "pod", labels),
+        crossNamespaceService,
+        observedResource("ConfigMap", "config-map", labels),
+        observedResource("NetworkPolicy", "network-policy", labels),
+        observedResource("Service", "service", labels)
+      ],
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    assert.deepEqual(plan.actions.filter(isDeleteAction).map((action) => `${action.kind}:${action.name}`), [
+      "Pod:pod",
+      "Service:service",
+      "NetworkPolicy:network-policy",
+      "ConfigMap:config-map",
+      "Secret:secret",
+      "ServiceAccount:service-account"
+    ]);
+  });
+
+  it("does not adopt or delete resources whose identity labels are partial", () => {
     const run = sandboxRun();
     const mismatchedPod = renderedResource(run, "Pod");
-    mismatchedPod.metadata.labels["agentsmith-lite/run-id"] = "other-run";
+    delete mismatchedPod.metadata.labels["agentsmith-lite/run-id"];
 
     const activePlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: [mismatchedPod],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -235,6 +292,7 @@ describe("sandbox reconciler", () => {
 
     const stopping = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
     const cleanupPlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [stopping],
       observedResources: [mismatchedPod],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -255,6 +313,7 @@ describe("sandbox reconciler", () => {
     const created = createdResourcesForRun(activeRun);
 
     const plan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: created,
       now: new Date("2026-07-04T00:00:05.000Z")
@@ -289,6 +348,7 @@ describe("sandbox reconciler", () => {
     assert.equal(applied.observedResources.length, 0);
 
     const afterDelete = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: applied.observedResources,
       now: new Date("2026-07-04T00:00:06.000Z")
@@ -325,6 +385,7 @@ describe("sandbox reconciler", () => {
     const idleCreated = createdResourcesForRun(run2);
 
     const expiredPlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [expired],
       observedResources: created,
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -351,6 +412,7 @@ describe("sandbox reconciler", () => {
     assert.equal(expiredStore?.run.cleanupStatus, "deleting");
 
     const idlePlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [idleExpired],
       observedResources: idleCreated,
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -400,11 +462,13 @@ describe("sandbox reconciler", () => {
     });
 
     const expiredPlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [expired],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")
     });
     const idlePlan = reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [idleExpired],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -492,6 +556,7 @@ function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {
   return applySandboxReconcileActions({
     observedResources: [],
     actions: reconcileSandboxRuns({
+      namespace: "agentsmith",
       desiredRuns: [run],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")
@@ -516,7 +581,6 @@ function actionSummary(action: SandboxReconcileAction): string {
     case "create_resource":
     case "adopt_resource":
     case "delete_resource":
-    case "mark_cleanup":
       return `${action.type}:${action.kind}:${action.name}`;
     case "store_run_state":
       return `${action.type}:${action.run.runId}:${action.run.phase}:${action.reason}`;

@@ -125,50 +125,6 @@ describe("sandbox Kubernetes port", () => {
     assert.deepEqual(transport.requests, []);
   });
 
-  it("patches labels with JSON Patch test ops before mutation and maps not-found or test mismatch", async () => {
-    const transport = recordingTransport(() => ({ statusCode: 200, body: resource("Pod", "asl-task-t1") }));
-    const port = new SandboxKubernetesPort({ transport });
-
-    assert.equal(
-      await port.patchLabels(
-        { kind: "Pod", namespace: "agentsmith", name: "asl-task-t1" },
-        identityLabels,
-        { "agentsmith-lite/cleanup-status": "pending" }
-      ),
-      "patched"
-    );
-
-    const body = JSON.parse(String(transport.requests[0]?.body)) as Array<{ op: string; path: string; value: string }>;
-    assert.deepEqual(body.slice(0, Object.keys(identityLabels).length), [
-      { op: "test", path: "/metadata/labels/agentsmith-lite~1managed-by", value: "agentsmith-lite" },
-      { op: "test", path: "/metadata/labels/agentsmith-lite~1workspace-id", value: "w1" },
-      { op: "test", path: "/metadata/labels/agentsmith-lite~1project-id", value: "p1" },
-      { op: "test", path: "/metadata/labels/agentsmith-lite~1task-id", value: "t1" },
-      { op: "test", path: "/metadata/labels/agentsmith-lite~1run-id", value: "r1" }
-    ]);
-    assert.deepEqual(body.at(-1), {
-      op: "add",
-      path: "/metadata/labels/agentsmith-lite~1cleanup-status",
-      value: "pending"
-    });
-
-    const notFound = new SandboxKubernetesPort({ transport: recordingTransport(() => ({ statusCode: 404 })) });
-    assert.equal(
-      await notFound.patchLabels({ kind: "Pod", namespace: "agentsmith", name: "missing" }, identityLabels, {
-        "agentsmith-lite/cleanup-status": "pending"
-      }),
-      "not_found"
-    );
-
-    const mismatch = new SandboxKubernetesPort({ transport: recordingTransport(() => ({ statusCode: 409 })) });
-    assert.equal(
-      await mismatch.patchLabels({ kind: "Pod", namespace: "agentsmith", name: "asl-task-t1" }, identityLabels, {
-        "agentsmith-lite/cleanup-status": "pending"
-      }),
-      "fence_mismatch"
-    );
-  });
-
   it("deletes with GET label fencing and UID precondition, with idempotent not-found handling", async () => {
     const transport = recordingTransport((request) => {
       if (request.method === "GET") {
@@ -298,17 +254,12 @@ describe("sandbox Kubernetes port", () => {
         calls.push(`delete:${ref.kind}:${ref.name}:${expectedLabels["agentsmith-lite/run-id"]}`);
         return "deleted" as const;
       },
-      patchLabels: async (ref: KubernetesResourceRef, expectedLabels: Record<string, string>, labels: Record<string, string>) => {
-        calls.push(`patch:${ref.kind}:${ref.name}:${expectedLabels["agentsmith-lite/run-id"]}:${labels["agentsmith-lite/cleanup-status"]}`);
-        return "patched" as const;
-      }
     };
 
     const actions: SandboxReconcileAction[] = [
       { type: "create_resource", runId: "r1", kind: "Secret", name: "asl-botified-t1", labels: identityLabels, resource: resource("Secret", "asl-botified-t1") },
       { type: "adopt_resource", runId: "r1", kind: "Pod", name: "asl-task-t1", labels: identityLabels, resource: resource("Pod", "asl-task-t1") },
       { type: "delete_resource", runId: "r1", kind: "Pod", name: "asl-task-t1", labels: identityLabels, resource: resource("Pod", "asl-task-t1") },
-      { type: "mark_cleanup", kind: "Service", name: "asl-task-old", labels: identityLabels, resource: resource("Service", "asl-task-old"), reason: "unknown_managed_resource" },
       { type: "store_run_state", run: { runId: "r1" } as never, reason: "desired_observed" }
     ];
 
@@ -316,8 +267,7 @@ describe("sandbox Kubernetes port", () => {
 
     assert.deepEqual(calls, [
       "apply:Secret:asl-botified-t1:r1",
-      "delete:Pod:asl-task-t1:r1",
-      "patch:Service:asl-task-old:r1:pending"
+      "delete:Pod:asl-task-t1:r1"
     ]);
   });
 
@@ -363,32 +313,10 @@ describe("sandbox Kubernetes port", () => {
     );
   });
 
-  it("throws when action applier sees patchLabels fence_mismatch", async () => {
-    await assert.rejects(
-      applySandboxReconcileActionsToKubernetes(
-        mutationPort({
-          patchLabels: async () => "fence_mismatch"
-        }),
-        [
-          {
-            type: "mark_cleanup",
-            kind: "Service",
-            name: "asl-task-old",
-            labels: identityLabels,
-            resource: resource("Service", "asl-task-old"),
-            reason: "unknown_managed_resource"
-          }
-        ]
-      ),
-      /Kubernetes patch labels fence mismatch for mark_cleanup Service\/asl-task-old/
-    );
-  });
-
-  it("keeps delete and mark_cleanup not_found idempotent in the action applier", async () => {
+  it("keeps delete not_found idempotent in the action applier", async () => {
     await applySandboxReconcileActionsToKubernetes(
       mutationPort({
-        deleteResource: async () => "not_found",
-        patchLabels: async () => "not_found"
+        deleteResource: async () => "not_found"
       }),
       [
         {
@@ -398,14 +326,6 @@ describe("sandbox Kubernetes port", () => {
           name: "asl-task-t1",
           labels: identityLabels,
           resource: resource("Pod", "asl-task-t1")
-        },
-        {
-          type: "mark_cleanup",
-          kind: "Service",
-          name: "asl-task-old",
-          labels: identityLabels,
-          resource: resource("Service", "asl-task-old"),
-          reason: "unknown_managed_resource"
         }
       ]
     );
@@ -467,15 +387,9 @@ async function readiness(status: Record<string, unknown>): Promise<string> {
 function mutationPort(overrides: {
   applyResource?: (created: KubernetesResource, expectedLabels: Record<string, string>) => Promise<"applied" | "fence_mismatch">;
   deleteResource?: (ref: KubernetesResourceRef, expectedLabels: Record<string, string>) => Promise<"deleted" | "not_found" | "fence_mismatch">;
-  patchLabels?: (
-    ref: KubernetesResourceRef,
-    expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ) => Promise<"patched" | "not_found" | "fence_mismatch">;
 }) {
   return {
     applyResource: overrides.applyResource ?? (async () => "applied" as const),
-    deleteResource: overrides.deleteResource ?? (async () => "deleted" as const),
-    patchLabels: overrides.patchLabels ?? (async () => "patched" as const)
+    deleteResource: overrides.deleteResource ?? (async () => "deleted" as const)
   };
 }

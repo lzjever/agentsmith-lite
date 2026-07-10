@@ -8,7 +8,6 @@ import { applySandboxReconcileActions, reconcileSandboxRuns } from "../../dist/p
 
 class FakeSandboxLifecyclePort {
   deletedRefs = [];
-  patchedRefs = [];
 
   constructor(resources) {
     this.resources = resources.map((resource) => structuredClone(resource));
@@ -24,11 +23,6 @@ class FakeSandboxLifecyclePort {
 
   async waitForPodReady() {
     return "ready";
-  }
-
-  async patchLabels(ref) {
-    this.patchedRefs.push(structuredClone(ref));
-    return "patched";
   }
 
   async deleteResource(ref) {
@@ -122,7 +116,6 @@ try {
   assert.equal(dryRun.dryRun, true, "reap should default to dry-run");
   assert.ok(hasTarget(dryRun, { type: "store_run_state", runId: run.runId }), "store_run_state target missing");
   assert.deepEqual(port.deletedRefs, [], "dry-run must not delete Kubernetes resources");
-  assert.deepEqual(port.patchedRefs, [], "dry-run must not patch Kubernetes resources");
   assert.deepEqual(await store.sandboxRuns.get(run.runId), beforeRun, "dry-run must not mutate run state");
   assertRedactedCleanupFailure(dryRun);
   assertNoSecrets(dryRun);
@@ -284,6 +277,7 @@ function createdResourcesForRun(run) {
   return applySandboxReconcileActions({
     observedResources: [],
     actions: reconcileSandboxRuns({
+      namespace: run.namespace,
       desiredRuns: [run],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")

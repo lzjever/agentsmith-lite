@@ -281,7 +281,6 @@ class FakeCredentialResolver implements ModelCredentialResolver {
 class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   readonly appliedResources: KubernetesResource[] = [];
   readonly deletedRefs: KubernetesResourceRef[] = [];
-  readonly patchedRefs: KubernetesResourceRef[] = [];
   readonly sleeps: number[] = [];
   listManagedResourcesCalls = 0;
   readonly sleep = async (ms: number): Promise<void> => {
@@ -304,23 +303,6 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
     this.resources = this.resources.filter((candidate) => !sameRef(candidate, resourceRef(resource)));
     this.resources.push(structuredClone(resource));
     return "applied";
-  }
-
-  async patchLabels(
-    ref: KubernetesResourceRef,
-    expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ): Promise<"patched" | "not_found" | "fence_mismatch"> {
-    this.patchedRefs.push(structuredClone(ref));
-    const resource = this.resources.find((candidate) => sameRef(candidate, ref));
-    if (!resource) {
-      return "not_found";
-    }
-    if (!hasLabels(resource, expectedLabels)) {
-      return "fence_mismatch";
-    }
-    Object.assign(resource.metadata.labels, labels);
-    return "patched";
   }
 
   async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {

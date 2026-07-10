@@ -548,7 +548,7 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.findTask(completedRun.taskId))?.status, "completed");
   });
 
-  it("marks unknown managed resources for cleanup but never recreates missing active resources", async () => {
+  it("deletes full-identity orphaned resources but never recreates missing active resources", async () => {
     const store = createLocalInMemoryProductStore();
     await store.sandboxRuns.put(sandboxRun({ phase: "running", cleanupStatus: "active" }));
     const unknown = observedResource("Pod", "asl-task-unknown", {
@@ -568,9 +568,9 @@ describe("sandbox lifecycle service", () => {
     const result = await service.reapSandboxRunsOnce({ apply: true });
 
     assert.deepEqual(port.appliedResources, []);
-    assert.deepEqual(port.patchedRefs.map((ref) => `${ref.kind}:${ref.name}`), ["Pod:asl-task-unknown"]);
+    assert.deepEqual(port.deletedRefs.map((ref) => `${ref.kind}:${ref.name}`), ["Pod:asl-task-unknown"]);
     assert.ok(result.actionSummary.some((action) => action.type === "create_resource" && action.kind === "Secret"));
-    assert.ok(result.actionSummary.some((action) => action.type === "mark_cleanup" && action.kind === "Pod"));
+    assert.ok(result.actionSummary.some((action) => action.type === "delete_resource" && action.kind === "Pod"));
   });
 
   it("does not patch or delete other runs when scoped to a missing run document", async () => {
@@ -587,7 +587,6 @@ describe("sandbox lifecycle service", () => {
     assert.deepEqual(result.observedResourceCounts.Pod, 0);
     assert.deepEqual(result.actionSummary, []);
     assert.deepEqual(port.deletedRefs, []);
-    assert.deepEqual(port.patchedRefs, []);
     assert.equal((await store.sandboxRuns.get(otherRun.runId))?.cleanupStatus, "active");
   });
 
@@ -613,7 +612,6 @@ describe("sandbox lifecycle service", () => {
 
     const status = await service.getSandboxStatus({ runId: run.runId });
     assert.equal(status.observedResourceCounts.Pod, 1);
-    assert.deepEqual(status.actionSummary.filter((action) => action.type === "mark_cleanup"), []);
     assert.deepEqual(
       status.actionSummary.filter((action) => action.type === "delete_resource").map((action) => `${action.kind}:${action.name}`),
       [
@@ -636,7 +634,6 @@ describe("sandbox lifecycle service", () => {
       "Secret:asl-botified-task1",
       "ServiceAccount:asl-task-task1"
     ]);
-    assert.deepEqual(port.patchedRefs, []);
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.equal((await store.sandboxRuns.get(otherRun.runId))?.cleanupStatus, "active");
   });
@@ -671,7 +668,6 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
   readonly appliedResources: KubernetesResource[] = [];
   readonly deletedRefs: KubernetesResourceRef[] = [];
   readonly listResults: KubernetesResource[][] = [];
-  readonly patchedRefs: KubernetesResourceRef[] = [];
   private resources: KubernetesResource[];
   private pendingObserveSnapshots: KubernetesResource[][] = [];
 
@@ -698,20 +694,6 @@ class FakeLifecyclePort implements SandboxKubernetesMutationPort {
   async applyResource(resource: KubernetesResource): Promise<"applied" | "fence_mismatch"> {
     this.appliedResources.push(structuredClone(resource));
     return "applied";
-  }
-
-  async patchLabels(
-    ref: KubernetesResourceRef,
-    _expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ): Promise<"patched" | "not_found" | "fence_mismatch"> {
-    this.patchedRefs.push(structuredClone(ref));
-    const resource = this.resources.find((candidate) => sameRef(candidate, ref));
-    if (!resource) {
-      return "not_found";
-    }
-    Object.assign(resource.metadata.labels, labels);
-    return "patched";
   }
 
   async deleteResource(
@@ -847,6 +829,7 @@ function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {
   return applySandboxReconcileActions({
     observedResources: [],
     actions: reconcileSandboxRuns({
+      namespace: run.namespace,
       desiredRuns: [run],
       observedResources: [],
       now: new Date("2026-07-04T00:00:00.000Z")

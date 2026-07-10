@@ -189,9 +189,6 @@ function formatSandboxTarget(target) {
   if (target.type === "delete_resource") {
     return `would delete ${target.kind}/${target.name} for run ${target.runId}`;
   }
-  if (target.type === "mark_cleanup") {
-    return `would mark ${target.kind}/${target.name} cleanup pending (${target.reason})`;
-  }
   if (target.type === "store_run_state") {
     return `would store run ${target.runId} phase=${target.phase} cleanupStatus=${target.cleanupStatus} (${target.reason})`;
   }

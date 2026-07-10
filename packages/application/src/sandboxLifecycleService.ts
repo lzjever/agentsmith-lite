@@ -75,13 +75,6 @@ export type SandboxCleanupPlanTarget =
       name: string;
     }
   | {
-      type: "mark_cleanup";
-      source: "kubernetes";
-      kind: string;
-      name: string;
-      reason: string;
-    }
-  | {
       type: "store_run_state";
       source: "store";
       runId: string;
@@ -276,6 +269,7 @@ export class SandboxLifecycleService {
 
   private plan(runs: SandboxRunState[], observedResources: KubernetesResource[]): { actions: SandboxReconcileAction[] } {
     return reconcileSandboxRuns({
+      namespace: this.config.namespace,
       desiredRuns: runs,
       observedResources,
       now: this.config.now?.() ?? new Date()
@@ -340,22 +334,6 @@ export class SandboxLifecycleService {
           }
           errors.push(errorMessage(error));
         }
-        return errors;
-      }
-      try {
-        if (action.type === "mark_cleanup") {
-          const result = await port.patchLabels(resourceRef(action.resource), action.labels, {
-            "agentsmith-lite/cleanup-status": "pending"
-          });
-          if (result === "fence_mismatch") {
-            errors.push(`Kubernetes cleanup mark fence mismatch for ${action.kind}/${action.name}`);
-            return errors;
-          }
-        }
-      } catch (error) {
-        errors.push(errorMessage(error));
-      }
-      if (errors.length > 0) {
         return errors;
       }
     }
@@ -532,14 +510,6 @@ function cleanupTargetsForAction(action: SandboxReconcileAction): SandboxCleanup
         runId: action.runId,
         kind: action.kind,
         name: action.name
-      }];
-    case "mark_cleanup":
-      return [{
-        type: "mark_cleanup",
-        source: "kubernetes",
-        kind: action.kind,
-        name: action.name,
-        reason: action.reason
       }];
     case "store_run_state":
       return [{
@@ -747,13 +717,6 @@ function actionSummary(action: SandboxReconcileAction): SandboxLifecycleActionSu
         runId: action.runId,
         kind: action.kind,
         name: action.name
-      };
-    case "mark_cleanup":
-      return {
-        type: action.type,
-        kind: action.kind,
-        name: action.name,
-        reason: action.reason
       };
     case "store_run_state":
       return {

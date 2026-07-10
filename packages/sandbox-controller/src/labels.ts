@@ -1,5 +1,4 @@
 export const SANDBOX_MANAGED_BY = "agentsmith-lite";
-export const SANDBOX_CLEANUP_STATUS_LABEL = "agentsmith-lite/cleanup-status";
 
 export const SANDBOX_LABEL_KEYS = {
   managedBy: "agentsmith-lite/managed-by",

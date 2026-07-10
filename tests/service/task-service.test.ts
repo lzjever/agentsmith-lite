@@ -894,7 +894,6 @@ describe("task service Botified orchestration", () => {
     assert.equal(sandboxRun?.phase, "running");
     assert.equal(sandboxRun?.cleanupStatus, "active");
     assert.deepEqual(livePort.deletedRefs, []);
-    assert.deepEqual(livePort.patchedRefs, []);
   });
 
   it("requests live cleanup when terminal timeline events are projected", async () => {
@@ -2110,7 +2109,6 @@ class FakeCredentialResolver implements ModelCredentialResolver {
 class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   readonly appliedResources: KubernetesResource[] = [];
   readonly deletedRefs: KubernetesResourceRef[] = [];
-  readonly patchedRefs: KubernetesResourceRef[] = [];
   readonly sleeps: number[] = [];
   readonly sleep = async (ms: number): Promise<void> => {
     this.sleeps.push(ms);
@@ -2156,23 +2154,6 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
       this.taskId = resource.metadata.labels["agentsmith-lite/task-id"] ?? "";
     }
     return "applied";
-  }
-
-  async patchLabels(
-    ref: KubernetesResourceRef,
-    expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ): Promise<"patched" | "not_found" | "fence_mismatch"> {
-    this.patchedRefs.push(structuredClone(ref));
-    const resource = this.resources.find((candidate) => sameRef(candidate, ref));
-    if (!resource) {
-      return "not_found";
-    }
-    if (!hasLabels(resource, expectedLabels)) {
-      return "fence_mismatch";
-    }
-    Object.assign(resource.metadata.labels, labels);
-    return "patched";
   }
 
   async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {

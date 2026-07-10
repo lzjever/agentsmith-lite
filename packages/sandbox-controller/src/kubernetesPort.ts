@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import https from "node:https";
 import type { KubernetesResource } from "../../contracts/src/api.js";
 import type { SandboxCoreResourceKind, SandboxReconcileAction } from "./reconciler.js";
-import { SANDBOX_CLEANUP_STATUS_LABEL, SANDBOX_LABEL_KEYS, SANDBOX_MANAGED_BY } from "./labels.js";
+import { SANDBOX_LABEL_KEYS, SANDBOX_MANAGED_BY } from "./labels.js";
 
 export interface KubernetesResourceRef {
   kind: SandboxCoreResourceKind;
@@ -30,11 +30,6 @@ export interface KubernetesTransport {
 
 export interface SandboxKubernetesMutationPort {
   applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>): Promise<"applied" | "fence_mismatch">;
-  patchLabels(
-    ref: KubernetesResourceRef,
-    expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ): Promise<"patched" | "not_found" | "fence_mismatch">;
   deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch">;
 }
 
@@ -118,42 +113,6 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       throw kubernetesHttpError(`Kubernetes apply ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
     return "applied";
-  }
-
-  async patchLabels(
-    ref: KubernetesResourceRef,
-    expectedLabels: Record<string, string>,
-    labels: Record<string, string>
-  ): Promise<"patched" | "not_found" | "fence_mismatch"> {
-    const response = await this.transport.request({
-      method: "PATCH",
-      path: resourcePath(ref),
-      headers: {
-        "content-type": "application/json-patch+json"
-      },
-      body: JSON.stringify([
-        ...Object.entries(expectedLabels).map(([key, value]) => ({
-          op: "test",
-          path: `/metadata/labels/${jsonPointerEscape(key)}`,
-          value
-        })),
-        ...Object.entries(labels).map(([key, value]) => ({
-          op: "add",
-          path: `/metadata/labels/${jsonPointerEscape(key)}`,
-          value
-        }))
-      ])
-    });
-    if (response.statusCode === 404) {
-      return "not_found";
-    }
-    if (response.statusCode === 409 || response.statusCode === 422) {
-      return "fence_mismatch";
-    }
-    if (!isSuccess(response.statusCode)) {
-      throw kubernetesHttpError(`Kubernetes patch labels ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
-    }
-    return "patched";
   }
 
   async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {
@@ -258,15 +217,6 @@ export async function applySandboxReconcileActionsToKubernetes(
         const result = await port.deleteResource(resourceRef(action.resource), action.labels);
         if (result === "fence_mismatch") {
           throw new Error(`Kubernetes delete fence mismatch for ${action.type} ${action.kind}/${action.name}`);
-        }
-        break;
-      }
-      case "mark_cleanup": {
-        const result = await port.patchLabels(resourceRef(action.resource), action.labels, {
-          [SANDBOX_CLEANUP_STATUS_LABEL]: "pending"
-        });
-        if (result === "fence_mismatch") {
-          throw new Error(`Kubernetes patch labels fence mismatch for ${action.type} ${action.kind}/${action.name}`);
         }
         break;
       }
@@ -479,10 +429,6 @@ function sanitizeKubernetesStatusText(value: string): string {
     .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "sk-<redacted>")
     .replace(/\bMODEL_API_KEY\b/g, "<redacted>")
     .slice(0, 400);
-}
-
-function jsonPointerEscape(value: string): string {
-  return value.replaceAll("~", "~0").replaceAll("/", "~1");
 }
 
 function parseResponseBody(text: string): unknown {

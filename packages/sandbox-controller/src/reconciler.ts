@@ -1,7 +1,6 @@
 import type { KubernetesResource } from "../../contracts/src/api.js";
 import type { SandboxIdentity } from "./labels.js";
 import {
-  SANDBOX_CLEANUP_STATUS_LABEL,
   SANDBOX_LABEL_KEYS,
   SANDBOX_MANAGED_BY,
   sandboxIdentityLabels as identityLabels
@@ -78,6 +77,7 @@ export interface SandboxRunState extends SandboxIdentity {
 }
 
 export interface SandboxReconcileInput {
+  namespace: string;
   desiredRuns: SandboxRunState[];
   observedResources: KubernetesResource[];
   now: Date;
@@ -111,14 +111,6 @@ export type SandboxReconcileAction =
       name: string;
       labels: Record<string, string>;
       resource: KubernetesResource;
-    }
-  | {
-      type: "mark_cleanup";
-      kind: string;
-      name: string;
-      labels: Record<string, string>;
-      resource: KubernetesResource;
-      reason: "unknown_managed_resource";
     }
   | {
       type: "store_run_state";
@@ -156,6 +148,7 @@ const DELETE_ORDER: readonly SandboxCoreResourceKind[] = [
 export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxReconcileResult {
   const actions: SandboxReconcileAction[] = [];
   const desiredKnownResourceKeys = new Set<string>();
+  const observedResources = input.observedResources.filter((resource) => resource.metadata.namespace === input.namespace);
 
   for (const run of input.desiredRuns) {
     for (const resource of renderSandboxRunKnownResources(run)) {
@@ -166,7 +159,7 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
   for (const run of input.desiredRuns) {
     const cleanupReason = shouldCleanup(run, input.now);
     if (cleanupReason) {
-      actions.push(...cleanupRunResources(run, input.observedResources, cleanupReason));
+      actions.push(...cleanupRunResources(run, observedResources, cleanupReason));
       continue;
     }
     if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") {
@@ -176,7 +169,7 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
     for (const resource of renderSandboxRunCoreResources(run)) {
       const kind = asCoreKind(resource.kind);
       const labels = identityLabels(run);
-      const observed = input.observedResources.find((candidate) => sameResource(candidate, resource) && hasLabels(candidate, labels));
+      const observed = observedResources.find((candidate) => sameResource(candidate, resource) && hasLabels(candidate, labels));
       if (observed) {
         actions.push({
           type: "adopt_resource",
@@ -205,26 +198,32 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
     });
   }
 
-  for (const resource of input.observedResources) {
-    if (!isAgentsmithManaged(resource)) {
-      continue;
+  for (const kind of DELETE_ORDER) {
+    for (const resource of observedResources) {
+      if (resource.kind !== kind || !isAgentsmithManaged(resource)) {
+        continue;
+      }
+      const belongsToDesiredRun = input.desiredRuns.some((run) => hasRunIdentity(resource, run));
+      if (belongsToDesiredRun && desiredKnownResourceKeys.has(resourceKey(resource))) {
+        continue;
+      }
+      const labels = resourceIdentityLabels(resource);
+      if (!labels) {
+        continue;
+      }
+      const runId = labels[SANDBOX_LABEL_KEYS.runId];
+      if (!runId) {
+        continue;
+      }
+      actions.push({
+        type: "delete_resource",
+        runId,
+        kind,
+        name: resource.metadata.name,
+        labels,
+        resource: structuredClone(resource)
+      });
     }
-    const belongsToDesiredRun = input.desiredRuns.some((run) => hasRunIdentity(resource, run));
-    if (belongsToDesiredRun && desiredKnownResourceKeys.has(resourceKey(resource))) {
-      continue;
-    }
-    const labels = resourceIdentityLabels(resource);
-    if (!labels) {
-      continue;
-    }
-    actions.push({
-      type: "mark_cleanup",
-      kind: resource.kind,
-      name: resource.metadata.name,
-      labels,
-      resource: structuredClone(resource),
-      reason: "unknown_managed_resource"
-    });
   }
 
   return { actions };
@@ -245,9 +244,6 @@ export function applySandboxReconcileActions(
         break;
       case "delete_resource":
         removeMatchingResource(resources, action.resource, action.labels);
-        break;
-      case "mark_cleanup":
-        markResourceForCleanup(resources, action.resource, action.labels);
         break;
       case "store_run_state":
         storedRuns.set(action.run.runId, structuredClone(action.run));
@@ -456,18 +452,6 @@ function removeMatchingResource(
   if (index >= 0) {
     resources.splice(index, 1);
   }
-}
-
-function markResourceForCleanup(
-  resources: KubernetesResource[],
-  expected: KubernetesResource,
-  labels: Record<string, string>
-): void {
-  const resource = resources.find((candidate) => sameResource(candidate, expected) && hasLabels(candidate, labels));
-  if (!resource) {
-    return;
-  }
-  resource.metadata.labels[SANDBOX_CLEANUP_STATUS_LABEL] = "pending";
 }
 
 function asCoreKind(kind: string): SandboxCoreResourceKind {

@@ -673,6 +673,7 @@ export class TaskService {
     }
     await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
     const actions = reconcileSandboxRuns({
+      namespace: input.run.namespace,
       desiredRuns: [input.run],
       observedResources: [],
       now: new Date()
