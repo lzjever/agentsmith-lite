@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
 bundle=
-runtime="${CONTAINER_RUNTIME:-docker}"
+k3s_bin=
 dry_run=false
 
 while [ "$#" -gt 0 ]; do
@@ -17,12 +17,12 @@ while [ "$#" -gt 0 ]; do
       bundle="$2"
       shift 2
       ;;
-    --runtime)
+    --k3s-bin)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-        echo "--runtime requires docker or podman" >&2
+        echo "--k3s-bin requires a path" >&2
         exit 2
       fi
-      runtime="$2"
+      k3s_bin="$2"
       shift 2
       ;;
     --dry-run)
@@ -40,8 +40,16 @@ if [ -z "$bundle" ]; then
   echo "--bundle is required" >&2
   exit 2
 fi
+if [ -z "$k3s_bin" ]; then
+  echo "--k3s-bin is required" >&2
+  exit 2
+fi
 if [ ! -d "$bundle" ]; then
   echo "bundle directory does not exist: $bundle" >&2
+  exit 1
+fi
+if [ ! -f "$k3s_bin" ] || [ ! -x "$k3s_bin" ]; then
+  echo "--k3s-bin must be an executable file: $k3s_bin" >&2
   exit 1
 fi
 
@@ -49,6 +57,9 @@ checksums_file="$bundle/checksums.txt"
 lock_file="$bundle/images.lock"
 app_archive="$bundle/images/app.tar"
 runner_archive="$bundle/images/botified-runner.tar"
+app_image_ref=
+runner_image_ref=
+oci_validator="$script_dir/validate-oci-archive.sh"
 
 require_file() {
   local file="$1"
@@ -107,10 +118,14 @@ validate_checksum_contract() {
 }
 
 validate_images_lock() {
+  local refs
+
   if [ ! -f "$repo_root/dist/packages/sandbox-controller/src/appImageLock.js" ]; then
     (cd "$repo_root" && npm run build >/dev/null)
   fi
-  node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file" >/dev/null
+  refs="$(node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file")"
+  app_image_ref="$(printf '%s\n' "$refs" | sed -n '1p')"
+  runner_image_ref="$(printf '%s\n' "$refs" | sed -n '2p')"
 }
 
 require_file "$checksums_file"
@@ -129,14 +144,37 @@ fi
 
 validate_images_lock
 
-load_image() {
+validate_oci_archive() {
   local archive="$1"
-  if [ "$dry_run" = true ]; then
-    printf 'image load -i %s\n' "$archive"
-    return
-  fi
-  "$runtime" image load -i "$archive"
+  local image_ref="$2"
+  bash "$oci_validator" "$archive" "${image_ref#*@}"
 }
 
-load_image "$app_archive"
-load_image "$runner_archive"
+validate_oci_archive "$app_archive" "$app_image_ref"
+validate_oci_archive "$runner_archive" "$runner_image_ref"
+
+load_image() {
+  local archive="$1"
+  local image_ref="$2"
+  local image_name="${image_ref%%@*}"
+  if [ "$dry_run" = true ]; then
+    printf '%s ctr -n k8s.io images import --base-name %s --digests %s\n' "$k3s_bin" "$image_name" "$archive"
+    printf '%s ctr -n k8s.io images tag --force %s@%s %s\n' "$k3s_bin" "$image_name" "${image_ref#*@}" "$image_ref"
+    printf '%s ctr -n k8s.io images ls -q name==%s\n' "$k3s_bin" "$image_ref"
+    return
+  fi
+  "$k3s_bin" ctr -n k8s.io images import --base-name "$image_name" --digests "$archive"
+  "$k3s_bin" ctr -n k8s.io images tag --force "$image_name@${image_ref#*@}" "$image_ref"
+  local resolved_image
+  if ! resolved_image="$("$k3s_bin" ctr -n k8s.io images ls -q "name==$image_ref")"; then
+    echo "k3s containerd could not resolve imported image: $image_ref" >&2
+    exit 1
+  fi
+  if [ "$resolved_image" != "$image_ref" ]; then
+    echo "k3s containerd did not resolve imported image: $image_ref" >&2
+    exit 1
+  fi
+}
+
+load_image "$app_archive" "$app_image_ref"
+load_image "$runner_archive" "$runner_image_ref"

@@ -2,12 +2,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo_root="$(pwd)"
+oci_validator="$repo_root/scripts/deploy/validate-oci-archive.sh"
 
 app_image=
 runner_image=
 images_lock=
 output=dist/app-offline-bundle
-runtime="${CONTAINER_RUNTIME:-docker}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --app-image) app_image="$2"; shift 2 ;;
@@ -21,7 +21,6 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --output) output="$2"; shift 2 ;;
-    --runtime) runtime="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -71,28 +70,36 @@ if [[ ! "$runner_image" =~ ^agentsmith-lite/botified-runner@sha256:[0-9a-fA-F]{6
   exit 2
 fi
 
-mkdir -p "$output/images"
+if ! skopeo_bin="$(command -v skopeo)"; then
+  echo "skopeo is required on the bundle producer host" >&2
+  exit 1
+fi
 
-save_image() {
+output_parent="$(dirname "$output")"
+output_name="$(basename "$output")"
+mkdir -p "$output_parent"
+staging_dir="$(mktemp -d "$output_parent/.${output_name}.staging.XXXXXX")"
+trap 'rm -rf "$staging_dir"' EXIT
+mkdir -p "$staging_dir/images"
+
+export_image() {
   local ref="$1"
   local archive="$2"
-  rm -f "$archive"
-  "$runtime" image save -o "$archive" "$ref"
-  if [ ! -s "$archive" ]; then
-    echo "image archive was not created or is empty: $archive" >&2
-    exit 1
-  fi
+  local image_name="${ref%%@*}"
+
+  "$skopeo_bin" copy --preserve-digests "docker://$ref" "oci-archive:$archive:$image_name"
+  bash "$oci_validator" "$archive" "${ref#*@}"
 }
 
-save_image "$app_image" "$output/images/app.tar"
-save_image "$runner_image" "$output/images/botified-runner.tar"
+export_image "$app_image" "$staging_dir/images/app.tar"
+export_image "$runner_image" "$staging_dir/images/botified-runner.tar"
 
-cat > "$output/images.lock" <<LOCK
+cat > "$staging_dir/images.lock" <<LOCK
 ${app_image}
 ${runner_image}
 LOCK
 
-cat > "$output/manifest.yaml" <<MANIFEST
+cat > "$staging_dir/manifest.yaml" <<MANIFEST
 schema: agentsmith-lite.app-offline-bundle/v1
 created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 botified:
@@ -110,7 +117,21 @@ deploy_scripts: scripts/deploy
 MANIFEST
 
 (
-  cd "$output"
+  cd "$staging_dir"
   sha256sum manifest.yaml images.lock images/app.tar images/botified-runner.tar > checksums.txt
 )
+
+backup_dir="$(mktemp -d "$output_parent/.${output_name}.backup.XXXXXX")"
+rmdir "$backup_dir"
+if [ -e "$output" ] || [ -L "$output" ]; then
+  mv "$output" "$backup_dir"
+fi
+if ! mv "$staging_dir" "$output"; then
+  if [ -e "$backup_dir" ] || [ -L "$backup_dir" ]; then
+    mv "$backup_dir" "$output"
+  fi
+  exit 1
+fi
+rm -rf "$backup_dir"
+trap - EXIT
 echo "Wrote app offline bundle to $output"
