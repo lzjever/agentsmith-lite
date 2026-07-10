@@ -254,6 +254,19 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(task);
   }
 
+  async updateTaskStatusIfStarting(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
+    const rows = await this.queryRows<AgentTaskRow>(
+      `update agent_tasks
+          set status = $2,
+              updated_at = $3
+        where id = $1
+          and status = 'starting'
+        returning *`,
+      [taskId, status, updatedAt]
+    );
+    return rows[0] ? mapTask(rows[0]) : null;
+  }
+
   async updateTaskStatusIfNonterminal(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(
       `update agent_tasks

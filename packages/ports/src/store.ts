@@ -169,6 +169,7 @@ export interface ProductStore {
 
   createTask(task: AgentTask): Promise<AgentTask>;
   updateTask(task: AgentTask): Promise<AgentTask>;
+  updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<AgentTask | null>;
   updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<AgentTask | null>;
   listActiveTasks(): Promise<AgentTask[]>;
   listTasksForProject(projectId: string): Promise<AgentTask[]>;

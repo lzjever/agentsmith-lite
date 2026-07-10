@@ -236,10 +236,15 @@ export class SandboxLifecycleService {
         continue;
       }
       if (action.reason === "cleanup_complete") {
-        const cleanupError = await this.removeRuntimeCleanupCandidates(action.run);
+        const claimed = await this.claimRunForRuntimeCleanup(action.run);
+        if (!claimed) {
+          result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before runtime cleanup could be claimed`);
+          continue;
+        }
+        const cleanupError = await this.removeRuntimeCleanupCandidates(claimed);
         if (cleanupError) {
           result.errors.push(cleanupError.message);
-          await this.persistCleanupFailure(action.run.runId, cleanupError.target, cleanupError.message);
+          await this.persistCleanupFailure(claimed, cleanupError.target, cleanupError.message);
           const afterFailureRuns = await this.loadRuns(input);
           result.runCounts = runCounts(afterFailureRuns.allRuns);
           const afterFailurePlan = this.cleanupPlan(afterFailureRuns.activeRuns, finalPlan.actions, afterFailureRuns.allRuns);
@@ -247,6 +252,14 @@ export class SandboxLifecycleService {
           result.recentCleanupFailures = afterFailurePlan.recentFailures;
           return result;
         }
+        const transition = await this.persistRunTransition(action.run, claimed);
+        if (transition) {
+          result.storedRunIds.push(transition.stored.runId);
+          await this.advanceTaskAfterRunTransition(transition.previous, transition.stored);
+        } else {
+          result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
+        }
+        continue;
       }
       const transition = await this.persistRunTransition(action.run);
       if (transition) {
@@ -400,11 +413,11 @@ export class SandboxLifecycleService {
     return false;
   }
 
-  private async persistRunTransition(run: SandboxRunState): Promise<{
+  private async persistRunTransition(run: SandboxRunState, claimed?: PersistedSandboxRunState): Promise<{
     previous: PersistedSandboxRunState;
     stored: PersistedSandboxRunState;
   } | null> {
-    const current = await this.store.sandboxRuns.get(run.runId);
+    const current = claimed ?? await this.store.sandboxRuns.get(run.runId);
     if (!current) {
       return null;
     }
@@ -415,6 +428,18 @@ export class SandboxLifecycleService {
       updatedAt: now
     });
     return stored ? { previous: current, stored } : null;
+  }
+
+  private async claimRunForRuntimeCleanup(run: SandboxRunState): Promise<PersistedSandboxRunState | null> {
+    const nowDate = this.config.now?.() ?? new Date();
+    const now = nowDate.toISOString();
+    return this.store.sandboxRuns.updateWithFencing(run.runId, run.fencingToken, {
+      ...(run as PersistedSandboxRunState),
+      phase: runWasExpired(run, nowDate) ? "expired" : "stopping",
+      cleanupStatus: "deleting",
+      fencingToken: run.fencingToken + 1,
+      updatedAt: now
+    });
   }
 
   private async persistTerminalFailureTransitions(
@@ -571,14 +596,11 @@ export class SandboxLifecycleService {
     return assertRuntimePathInsideDataRoot(this.config.dataRoot, runtimePath);
   }
 
-  private async persistCleanupFailure(runId: string, target: string, message: string): Promise<void> {
-    const current = await this.store.sandboxRuns.get(runId);
-    if (!current) {
-      return;
-    }
+  private async persistCleanupFailure(current: PersistedSandboxRunState, target: string, message: string): Promise<void> {
     const now = (this.config.now?.() ?? new Date()).toISOString();
-    await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
+    await this.store.sandboxRuns.updateWithFencing(current.runId, current.fencingToken, {
       ...current,
+      cleanupStatus: "cleanup_requested",
       cleanupAttempts: (current.cleanupAttempts ?? 0) + 1,
       lastCleanupAt: now,
       lastCleanupError: {

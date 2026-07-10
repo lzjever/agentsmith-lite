@@ -157,7 +157,11 @@ postgresDescribe("postgres product store", () => {
     await store.createProject(project);
     await store.createEndpoint(endpoint);
     await store.createTask(task);
-    await store.updateTask({ ...task, status: "running", updatedAt: "2026-07-04T00:07:00.000Z" });
+    assert.equal(
+      (await store.updateTaskStatusIfStarting(task.id, "running", "2026-07-04T00:07:00.000Z"))?.status,
+      "running"
+    );
+    assert.equal(await store.updateTaskStatusIfStarting(task.id, "running", "2026-07-04T00:07:01.000Z"), null);
     await store.appendTaskEvents([event, event, resetEvent, duplicateResetEvent]);
     await store.appendTaskArtifacts([artifact, artifact]);
 

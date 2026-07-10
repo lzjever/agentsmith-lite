@@ -241,6 +241,12 @@ export class TaskService {
           serviceKey,
           modelApiKey: liveCredential.apiKey
         });
+        await this.claimLiveRunForPrompt(liveRun.runId);
+      }
+
+      const running = await this.store.updateTaskStatusIfStarting(task.id, "running", nowIso());
+      if (!running) {
+        throw new ProductError("Task is no longer starting", 409);
       }
 
       const posted = await this.callBotified("send message", () =>
@@ -255,10 +261,6 @@ export class TaskService {
         ...state,
         ...(timelineCursor !== undefined ? { timelineCursor } : {})
       });
-      if (liveRun) {
-        await this.updatePersistedRun(liveRun.runId, { phase: "running", cleanupStatus: "active" });
-      }
-      const running = await this.store.updateTask({ ...task, status: "running", updatedAt: nowIso() });
       return this.syncTaskTimeline(running);
     } catch (error) {
       if (!acceptedPrompt) {
@@ -298,14 +300,22 @@ export class TaskService {
   async cancelTask(userId: string, taskId: string): Promise<AgentTask> {
     const task = await this.requireTaskForUser(userId, taskId);
     const serviceKey = this.serviceKeyForTask(task);
+    if (this.config.liveSandbox) {
+      await this.requestLiveRunCleanupBeforeCancel(task.runId);
+    }
+    const saved = await this.store.updateTaskStatusIfNonterminal(task.id, "stopping", nowIso());
+    if (!saved) {
+      const current = await this.store.findTask(task.id);
+      if (current) {
+        return current;
+      }
+      throw new ProductError("Task not found", 404);
+    }
     const state = await this.readRuntimeState(task, serviceKey);
     const abort = await this.callBotified("abort", () => this.botified.abort(state.baseUrl, serviceKey));
     if (!abort.aborted) {
       throw new ProductError("Botified did not abort task", 502);
     }
-    const updated = { ...task, status: "stopping" as const, updatedAt: nowIso() };
-    const saved = await this.store.updateTask(updated);
-    await this.bestEffortRequestRunCleanup(task.runId, "stopping");
     await this.bestEffortReapSandboxRun(task.runId);
     return saved;
   }
@@ -760,28 +770,41 @@ export class TaskService {
 
   private async bestEffortMarkTaskFailed(task: AgentTask): Promise<void> {
     try {
-      await this.store.updateTask({ ...task, status: "failed", updatedAt: nowIso() });
+      await this.store.updateTaskStatusIfNonterminal(task.id, "failed", nowIso());
     } catch {
       // Startup cleanup and the original failure must not depend on the failed-state write.
     }
   }
 
-  private async updatePersistedRun(
-    runId: string,
-    updates: Pick<PersistedSandboxRunState, "phase" | "cleanupStatus">
-  ): Promise<void> {
+  private async claimLiveRunForPrompt(runId: string): Promise<void> {
     const current = await this.store.sandboxRuns.get(runId);
-    if (!current) {
-      throw new ProductError("Sandbox run state not found", 409);
+    if (
+      !current ||
+      current.phase !== "starting" ||
+      current.cleanupStatus !== "active" ||
+      sandboxRunDeadlineElapsed(current, new Date())
+    ) {
+      throw new ProductError("Sandbox run is no longer eligible to receive a prompt", 409);
     }
     const updated = await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
       ...current,
-      ...updates,
+      phase: "running",
+      cleanupStatus: "active",
       fencingToken: current.fencingToken + 1,
       updatedAt: nowIso()
     });
     if (!updated) {
       throw new ProductError("Sandbox run state fencing token changed", 409);
+    }
+  }
+
+  private async requestLiveRunCleanupBeforeCancel(runId: string): Promise<void> {
+    const updated = await requestSandboxRunCleanup(this.store, runId, {
+      phase: "stopping",
+      cleanupStatus: "cleanup_requested"
+    });
+    if (!updated) {
+      throw new ProductError("Sandbox run cleanup intent could not be persisted", 409);
     }
   }
 
@@ -971,6 +994,12 @@ function isActiveTaskStatus(status: AgentTaskStatus): boolean {
 
 function cleanupPhaseForTaskStatus(status: AgentTaskStatus): PersistedSandboxRunState["phase"] {
   return status === "expired" ? "expired" : "stopping";
+}
+
+function sandboxRunDeadlineElapsed(run: PersistedSandboxRunState, now: Date): boolean {
+  return [run.expiresAt, run.idleExpiresAt].some((deadline) =>
+    typeof deadline === "string" && Date.parse(deadline) <= now.getTime()
+  );
 }
 
 function stringDocumentField(document: Record<string, unknown>, field: string): string {

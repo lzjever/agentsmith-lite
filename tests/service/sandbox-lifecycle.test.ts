@@ -22,6 +22,51 @@ import {
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
 describe("sandbox lifecycle service", () => {
+  it("skips a stale cleanup claim and continues reaping later independent runs", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    const laterRun = sandboxRunFor("task2", "run2", { phase: "stopping", cleanupStatus: "cleanup_requested" });
+    await store.sandboxRuns.put(run);
+    await store.sandboxRuns.put(laterRun);
+    const updateWithFencing = store.sandboxRuns.updateWithFencing.bind(store.sandboxRuns);
+    let stalePlanRejected = false;
+    store.sandboxRuns.updateWithFencing = async (runId, token, next) => {
+      if (!stalePlanRejected && runId === run.runId && next.cleanupStatus === "deleting") {
+        stalePlanRejected = true;
+        const current = await store.sandboxRuns.get(runId);
+        assert.ok(current);
+        await updateWithFencing(runId, current.fencingToken, {
+          ...current,
+          phase: "running",
+          cleanupStatus: "active",
+          fencingToken: current.fencingToken + 1,
+          updatedAt: "2026-07-04T00:00:01.000Z"
+        });
+        return null;
+      }
+      return updateWithFencing(runId, token, next);
+    };
+    const cleaner = new FakeRuntimeDirectoryCleaner();
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort([...createdResourcesForRun(run), ...createdResourcesForRun(laterRun)]),
+      runtimeDirectoryCleaner: cleaner
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.match(result.errors[0] ?? "", /fencing token changed before runtime cleanup/);
+    const stored = await store.sandboxRuns.get(run.runId);
+    assert.equal(stored?.phase, "running");
+    assert.equal(stored?.cleanupStatus, "active");
+    assert.equal((await store.sandboxRuns.get(laterRun.runId))?.cleanupStatus, "cleaned");
+    assert.deepEqual(cleaner.removedPaths, [
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/home",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified"
+    ]);
+  });
+
   it("does not overwrite a completion that races cleanup-complete task advancement", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });

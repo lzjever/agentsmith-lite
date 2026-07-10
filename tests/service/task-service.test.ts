@@ -374,6 +374,103 @@ describe("task service Botified orchestration", () => {
     assert.equal(JSON.stringify(sandboxRun).includes("sk-real-model-key"), false);
   });
 
+  it("terminalizes and reaps a live run when cleanup wins the startup fence after readiness", async () => {
+    const operations: string[] = [];
+    const botified = new FakeBotifiedClient([], { operations });
+    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+    const setup = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        readinessTimeoutMs: 1000,
+        readinessPollMs: 10,
+        sleep: livePort.sleep
+      }
+    });
+    const updateWithFencing = setup.store.sandboxRuns.updateWithFencing.bind(setup.store.sandboxRuns);
+    let cleanupWon = false;
+    setup.store.sandboxRuns.updateWithFencing = async (runId, token, next) => {
+      if (!cleanupWon && next.phase === "running" && next.cleanupStatus === "active") {
+        cleanupWon = true;
+        const current = await setup.store.sandboxRuns.get(runId);
+        assert.ok(current);
+        await updateWithFencing(runId, current.fencingToken, {
+          ...current,
+          phase: "stopping",
+          cleanupStatus: "cleanup_requested",
+          fencingToken: current.fencingToken + 1,
+          updatedAt: "2026-07-04T00:00:01.000Z"
+        });
+        return null;
+      }
+      return updateWithFencing(runId, token, next);
+    };
+
+    await assert.rejects(
+      () => setup.services.tasks.createTask(setup.userId, setup.projectId, { prompt: "do not post", endpointId: setup.endpointId }),
+      /fencing token changed/
+    );
+
+    const task = (await setup.store.listTasksForProject(setup.projectId))[0];
+    assert.ok(task);
+    assert.equal(operations.includes("post"), false);
+    assert.equal(task.status, "failed");
+    const run = await setup.store.sandboxRuns.get(task.runId);
+    assert.equal(run?.phase, "cleaned");
+    assert.equal(run?.cleanupStatus, "cleaned");
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+  });
+
+  it("terminalizes and reaps a live run when its deadline expires before the startup claim", async () => {
+    const operations: string[] = [];
+    const botified = new FakeBotifiedClient([], { operations });
+    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+    const setup = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        readinessTimeoutMs: 1000,
+        readinessPollMs: 10,
+        sleep: livePort.sleep
+      }
+    });
+    const getRun = setup.store.sandboxRuns.get.bind(setup.store.sandboxRuns);
+    const updateWithFencing = setup.store.sandboxRuns.updateWithFencing.bind(setup.store.sandboxRuns);
+    let expired = false;
+    setup.store.sandboxRuns.get = async (runId) => {
+      const current = await getRun(runId);
+      if (current && !expired && current.phase === "starting") {
+        expired = true;
+        return updateWithFencing(runId, current.fencingToken, {
+          ...current,
+          expiresAt: "2020-01-01T00:00:00.000Z",
+          fencingToken: current.fencingToken + 1,
+          updatedAt: "2026-07-04T00:00:01.000Z"
+        });
+      }
+      return current;
+    };
+
+    await assert.rejects(
+      () => setup.services.tasks.createTask(setup.userId, setup.projectId, { prompt: "too late", endpointId: setup.endpointId }),
+      /no longer eligible/
+    );
+
+    assert.equal(operations.includes("post"), false);
+    const [task] = await setup.store.listTasksForProject(setup.projectId);
+    assert.equal(task?.status, "failed");
+    const run = task ? await setup.store.sandboxRuns.get(task.runId) : null;
+    assert.equal(run?.phase, "cleaned");
+    assert.equal(run?.cleanupStatus, "cleaned");
+    assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+  });
+
   it("rejects live sandbox creation when the namespace active run limit is reached before applying resources", async () => {
     const botified = new FakeBotifiedClient([]);
     const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
@@ -730,14 +827,14 @@ describe("task service Botified orchestration", () => {
         sleep: livePort.sleep
       }
     });
-    const updateTask = store.updateTask.bind(store);
+    const updateTaskStatusIfNonterminal = store.updateTaskStatusIfNonterminal.bind(store);
     let failedUpdateAttempts = 0;
-    store.updateTask = async (task) => {
-      if (task.status === "failed") {
+    store.updateTaskStatusIfNonterminal = async (taskId, status, updatedAt) => {
+      if (status === "failed") {
         failedUpdateAttempts += 1;
         throw new Error("store failed-state update failed");
       }
-      return updateTask(task);
+      return updateTaskStatusIfNonterminal(taskId, status, updatedAt);
     };
 
     await assert.rejects(
@@ -820,7 +917,7 @@ describe("task service Botified orchestration", () => {
     assert.deepEqual(postErrorPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
   });
 
-  it("aborts live Botified tasks before marking stopping and then reaps the run", async () => {
+  it("persists live cleanup intent before aborting Botified and reaping the run", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
     const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
     const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
@@ -845,7 +942,41 @@ describe("task service Botified orchestration", () => {
     assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
   });
 
-  it("does not delete live resources when Botified abort fails", async () => {
+  it("does not overwrite a terminal task when cancel races its conditional stopping transition", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const livePort = new FakeLiveSandboxPort({ readiness: ["ready"] });
+    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+      modelCredentialResolver: new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1"
+      }),
+      liveSandbox: {
+        port: livePort,
+        sleep: livePort.sleep
+      }
+    });
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "finish during cancel", endpointId });
+    const updateTaskStatusIfNonterminal = store.updateTaskStatusIfNonterminal.bind(store);
+    let completionWon = false;
+    store.updateTaskStatusIfNonterminal = async (taskId, status, updatedAt) => {
+      if (!completionWon && taskId === task.id && status === "stopping") {
+        completionWon = true;
+        const current = await store.findTask(taskId);
+        assert.ok(current);
+        await store.updateTask({ ...current, status: "completed", updatedAt: "2026-07-04T00:00:01.000Z" });
+        return null;
+      }
+      return updateTaskStatusIfNonterminal(taskId, status, updatedAt);
+    };
+
+    const cancelled = await services.tasks.cancelTask(userId, task.id);
+
+    assert.equal(cancelled.status, "completed");
+    assert.equal((await store.findTask(task.id))?.status, "completed");
+    assert.deepEqual(botified.abortCalls, []);
+  });
+
+  it("retains persisted live cleanup intent when Botified abort fails", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }], {
       abortError: new Error("abort failed")
     });
@@ -865,11 +996,11 @@ describe("task service Botified orchestration", () => {
     await assert.rejects(() => services.tasks.cancelTask(userId, task.id), /Botified abort failed: abort failed/);
 
     assert.deepEqual(livePort.deletedRefs, []);
-    assert.equal((await store.sandboxRuns.get(task.runId))?.phase, "running");
-    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
+    assert.equal((await store.sandboxRuns.get(task.runId))?.phase, "stopping");
+    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleanup_requested");
   });
 
-  it("does not mark stopping or reap when Botified declines abort", async () => {
+  it("keeps persisted stopping cleanup intent when Botified declines abort", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }], {
       abortResult: { aborted: false }
     });
@@ -890,9 +1021,9 @@ describe("task service Botified orchestration", () => {
 
     const [storedTask] = await store.listTasksForProject(projectId);
     const sandboxRun = await store.sandboxRuns.get(task.runId);
-    assert.equal(storedTask?.status, "running");
-    assert.equal(sandboxRun?.phase, "running");
-    assert.equal(sandboxRun?.cleanupStatus, "active");
+    assert.equal(storedTask?.status, "stopping");
+    assert.equal(sandboxRun?.phase, "stopping");
+    assert.equal(sandboxRun?.cleanupStatus, "cleanup_requested");
     assert.deepEqual(livePort.deletedRefs, []);
   });
 
