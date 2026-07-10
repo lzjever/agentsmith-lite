@@ -91,6 +91,7 @@ export class FileService {
       }
       if (entryStat.isDirectory()) {
         return {
+          name: entry.name,
           path: entryPath,
           type: "directory",
           updatedAt: entryStat.mtime.toISOString()
@@ -98,6 +99,7 @@ export class FileService {
       }
       if (entryStat.isFile()) {
         return {
+          name: entry.name,
           path: entryPath,
           type: "file",
           size: entryStat.size,

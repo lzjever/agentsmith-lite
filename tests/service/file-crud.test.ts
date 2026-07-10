@@ -20,10 +20,10 @@ describe("file CRUD service", () => {
       assert.equal(await readFile(path.join(root, "files", "notes", "plan.md"), "utf8"), "hello from files");
 
       const listed = await service.listFiles(root, "files");
-      assert.deepEqual(listed.entries.map((entry) => [entry.path, entry.type]), [["files/notes", "directory"]]);
+      assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.path, entry.type]), [["notes", "files/notes", "directory"]]);
 
       const nested = await service.listFiles(root, "files/notes");
-      assert.deepEqual(nested.entries.map((entry) => [entry.path, entry.type, entry.size]), [["files/notes/plan.md", "file", 16]]);
+      assert.deepEqual(nested.entries.map((entry) => [entry.name, entry.path, entry.type, entry.size]), [["plan.md", "files/notes/plan.md", "file", 16]]);
 
       const downloaded = await service.downloadTextFile(root, "files/notes/plan.md");
       assert.deepEqual(downloaded, {

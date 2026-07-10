@@ -722,7 +722,7 @@ function artifactItem(task, artifact) {
 }
 
 function projectFileItem(entry) {
-  const node = item(entry.path, entry.type === "file" ? `${entry.size} bytes` : "directory");
+  const node = item(entry.name, projectFileEntryDetail(entry));
   const actions = document.createElement("div");
   actions.className = "item-actions";
 
@@ -752,6 +752,13 @@ function projectFileItem(entry) {
 
   node.append(actions);
   return node;
+}
+
+function projectFileEntryDetail(entry) {
+  if (entry.type === "file") {
+    return `${entry.path} · ${entry.size} bytes`;
+  }
+  return `${entry.path} · directory`;
 }
 
 function projectFileParentItem() {

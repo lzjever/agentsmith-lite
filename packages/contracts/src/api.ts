@@ -190,6 +190,7 @@ export interface CreateTaskInput {
 export type ProjectFileEntryType = "file" | "directory";
 
 export interface ProjectFileEntry {
+  name: string;
   path: string;
   type: ProjectFileEntryType;
   size?: number;

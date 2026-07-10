@@ -138,11 +138,11 @@ describe("api product workflow", () => {
     assert.deepEqual(fileValidation, { normalizedPath: filePath });
     assert.equal("absolutePath" in fileValidation, false);
     assert.deepEqual(uploadedFile, { path: filePath, bytes: Buffer.byteLength(fileContent) });
-    assert.equal(listedRootFiles.entries.some((entry: { path: string; type: string }) =>
-      entry.path === "files/docs" && entry.type === "directory"
+    assert.equal(listedRootFiles.entries.some((entry: { name: string; path: string; type: string }) =>
+      entry.path === "files/docs" && entry.name === "docs" && entry.type === "directory"
     ), true);
-    assert.equal(listedNestedFiles.entries.some((entry: { path: string; type: string }) =>
-      entry.path === filePath && entry.type === "file"
+    assert.equal(listedNestedFiles.entries.some((entry: { name: string; path: string; type: string }) =>
+      entry.name === "readme.md" && entry.path === filePath && entry.type === "file"
     ), true);
     assert.equal(downloadedFile.status, 200);
     assert.equal(downloadedFile.headers.get("content-type"), "application/octet-stream");
