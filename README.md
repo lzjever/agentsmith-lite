@@ -50,6 +50,23 @@ The operator lifecycle e2e and visual screenshot are independent manual checks; 
 
 ## Deploy Skeleton
 
+For the direct local development path after the k3s substrate install, build the renderer-default `:dev` images and import them into that installed k3s before rendering/applying with `--tag dev`:
+
+```bash
+scripts/build-images.sh --tag dev
+scripts/deploy/import-dev-images.sh \
+  --k3s-bin "$(command -v k3s)" \
+  --kubectl-bin "$(command -v kubectl)" \
+  --kubeconfig "$(awk -F= '$1 == "KUBECONFIG_PATH" { print $2 }' substrate.env)" \
+  --kube-context "$(awk -F= '$1 == "KUBE_CONTEXT" { print $2 }' substrate.env)" \
+  --namespace "$(awk -F= '$1 == "KUBE_NAMESPACE" { print $2 }' substrate.env)"
+scripts/deploy/render.sh --env substrate.env --secrets substrate.secrets.env \
+  --app-env app.env --app-secrets app.secrets.env --tag dev --out out/manifests
+scripts/deploy/apply.sh --env substrate.env --out out/manifests
+```
+
+This uses the existing `agentsmith-lite/app:dev` and `agentsmith-lite/botified-runner:dev` references, which the renderer uses with Kubernetes `IfNotPresent` behavior. The explicit substrate kubeconfig, context, and namespace scope the API deployment probe and restart. Each re-import restarts `deployment/agentsmith-lite-api` only when it already exists, so the first import can precede render/apply; the runner image is used by future sandbox Pods. It is local development only: it neither pushes to a registry nor creates or imports an offline digest bundle.
+
 ```bash
 scripts/build-images.sh --tag dev --push --images-lock dist/images.lock
 scripts/build-offline-bundle.sh \

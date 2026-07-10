@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+k3s_bin=
+kubectl_bin=
+kubeconfig=
+kube_context=
+namespace=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --k3s-bin)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--k3s-bin requires a path" >&2
+        exit 2
+      fi
+      k3s_bin="$2"
+      shift 2
+      ;;
+    --kubectl-bin)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--kubectl-bin requires a path" >&2
+        exit 2
+      fi
+      kubectl_bin="$2"
+      shift 2
+      ;;
+    --kubeconfig)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--kubeconfig requires a path" >&2
+        exit 2
+      fi
+      kubeconfig="$2"
+      shift 2
+      ;;
+    --kube-context)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--kube-context requires a value" >&2
+        exit 2
+      fi
+      kube_context="$2"
+      shift 2
+      ;;
+    --namespace)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--namespace requires a value" >&2
+        exit 2
+      fi
+      namespace="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "$k3s_bin" ]; then
+  echo "--k3s-bin is required" >&2
+  exit 2
+fi
+if [ -z "$kubectl_bin" ]; then
+  echo "--kubectl-bin is required" >&2
+  exit 2
+fi
+if [ -z "$kubeconfig" ]; then
+  echo "--kubeconfig is required" >&2
+  exit 2
+fi
+if [ -z "$kube_context" ]; then
+  echo "--kube-context is required" >&2
+  exit 2
+fi
+if [ -z "$namespace" ]; then
+  echo "--namespace is required" >&2
+  exit 2
+fi
+if [ ! -f "$k3s_bin" ] || [ ! -x "$k3s_bin" ]; then
+  echo "--k3s-bin must be an executable file: $k3s_bin" >&2
+  exit 1
+fi
+if [ ! -f "$kubectl_bin" ] || [ ! -x "$kubectl_bin" ]; then
+  echo "--kubectl-bin must be an executable file: $kubectl_bin" >&2
+  exit 1
+fi
+if [ ! -f "$kubeconfig" ]; then
+  echo "--kubeconfig must be a file: $kubeconfig" >&2
+  exit 1
+fi
+if ! docker_bin="$(command -v docker)"; then
+  echo "docker is required to import local dev images" >&2
+  exit 1
+fi
+
+images=(
+  "agentsmith-lite/app:dev"
+  "agentsmith-lite/botified-runner:dev"
+)
+
+for image in "${images[@]}"; do
+  if ! "$docker_bin" image inspect "$image" >/dev/null; then
+    echo "local Docker image is required: $image" >&2
+    exit 1
+  fi
+done
+
+for image in "${images[@]}"; do
+  if ! "$docker_bin" image save "$image" | "$k3s_bin" ctr -n k8s.io images import -; then
+    echo "failed to import local Docker image into k3s containerd: $image" >&2
+    exit 1
+  fi
+done
+
+kubectl_args=(--kubeconfig "$kubeconfig" --context "$kube_context" --namespace "$namespace")
+api_deployment="$("$kubectl_bin" "${kubectl_args[@]}" get deployment/agentsmith-lite-api --ignore-not-found -o name)"
+if [ -n "$api_deployment" ]; then
+  "$kubectl_bin" "${kubectl_args[@]}" rollout restart deployment/agentsmith-lite-api
+fi
