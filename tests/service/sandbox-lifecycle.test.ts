@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { SandboxLifecycleService, type RuntimeDirectoryCleaner } from "../../packages/application/src/sandboxLifecycleService.js";
@@ -757,6 +760,114 @@ describe("sandbox lifecycle service", () => {
     assert.deepEqual(result.errors, []);
     assert.deepEqual(cleaner.removedPaths, []);
     assert.notEqual((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+  });
+
+  it("rejects cleanup through an ancestor symlink to an external directory", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-outside-"));
+    try {
+      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+      const outsideHome = path.join(outside, "proj1", "tasks", run.taskId, "home");
+      await mkdir(outsideHome, { recursive: true });
+      await writeFile(path.join(outsideHome, "keep.txt"), "keep");
+      await mkdir(path.join(dataRoot, "workspaces", run.workspaceId), { recursive: true });
+      await symlink(outside, path.join(dataRoot, "workspaces", run.workspaceId, "projects"));
+      const store = createLocalInMemoryProductStore();
+      await store.sandboxRuns.put(run);
+      const service = new SandboxLifecycleService(store, {
+        dataRoot,
+        namespace: run.namespace,
+        port: new FakeLifecyclePort([])
+      });
+
+      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+      assert.match(result.errors[0] ?? "", /symlink/);
+      assert.equal(await readFile(path.join(outsideHome, "keep.txt"), "utf8"), "keep");
+      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects cleanup through an ancestor symlink to another in-root task", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
+    try {
+      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+      const taskRoot = path.join(dataRoot, run.projectSubPath, "tasks");
+      const otherTaskHome = path.join(taskRoot, "task2", "home");
+      await mkdir(otherTaskHome, { recursive: true });
+      await writeFile(path.join(otherTaskHome, "keep.txt"), "keep");
+      await symlink("task2", path.join(taskRoot, run.taskId));
+      const store = createLocalInMemoryProductStore();
+      await store.sandboxRuns.put(run);
+      const service = new SandboxLifecycleService(store, {
+        dataRoot,
+        namespace: run.namespace,
+        port: new FakeLifecyclePort([])
+      });
+
+      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+      assert.match(result.errors[0] ?? "", /symlink/);
+      assert.equal(await readFile(path.join(otherTaskHome, "keep.txt"), "utf8"), "keep");
+      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("unlinks a final runtime target symlink without deleting its target", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-outside-"));
+    try {
+      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+      const taskRoot = path.join(dataRoot, run.projectSubPath, "tasks", run.taskId);
+      const outsideTarget = path.join(outside, "home");
+      await mkdir(taskRoot, { recursive: true });
+      await mkdir(outsideTarget);
+      await writeFile(path.join(outsideTarget, "keep.txt"), "keep");
+      await symlink(outsideTarget, path.join(taskRoot, "home"));
+      const store = createLocalInMemoryProductStore();
+      await store.sandboxRuns.put(run);
+      const service = new SandboxLifecycleService(store, {
+        dataRoot,
+        namespace: run.namespace,
+        port: new FakeLifecyclePort([])
+      });
+
+      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+      await assert.rejects(() => lstat(path.join(taskRoot, "home")), { code: "ENOENT" });
+      assert.equal(await readFile(path.join(outsideTarget, "keep.txt"), "utf8"), "keep");
+      assert.deepEqual(result.errors, []);
+      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a missing runtime parent as successful cleanup", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
+    try {
+      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
+      const store = createLocalInMemoryProductStore();
+      await store.sandboxRuns.put(run);
+      const service = new SandboxLifecycleService(store, {
+        dataRoot,
+        namespace: run.namespace,
+        port: new FakeLifecyclePort([])
+      });
+
+      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+      assert.deepEqual(result.errors, []);
+      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 
   it("rejects runtime directory cleanup that escapes dataRoot without deleting or marking cleaned", async () => {

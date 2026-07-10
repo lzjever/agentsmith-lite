@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import type { AgentTaskStatus, KubernetesResource } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
@@ -552,7 +552,7 @@ export class SandboxLifecycleService {
       }
       const target = `runtime_directory:${directory.directory}`;
       try {
-        const absolutePath = this.resolveRuntimeCleanupPath(directory.path);
+        const absolutePath = await this.resolveRuntimeCleanupPath(directory.path);
         await cleaner.removeRuntimePath(absolutePath);
       } catch (error) {
         return {
@@ -564,7 +564,7 @@ export class SandboxLifecycleService {
     return null;
   }
 
-  private resolveRuntimeCleanupPath(runtimePath: string): string {
+  private async resolveRuntimeCleanupPath(runtimePath: string): Promise<string> {
     if (!this.config.dataRoot) {
       throw new ProductError("Sandbox lifecycle dataRoot is not configured", 409);
     }
@@ -751,14 +751,49 @@ function recentCleanupFailures(runs: PersistedSandboxRunState[]): SandboxRecentC
     .slice(0, 10);
 }
 
-function assertRuntimePathInsideDataRoot(dataRoot: string, runtimePath: string): string {
+async function assertRuntimePathInsideDataRoot(dataRoot: string, runtimePath: string): Promise<string> {
   const root = path.resolve(dataRoot);
   const absolutePath = path.resolve(runtimePath);
   const relative = path.relative(root, absolutePath);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new ProductError("Runtime directory is outside the data root", 409);
   }
-  return absolutePath;
+
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await realpath(root);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return absolutePath;
+    }
+    throw error;
+  }
+
+  const canonicalPath = path.resolve(canonicalRoot, relative);
+  const parentRelative = path.dirname(relative);
+  let expectedParent = canonicalRoot;
+  for (const segment of parentRelative.split(path.sep)) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    expectedParent = path.join(expectedParent, segment);
+    try {
+      const parentStat = await lstat(expectedParent);
+      if (parentStat.isSymbolicLink() || await realpath(expectedParent) !== expectedParent) {
+        throw new ProductError("Runtime directory parent uses a symlink", 409);
+      }
+    } catch (error) {
+      if (isNotFound(error)) {
+        return canonicalPath;
+      }
+      throw error;
+    }
+  }
+  return canonicalPath;
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 function sanitizeCleanupError(message: string): string {
