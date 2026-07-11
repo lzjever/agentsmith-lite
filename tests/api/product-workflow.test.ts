@@ -88,6 +88,18 @@ describe("api product workflow", () => {
       undefined,
       cookie
     );
+    const unicodeFilePath = "files/docs/报告.md";
+    const unicodeFileContent = "unicode filename";
+    await requestJson("POST", `/api/projects/${project.id}/files`, {
+      path: unicodeFilePath,
+      content: unicodeFileContent
+    }, cookie, csrf);
+    const downloadedUnicodeFile = await request(
+      "GET",
+      `/api/projects/${project.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
+      undefined,
+      cookie
+    );
     await assertApiError(
       await request("GET", `/api/projects/${project.id}/files/download`, undefined, cookie),
       400,
@@ -150,6 +162,12 @@ describe("api product workflow", () => {
     assert.equal(downloadedFile.headers.get("content-disposition"), "attachment; filename=\"readme.md\"");
     assert.equal(downloadedFile.headers.get("x-content-type-options"), "nosniff");
     assert.equal(await downloadedFile.text(), fileContent);
+    assert.equal(downloadedUnicodeFile.status, 200);
+    assert.equal(
+      downloadedUnicodeFile.headers.get("content-disposition"),
+      "attachment; filename=\"__.md\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.md"
+    );
+    assert.equal(await downloadedUnicodeFile.text(), unicodeFileContent);
     assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "running");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);

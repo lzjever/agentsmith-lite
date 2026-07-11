@@ -142,8 +142,11 @@ describe("task events API", () => {
     assert.equal(download.headers.get("content-type"), "application/octet-stream");
     assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
     assert.equal(download.headers.get("x-content-type-options"), "nosniff");
-    assert.equal(download.headers.get("content-disposition"), "attachment; filename=\"_____.txt\"");
-    const filename = /^attachment; filename="([^"]+)"$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
+    assert.equal(
+      download.headers.get("content-disposition"),
+      "attachment; filename=\"_____.txt\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A___.txt"
+    );
+    const filename = /^attachment; filename="([^"]+)"(?:; filename\*=UTF-8''[^;]+)?$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
     assert.doesNotMatch(filename, /[\r\n\\"/\u0080-\uffff]/);
     assert.doesNotMatch(download.headers.get("content-disposition") ?? "", /api-service-key|botified\.internal|download_url|service_key/);
     assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);

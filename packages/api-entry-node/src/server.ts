@@ -464,13 +464,23 @@ function contentTypeFor(filePath: string): string {
   return "text/html; charset=utf-8";
 }
 
-function headerFilename(input: string): string {
+function contentDispositionFilename(input: string): string {
   const base = path.posix.basename(input.replace(/\\/g, "/"));
-  const cleaned = base
-    .replace(/[\r\n"\\]/g, "_")
-    .replace(/[^\x20-\x7e]/g, "_")
-    .trim();
-  return cleaned.length > 0 ? cleaned : "artifact";
+  const filename = base.replace(/[\r\n"\\]/g, "_");
+  const fallback = filename.replace(/[^\x20-\x7e]/g, "_").trim() || "artifact";
+  if (!/[^\x20-\x7e]/.test(filename)) {
+    return `attachment; filename="${fallback}"`;
+  }
+
+  const encodedFilename = Array.from(Buffer.from(filename.trim() || "artifact", "utf8"), (byte) =>
+    (byte >= 0x41 && byte <= 0x5a) ||
+    (byte >= 0x61 && byte <= 0x7a) ||
+    (byte >= 0x30 && byte <= 0x39) ||
+    "!#$&+-.^_`|~".includes(String.fromCharCode(byte))
+      ? String.fromCharCode(byte)
+      : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+  ).join("");
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodedFilename}`;
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -505,7 +515,7 @@ function sendArtifactDownload(
   res.writeHead(200, {
     "content-type": "application/octet-stream",
     "content-length": String(download.bytes.byteLength),
-    "content-disposition": `attachment; filename="${headerFilename(download.artifact.name || download.artifact.fileId)}"`,
+    "content-disposition": contentDispositionFilename(download.artifact.name || download.artifact.fileId),
     "x-content-type-options": "nosniff"
   });
   res.end(download.bytes);
@@ -519,7 +529,7 @@ function sendProjectFileDownload(
   res.writeHead(200, {
     "content-type": "application/octet-stream",
     "content-length": String(bytes.byteLength),
-    "content-disposition": `attachment; filename="${headerFilename(download.filename)}"`,
+    "content-disposition": contentDispositionFilename(download.filename),
     "x-content-type-options": "nosniff"
   });
   res.end(bytes);
