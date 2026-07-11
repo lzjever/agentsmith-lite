@@ -117,11 +117,15 @@ describe("sandbox manifest renderer", () => {
     assert.equal(pod?.spec.securityContext.runAsUser, 10001);
     assert.equal(pod?.spec.securityContext.runAsGroup, 10001);
     assert.equal(pod?.spec.securityContext.fsGroup, 10001);
-    const container = pod?.spec.containers[0];
+    assert.equal(pod?.spec.shareProcessNamespace, false);
+    assert.deepEqual(pod?.spec.containers.map((candidate) => candidate.name), ["botified-server", "bash-executor"]);
+    const container = pod?.spec.containers.find((candidate) => candidate.name === "botified-server");
+    const executor = pod?.spec.containers.find((candidate) => candidate.name === "bash-executor");
     const projectMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/project");
     const taskHomeMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
     const botifiedMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/botified");
     assert.ok(container);
+    assert.ok(executor);
     assert.ok(projectMount);
     assert.ok(taskHomeMount);
     assert.ok(botifiedMount);
@@ -165,6 +169,12 @@ describe("sandbox manifest renderer", () => {
     assert.notEqual(taskHomeMount.readOnly, true);
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
     assert.notEqual(botifiedMount.readOnly, true);
+    assert.equal(executor.env.length, 0);
+    assert.equal(executor.securityContext.runAsUser, 10002);
+    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/project" && mount.readOnly === true), true);
+    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/home" && mount.readOnly !== true), true);
+    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/botified"), false);
+    assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
     assert.equal(container.volumeMounts.some((mount) => mount.subPath?.endsWith("/artifacts")), false);
     assert.ok(service, "Service should be rendered");
     assert.deepEqual(service.spec.selector, pod?.metadata.labels);
@@ -327,14 +337,17 @@ interface PodResource extends KubernetesResource {
     serviceAccountName: string;
     automountServiceAccountToken: boolean;
     hostNetwork: boolean;
+    shareProcessNamespace: boolean;
     securityContext: { runAsNonRoot: boolean; runAsUser: number; runAsGroup: number; fsGroup: number };
     containers: Array<{
+      name: string;
       resources: {
         requests: { cpu: string; memory: string };
         limits: { cpu: string; memory: string };
       };
       securityContext: {
         allowPrivilegeEscalation: boolean;
+        runAsUser?: number;
         privileged?: boolean;
         capabilities: { drop: string[] };
       };

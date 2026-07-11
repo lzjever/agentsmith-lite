@@ -340,7 +340,7 @@ describe("sandbox lifecycle service", () => {
     assert.ok(pod);
     pod.status = {
       containerStatuses: [{
-        name: "botified-runner",
+        name: "botified-server",
         state: { terminated: { exitCode: 41 } }
       }]
     };

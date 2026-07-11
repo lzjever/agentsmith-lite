@@ -88,6 +88,7 @@ describe("botified runtime integration", () => {
     assert.notEqual(config.runtime.cwd, config.runtime.data_dir);
     assert.notEqual(config.files.root_dir, "/workspace/task/artifacts");
     assert.deepEqual(config.tools.enabled, ["bash"]);
+    assert.equal(config.tools.execution.bash_executor_addr, "127.0.0.1:3110");
     assert.equal(config.skills.default_discovery, false);
     assert.deepEqual(config.skills.explicit, []);
     assert.equal(config.context_files.enabled, true);
@@ -96,6 +97,28 @@ describe("botified runtime integration", () => {
     assert.equal(config.subagents.enabled, false);
     assert.equal(config.profiling.enabled, false);
     assert.equal(config.llm_text_preview.enabled, false);
+  });
+
+  it("configures BashTool to use only the loopback executor sidecar", () => {
+    const config = generateBotifiedConfig({
+      endpoint: {
+        id: "e1", projectId: "p1", name: "model", protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1", model: "gpt-compatible", apiKeySecretRef: "secret/model",
+        capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30,
+        createdAt: "2026-07-04T00:00:00.000Z", updatedAt: "2026-07-04T00:00:00.000Z"
+      },
+      task: {
+        taskId: "t1", projectMountPath: "/workspace/project", taskHomePath: "/runner/task-home",
+        botifiedDataPath: "/runner/botified-data", serviceKeyEnv: "BOTIFIED_SERVICE_KEY", modelApiKeyEnv: "MODEL_API_KEY"
+      }
+    });
+
+    assert.deepEqual(Object.keys(config.tools.execution).sort(), [
+      "bash_executor_addr", "callback_output_tail_bytes", "default_detach_after_secs", "default_timeout_secs",
+      "max_concurrent_tasks", "max_detach_after_secs", "max_retained_tasks", "max_task_ask_pending_secs",
+      "max_task_output_bytes", "max_timeout_secs", "task_retention_secs"
+    ].sort());
+    assert.equal(JSON.stringify(config).includes("0.0.0.0:3110"), false);
   });
 
   it("honors a custom service port and serializes without raw API keys", () => {

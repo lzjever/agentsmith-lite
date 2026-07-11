@@ -123,6 +123,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
         automountServiceAccountToken: false,
         restartPolicy: "Never",
         hostNetwork: false,
+        shareProcessNamespace: false,
         securityContext: {
           runAsNonRoot: true,
           runAsUser: 10001,
@@ -134,7 +135,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
         },
         containers: [
           {
-            name: "botified-runner",
+            name: "botified-server",
             image: input.image,
             imagePullPolicy: "IfNotPresent",
             command: ["botified", "serve", "--config", "/etc/botified/botified-config.yaml"],
@@ -205,6 +206,45 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 readOnly: true
               },
               ...(modelCaMount ? [modelCaMount] : [])
+            ]
+          },
+          {
+            name: "bash-executor",
+            image: input.image,
+            imagePullPolicy: "IfNotPresent",
+            command: ["bash-executor", "--listen", "127.0.0.1:3110"],
+            env: [],
+            resources: {
+              requests: {
+                cpu: input.cpuRequest,
+                memory: input.memoryRequest
+              },
+              limits: {
+                cpu: input.cpuLimit,
+                memory: input.memoryLimit
+              }
+            },
+            securityContext: {
+              runAsUser: 10002,
+              runAsGroup: 10001,
+              allowPrivilegeEscalation: false,
+              readOnlyRootFilesystem: false,
+              capabilities: {
+                drop: ["ALL"]
+              }
+            },
+            volumeMounts: [
+              {
+                name: "project-files",
+                mountPath: "/workspace/project",
+                subPath: input.projectSubPath,
+                readOnly: true
+              },
+              {
+                name: "project-files",
+                mountPath: "/workspace/task/home",
+                subPath: `${taskSubPath}/home`
+              }
             ]
           }
         ],

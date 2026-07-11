@@ -447,7 +447,7 @@ function terminalFailureForExpectedRunnerPod(
     return { reason: "pod_failed" };
   }
   const containerStatuses = Array.isArray(status?.containerStatuses) ? status.containerStatuses : [];
-  const runner = containerStatuses.find((candidate) => asRecord(candidate)?.name === "botified-runner");
+  const runner = containerStatuses.find((candidate) => asRecord(candidate)?.name === "botified-server");
   const state = asRecord(asRecord(runner)?.state);
   const terminated = asRecord(state?.terminated);
   if (isNonZeroExitCode(terminated?.exitCode)) {

@@ -156,8 +156,12 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     )?;
     let subagent_options = build_subagent_options(&runtime_config, &provider_endpoints)?;
     let provider = Arc::new(ProviderRouter::new(provider_endpoints)) as Arc<dyn Provider>;
-    let tools =
-        build_tools(&runtime_config.tools.enabled, provider.clone()).map_err(StartupError::new)?;
+    let tools = build_tools(
+        &runtime_config.tools.enabled,
+        provider.clone(),
+        &runtime_config.tools.execution.bash_executor_addr,
+    )
+    .map_err(StartupError::new)?;
     let limits = ServiceLimits::new(runtime_config.service.max_queue_messages)
         .with_max_queue_bytes(runtime_config.service.max_queue_bytes);
     let files_root_dir = resolve_files_root_dir(&runtime_config.files, &data_dir);
@@ -522,11 +526,12 @@ fn build_provider_endpoints(
 fn build_tools(
     enabled: &[RuntimeTool],
     provider: Arc<dyn Provider>,
+    bash_executor_addr: &str,
 ) -> Result<Vec<Arc<dyn Tool>>, String> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::with_capacity(enabled.len());
     for tool in enabled {
         match tool {
-            RuntimeTool::Bash => tools.push(Arc::new(BashTool::new())),
+            RuntimeTool::Bash => tools.push(Arc::new(BashTool::new().with_executor_addr(bash_executor_addr)?)),
             RuntimeTool::ViewImage => tools.push(Arc::new(ViewImageTool::new(provider.clone()))),
         }
     }

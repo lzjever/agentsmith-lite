@@ -1,25 +1,29 @@
 use std::{
-    env,
-    ffi::OsStr,
-    io::{self, Read},
-    os::raw::c_int,
-    process::{Command, ExitStatus, Stdio},
-    sync::Arc,
+    io::{self, BufRead, BufReader, Write},
+    net::{SocketAddr, TcpStream},
+    process::ExitStatus,
+    sync::{mpsc::{self, SyncSender, TrySendError}, Arc},
     thread,
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
+#[cfg(test)]
+use std::{env, ffi::OsStr, io::Read, os::raw::c_int, process::{Command, Stdio}};
+
+#[cfg(all(test, unix))]
 use std::os::fd::AsRawFd;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::tasks::{BotifiedFrameScanner, SharedTaskStdinWriter};
+use crate::tasks::{BotifiedFrameScanner, TaskStdinWriteSuccess, TaskStdinWriter};
+#[cfg(test)]
+use crate::tasks::SharedTaskStdinWriter;
 use crate::types::{ToolCall, ToolResult};
 
 use super::{
@@ -30,27 +34,28 @@ use super::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT_BYTES: usize = 60 * 1024;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(test)]
 const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 const SIGKILL: c_int = 9;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 const F_GETFL: c_int = 3;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 const F_SETFL: c_int = 4;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(all(test, any(target_os = "android", target_os = "linux")))]
 const O_NONBLOCK: c_int = 0o4000;
-#[cfg(any(
+#[cfg(all(test, any(
     target_os = "dragonfly",
     target_os = "freebsd",
     target_os = "ios",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "openbsd"
-))]
+)))]
 const O_NONBLOCK: c_int = 0x0004;
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 unsafe extern "C" {
     fn kill(pid: c_int, sig: c_int) -> c_int;
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
@@ -60,6 +65,7 @@ unsafe extern "C" {
 pub struct BashTool {
     default_timeout: Duration,
     max_output_bytes: usize,
+    executor_addr: SocketAddr,
 }
 
 impl BashTool {
@@ -67,12 +73,22 @@ impl BashTool {
         Self {
             default_timeout: DEFAULT_TIMEOUT,
             max_output_bytes: MAX_OUTPUT_BYTES,
+            executor_addr: "127.0.0.1:3110".parse().expect("default executor address must parse"),
         }
     }
 
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
         self
+    }
+
+    pub fn with_executor_addr(mut self, addr: &str) -> Result<Self, String> {
+        let executor_addr = addr.parse::<SocketAddr>().map_err(|error| format!("invalid bash executor address: {error}"))?;
+        if !executor_addr.ip().is_loopback() {
+            return Err("bash executor address must be loopback-only".to_owned());
+        }
+        self.executor_addr = executor_addr;
+        Ok(self)
     }
 }
 
@@ -145,11 +161,13 @@ impl OutputAccumulator {
     }
 }
 
+#[cfg(test)]
 struct PipeReader<R> {
     reader: R,
     closed: bool,
 }
 
+#[cfg(test)]
 enum PipeRead {
     Chunk(Vec<u8>),
     NoProgress,
@@ -159,6 +177,7 @@ enum PipeRead {
 #[cfg(test)]
 type TailUpdateObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
+#[cfg(test)]
 impl<R> PipeReader<R>
 where
     R: PipeNonblocking + Read,
@@ -198,6 +217,7 @@ where
     }
 }
 
+#[cfg(test)]
 struct OutputPump<R> {
     output_pipe: PipeReader<R>,
     output: OutputAccumulator,
@@ -209,11 +229,13 @@ struct OutputPump<R> {
     tail_update_observer: Option<TailUpdateObserver>,
 }
 
+#[cfg(test)]
 struct OutputPumpOutput {
     output: OutputAccumulator,
     output_snapshot: Option<ToolOutputSnapshot>,
 }
 
+#[cfg(test)]
 impl<R> OutputPump<R>
 where
     R: PipeNonblocking + Read,
@@ -368,6 +390,7 @@ impl Tool for BashTool {
         let cwd = context.cwd;
         let output_sink = context.output_sink;
         let interactive_stdio = context.interactive_stdio;
+        let executor_addr = self.executor_addr;
 
         if cancel.is_cancelled() {
             let outcome = cancelled_bash_outcome(output_sink)?;
@@ -380,7 +403,7 @@ impl Tool for BashTool {
         }
 
         let outcome = tokio::task::spawn_blocking(move || {
-            run_bash_command(
+            run_executor_bash_command(
                 &command,
                 &cwd,
                 timeout,
@@ -388,6 +411,7 @@ impl Tool for BashTool {
                 output_sink,
                 interactive_stdio,
                 cancel,
+                executor_addr,
             )
         })
         .await
@@ -441,6 +465,204 @@ fn timeout_from_context_or_arguments(
     }
 }
 
+#[derive(Serialize)]
+struct ExecutorExecuteRequest<'a> {
+    op: &'static str,
+    command: &'a str,
+    cwd: &'a str,
+    interactive_stdio: bool,
+}
+
+#[derive(Serialize)]
+struct ExecutorControlRequest {
+    op: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExecutorEvent {
+    op: String,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+struct ExecutorStdinWriter {
+    sender: SyncSender<ExecutorControlRequest>,
+}
+
+impl ExecutorStdinWriter {
+    fn frame(bytes: &[u8]) -> ExecutorControlRequest {
+        ExecutorControlRequest {
+            op: "stdin",
+            data: Some(BASE64.encode(bytes)),
+        }
+    }
+
+    fn write_frame(&self, bytes: &[u8]) -> Result<(), String> {
+        self.sender.send(Self::frame(bytes)).map_err(|_| "bash executor stdin is closed".to_owned())
+    }
+
+    fn try_write_frame(&self, bytes: &[u8]) -> Result<(), String> {
+        match self.sender.try_send(Self::frame(bytes)) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err("bash executor stdin writer is busy".to_owned()),
+            Err(TrySendError::Disconnected(_)) => Err("bash executor stdin is closed".to_owned()),
+        }
+    }
+}
+
+impl TaskStdinWriter for ExecutorStdinWriter {
+    fn write_stdin(&self, bytes: &[u8]) -> Result<(), String> {
+        self.write_frame(bytes)
+    }
+
+    fn supports_priority_stdin(&self) -> bool {
+        true
+    }
+
+    fn try_write_priority_stdin(&self, bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
+        self.try_write_frame(bytes)?;
+        Ok(TaskStdinWriteSuccess::delivered())
+    }
+
+    fn supports_observer_stdin(&self) -> bool {
+        true
+    }
+
+    fn try_write_observer_stdin(&self, bytes: &[u8]) -> Result<(), String> {
+        self.try_write_frame(bytes)
+    }
+}
+
+fn write_ndjson<T: Serialize>(stream: &mut TcpStream, value: &T) -> io::Result<()> {
+    serde_json::to_writer(&mut *stream, value).map_err(io::Error::other)?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+fn run_executor_bash_command(
+    command: &str,
+    cwd: &str,
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+    output_sink: Option<Arc<dyn ToolOutputSink>>,
+    interactive_stdio: Option<Arc<dyn crate::tasks::InteractiveStdioBridge>>,
+    cancel: CancellationToken,
+    executor_addr: SocketAddr,
+) -> Result<BashOutcome, ToolError> {
+    if cancel.is_cancelled() {
+        return cancelled_bash_outcome(output_sink);
+    }
+    let mut stream = TcpStream::connect_timeout(&executor_addr, Duration::from_secs(2)).map_err(|error| {
+        ToolError::execution_failed(format!("failed to connect to bash executor: {error}"))
+    })?;
+    stream.set_read_timeout(Some(WAIT_POLL_INTERVAL)).map_err(|error| {
+        ToolError::execution_failed(format!("failed to configure bash executor connection: {error}"))
+    })?;
+    write_ndjson(&mut stream, &ExecutorExecuteRequest {
+        op: "execute",
+        command,
+        cwd,
+        interactive_stdio: interactive_stdio.is_some(),
+    }).map_err(|error| ToolError::execution_failed(format!("failed to start bash executor request: {error}")))?;
+
+    let mut control_stream = stream.try_clone().map_err(|error| ToolError::execution_failed(format!("failed to clone bash executor connection: {error}")))?;
+    let (control_sender, control_receiver) = mpsc::sync_channel(32);
+    thread::spawn(move || {
+        while let Ok(control) = control_receiver.recv() {
+            if write_ndjson(&mut control_stream, &control).is_err() {
+                return;
+            }
+        }
+    });
+    let writer = Arc::new(ExecutorStdinWriter { sender: control_sender.clone() });
+    if let Some(bridge) = interactive_stdio.as_ref() {
+        bridge.register_stdin_writer(writer.clone());
+    }
+    let mut reader = BufReader::new(stream);
+    let mut output = OutputAccumulator::new(max_output_bytes);
+    let mut scanner = interactive_stdio.as_ref().map(|_| BotifiedFrameScanner::default());
+    let started = Instant::now();
+    let mut cancelled = false;
+    let mut timed_out = false;
+    let mut cancel_sent = false;
+    let mut status = None;
+
+    loop {
+        if !cancel_sent && (cancel.is_cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit)) {
+            cancelled = cancel.is_cancelled();
+            timed_out = !cancelled;
+            control_sender.send(ExecutorControlRequest { op: "cancel", data: None })
+                .map_err(|_| ToolError::execution_failed("bash executor stdin is closed"))?;
+            cancel_sent = true;
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let event: ExecutorEvent = serde_json::from_str(line.trim_end()).map_err(|error| ToolError::execution_failed(format!("invalid bash executor response: {error}")))?;
+                match event.op.as_str() {
+                    "output" => {
+                        let encoded = event.data.ok_or_else(|| ToolError::execution_failed("bash executor output missing data"))?;
+                        let chunk = BASE64.decode(encoded).map_err(|error| ToolError::execution_failed(format!("invalid bash executor output: {error}")))?;
+                        fan_out_executor_chunk(&chunk, &mut output, max_output_bytes, output_sink.as_ref(), scanner.as_mut(), interactive_stdio.as_ref())?;
+                    }
+                    "completed" => { status = event.exit_code.map(exit_status_from_code).transpose()?; break; }
+                    "error" => return Err(ToolError::execution_failed(event.message.unwrap_or_else(|| "bash executor failed".to_owned()))),
+                    other => return Err(ToolError::execution_failed(format!("unknown bash executor response: {other}"))),
+                }
+            }
+            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+            Err(error) => return Err(ToolError::execution_failed(format!("failed to read bash executor response: {error}"))),
+        }
+    }
+    if let Some(scanner) = scanner.as_mut() {
+        let scan = scanner.finish();
+        fan_out_executor_scan(scan, &mut output, max_output_bytes, output_sink.as_ref(), interactive_stdio.as_ref())?;
+    }
+    let output_snapshot = output_sink.map(|sink| sink.complete()).transpose()?;
+    Ok(BashOutcome { status, output, output_snapshot, timed_out, cancelled })
+}
+
+fn exit_status_from_code(code: i32) -> Result<ExitStatus, ToolError> {
+    #[cfg(unix)]
+    { Ok(std::os::unix::process::ExitStatusExt::from_raw(code << 8)) }
+    #[cfg(not(unix))]
+    { let _ = code; Err(ToolError::execution_failed("bash executor exit status is unsupported on this platform")) }
+}
+
+fn fan_out_executor_chunk(
+    chunk: &[u8], output: &mut OutputAccumulator, max_output_bytes: usize,
+    output_sink: Option<&Arc<dyn ToolOutputSink>>, scanner: Option<&mut BotifiedFrameScanner>,
+    interactive_stdio: Option<&Arc<dyn crate::tasks::InteractiveStdioBridge>>,
+) -> Result<(), ToolError> {
+    if let Some(scanner) = scanner {
+        return fan_out_executor_scan(scanner.push(chunk), output, max_output_bytes, output_sink, interactive_stdio);
+    }
+    fan_out_executor_plain(chunk, output, max_output_bytes, output_sink)
+}
+
+fn fan_out_executor_scan(
+    scan: crate::tasks::BotifiedFrameScan, output: &mut OutputAccumulator, max_output_bytes: usize,
+    output_sink: Option<&Arc<dyn ToolOutputSink>>, interactive_stdio: Option<&Arc<dyn crate::tasks::InteractiveStdioBridge>>,
+) -> Result<(), ToolError> {
+    if !scan.plain_output.is_empty() { fan_out_executor_plain(&scan.plain_output, output, max_output_bytes, output_sink)?; }
+    if !scan.events.is_empty() { if let Some(bridge) = interactive_stdio { bridge.handle_frame_events(scan.events); } }
+    Ok(())
+}
+
+fn fan_out_executor_plain(chunk: &[u8], output: &mut OutputAccumulator, max_output_bytes: usize, output_sink: Option<&Arc<dyn ToolOutputSink>>) -> Result<(), ToolError> {
+    if let Some(sink) = output_sink { sink.record(chunk)?; }
+    output.push(chunk, max_output_bytes);
+    Ok(())
+}
+
+#[cfg(test)]
 fn run_bash_command(
     command: &str,
     cwd: &str,
@@ -572,6 +794,7 @@ fn run_bash_command(
     })
 }
 
+#[cfg(test)]
 fn drain_startup_stderr_available<R, S>(
     startup_stderr: &mut PipeReader<S>,
     output_pump: &mut OutputPump<R>,
@@ -589,6 +812,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn drain_bash_pipes_until<R, S>(
     output_pump: &mut OutputPump<R>,
     startup_stderr: &mut PipeReader<S>,
@@ -609,11 +833,12 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 trait PipeNonblocking {
     fn set_nonblocking(&self) -> Result<(), ToolError>;
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 impl<T> PipeNonblocking for T
 where
     T: AsRawFd,
@@ -640,20 +865,22 @@ where
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 impl<T> PipeNonblocking for T {
     fn set_nonblocking(&self) -> Result<(), ToolError> {
         Ok(())
     }
 }
 
+#[cfg(test)]
 fn kill_child(child: &mut std::process::Child) {
     kill_process_group(child.id());
     let _ = child.kill();
 }
 
+#[cfg(test)]
 fn kill_process_group(child_id: u32) {
-    #[cfg(unix)]
+    #[cfg(all(test, unix))]
     {
         let process_group_id = -(child_id as c_int);
         // SAFETY: kill(2) is called with the child process group id created above.
@@ -769,6 +996,7 @@ fn cancelled_bash_outcome(
     })
 }
 
+#[cfg(test)]
 fn is_secret_env_key(key: &OsStr) -> bool {
     let key = key.to_string_lossy().to_ascii_uppercase();
     key == "AUTHORIZATION"
@@ -783,6 +1011,7 @@ fn is_secret_env_key(key: &OsStr) -> bool {
         || key.contains("PASSWORD")
 }
 
+#[cfg(test)]
 fn secret_env_cleanup_script() -> &'static str {
     r#"botified_clear_secret_env() {
     local key botified_had_nocasematch
@@ -802,10 +1031,12 @@ botified_clear_secret_env
 unset -f botified_clear_secret_env"#
 }
 
+#[cfg(test)]
 fn is_bash_exported_function_env_key(key: &OsStr) -> bool {
     key.to_string_lossy().starts_with("BASH_FUNC_")
 }
 
+#[cfg(test)]
 fn should_inherit_env_key(key: &OsStr) -> bool {
     !is_secret_env_key(key) && !is_bash_exported_function_env_key(key)
 }
@@ -817,6 +1048,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::process;
     use std::sync::Mutex;
@@ -1359,6 +1592,34 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
                 .any(|entry| entry == "protocol_diagnostic:unsupported_op"),
             "echoed stdin frame should be filtered as an unsupported stdout frame"
         );
+    }
+
+    #[test]
+    fn executor_protocol_preserves_output_and_uses_loopback_ndjson() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("executor should connect");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("stream should clone"))
+                .read_line(&mut request)
+                .expect("execute request should read");
+            let request: Value = serde_json::from_str(request.trim_end()).expect("execute request should be JSON");
+            assert_eq!(request["op"], "execute");
+            assert_eq!(request["command"], "printf ignored");
+            assert_eq!(request["interactive_stdio"], false);
+            writeln!(stream, r#"{{"op":"output","data":"c2lkZWNhciBvdXRwdXQK"}}"#).expect("output should write");
+            writeln!(stream, r#"{{"op":"completed","exit_code":0}}"#).expect("completion should write");
+        });
+
+        let outcome = run_executor_bash_command(
+            "printf ignored", ".", Some(Duration::from_secs(1)), 4096, None, None,
+            CancellationToken::new(), addr,
+        ).expect("executor command should complete");
+        server.join().expect("executor server should finish");
+        let result = format_tool_result("call_1".to_owned(), "bash".to_owned(), outcome, 4096);
+        assert_eq!(result.details["aggregated_output"], "sidecar output\n");
+        assert!(result.text.contains("status: completed\nexit code: 0\n"));
     }
 
     #[test]

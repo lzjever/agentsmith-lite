@@ -16,8 +16,8 @@ describe("sandbox reconciler", () => {
     const run = sandboxRun();
     for (const [status, expected] of [
       [{ phase: "Failed" }, { reason: "pod_failed" }],
-      [{ containerStatuses: [{ name: "botified-runner", state: { terminated: { exitCode: 23 } } }] }, { reason: "runner_terminated", exitCode: 23 }],
-      [{ containerStatuses: [{ name: "botified-runner", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }]
+      [{ containerStatuses: [{ name: "botified-server", state: { terminated: { exitCode: 23 } } }] }, { reason: "runner_terminated", exitCode: 23 }],
+      [{ containerStatuses: [{ name: "botified-server", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }]
     ] as const) {
       const pod = renderedResource(run, "Pod");
       pod.status = status;
@@ -38,7 +38,7 @@ describe("sandbox reconciler", () => {
 
     const pod = renderedResource(run, "Pod");
     pod.status = {
-      containerStatuses: [{ name: "botified-runner", state: { terminated: { exitCode: 999 } } }]
+      containerStatuses: [{ name: "botified-server", state: { terminated: { exitCode: 999 } } }]
     };
     const plan = reconcileSandboxRuns({
       namespace: run.namespace,

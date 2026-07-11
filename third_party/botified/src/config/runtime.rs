@@ -75,6 +75,7 @@ pub struct RuntimeToolsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeToolExecutionConfig {
+    pub bash_executor_addr: String,
     pub default_detach_after_secs: RuntimeSeconds,
     pub max_detach_after_secs: RuntimeSeconds,
     pub default_timeout_secs: RuntimeSeconds,
@@ -644,6 +645,7 @@ impl RuntimeToolsConfig {
 impl Default for RuntimeToolExecutionConfig {
     fn default() -> Self {
         Self {
+            bash_executor_addr: "127.0.0.1:3110".to_owned(),
             default_detach_after_secs:
                 RuntimeToolsConfig::DEFAULT_EXECUTION_DEFAULT_DETACH_AFTER_SECS,
             max_detach_after_secs: RuntimeToolsConfig::DEFAULT_EXECUTION_MAX_DETACH_AFTER_SECS,
@@ -663,6 +665,12 @@ impl Default for RuntimeToolExecutionConfig {
 
 impl RuntimeToolExecutionConfig {
     fn validate(&self) -> Result<(), ConfigError> {
+        let executor_addr = self.bash_executor_addr.parse::<std::net::SocketAddr>().map_err(|error| {
+            ConfigError::new(format!("tools.execution.bash_executor_addr must be a socket address: {error}"))
+        })?;
+        if !executor_addr.ip().is_loopback() {
+            return Err(ConfigError::new("tools.execution.bash_executor_addr must use a loopback address"));
+        }
         validate_positive_seconds(
             "tools.execution.default_detach_after_secs",
             self.default_detach_after_secs,
@@ -1004,6 +1012,7 @@ providers:
 tools:
   enabled: [bash, view_image]
   execution:
+    bash_executor_addr: 127.0.0.1:3110
     default_detach_after_secs: 1.0
     max_detach_after_secs: 10.0
     default_timeout_secs: 120.0

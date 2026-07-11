@@ -1,12 +1,13 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY third_party/botified ./
-RUN cargo build --release --bin botified
+RUN cargo build --release --bin botified --bin bash-executor
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --gid 0 botified
+RUN useradd --system --uid 10002 --gid 0 bash-executor
 COPY --from=build /src/target/release/botified /usr/local/bin/botified
+COPY --from=build /src/target/release/bash-executor /usr/local/bin/bash-executor
 COPY infra/docker/botified-runner-entrypoint.sh /usr/local/bin/botified-runner-entrypoint.sh
 USER 10001
 ENTRYPOINT ["/usr/local/bin/botified-runner-entrypoint.sh"]
-

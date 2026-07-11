@@ -1203,7 +1203,7 @@ impl<W> SharedTaskStdinWriter<W> {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn new_verified_pipe(writer: W) -> Self {
         Self {
             writer: Mutex::new(writer),

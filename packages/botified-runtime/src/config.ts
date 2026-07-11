@@ -99,6 +99,7 @@ export interface BotifiedToolsConfig {
     max_task_ask_pending_secs: number;
     max_retained_tasks: number;
     task_retention_secs: number;
+    bash_executor_addr: string;
   };
 }
 
@@ -126,7 +127,8 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
         max_task_output_bytes: 16_777_216,
         max_task_ask_pending_secs: 300,
         max_retained_tasks: 128,
-        task_retention_secs: 86_400
+        task_retention_secs: 86_400,
+        bash_executor_addr: "127.0.0.1:3110"
       }
     },
     service: {
