@@ -11,7 +11,7 @@
 当前工作重点是把精力拉回产品本体：
 
 1. `agentsmith-lite-substrates` 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI、Keycloak，并输出 app 可消费的 env/secrets。
-2. `agentsmith-lite` 部署 API/Web、OIDC session、Botified runner、sandbox controller。
+2. `agentsmith-lite` 部署 API/Web、OIDC session、Botified runtime、sandbox controller。
 3. 用户通过 Keycloak/OIDC 登录。
 4. Product API/UI 创建 workspace、project、endpoint、task。
 5. Botified sandbox pod 挂载 JuiceFS，运行任务并写入 artifact。
@@ -45,6 +45,10 @@ AgentSmith Lite 是私有化智能体平台的最小产品内核。它把 Botifi
 | Cleanup | cancel、TTL、reap 只作用于 app-owned resources，并按 runId/labels fence。 |
 | UI/TUI | 只调用 `/api/*`；不得直接访问 K8s、DB、Botified、provider 或 substrate secrets。 |
 
+命名空间必须分离且不可相同：`KUBE_NAMESPACE` 只拥有 app/API、sandbox task、JuiceFS PVC 及其 app-owned 资源；`SUBSTRATE_NAMESPACE` 只拥有 PostgreSQL、S3-compatible storage/MinIO、Keycloak、JuiceFS CSI secret 和 format resources。app runtime 不接收 substrate namespace 或 secret internals。
+
+Sandbox task pod 固定为两个隔离容器：`botified-server` 独占 model/service credentials 与私有 Botified state；`bash-executor` 独立运行，不挂载或接收这些 env、secret 或 state，且 `shareProcessNamespace: false`。这是凭据职责隔离，不宣称可对抗任意 hostile code。
+
 明确不做：
 
 - LLMUP、Codex runner core、JVS、WebDAV、local/remote file mount、AFSCP、ASBCP。
@@ -55,12 +59,12 @@ AgentSmith Lite 是私有化智能体平台的最小产品内核。它把 Botifi
 
 | 范围 | Core 内容 |
 | --- | --- |
-| Substrates | k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI、Keycloak、namespace/PVC/ingress 基础资源、env/secrets 输出。 |
+| Substrates | k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI、Keycloak、两命名空间/PVC/ingress 基础资源、env/secrets 输出。 |
 | Auth | OIDC login/callback/session/logout、CSRF/API 权限校验、built-in admin 过渡路径收敛。 |
 | Product API | workspace/project create/list/select，endpoint create/list/use，server-side endpoint call。 |
 | Files | project file validate/list/upload/download/delete；服务端 path normalization 和权限判断。 |
-| Tasks | task create/status/events/artifacts/cancel；Botified event projection；artifact download。 |
-| Runtime | Botified vendored source pin、runner image、runtime config、HTTP client。 |
+| Tasks | task create/status/events/artifacts/cancel；任务 endpoint 必须同时声明 `text` 与 `tool_calls`，否则在 task/pod/model 副作用前拒绝；Botified event projection；artifact download。 |
+| Runtime | Botified vendored source pin、runtime image、runtime config、HTTP client。 |
 | Sandbox | K8s manifest render/apply/status/reap；JuiceFS PVC mount；最小 RBAC；TTL cleanup。 |
 | Packaging | app image、runner image、manifest render/apply/status/down、digest-pinned app offline bundle。 |
 | Tests | 与当前改动相关的 unit/contract/behavior tests；需要命令检查时，按具体业务路径命名并由开发者主动选择。 |
@@ -75,7 +79,7 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - Keycloak/OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已通过手动验证；app 消费 substrates 输出的 issuer/client/secret/backchannel。
 - Web UI logout、服务端 session revoke、`e2e:web-product-oidc` 手动浏览器路径已覆盖 OIDC login/callback -> workspace/project -> endpoint -> task -> artifact download -> project file upload/download/delete -> logout。
 - Web UI active task 自动刷新已覆盖晚到 events/artifacts 自动出现，仍只通过产品 API 读取 task events/artifacts。
-- Botified runner image 可在 sandbox pod 中启动；Botified bash 能在 JuiceFS 挂载中写文件并发布 artifact；API 能读取 events、列出 artifacts、下载 artifact 内容。
+- 旧 runner 路径已验证 Botified bash 可在 JuiceFS 挂载中写文件并发布 artifact，API 能读取 events、列出 artifacts、下载 artifact 内容；当前双容器 sidecar 路径仍需开发者手动在本地单机 K8s 跑一次真实任务验证，不是默认 gate。
 - cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
 - `scripts/deploy/check-product-workflow.sh` / `.mjs` 只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；不要包装成默认入口。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
