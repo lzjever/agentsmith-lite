@@ -102,10 +102,13 @@ const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const API_OWNED_ARTIFACT_DIRECTORY_MODE = 0o755;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
+const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 
-function requireTaskEndpointToolCalls(endpoint: ModelEndpoint): void {
-  if (!endpoint.capabilities.includes("tool_calls")) {
-    throw new ProductError("Task endpoint must support the tool_calls capability for Botified tool execution", 409);
+function requireTaskEndpointCapabilities(endpoint: ModelEndpoint): void {
+  const missing = TASK_ENDPOINT_CAPABILITIES.filter((capability) => !endpoint.capabilities.includes(capability));
+  if (missing.length > 0) {
+    const capabilities = missing.join(" and ");
+    throw new ProductError(`Task endpoint must support the ${capabilities} ${missing.length === 1 ? "capability" : "capabilities"} for Botified execution`, 409);
   }
 }
 
@@ -157,7 +160,7 @@ export class TaskService {
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const project = await this.workspaces.requireProjectForUser(userId, projectId);
     const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
-    requireTaskEndpointToolCalls(endpoint);
+    requireTaskEndpointCapabilities(endpoint);
     const active = (await this.store.listTasksForProject(projectId)).filter((task) =>
       ["queued", "starting", "running", "stopping"].includes(task.status)
     );

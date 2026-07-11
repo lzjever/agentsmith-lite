@@ -105,40 +105,45 @@ describe("task service Botified orchestration", () => {
     assert.equal(botified.postMessageCalls.length, 0);
   });
 
-  it("rejects text-only endpoints before creating sandbox or Botified side effects", async () => {
-    const operations: string[] = [];
-    const botified = new FakeBotifiedClient([], { operations });
-    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
-    const resolver = new FakeCredentialResolver({
-      apiKey: "sk-real-model-key",
-      baseUrl: "https://models.example.com/v1/"
-    });
-    const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
-      endpointCapabilities: ["text"],
-      modelCredentialResolver: resolver,
-      liveSandbox: {
-        port: livePort,
-        readinessTimeoutMs: 1000,
-        readinessPollMs: 10,
-        sleep: livePort.sleep
-      }
-    });
+  it("rejects endpoints missing task capabilities before creating sandbox or Botified side effects", async () => {
+    for (const { capabilities, missingCapability } of [
+      { capabilities: ["text"] as const, missingCapability: "tool_calls" },
+      { capabilities: ["tool_calls"] as const, missingCapability: "text" }
+    ]) {
+      const operations: string[] = [];
+      const botified = new FakeBotifiedClient([], { operations });
+      const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+      const resolver = new FakeCredentialResolver({
+        apiKey: "sk-real-model-key",
+        baseUrl: "https://models.example.com/v1/"
+      });
+      const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, {
+        endpointCapabilities: [...capabilities],
+        modelCredentialResolver: resolver,
+        liveSandbox: {
+          port: livePort,
+          readinessTimeoutMs: 1000,
+          readinessPollMs: 10,
+          sleep: livePort.sleep
+        }
+      });
 
-    await assert.rejects(
-      () => services.tasks.createTask(userId, projectId, { prompt: "publish a file", endpointId }),
-      (error: unknown) => {
-        assert.ok(error instanceof ProductError);
-        assert.equal(error.statusCode, 409);
-        assert.match(error.message, /tool_calls/);
-        assert.doesNotMatch(error.message, /sk-real-model-key|secret\/openai/);
-        return true;
-      }
-    );
-    assert.deepEqual(operations, []);
-    assert.equal(livePort.appliedResources.length, 0);
-    assert.equal(botified.postMessageCalls.length, 0);
-    assert.deepEqual(resolver.calls, []);
-    assert.deepEqual(await store.listTasksForProject(projectId), []);
+      await assert.rejects(
+        () => services.tasks.createTask(userId, projectId, { prompt: "publish a file", endpointId }),
+        (error: unknown) => {
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode, 409);
+          assert.match(error.message, new RegExp(missingCapability));
+          assert.doesNotMatch(error.message, /sk-real-model-key|secret\/openai/);
+          return true;
+        }
+      );
+      assert.deepEqual(operations, []);
+      assert.equal(livePort.appliedResources.length, 0);
+      assert.equal(botified.postMessageCalls.length, 0);
+      assert.deepEqual(resolver.calls, []);
+      assert.deepEqual(await store.listTasksForProject(projectId), []);
+    }
   });
 
   it("does not resolve or use a pre-existing credential-bound endpoint for a non-admin live task owner", async () => {
