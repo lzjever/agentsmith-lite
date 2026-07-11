@@ -439,7 +439,7 @@ export class TaskService {
         }
         const productArtifact = {
           ...artifact,
-          name: sanitizeArtifactFilename(artifact.name, artifact.fileId)
+          name: normalizeArtifactDisplayName(artifact.name, artifact.fileId)
         };
         await this.downloadAndStoreTaskArtifact(task, state.baseUrl, serviceKey, productArtifact, download.fileId);
         await this.store.appendTaskArtifacts([productArtifact]);
@@ -640,7 +640,7 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
-    const filename = `${sanitizeArtifactFilename(artifact.id, "artifact")}-${sanitizeArtifactFilename(artifact.name, artifact.fileId)}`;
+    const filename = `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`;
     const filePath = path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
     return { root, filePath };
@@ -1033,7 +1033,26 @@ function resolveDurationMs(value: number | undefined, fallback: number): number 
   return Math.max(0, Math.floor(value));
 }
 
-function sanitizeArtifactFilename(input: string, fallback: string): string {
+function normalizeArtifactDisplayName(input: string, fallback: string): string {
+  const cleaned = path.posix.basename(input.replace(/\\/g, "/"))
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .replace(/^\.+/, "")
+    .slice(0, 180);
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+  const fallbackCleaned = path.posix.basename(fallback.replace(/\\/g, "/"))
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .replace(/^\.+/, "")
+    .slice(0, 180);
+  return fallbackCleaned.length > 0 ? fallbackCleaned : "artifact";
+}
+
+function artifactStorageSegment(input: string, fallback: string): string {
   const base = path.posix.basename(input.replace(/\\/g, "/"));
   const cleaned = base
     .replace(/[\u0000-\u001f\u007f]/g, "")

@@ -82,7 +82,7 @@ describe("task events API", () => {
       artifact.name,
       artifact.bytes,
       artifact.sha256
-    ]), [["f1", "-.txt", artifactBytes.byteLength, "b".repeat(64)]]);
+    ]), [["f1", "报告\".txt", artifactBytes.byteLength, "b".repeat(64)]]);
     assert.equal(botified.postMessageCalls[0]?.serviceKey, "api-service-key");
     assert.equal(botified.downloadFileCalls[0]?.serviceKey, "api-service-key");
     assert.doesNotMatch(leakedJson, /api-service-key|botified\.internal|download_url|\/v1\/files/);
@@ -95,8 +95,11 @@ describe("task events API", () => {
     assert.equal(download.headers.get("content-type"), "application/octet-stream");
     assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
     assert.equal(download.headers.get("x-content-type-options"), "nosniff");
-    assert.equal(download.headers.get("content-disposition"), "attachment; filename=\"-.txt\"");
-    const headerFilename = /^attachment; filename="([^"]+)"$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
+    assert.equal(
+      download.headers.get("content-disposition"),
+      "attachment; filename=\"___.txt\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A_.txt"
+    );
+    const headerFilename = /^attachment; filename="([^"]+)"(?:; filename\*=UTF-8''[^;]+)?$/.exec(download.headers.get("content-disposition") ?? "")?.[1] ?? "";
     assert.doesNotMatch(headerFilename, /[\r\n\\"/\u0080-\uffff]/);
     assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
     const downloadHeaders: string[] = [];
