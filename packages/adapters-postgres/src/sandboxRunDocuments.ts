@@ -27,6 +27,7 @@ function assertSandboxRunDocument(clone: unknown): asserts clone is Record<strin
   assertString(clone.phase, "phase");
   assertString(clone.cleanupStatus, "cleanupStatus");
   assertTerminalFailure(clone.terminalFailure);
+  assertStartupFailure(clone.startupFailure);
 }
 
 function assertNoSecretValues(value: unknown): void {
@@ -121,4 +122,21 @@ function assertTerminalFailure(value: unknown): void {
   if (syncAttempts !== MAX_TERMINAL_FAILURE_SYNC_ATTEMPTS || typeof value.lastSyncError !== "string") {
     throw new Error("Sandbox run terminalFailure unavailable settlement is invalid");
   }
+}
+
+function assertStartupFailure(value: unknown): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  assertRecord(value);
+  assertString(value.operation, "startupFailure.operation");
+  assertString(value.message, "startupFailure.message");
+  if (value.message.length > 300) {
+    throw new Error("Sandbox run startupFailure message is invalid");
+  }
+  const status = value.status;
+  if (typeof status !== "number" || !Number.isSafeInteger(status) || status < 100 || status > 599) {
+    throw new Error("Sandbox run startupFailure status is invalid");
+  }
+  assertString(value.at, "startupFailure.at");
 }

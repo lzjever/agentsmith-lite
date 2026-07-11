@@ -4,7 +4,7 @@ import { generateBotifiedConfig, serializeBotifiedConfig } from "../../packages/
 import { projectBotifiedTimelineEvents } from "../../packages/botified-runtime/src/projection.js";
 
 describe("botified runtime integration", () => {
-  it("generates a hardened per-task config without product TUI behavior", () => {
+  it("generates a hardened per-task config from the supplied runtime paths", () => {
     const config = generateBotifiedConfig({
       endpoint: {
         id: "e1",
@@ -22,8 +22,8 @@ describe("botified runtime integration", () => {
       task: {
         taskId: "t1",
         projectMountPath: "/workspace/project",
-        taskHomePath: "/workspace/project/tasks/t1/home",
-        botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        taskHomePath: "/runner/task-home",
+        botifiedDataPath: "/runner/botified-data",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         modelApiKeyEnv: "MODEL_API_KEY"
       }
@@ -79,12 +79,12 @@ describe("botified runtime integration", () => {
     assert.equal(config.service.max_queue_messages > 0, true);
     assert.equal(config.service.max_queue_bytes > 0, true);
     assert.deepEqual(Object.keys(config.runtime).sort(), ["cwd", "data_dir", "session"].sort());
-    assert.equal(config.runtime.cwd, "/workspace/task/home");
-    assert.equal(config.runtime.data_dir, "/workspace/task/botified");
+    assert.equal(config.runtime.cwd, "/runner/task-home");
+    assert.equal(config.runtime.data_dir, "/runner/botified-data");
     assert.equal(config.runtime.session, "t1");
     assert.equal(config.files.root_dir, "files");
-    assert.equal(pathIsInside(config.runtime.cwd, "/workspace/task"), true);
-    assert.equal(pathIsInside(config.runtime.data_dir, "/workspace/task"), true);
+    assert.equal(pathIsInside(config.runtime.cwd, "/runner"), true);
+    assert.equal(pathIsInside(config.runtime.data_dir, "/runner"), true);
     assert.notEqual(config.runtime.cwd, config.runtime.data_dir);
     assert.notEqual(config.files.root_dir, "/workspace/task/artifacts");
     assert.deepEqual(config.tools.enabled, ["bash"]);

@@ -924,9 +924,19 @@ describe("task service Botified orchestration", () => {
     );
     assert.equal((await postNotAccepted.store.listTasksForProject(postNotAccepted.projectId))[0]?.status, "failed");
     assert.deepEqual(postNotAcceptedPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    const postNotAcceptedRun = await postNotAccepted.store.sandboxRuns.get(
+      (await postNotAccepted.store.listTasksForProject(postNotAccepted.projectId))[0]?.runId ?? ""
+    );
+    assert.deepEqual(postNotAcceptedRun?.startupFailure, {
+      operation: "send message",
+      message: "Botified did not accept task prompt",
+      status: 502,
+      at: postNotAcceptedRun?.startupFailure?.at
+    });
+    assert.ok(Date.parse(postNotAcceptedRun?.startupFailure?.at ?? ""));
 
     const postErrorPort = new FakeLiveSandboxPort({ readiness: ["ready"] });
-    const postErrorBotified = new FakeBotifiedClient([], { postError: new Error("runtime down") });
+    const postErrorBotified = new FakeBotifiedClient([], { postError: new Error("runtime down with sk-real-model-key") });
     const postError = await setupTaskServices(postErrorBotified, {
       modelCredentialResolver: new FakeCredentialResolver({
         apiKey: "sk-real-model-key",
@@ -942,10 +952,20 @@ describe("task service Botified orchestration", () => {
         prompt: "post throws",
         endpointId: postError.endpointId
       }),
-      /Botified send message failed: runtime down/
+      /Botified send message failed: runtime down with sk-<redacted>/
     );
     assert.equal((await postError.store.listTasksForProject(postError.projectId))[0]?.status, "failed");
     assert.deepEqual(postErrorPort.deletedRefs.map((ref) => ref.kind), ["Pod", "Service", "NetworkPolicy", "ConfigMap", "Secret", "ServiceAccount"]);
+    const postErrorRun = await postError.store.sandboxRuns.get(
+      (await postError.store.listTasksForProject(postError.projectId))[0]?.runId ?? ""
+    );
+    assert.deepEqual(postErrorRun?.startupFailure, {
+      operation: "send message",
+      message: "Botified send message failed: runtime down with sk-<redacted>",
+      status: 502,
+      at: postErrorRun?.startupFailure?.at
+    });
+    assert.ok(Date.parse(postErrorRun?.startupFailure?.at ?? ""));
   });
 
   it("persists live cleanup intent before aborting Botified and reaping the run", async () => {

@@ -38,6 +38,13 @@ export interface PersistedSandboxTerminalFailure {
   lastSyncError?: string | null;
 }
 
+export interface PersistedSandboxStartupFailure {
+  operation: string;
+  message: string;
+  status: number;
+  at: string;
+}
+
 export interface PersistedSandboxRunResourceNames {
   pod: string;
   service: string;
@@ -84,6 +91,7 @@ export interface PersistedSandboxRunState {
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
   terminalFailure?: PersistedSandboxTerminalFailure | null;
+  startupFailure?: PersistedSandboxStartupFailure | null;
   fencingToken: number;
   cleanupStatus: PersistedSandboxCleanupStatus;
   cleanupAttempts?: number;

@@ -100,6 +100,8 @@ const BOTIFIED_RUNNER_GID = 10001;
 const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const API_OWNED_ARTIFACT_DIRECTORY_MODE = 0o755;
+const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
+const BOTIFIED_DATA_PATH = "/workspace/task/botified";
 
 function requireTaskEndpointToolCalls(endpoint: ModelEndpoint): void {
   if (!endpoint.capabilities.includes("tool_calls")) {
@@ -228,6 +230,7 @@ export class TaskService {
       : null;
 
     let acceptedPrompt = false;
+    let livePromptPostAttempted = false;
     try {
       if (liveRun) {
         await this.store.sandboxRuns.put(liveRun);
@@ -249,6 +252,7 @@ export class TaskService {
         throw new ProductError("Task is no longer starting", 409);
       }
 
+      livePromptPostAttempted = this.config.liveSandbox !== undefined;
       const posted = await this.callBotified("send message", () =>
         this.botified.postMessage(state.baseUrl, serviceKey, prompt)
       );
@@ -264,6 +268,9 @@ export class TaskService {
       return this.syncTaskTimeline(running);
     } catch (error) {
       if (!acceptedPrompt) {
+        if (liveRun && livePromptPostAttempted) {
+          await this.bestEffortPersistLiveStartupFailure(liveRun.runId, "send message", error);
+        }
         await this.bestEffortMarkTaskFailed(task);
         if (liveRun) {
           await this.bestEffortRequestRunCleanup(liveRun.runId, "stopping");
@@ -730,8 +737,8 @@ export class TaskService {
       task: {
         taskId: input.task.id,
         projectMountPath: "/workspace/project",
-        taskHomePath: input.run.directories.taskHome,
-        botifiedDataPath: input.run.directories.botified,
+        taskHomePath: BOTIFIED_TASK_HOME_PATH,
+        botifiedDataPath: BOTIFIED_DATA_PATH,
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         modelApiKeyEnv: "MODEL_API_KEY",
         ...(this.config.modelCa ? { modelCaBundlePath: this.config.modelCa.path } : {}),
@@ -773,6 +780,34 @@ export class TaskService {
       await this.store.updateTaskStatusIfNonterminal(task.id, "failed", nowIso());
     } catch {
       // Startup cleanup and the original failure must not depend on the failed-state write.
+    }
+  }
+
+  private async bestEffortPersistLiveStartupFailure(
+    runId: string,
+    operation: BotifiedOperation,
+    error: unknown
+  ): Promise<void> {
+    try {
+      const current = await this.store.sandboxRuns.get(runId);
+      if (!current) {
+        return;
+      }
+      const message = redactSecretLikeText(error instanceof Error ? error.message : "Unknown Botified error").slice(0, 300);
+      const status = error instanceof ProductError ? error.statusCode : 502;
+      await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
+        ...current,
+        startupFailure: {
+          operation,
+          message,
+          status,
+          at: nowIso()
+        },
+        fencingToken: current.fencingToken + 1,
+        updatedAt: nowIso()
+      });
+    } catch {
+      // Startup cleanup and the original failure must not depend on the failure metadata write.
     }
   }
 
