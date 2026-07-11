@@ -137,8 +137,8 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
       max_queue_bytes: 33_554_432
     },
     runtime: {
-      cwd: input.task.taskHomePath,
-      data_dir: input.task.botifiedDataPath,
+      cwd: "/workspace/task/home",
+      data_dir: "/workspace/task/botified",
       session: input.task.taskId
     },
     timeline: {

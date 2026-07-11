@@ -49,6 +49,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const serviceKeySecretName = kubernetesDnsLabelName(input.serviceKeySecretName);
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
   const modelApiKeySecretKey = input.modelApiKeySecretKey ?? "MODEL_API_KEY";
+  const taskSubPath = `${input.projectSubPath}/tasks/${input.taskId}`;
   const modelCaVolume = input.modelCa
     ? {
         name: "model-ca",
@@ -185,7 +186,18 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               {
                 name: "project-files",
                 mountPath: "/workspace/project",
-                subPath: input.projectSubPath
+                subPath: input.projectSubPath,
+                readOnly: true
+              },
+              {
+                name: "project-files",
+                mountPath: "/workspace/task/home",
+                subPath: `${taskSubPath}/home`
+              },
+              {
+                name: "project-files",
+                mountPath: "/workspace/task/botified",
+                subPath: `${taskSubPath}/botified`
               },
               {
                 name: "botified-config",

@@ -303,13 +303,14 @@ describe("task service Botified orchestration", () => {
       MODEL_API_KEY: "sk-real-model-key"
     });
     const appliedConfig = livePort.appliedResources.find((resource) => resource.kind === "ConfigMap") as ConfigMapResource | undefined;
+    const appliedPod = livePort.appliedResources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
     const generatedConfig = JSON.parse(appliedConfig?.data["botified-config.yaml"] ?? "{}") as {
       runtime?: { cwd?: string; data_dir?: string };
       service?: { host?: string; port?: number };
       providers?: Array<{ base_url?: string; api_key_env?: string; ca_bundle_path?: string }>;
     };
-    assert.equal(generatedConfig.runtime?.cwd, `/workspace/project/tasks/${task.id}/home`);
-    assert.equal(generatedConfig.runtime?.data_dir, `/workspace/project/tasks/${task.id}/botified`);
+    assert.equal(generatedConfig.runtime?.cwd, "/workspace/task/home");
+    assert.equal(generatedConfig.runtime?.data_dir, "/workspace/task/botified");
     assert.equal(generatedConfig.service?.host, "0.0.0.0");
     assert.equal(generatedConfig.service?.port, 3099);
     assert.equal(generatedConfig.providers?.[0]?.base_url, "https://agentsmith-lite-local-openai.agentsmith.svc.cluster.local/v1");
@@ -317,9 +318,39 @@ describe("task service Botified orchestration", () => {
     assert.equal(generatedConfig.providers?.[0]?.ca_bundle_path, "/etc/agentsmith-lite/model-ca/ca.crt");
     assert.equal(JSON.stringify(generatedConfig).includes("sk-real-model-key"), false);
     assert.equal(JSON.stringify(generatedConfig).includes("BEGIN CERTIFICATE"), false);
+    const projectMount = appliedPod?.spec.containers[0]?.volumeMounts.find(
+      (mount) => mount.name === "project-files" && mount.mountPath === "/workspace/project"
+    );
+    const taskHomeMount = appliedPod?.spec.containers[0]?.volumeMounts.find(
+      (mount) => mount.name === "project-files" && mount.mountPath === "/workspace/task/home"
+    );
+    const botifiedMount = appliedPod?.spec.containers[0]?.volumeMounts.find(
+      (mount) => mount.name === "project-files" && mount.mountPath === "/workspace/task/botified"
+    );
+    const projectSubPath = projectMount?.subPath;
+    assert.ok(projectSubPath);
+    assert.deepEqual(projectMount, {
+      name: "project-files",
+      mountPath: "/workspace/project",
+      subPath: projectSubPath,
+      readOnly: true
+    });
+    assert.deepEqual(taskHomeMount, {
+      name: "project-files",
+      mountPath: "/workspace/task/home",
+      subPath: `${projectSubPath}/tasks/${task.id}/home`
+    });
+    assert.deepEqual(botifiedMount, {
+      name: "project-files",
+      mountPath: "/workspace/task/botified",
+      subPath: `${projectSubPath}/tasks/${task.id}/botified`
+    });
+    assert.equal(
+      appliedPod?.spec.containers[0]?.volumeMounts.some((mount) => mount.subPath?.endsWith("/artifacts")),
+      false
+    );
     assert.equal(botified.postMessageCalls[0]?.baseUrl, botifiedBaseUrlForTask(task.id));
     assert.equal(botified.readTimelineCalls[0]?.baseUrl, botifiedBaseUrlForTask(task.id));
-    const appliedPod = livePort.appliedResources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
     const appliedContainer = appliedPod?.spec.containers[0];
     assert.ok(
       appliedContainer?.volumeMounts.some(
