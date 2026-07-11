@@ -19,19 +19,16 @@ Use `scripts/deploy/render.sh` and `scripts/deploy/apply.sh` for app manifest re
 
 ## Sandbox Operator CLI
 
-Sandbox lifecycle status and cleanup are API-backed. Use an admin session cookie file and CSRF token from an explicit login flow; the deploy scripts do not bootstrap or log in.
+Sandbox lifecycle status and reaping are API-backed. Use an admin session cookie file and CSRF token from an explicit login flow; the deploy scripts do not bootstrap or log in.
 
 ```bash
-scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
-scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
-scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --apply --cookie-file admin.cookie --csrf-token <csrf> [--run-id <run-id>]
+scripts/deploy/status.sh --env substrate.env
+node scripts/deploy/operator-sandbox.mjs status --base-url <url> --cookie-file admin.cookie
+node scripts/deploy/operator-sandbox.mjs reap --base-url <url> --cookie-file admin.cookie --csrf-token <csrf> --dry-run
+node scripts/deploy/operator-sandbox.mjs reap --base-url <url> --cookie-file admin.cookie --csrf-token <csrf> --apply [--run-id <run-id>]
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
-Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the substrate env file. Status, cleanup, and down only need substrate env, not app overlay. `status.sh --resources` calls `GET /api/operator/sandbox/status`; `cleanup-stuck-tasks.sh` calls `POST /api/operator/sandbox/reap`. Dry-run sends `{}` or `{ "runId": "..." }`; apply sends `{ "apply": true }` plus `runId` when `--run-id` is provided. `--dry-run` and `--apply` cannot be combined.
+Use `--base-url` or set `APP_PUBLIC_BASE_URL` in the substrate env file. Status and down only need substrate env, not app overlay. `operator-sandbox.mjs status` calls `GET /api/operator/sandbox/status`; `operator-sandbox.mjs reap` calls `POST /api/operator/sandbox/reap`. Dry-run sends `{}` or `{ "runId": "..." }`; apply sends `{ "apply": true }` plus `runId` when `--run-id` is provided. `--dry-run` and `--apply` cannot be combined.
 
 The formatted cleanup plan comes only from the product API. `kubectl` must not be used to derive sandbox cleanup targets.
-
-## Manual Checks
-
-`npm run e2e:operator-lifecycle` and `npm run visual:screenshot` are independent manual checks. They are useful before risky runtime, operator, or UI changes, but they are not part of `npm test`.

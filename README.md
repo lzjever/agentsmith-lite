@@ -31,22 +31,9 @@ scripts/dev/up.sh --env substrate.env --secrets substrate.secrets.env \
 
 `--env` and `--secrets` are the substrate contract. They export only the app-consumed substrate intersection, such as `APP_PUBLIC_BASE_URL`, Kubernetes namespace/context values, `JUICEFS_PVC_NAME`, OIDC issuer/client/backchannel values from `substrate.env` (`OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, and optional `OIDC_BACKCHANNEL_BASE_URL`), and product core secrets from `substrate.secrets.env` (`POSTGRES_APP_URL`, `APP_SESSION_SECRET`, plus either `BUILTIN_ADMIN_INITIAL_PASSWORD` for `AUTH_MODE=builtin_admin` or `OIDC_CLIENT_SECRET` for `AUTH_MODE=oidc`). Built-in mode filters empty OIDC placeholders and fails closed on non-empty OIDC runtime keys. OIDC mode requires non-empty `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET`; optional `OIDC_ADMIN_EMAILS` and `OIDC_ADMIN_SUBJECTS` come only from `--app-env`. Errors name keys without printing secret values. App-owned runtime/deploy overrides belong in `--app-env` (`OIDC_ADMIN_EMAILS`, `OIDC_ADMIN_SUBJECTS`, `BOTIFIED_RUNNER_IMAGE`, `AGENTSMITH_LITE_DATA_DIR`, sandbox mode/limit/tick settings, and `AGENTSMITH_LITE_MODEL_BASE_URL_*`); model API keys named `AGENTSMITH_LITE_MODEL_API_KEY_*` belong in `--app-secrets`. Raw substrate storage and CSI internals such as `S3_*`, `JUICEFS_META_URL`, `JUICEFS_BUCKET`, `JUICEFS_VOLUME_NAME`, `JUICEFS_SECRET_NAME`, `JUICEFS_CSI_DRIVER`, `JUICEFS_STORAGE_CLASS`, and `JUICEFS_MOUNT_ROOT` are not passed to the API child process or app overlay.
 
-## Manual Checks
+## Manual Browser Check
 
-These are opt-in developer checks, not part of the default test path:
-
-```bash
-npm run check:botified-runner
-npm run check:botified-runner-image
-npm run e2e:operator-lifecycle
-npm run visual:screenshot
-```
-
-`check:botified-runner` builds the Node output first, then runs a local Botified runner process from the pinned vendored binary with `--mock-provider`, posts a mock-provider command, observes bash output plus `file.published`, downloads the published artifact through the Botified file API, verifies marker/filename/bytes/sha256, and calls abort. It still expects the Rust binary at `third_party/botified/target/release/botified`. This is local runner process only; Kubernetes Pod/PVC, JuiceFS artifact flow, product task API, and cleanup require an external environment.
-
-`check:botified-runner-image` builds the Node output, builds `agentsmith-lite/botified-runner:check` from `infra/docker/Dockerfile.botified-runner`, runs that runner container with the mock provider, and exercises `/healthz`, `/v1/messages`, `/v1/timeline`, Botified file download, `/v1/state`, and `/v1/abort` through a random loopback port. It requires Docker to pull the Dockerfile base images. When it succeeds, this is runner-container-only; it does not cover Kubernetes, PVC, JuiceFS, product task API, or cancel/reap.
-
-The operator lifecycle e2e and visual screenshot are independent manual checks; they are not run by `npm test`. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
+`npm run visual:screenshot` is an independently selected browser diagnostic, not part of `npm test`. The screenshot is written to `out/visual/agentsmith-lite-dashboard.png`.
 
 ## Deploy Skeleton
 
@@ -87,16 +74,17 @@ Use `scripts/build-images.sh --tag dev --push --images-lock dist/images.lock --d
 
 The app offline bundle is fixed to `manifest.yaml`, `images.lock`, `checksums.txt`, `images/app.tar`, and `images/botified-runner.tar`. `checksums.txt` is an exact allowlist for `manifest.yaml`, `images.lock`, `images/app.tar`, and `images/botified-runner.tar`; bundle consumers reject duplicate entries, path traversal, absolute paths, URL-like paths, and non-allowlist paths. Each lock must name a single linux/amd64 OCI image manifest. Each archive must have exactly one `index.json` root descriptor with OCI image-manifest media type, matching digest, matching size, and matching blob hash; its config and layers are checked the same way. `scripts/build-offline-bundle.sh --images-lock`, `scripts/deploy/render.sh --images-lock`, `scripts/deploy/import-images.sh --bundle --k3s-bin "$(command -v k3s)"`, and `scripts/deploy/apply.sh --images-lock` reuse the app lock semantics from `parseAppImagesLock()`: source locks may include comments, blank lines, and surrounding whitespace, while the bundle lock is normalized to the two digest refs for app and runner. Import uses `ctr images import --base-name ... --digests`, binds the verified manifest with `ctr images tag --force`, and verifies the exact lock ref with `ctr images ls`; use `dist/offline-cache/bin/k3s` for the offline substrate cache workflow. This is only the app image bundle, not the substrates p1-real offline cache or a replacement for Kubernetes/JuiceFS install checks.
 
-Operator sandbox status and cleanup use the product API and require an authenticated admin session cookie:
+Operator sandbox reaping uses the product API and requires an authenticated admin session cookie:
 
 ```bash
-scripts/deploy/status.sh --env substrate.env --resources --cookie-file admin.cookie --csrf-token <csrf>
-scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --dry-run --cookie-file admin.cookie --csrf-token <csrf>
-scripts/deploy/cleanup-stuck-tasks.sh --env substrate.env --apply --cookie-file admin.cookie --csrf-token <csrf> [--run-id <run-id>]
+scripts/deploy/status.sh --env substrate.env
+node scripts/deploy/operator-sandbox.mjs status --base-url <url> --cookie-file admin.cookie
+node scripts/deploy/operator-sandbox.mjs reap --base-url <url> --cookie-file admin.cookie --csrf-token <csrf> --dry-run
+node scripts/deploy/operator-sandbox.mjs reap --base-url <url> --cookie-file admin.cookie --csrf-token <csrf> --apply [--run-id <run-id>]
 scripts/deploy/down.sh --env substrate.env [--dry-run]
 ```
 
-Pass `--base-url` or set `APP_PUBLIC_BASE_URL` in the substrate env file. Status, cleanup, and down only need substrate env, not app overlay. Cleanup defaults to dry-run unless `--apply` is passed; `--dry-run` and `--apply` cannot be combined. These scripts do not bootstrap or log in; status and cleanup only call `/api/operator/sandbox/status` and `/api/operator/sandbox/reap`.
+Pass `--base-url` or set `APP_PUBLIC_BASE_URL` in the substrate env file. Status and down only need substrate env, not app overlay. Reap defaults to dry-run unless `--apply` is passed; `--dry-run` and `--apply` cannot be combined. These commands do not bootstrap or log in.
 
 App deploy renders product config into app-owned Kubernetes resources: substrate env provides the app-consumed public/namespace/PVC fields plus OIDC issuer/client/backchannel values, `--app-env` provides non-secret app-owned runtime values such as `AGENTSMITH_LITE_MODEL_BASE_URL_*` plus optional `OIDC_ADMIN_EMAILS` and `OIDC_ADMIN_SUBJECTS`, and substrate secrets provide `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, and the active auth secret. OIDC env values render into the app ConfigMap from those sources and `OIDC_CLIENT_SECRET` renders into the app Secret; builtin mode keeps generated empty OIDC metadata filtered before manifest rendering and fails closed on non-empty OIDC runtime keys. Model API keys named `AGENTSMITH_LITE_MODEL_API_KEY_*` come from `--app-secrets`. S3 raw credentials and JuiceFS substrate secrets such as `JUICEFS_META_URL` stay with the substrate/CSI layer and must not be placed in app overlay.
 
