@@ -81,7 +81,6 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - Web UI active task 自动刷新已覆盖晚到 events/artifacts 自动出现，仍只通过产品 API 读取 task events/artifacts。
 - 旧 runner 路径已验证 Botified bash 可在 JuiceFS 挂载中写文件并发布 artifact，API 能读取 events、列出 artifacts、下载 artifact 内容；当前双容器 sidecar 路径仍需开发者手动在本地单机 K8s 跑一次真实任务验证，不是默认 gate。
 - cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
-- `scripts/deploy/check-product-workflow.sh` / `.mjs` 只是开发者主动选择的具体产品路径检查，stdout 输出，失败非零；不要包装成默认入口。
 - Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
 
 仍需注意的现实：

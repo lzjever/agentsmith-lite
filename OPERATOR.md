@@ -13,9 +13,9 @@ The app deploy contract supports `AUTH_MODE=builtin_admin` and `AUTH_MODE=oidc`.
 
 Substrate-only secrets such as `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and `JUICEFS_META_URL` must not be injected into app server, sandbox pods, Botified env, or app-owned Secrets.
 
-`--env`/`--secrets` are the substrate contract. App-owned deploy/runtime/workflow-check overrides belong in `--app-env`/`--app-secrets`; product core secrets still come from substrate secrets, and raw S3/JuiceFS substrate secrets must not be placed in app overlay.
+`--env`/`--secrets` are the substrate contract. App-owned deploy/runtime overrides belong in `--app-env`/`--app-secrets`; product core secrets still come from substrate secrets, and raw S3/JuiceFS substrate secrets must not be placed in app overlay.
 
-Use `scripts/deploy/render.sh` and `scripts/deploy/apply.sh` for app manifest rendering and apply-time readiness. Use `scripts/deploy/check-product-workflow.sh --env substrate.env --secrets substrate.secrets.env --app-env app.workflow.env` for a remote API workflow check. Built-in mode bootstraps/logs in with the configured built-in admin secret; OIDC mode requires `--cookie-file` and `--csrf-token` or `PRODUCT_WORKFLOW_COOKIE_FILE` and `PRODUCT_WORKFLOW_CSRF_TOKEN`. The check covers product API health, workspace/project/file CRUD, optional endpoint/chat, optional task artifact creation, optional task cancel/reap, and operator sandbox status. Add `--check-k8s-run-resources` only when read-only Kubernetes run-resource observation is needed. The workflow command prints redacted JSON to stdout and exits non-zero on failure.
+Use `scripts/deploy/render.sh` and `scripts/deploy/apply.sh` for app manifest rendering and apply-time readiness.
 
 ## Sandbox Operator CLI
 
