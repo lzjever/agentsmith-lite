@@ -6,6 +6,18 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 describe("deploy env contract", () => {
+  it("rejects the installer namespace from app overlays", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-installer-namespace-overlay-"));
+    const appEnvFile = path.join(tempDir, "app.env");
+    writeFileSync(appEnvFile, "SUBSTRATE_NAMESPACE=agentsmith-substrates\n");
+
+    const result = runContract(["export", "--app-env", appEnvFile]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SUBSTRATE_NAMESPACE/);
+    assert.doesNotMatch(result.stdout, /agentsmith-substrates/);
+  });
+
   it("accepts the generated substrates env/secrets shape while exporting only app-consumed keys", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-generated-"));
     const envFile = path.join(tempDir, "substrate.env");

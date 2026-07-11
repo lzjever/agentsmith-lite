@@ -57,6 +57,7 @@ const oidcRuntimeEnvKeys = [...oidcCoreSubstrateEnvKeys, ...oidcAdminAllowlistAp
 
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
+  "SUBSTRATE_NAMESPACE",
   "REGISTRY_URL",
   "IMAGE_PULL_SECRET_NAME",
   "KUBERNETES_SKIP_K3S",

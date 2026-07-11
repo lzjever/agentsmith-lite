@@ -6,6 +6,30 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 describe("render manifests YAML", () => {
+  it("keeps the installer namespace out of app manifests and renders app resources in KUBE_NAMESPACE", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-render-namespace-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const outDir = path.join(tempDir, "manifests");
+
+    writeFileSync(envFile, "SUBSTRATE_NAMESPACE=agentsmith-substrates\nKUBE_NAMESPACE=agentsmith-app\n");
+
+    const result = spawnSync(
+      "bash",
+      ["scripts/deploy/render.sh", "--env", envFile, "--out", outDir, "--tag", "dev"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8"
+      }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
+    assert.doesNotMatch(manifest, /SUBSTRATE_NAMESPACE|agentsmith-substrates/);
+    assert.match(manifest, /kind: "Role"\n\s+metadata:\n\s+name: "agentsmith-lite-api-sandbox"\n\s+namespace: "agentsmith-app"/);
+    assert.match(manifest, /kind: "RoleBinding"\n\s+metadata:\n\s+name: "agentsmith-lite-api-sandbox"\n\s+namespace: "agentsmith-app"/);
+    assert.deepEqual([...manifest.matchAll(/^\s+namespace: "([^"]+)"$/gm)].map((match) => match[1]), Array(10).fill("agentsmith-app"));
+  });
+
   it("quotes ConfigMap.data and Secret.stringData strings that look like YAML scalars", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-render-yaml-"));
     const envFile = path.join(tempDir, "substrate.env");
