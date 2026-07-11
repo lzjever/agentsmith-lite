@@ -53,6 +53,27 @@ describe("app manifest rendering", () => {
     ]);
   });
 
+  it("binds the self-hosted Traefik HTTPS ingress to websecure only", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {
+        APP_PUBLIC_BASE_URL: "https://agentsmith.localhost",
+        APP_INGRESS_CLASS: "traefik",
+        APP_TLS_SECRET_NAME: "agentsmith-lite-local-ingress-tls",
+        APP_INGRESS_TRAEFIK_ENTRYPOINTS: "websecure"
+      },
+      secrets: {}
+    });
+
+    const ingress = manifests.find((manifest) => manifest.kind === "Ingress" && manifest.metadata.name === "agentsmith-lite-api") as
+      | IngressResource
+      | undefined;
+
+    assert.ok(ingress);
+    assert.equal(ingress.metadata.annotations?.["traefik.ingress.kubernetes.io/router.entrypoints"], "websecure");
+  });
+
   it("omits optional Ingress fields when unset and skips local public URLs", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -669,6 +690,7 @@ interface IngressResource {
     name: string;
     namespace?: string;
     labels: Record<string, string>;
+    annotations?: Record<string, string>;
   };
   spec: {
     ingressClassName?: string;

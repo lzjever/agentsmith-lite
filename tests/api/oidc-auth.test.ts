@@ -203,6 +203,7 @@ describe("api OIDC auth", () => {
     assert.equal(start.status, 302);
     assert.equal(start.headers.get("location"), "https://idp.example.test/auth?state=oidc-state-test");
     assert.match(start.headers.get("set-cookie") ?? "", /asl_oidc_tx=.*Path=\/app\/api\/auth\/oidc/);
+    assert.match(start.headers.get("set-cookie") ?? "", /asl_oidc_tx=.*; Secure$/);
     const transactionCookie = cookieFromSetCookie(start.headers.get("set-cookie"));
     assert.ok(transactionCookie.startsWith("asl_oidc_tx="));
     const authorizationCall = oidcCalls.at(-1);
@@ -218,6 +219,7 @@ describe("api OIDC auth", () => {
     const sessionCookie = cookieFromSetCookie(callbackCookies);
     assert.ok(sessionCookie.startsWith("asl_session="));
     assert.match(callbackCookies, /asl_session=.*Path=\/app/);
+    assert.match(callbackCookies, /asl_session=.*; Secure/);
     assert.match(callbackCookies, /asl_oidc_tx=;/);
     assert.match(callbackCookies, /asl_oidc_tx=;.*Path=\/app\/api\/auth\/oidc/);
     const callbackCall = oidcCalls.at(-1);
@@ -241,6 +243,30 @@ describe("api OIDC auth", () => {
   function apiPath(pathname: string): string {
     return `${appBasePath}${pathname}`;
   }
+});
+
+describe("OIDC cookie transport", () => {
+  it("keeps HTTP development public bases testable without Secure cookies", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-api-oidc-http-"));
+    const api = await createApiServer({
+      port: 0,
+      dataRoot,
+      authMode: "oidc",
+      builtinAdminPassword: "builtin-password-must-not-work",
+      sessionSecret: "oidc-session-secret-at-least-32-chars",
+      publicBaseUrl: "http://agentsmith.example.test",
+      oidcClient: fakeOidcClient([], []),
+      oidcAdminEmails: ["oidc.admin@example.test"]
+    });
+    try {
+      const start = await fetch(`${api.baseUrl}/api/auth/oidc/start`, { redirect: "manual" });
+      assert.equal(start.status, 302);
+      assert.doesNotMatch(start.headers.get("set-cookie") ?? "", /; Secure(?:;|$)/);
+    } finally {
+      await api.close();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 function fakeOidcClient(calls: Array<Record<string, string | undefined>>, principals: ExternalPrincipal[]): OidcClientAdapter {

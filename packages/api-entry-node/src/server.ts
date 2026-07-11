@@ -115,6 +115,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
           bootstrapPassword: options.builtinAdminPassword,
           sessionSecret: effectiveSessionSecret,
           appBasePath,
+          secureCookies: publicBaseUrlUsesHttps(options.publicBaseUrl),
           ...(options.publicBaseUrl ? { publicBaseUrl: options.publicBaseUrl } : {}),
           ...(options.oidcClient ? { oidcClient: options.oidcClient } : {})
         });
@@ -150,6 +151,7 @@ interface AuthRouteContext {
   bootstrapPassword: string;
   sessionSecret: string;
   appBasePath: string;
+  secureCookies: boolean;
   publicBaseUrl?: string;
   oidcClient?: OidcClientAdapter;
 }
@@ -187,9 +189,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     }
     const body = await readJson(req);
     const result = await services.auth.login(asString(body.email), asString(body.password));
-    res.setHeader("set-cookie", [
-      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=43200`
-    ]);
+    res.setHeader("set-cookie", [serializeAuthCookie("asl_session", result.sessionId, sessionCookiePath(auth.appBasePath), 43200, auth.secureCookies)]);
     return sendJson(res, 200, result);
   }
 
@@ -199,15 +199,13 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     }
     const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl, auth.appBasePath);
     const authorization = await auth.oidcClient.createAuthorizationRequest({ redirectUri });
-    res.setHeader("set-cookie", [
-      `asl_oidc_tx=${encodeOidcTransaction({
+    res.setHeader("set-cookie", [serializeAuthCookie("asl_oidc_tx", encodeOidcTransaction({
         state: authorization.state,
         codeVerifier: authorization.codeVerifier,
         nonce: authorization.nonce,
         redirectUri,
         createdAt: Date.now()
-      }, auth.sessionSecret)}; HttpOnly; SameSite=Lax; Path=${oidcTransactionCookiePath(auth.appBasePath)}; Max-Age=600`
-    ]);
+      }, auth.sessionSecret), oidcTransactionCookiePath(auth.appBasePath), 600, auth.secureCookies)]);
     return sendRedirect(res, 302, authorization.authorizationUrl);
   }
 
@@ -224,8 +222,8 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       nonce: transaction.nonce
     }));
     res.setHeader("set-cookie", [
-      `asl_session=${result.sessionId}; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=43200`,
-      `asl_oidc_tx=; HttpOnly; SameSite=Lax; Path=${oidcTransactionCookiePath(auth.appBasePath)}; Max-Age=0`
+      serializeAuthCookie("asl_session", result.sessionId, sessionCookiePath(auth.appBasePath), 43200, auth.secureCookies),
+      serializeAuthCookie("asl_oidc_tx", "", oidcTransactionCookiePath(auth.appBasePath), 0, auth.secureCookies)
     ]);
     return sendRedirect(res, 302, appHomePath(auth.appBasePath));
   }
@@ -243,9 +241,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
 
   if (method === "POST" && url.pathname === "/api/auth/logout") {
     await services.auth.logout(sessionId);
-    res.setHeader("set-cookie", [
-      `asl_session=; HttpOnly; SameSite=Lax; Path=${sessionCookiePath(auth.appBasePath)}; Max-Age=0`
-    ]);
+    res.setHeader("set-cookie", [serializeAuthCookie("asl_session", "", sessionCookiePath(auth.appBasePath), 0, auth.secureCookies)]);
     return sendJson(res, 200, { loggedOut: true });
   }
 
@@ -417,6 +413,21 @@ function routeUrlForAppBasePath(url: URL, appBasePath: string): URL | null {
 
 function sessionCookiePath(appBasePath: string): string {
   return appBasePath || "/";
+}
+
+function publicBaseUrlUsesHttps(publicBaseUrl: string | undefined): boolean {
+  return publicBaseUrl !== undefined && new URL(publicBaseUrl).protocol === "https:";
+}
+
+function serializeAuthCookie(name: string, value: string, cookiePath: string, maxAge: number, secure: boolean): string {
+  return [
+    `${name}=${value}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    `Path=${cookiePath}`,
+    `Max-Age=${maxAge}`,
+    ...(secure ? ["Secure"] : [])
+  ].join("; ");
 }
 
 function oidcTransactionCookiePath(appBasePath: string): string {

@@ -79,9 +79,9 @@ Core 中的 chat 只是 endpoint/server-side model access 验证路径，不是�
 - Keycloak/OIDC login/callback/session/logout、`OIDC_BACKCHANNEL_BASE_URL`、OIDC env contract 已通过手动验证；app 消费 substrates 输出的 issuer/client/secret/backchannel。
 - Web UI logout、服务端 session revoke、`e2e:web-product-oidc` 手动浏览器路径已覆盖 OIDC login/callback -> workspace/project -> endpoint -> task -> artifact download -> project file upload/download/delete -> logout。
 - Web UI active task 自动刷新已覆盖晚到 events/artifacts 自动出现，仍只通过产品 API 读取 task events/artifacts。
-- 旧 runner 路径已验证 Botified bash 可在 JuiceFS 挂载中写文件并发布 artifact，API 能读取 events、列出 artifacts、下载 artifact 内容；当前双容器 sidecar 路径仍需在本地单机 K8s 跑一次真实任务验证，由 agent 按核心验证需要主动执行，不是默认 gate。
+- 本地单机 K8s 已验证双容器 Botified sidecar：Bash 在 JuiceFS 挂载中写入并发布 artifact，API 能读取 events、下载并校验 artifact，run-owned resources 会被回收；这是核心路径验证，不是默认 gate。
 - cancel、TTL、reap 已通过本地 artifact/reclaim 手动验证，并继续使用 runId/label/UID fencing 只清理 app-owned resources。
-- Boundary checks 保留 repo scope、UI client boundary、forbidden surfaces。
+- 不保留 repo scope、源码边界或文档同步类审计；只保留当前业务路径需要的直接测试。
 
 仍需注意的现实：
 

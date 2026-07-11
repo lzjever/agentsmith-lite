@@ -322,6 +322,7 @@ function renderAppIngress(input: AppManifestInput, parsed: URL, publicBasePath: 
 
   const ingressClassName = input.env.APP_INGRESS_CLASS?.trim();
   const tlsSecretName = input.env.APP_TLS_SECRET_NAME?.trim();
+  const traefikEntrypoints = input.env.APP_INGRESS_TRAEFIK_ENTRYPOINTS?.trim();
   const spec: Record<string, unknown> = {
     rules: [
       {
@@ -356,7 +357,14 @@ function renderAppIngress(input: AppManifestInput, parsed: URL, publicBasePath: 
   return {
     apiVersion: "networking.k8s.io/v1",
     kind: "Ingress",
-    metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels },
+    metadata: {
+      name: "agentsmith-lite-api",
+      namespace: input.namespace,
+      labels,
+      ...(ingressClassName === "traefik" && traefikEntrypoints === "websecure"
+        ? { annotations: { "traefik.ingress.kubernetes.io/router.entrypoints": "websecure" } }
+        : {})
+    },
     spec
   };
 }
