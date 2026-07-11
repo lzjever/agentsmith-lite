@@ -5,35 +5,48 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { FileService } from "../../packages/application/src/fileService.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
+import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 
 describe("file CRUD service", () => {
-  it("uploads, lists, downloads, and deletes UTF-8 project files under files/", async () => {
+  it("uploads, lists, downloads, and deletes arbitrary project file bytes under files/", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
 
-      const uploaded = await service.uploadTextFile(root, {
+      const content = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
+      const uploaded = await service.uploadFile(root, {
         path: "files/notes/../notes/plan.md",
-        content: "hello from files"
+        bytes: content
       });
       assert.equal(uploaded.path, "files/notes/plan.md");
-      assert.equal(await readFile(path.join(root, "files", "notes", "plan.md"), "utf8"), "hello from files");
+      assert.deepEqual([...await readFile(path.join(root, "files", "notes", "plan.md"))], [...content]);
 
       const listed = await service.listFiles(root, "files");
       assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.path, entry.type]), [["notes", "files/notes", "directory"]]);
 
       const nested = await service.listFiles(root, "files/notes");
-      assert.deepEqual(nested.entries.map((entry) => [entry.name, entry.path, entry.type, entry.size]), [["plan.md", "files/notes/plan.md", "file", 16]]);
+      assert.deepEqual(nested.entries.map((entry) => [entry.name, entry.path, entry.type, entry.size]), [["plan.md", "files/notes/plan.md", "file", 4]]);
 
-      const downloaded = await service.downloadTextFile(root, "files/notes/plan.md");
-      assert.deepEqual(downloaded, {
-        path: "files/notes/plan.md",
-        filename: "plan.md",
-        content: "hello from files"
-      });
+      const downloaded = await service.downloadFile(root, "files/notes/plan.md");
+      assert.equal(downloaded.path, "files/notes/plan.md");
+      assert.equal(downloaded.filename, "plan.md");
+      assert.deepEqual([...downloaded.bytes], [...content]);
 
       assert.deepEqual(await service.deleteFile(root, "files/notes/plan.md"), { deleted: true });
       assert.deepEqual((await service.listFiles(root, "files/notes")).entries, []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects project file bytes over the explicit file limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
+    try {
+      const service = new FileService();
+      await assert.rejects(
+        () => service.uploadFile(root, { path: "files/too-large.bin", bytes: new Uint8Array(MAX_PROJECT_FILE_BYTES + 1) }),
+        (error) => productError(error, 413, /Project file exceeds the .*byte limit/)
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -45,15 +58,15 @@ describe("file CRUD service", () => {
       const service = new FileService();
 
       await assert.rejects(
-        () => service.uploadTextFile(root, { path: "notes/plan.md", content: "nope" }),
+        () => service.uploadFile(root, { path: "notes/plan.md", bytes: new Uint8Array() }),
         /Project files must be under files\//
       );
       await assert.rejects(
-        () => service.uploadTextFile(root, { path: "../files/plan.md", content: "nope" }),
+        () => service.uploadFile(root, { path: "../files/plan.md", bytes: new Uint8Array() }),
         /Path traversal is not allowed/
       );
       await assert.rejects(
-        () => service.uploadTextFile(root, { path: "files\\plan.md", content: "nope" }),
+        () => service.uploadFile(root, { path: "files\\plan.md", bytes: new Uint8Array() }),
         /Backslash paths are not allowed/
       );
       await assert.rejects(
@@ -72,7 +85,7 @@ describe("file CRUD service", () => {
       await mkdir(path.join(root, "files", "notes"), { recursive: true });
 
       await assert.rejects(
-        () => service.downloadTextFile(root, "files/notes"),
+        () => service.downloadFile(root, "files/notes"),
         (error) => productError(error, 400, /Path is a directory/)
       );
       await assert.rejects(
@@ -104,7 +117,7 @@ describe("file CRUD service", () => {
         (error) => productError(error, 400, /Path is not a directory/)
       );
       await assert.rejects(
-        () => service.downloadTextFile(root, "files/plain.txt/child.txt"),
+        () => service.downloadFile(root, "files/plain.txt/child.txt"),
         (error) => productError(error, 400, /Path is not a directory/)
       );
       await assert.rejects(
@@ -131,11 +144,11 @@ describe("file CRUD service", () => {
       assert.deepEqual(listed.entries.map((entry) => entry.path), ["files/safe"]);
 
       await assert.rejects(
-        () => service.downloadTextFile(root, "files/escape/secret.txt"),
+        () => service.downloadFile(root, "files/escape/secret.txt"),
         /Path escapes the project root/
       );
       await assert.rejects(
-        () => service.uploadTextFile(root, { path: "files/escape/new.txt", content: "nope" }),
+        () => service.uploadFile(root, { path: "files/escape/new.txt", bytes: new Uint8Array() }),
         /Path escapes the project root/
       );
     } finally {

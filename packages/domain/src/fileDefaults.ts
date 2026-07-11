@@ -1,0 +1,1 @@
+export const MAX_PROJECT_FILE_BYTES = 52_428_800;

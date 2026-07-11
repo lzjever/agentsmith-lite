@@ -35,6 +35,8 @@ const endpointForm = document.querySelector("#endpoint-form");
 const chatForm = document.querySelector("#chat-form");
 const taskForm = document.querySelector("#task-form");
 const projectFileForm = document.querySelector("#project-file-form");
+const projectFilePathInput = projectFileForm.elements.namedItem("path");
+const projectFileInput = projectFileForm.elements.namedItem("file");
 const chatEndpointSelect = document.querySelector("#chat-endpoint");
 const taskEndpointSelect = document.querySelector("#task-endpoint");
 const chatReplyEl = document.querySelector("#chat-reply");
@@ -240,18 +242,30 @@ projectFileForm.addEventListener("submit", async (event) => {
 
   const form = new FormData(projectFileForm);
   const path = String(form.get("path") ?? "");
-  const content = String(form.get("content") ?? "");
+  const file = form.get("file");
+  if (!(file instanceof File) || !file.name) {
+    setStatus("Choose a project file.", "error");
+    return;
+  }
   try {
-    await api(`/api/projects/${state.projectId}/files`, {
-      method: "POST",
+    await api(`/api/projects/${state.projectId}/files?path=${encodeURIComponent(path)}`, {
+      method: "PUT",
       csrf: state.csrfToken,
-      body: { path, content }
+      contentType: "application/octet-stream",
+      rawBody: file
     });
     projectFileForm.reset();
     setStatus("Project file uploaded.", "success");
     await refreshProjectFiles();
   } catch (error) {
     setStatus(errorMessage(error), "error");
+  }
+});
+
+projectFileInput.addEventListener("change", () => {
+  const file = projectFileInput.files?.[0];
+  if (file) {
+    projectFilePathInput.value = `files/${file.name}`;
   }
 });
 
@@ -887,14 +901,14 @@ function apiUrl(path) {
 }
 
 async function api(path, options = {}) {
-  const headers = { "content-type": "application/json" };
+  const headers = { "content-type": options.contentType ?? "application/json" };
   if (options.csrf) {
     headers["x-csrf-token"] = options.csrf;
   }
   const response = await fetch(apiUrl(path), {
     method: options.method ?? "GET",
     headers,
-    body: options.body ? JSON.stringify(options.body) : undefined
+    body: options.rawBody ?? (options.body ? JSON.stringify(options.body) : undefined)
   });
   if (!response.ok) {
     const error = new Error(await responseErrorMessage(response));

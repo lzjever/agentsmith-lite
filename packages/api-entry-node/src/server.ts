@@ -12,8 +12,9 @@ import {
 } from "../../application/src/factory.js";
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint, UploadProjectFileInput } from "../../contracts/src/api.js";
+import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
+import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -314,23 +315,21 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       const project = await services.workspaces.requireProjectForUser(user.id, projectId);
       const projectRoot = services.projectAbsoluteRoot(project.rootPath);
 
-      if (segments[4] === "validate" && method === "POST") {
-        const body = await readJson(req);
-        const resolved = await services.files.resolveProjectFilesPath(projectRoot, asString(body.path), { allowFilesRoot: true });
-        return sendJson(res, 200, { normalizedPath: resolved.normalizedPath });
-      }
       if (!segments[4] && method === "GET") {
         return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
       }
-      if (!segments[4] && method === "POST") {
-        return sendJson(res, 200, await services.files.uploadTextFile(projectRoot, asUploadProjectFileInput(await readJson(req))));
+      if (!segments[4] && method === "PUT") {
+        return sendJson(res, 200, await services.files.uploadFile(projectRoot, {
+          path: requiredSearchParam(url, "path"),
+          bytes: await readProjectFileBytes(req)
+        }));
       }
       if (!segments[4] && method === "DELETE") {
         const body = await readJson(req);
         return sendJson(res, 200, await services.files.deleteFile(projectRoot, asString(body.path)));
       }
       if (segments[4] === "download" && method === "GET") {
-        return sendProjectFileDownload(res, await services.files.downloadTextFile(projectRoot, requiredSearchParam(url, "path")));
+        return sendProjectFileDownload(res, await services.files.downloadFile(projectRoot, requiredSearchParam(url, "path")));
       }
     }
     if (segments[3] === "tasks") {
@@ -523,9 +522,9 @@ function sendArtifactDownload(
 
 function sendProjectFileDownload(
   res: ServerResponse,
-  download: Awaited<ReturnType<Services["files"]["downloadTextFile"]>>
+  download: Awaited<ReturnType<Services["files"]["downloadFile"]>>
 ): void {
-  const bytes = Buffer.from(download.content, "utf8");
+  const bytes = Buffer.from(download.bytes);
   res.writeHead(200, {
     "content-type": "application/octet-stream",
     "content-length": String(bytes.byteLength),
@@ -704,11 +703,33 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
-function asUploadProjectFileInput(body: Record<string, unknown>): UploadProjectFileInput {
-  return {
-    path: asString(body.path),
-    content: asString(body.content)
-  };
+async function readProjectFileBytes(req: IncomingMessage): Promise<Uint8Array> {
+  const contentType = firstHeaderValue(req.headers["content-type"]);
+  if (!contentType?.toLowerCase().startsWith("application/octet-stream")) {
+    throw new ProductError("Project file uploads require Content-Type application/octet-stream");
+  }
+  const contentLength = firstHeaderValue(req.headers["content-length"]);
+  if (contentLength !== undefined) {
+    const declaredBytes = Number(contentLength);
+    if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
+      throw new ProductError("Content-Length must be a non-negative integer");
+    }
+    if (declaredBytes > MAX_PROJECT_FILE_BYTES) {
+      throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
+    }
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_PROJECT_FILE_BYTES) {
+      throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
+    }
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
 
 function asMessages(value: unknown): ChatMessage[] {

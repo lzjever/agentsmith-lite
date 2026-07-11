@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("api product workflow", () => {
@@ -72,14 +74,8 @@ describe("api product workflow", () => {
       messages: [{ role: "user", content: "hello" }]
     }, cookie, csrf);
     const filePath = "files/docs/readme.md";
-    const fileContent = "hello from API product workflow";
-    const fileValidation = await postJson(`/api/projects/${project.id}/files/validate`, {
-      path: filePath
-    }, cookie, csrf);
-    const uploadedFile = await requestJson("POST", `/api/projects/${project.id}/files`, {
-      path: filePath,
-      content: fileContent
-    }, cookie, csrf);
+    const fileContent = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
+    const uploadedFile = await requestRawFile(project.id, filePath, fileContent, cookie, csrf);
     const listedRootFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
     const listedNestedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
     const downloadedFile = await request(
@@ -89,11 +85,8 @@ describe("api product workflow", () => {
       cookie
     );
     const unicodeFilePath = "files/docs/报告.md";
-    const unicodeFileContent = "unicode filename";
-    await requestJson("POST", `/api/projects/${project.id}/files`, {
-      path: unicodeFilePath,
-      content: unicodeFileContent
-    }, cookie, csrf);
+    const unicodeFileContent = Uint8Array.from([0x75, 0x6e, 0x69, 0x63, 0x6f, 0x64, 0x65]);
+    await requestRawFile(project.id, unicodeFilePath, unicodeFileContent, cookie, csrf);
     const downloadedUnicodeFile = await request(
       "GET",
       `/api/projects/${project.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
@@ -147,9 +140,7 @@ describe("api product workflow", () => {
       model: "gpt-compatible",
       protocol: "openai_chat_completions"
     });
-    assert.deepEqual(fileValidation, { normalizedPath: filePath });
-    assert.equal("absolutePath" in fileValidation, false);
-    assert.deepEqual(uploadedFile, { path: filePath, bytes: Buffer.byteLength(fileContent) });
+    assert.deepEqual(uploadedFile, { path: filePath, bytes: fileContent.byteLength });
     assert.equal(listedRootFiles.entries.some((entry: { name: string; path: string; type: string }) =>
       entry.path === "files/docs" && entry.name === "docs" && entry.type === "directory"
     ), true);
@@ -158,30 +149,46 @@ describe("api product workflow", () => {
     ), true);
     assert.equal(downloadedFile.status, 200);
     assert.equal(downloadedFile.headers.get("content-type"), "application/octet-stream");
-    assert.equal(downloadedFile.headers.get("content-length"), String(Buffer.byteLength(fileContent)));
+    assert.equal(downloadedFile.headers.get("content-length"), String(fileContent.byteLength));
     assert.equal(downloadedFile.headers.get("content-disposition"), "attachment; filename=\"readme.md\"");
     assert.equal(downloadedFile.headers.get("x-content-type-options"), "nosniff");
-    assert.equal(await downloadedFile.text(), fileContent);
+    assert.deepEqual(new Uint8Array(await downloadedFile.arrayBuffer()), fileContent);
     assert.equal(downloadedUnicodeFile.status, 200);
     assert.equal(
       downloadedUnicodeFile.headers.get("content-disposition"),
       "attachment; filename=\"__.md\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.md"
     );
-    assert.equal(await downloadedUnicodeFile.text(), unicodeFileContent);
+    assert.deepEqual(new Uint8Array(await downloadedUnicodeFile.arrayBuffer()), unicodeFileContent);
     assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "running");
     assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);
 
-    const traversal = await fetch(baseUrl + `/api/projects/${project.id}/files`, {
-      method: "POST",
+    const traversal = await fetch(baseUrl + `/api/projects/${project.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
+      method: "PUT",
       headers: {
-        "content-type": "application/json",
+        "content-type": "application/octet-stream",
         cookie,
         "x-csrf-token": csrf
       },
-      body: JSON.stringify({ path: "../secret.txt", content: "nope" })
+      body: Buffer.from([0x6e, 0x6f, 0x70, 0x65])
     });
     assert.equal(traversal.status, 400);
+
+    const unauthenticatedUpload = await fetch(baseUrl + `/api/projects/${project.id}/files?path=files/forbidden.bin`, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: Buffer.from([0x01])
+    });
+    assert.equal(unauthenticatedUpload.status, 401);
+
+    const tooLargeUpload = await rawRequest(
+      `/api/projects/${project.id}/files?path=files/too-large.bin`,
+      cookie,
+      csrf,
+      { "content-length": String(MAX_PROJECT_FILE_BYTES + 1) }
+    );
+    assert.equal(tooLargeUpload.status, 413);
+    assert.deepEqual(tooLargeUpload.body, { error: `Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit` });
 
     const forbidden = await fetch(baseUrl + `/api/workspaces`, {
       method: "POST",
@@ -221,6 +228,49 @@ describe("api product workflow", () => {
       requestInit.body = JSON.stringify(body);
     }
     return fetch(baseUrl + pathname, requestInit);
+  }
+
+  async function requestRawFile(projectId: string, filePath: string, bytes: Uint8Array, cookie: string, csrf: string) {
+    const response = await fetch(baseUrl + `/api/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        cookie,
+        "x-csrf-token": csrf
+      },
+      body: Buffer.from(bytes)
+    });
+    if (response.status !== 200) {
+      assert.fail(await response.text());
+    }
+    return response.json();
+  }
+
+  async function rawRequest(pathname: string, cookie: string, csrf: string, headers: Record<string, string>) {
+    const url = new URL(baseUrl + pathname);
+    return new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      const request = httpRequest({
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: "PUT",
+        headers: {
+          "content-type": "application/octet-stream",
+          cookie,
+          "x-csrf-token": csrf,
+          ...headers
+        }
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => resolve({
+          status: response.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString("utf8"))
+        }));
+      });
+      request.on("error", reject);
+      request.end();
+    });
   }
 
   async function assertApiError(response: Response, status: number, error: string) {

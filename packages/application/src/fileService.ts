@@ -2,13 +2,14 @@ import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises
 import path from "node:path";
 import type {
   DeleteProjectFileResponse,
-  ProjectFileContentResponse,
+  ProjectFileDownloadResponse,
   ProjectFileEntry,
   ProjectFileListResponse,
   ProjectFileWriteResponse,
   UploadProjectFileInput
 } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
+import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
 import { FilePathValidationService } from "./filePathValidationService.js";
 
 interface ResolvedProjectFilePath {
@@ -50,14 +51,17 @@ export class FileService {
     };
   }
 
-  async uploadTextFile(projectRoot: string, input: UploadProjectFileInput): Promise<ProjectFileWriteResponse> {
+  async uploadFile(projectRoot: string, input: UploadProjectFileInput): Promise<ProjectFileWriteResponse> {
+    if (input.bytes.byteLength > MAX_PROJECT_FILE_BYTES) {
+      throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
+    }
     const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
     await mkdir(path.dirname(absolutePath), { recursive: true });
     await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
-    await writeFile(absolutePath, input.content, "utf8");
+    await writeFile(absolutePath, input.bytes);
     return {
       path: normalizedPath,
-      bytes: Buffer.byteLength(input.content, "utf8")
+      bytes: input.bytes.byteLength
     };
   }
 
@@ -116,7 +120,7 @@ export class FileService {
     };
   }
 
-  async downloadTextFile(projectRoot: string, input: string): Promise<ProjectFileContentResponse> {
+  async downloadFile(projectRoot: string, input: string): Promise<ProjectFileDownloadResponse> {
     const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input);
     try {
       const entryStat = await lstat(absolutePath);
@@ -129,7 +133,7 @@ export class FileService {
       return {
         path: normalizedPath,
         filename: path.posix.basename(normalizedPath),
-        content: await readFile(absolutePath, "utf8")
+        bytes: await readFile(absolutePath)
       };
     } catch (error) {
       if (error instanceof ProductError) {

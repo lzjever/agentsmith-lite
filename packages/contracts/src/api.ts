@@ -203,7 +203,7 @@ export interface ProjectFileListResponse {
 
 export interface UploadProjectFileInput {
   path: string;
-  content: string;
+  bytes: Uint8Array;
 }
 
 export interface ProjectFileWriteResponse {
@@ -211,10 +211,10 @@ export interface ProjectFileWriteResponse {
   bytes: number;
 }
 
-export interface ProjectFileContentResponse {
+export interface ProjectFileDownloadResponse {
   path: string;
   filename: string;
-  content: string;
+  bytes: Uint8Array;
 }
 
 export interface DeleteProjectFileResponse {
