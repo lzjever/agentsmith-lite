@@ -57,7 +57,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const modelCredentialResolver = input.modelCredentialResolver ?? new EnvModelCredentialResolver();
   const chat = new ChatService(
     endpoints,
-    workspaces,
     input.chatClient ?? new FetchOpenAICompatibleClient(),
     modelCredentialResolver
   );

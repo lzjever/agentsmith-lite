@@ -156,7 +156,7 @@ export class TaskService {
     const endpointId = requireNonEmptyString(input.endpointId, "task.endpointId");
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const project = await this.workspaces.requireProjectForUser(userId, projectId);
-    const endpoint = await this.endpoints.requireEndpointForProject(projectId, endpointId);
+    const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
     requireTaskEndpointToolCalls(endpoint);
     const active = (await this.store.listTasksForProject(projectId)).filter((task) =>
       ["queued", "starting", "running", "stopping"].includes(task.status)

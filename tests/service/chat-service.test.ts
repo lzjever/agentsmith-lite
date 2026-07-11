@@ -54,6 +54,40 @@ describe("ChatService", () => {
     assert.equal(clientCalls.length, 0);
   });
 
+  it("does not resolve a pre-existing credential-bound endpoint for a non-admin project owner", async () => {
+    const clientCalls: unknown[] = [];
+    const resolvedRefs: string[] = [];
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password",
+      chatClient: fakeClient(clientCalls),
+      modelCredentialResolver: trackingResolver(resolvedRefs, { "secret/openai": { apiKey: "sk-resolved", baseUrl: "https://models.example.com/v1" } })
+    });
+    const member = await services.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "member-chat-owner",
+      email: "member@example.test"
+    });
+    const workspace = await services.workspaces.createWorkspace(member.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(member.user.id, workspace.id, { name: "Project" });
+    const endpoint = await store.createEndpoint({
+      id: "endp_preexisting",
+      projectId: project.id,
+      ...endpointInput(),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    await assert.rejects(
+      () => services.chat.sendChat(member.user.id, project.id, endpoint.id, [{ role: "user", content: "hello" }]),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 403
+    );
+    assert.deepEqual(resolvedRefs, []);
+    assert.equal(clientCalls.length, 0);
+  });
+
   it("does not resolve secrets or call providers when the endpoint is missing", async () => {
     const clientCalls: unknown[] = [];
     const resolvedRefs: string[] = [];

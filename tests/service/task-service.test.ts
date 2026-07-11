@@ -141,6 +141,54 @@ describe("task service Botified orchestration", () => {
     assert.deepEqual(await store.listTasksForProject(projectId), []);
   });
 
+  it("does not resolve or use a pre-existing credential-bound endpoint for a non-admin live task owner", async () => {
+    const operations: string[] = [];
+    const botified = new FakeBotifiedClient([], { operations });
+    const livePort = new FakeLiveSandboxPort({ operations, readiness: ["ready"] });
+    const resolver = new FakeCredentialResolver({
+      apiKey: "sk-real-model-key",
+      baseUrl: "https://models.example.com/v1"
+    });
+    const { services, store } = await setupTaskServices(botified, {
+      modelCredentialResolver: resolver,
+      liveSandbox: {
+        port: livePort,
+        readinessTimeoutMs: 1000,
+        readinessPollMs: 10,
+        sleep: livePort.sleep
+      }
+    });
+    const member = await services.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "member-task-owner",
+      email: "member@example.test"
+    });
+    const workspace = await services.workspaces.createWorkspace(member.user.id, { name: "Member workspace" });
+    const project = await services.workspaces.createProject(member.user.id, workspace.id, { name: "Member project" });
+    const endpoint = await store.createEndpoint({
+      id: "endp_preexisting_member",
+      projectId: project.id,
+      name: "openai-compatible",
+      protocol: "openai_chat_completions",
+      baseUrl: "https://models.example.com/v1",
+      model: "gpt-compatible",
+      apiKeySecretRef: "secret/openai",
+      capabilities: ["text", "tool_calls"],
+      requestTimeoutSecs: 45,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    await assert.rejects(
+      () => services.tasks.createTask(member.user.id, project.id, { prompt: "publish a file", endpointId: endpoint.id }),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 403
+    );
+    assert.deepEqual(resolver.calls, []);
+    assert.deepEqual(operations, []);
+    assert.equal(botified.postMessageCalls.length, 0);
+    assert.deepEqual(await store.listTasksForProject(project.id), []);
+  });
+
   it("uses the safe Botified post cursor as the first timeline resume cursor", async () => {
     const botified = new FakeBotifiedClient([
       {

@@ -187,4 +187,34 @@ describe("product services", () => {
       );
     }
   });
+
+  it("does not let a project owner create a credential-bound endpoint without the admin role", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password"
+    });
+    const member = await services.auth.loginExternalPrincipal({
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "member-endpoint-owner",
+      email: "member@example.test"
+    });
+    const workspace = await services.workspaces.createWorkspace(member.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(member.user.id, workspace.id, { name: "Project" });
+
+    await assert.rejects(
+      () => services.endpoints.createEndpoint(member.user.id, project.id, {
+        name: "openai-compatible",
+        protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1",
+        model: "gpt-compatible",
+        apiKeySecretRef: "secret/openai",
+        capabilities: ["text"],
+        requestTimeoutSecs: 30
+      }),
+      (error: unknown) => error instanceof Error && /Admin role is required/.test(error.message)
+    );
+    assert.deepEqual(await store.listEndpointsForProject(project.id), []);
+  });
 });

@@ -119,6 +119,38 @@ describe("api OIDC auth", () => {
     });
     assert.equal(workspace.status, 200);
 
+    const memberWorkspace = await workspace.json();
+    const projectResponse = await fetch(baseUrl + apiPath(`/api/workspaces/${memberWorkspace.id}/projects`), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: login.sessionCookie,
+        "x-csrf-token": login.csrfToken
+      },
+      body: JSON.stringify({ name: "OIDC Project" })
+    });
+    assert.equal(projectResponse.status, 200);
+    const project = await projectResponse.json();
+    const endpoint = await fetch(baseUrl + apiPath(`/api/projects/${project.id}/endpoints`), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: login.sessionCookie,
+        "x-csrf-token": login.csrfToken
+      },
+      body: JSON.stringify({
+        name: "Member endpoint",
+        protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1",
+        model: "gpt-compatible",
+        apiKeySecretRef: "secret/openai",
+        capabilities: ["text", "tool_calls"],
+        requestTimeoutSecs: 30
+      })
+    });
+    assert.equal(endpoint.status, 403);
+    assert.doesNotMatch(await endpoint.text(), /apiKeySecretRef|secret\/openai/);
+
     const logout = await fetch(baseUrl + apiPath("/api/auth/logout"), {
       method: "POST",
       headers: {

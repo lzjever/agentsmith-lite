@@ -1,5 +1,5 @@
 import type { CreateEndpointInput, ModelEndpoint } from "../../contracts/src/api.js";
-import { NotFoundError } from "../../domain/src/errors.js";
+import { ForbiddenError, NotFoundError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
@@ -14,6 +14,7 @@ export class EndpointService {
 
   async createEndpoint(userId: string, projectId: string, input: CreateEndpointInput): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId);
+    await this.requireAdmin(userId);
     const timestamp = nowIso();
     const endpoint: ModelEndpoint = {
       id: newId("endp"),
@@ -44,5 +45,18 @@ export class EndpointService {
     }
     return endpoint;
   }
-}
 
+  async requireCredentialEndpointForUser(userId: string, projectId: string, endpointId: string): Promise<ModelEndpoint> {
+    await this.workspaces.requireProjectForUser(userId, projectId);
+    const endpoint = await this.requireEndpointForProject(projectId, endpointId);
+    await this.requireAdmin(userId);
+    return endpoint;
+  }
+
+  private async requireAdmin(userId: string): Promise<void> {
+    const user = await this.store.findUserById(userId);
+    if (user?.role !== "admin") {
+      throw new ForbiddenError("Admin role is required");
+    }
+  }
+}

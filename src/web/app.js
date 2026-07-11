@@ -1,6 +1,7 @@
 const state = {
   authMode: "builtin_admin",
   csrfToken: null,
+  userRole: null,
   workspaceId: null,
   projectId: null,
   projectFilesPath: "files",
@@ -335,6 +336,7 @@ function handleUnauthorizedSession() {
 }
 
 function renderDashboard(data) {
+  state.userRole = data.user?.role ?? null;
   const previousProjectId = state.projectId;
   const projects = data.workspaces.flatMap((workspace) =>
     workspace.projects.map((project) => ({ ...project, workspaceName: workspace.name }))
@@ -362,7 +364,7 @@ function renderDashboard(data) {
   renderTasks(state.tasks);
   renderTimeline(state.tasks);
   syncEndpointSelects();
-  syncWorkflowControls(Boolean(currentProject), state.endpoints.length > 0);
+  syncWorkflowControls(Boolean(currentProject), state.endpoints.length > 0, state.userRole === "admin");
 
   return { project: currentProject, endpoints: state.endpoints, tasks: state.tasks };
 }
@@ -686,8 +688,9 @@ function syncEndpointSelects() {
   }
 }
 
-function syncWorkflowControls(hasProject, hasEndpoint) {
-  setFormDisabled(endpointForm, !hasProject);
+function syncWorkflowControls(hasProject, hasEndpoint, canConfigureEndpoints) {
+  endpointForm.classList.toggle("hidden", !canConfigureEndpoints);
+  setFormDisabled(endpointForm, !hasProject || !canConfigureEndpoints);
   setFormDisabled(chatForm, !hasProject || !hasEndpoint);
   setFormDisabled(taskForm, !hasProject || !hasEndpoint);
   setFormDisabled(projectFileForm, !hasProject);
