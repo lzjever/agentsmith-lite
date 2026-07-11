@@ -57,6 +57,7 @@ describe("deploy env contract", () => {
         "OIDC_BACKCHANNEL_BASE_URL=http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         "OIDC_CLIENT_ID=agentsmith-lite",
         "OIDC_BOOTSTRAP_USERNAME=DO_NOT_PRINT_OIDC_BOOTSTRAP_USERNAME",
+        "OIDC_BOOTSTRAP_EMAIL=DO_NOT_PRINT_OIDC_BOOTSTRAP_EMAIL",
         "S3_ENDPOINT=DO_NOT_PRINT_S3_ENDPOINT",
         "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
         "JUICEFS_PVC_NAME=agentsmith-lite-files",
