@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,7 +49,9 @@ describe("task service Botified orchestration", () => {
         ],
         nextCursor: "c3"
       }
-    ]);
+    ], {
+      downloads: { f1: new Uint8Array(12) }
+    });
     const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified);
 
     const task = await services.tasks.createTask(userId, projectId, {
@@ -1715,7 +1718,9 @@ describe("task service Botified orchestration", () => {
         ],
         nextCursor: "c3"
       }
-    ]);
+    ], {
+      downloads: { f2: new Uint8Array(9) }
+    });
     const { services, userId, projectId, endpointId } = await setupTaskServices(botified);
     const task = await services.tasks.createTask(userId, projectId, { prompt: "ship", endpointId });
 
@@ -1747,7 +1752,7 @@ describe("task service Botified orchestration", () => {
               filename: "../报告 final artifact.txt",
               mime_type: "text/plain",
               size_bytes: artifactBytes.byteLength,
-              sha256: "a".repeat(64),
+              sha256: createHash("sha256").update(artifactBytes).digest("hex"),
               download_url: "http://botified.internal/v1/files/file_real_1?service_key=bsk_runtime_secret"
             }
           }
@@ -1775,6 +1780,12 @@ describe("task service Botified orchestration", () => {
     ], {
       downloads: {
         file_real_1: artifactBytes
+      },
+      downloadMetadata: {
+        file_real_1: {
+          sizeBytes: 999,
+          sha256: "0".repeat(64)
+        }
       }
     });
 
@@ -1793,7 +1804,12 @@ describe("task service Botified orchestration", () => {
       assert.notEqual(botified.downloadFileCalls[0]?.fileId, "botified-1");
 
       assert.deepEqual(artifacts.map((item) => [item.fileId, item.name, item.bytes, item.sha256]), [
-        ["file_real_1", "报告 final artifact.txt", artifactBytes.byteLength, "a".repeat(64)]
+        [
+          "file_real_1",
+          "报告 final artifact.txt",
+          artifactBytes.byteLength,
+          createHash("sha256").update(artifactBytes).digest("hex")
+        ]
       ]);
       assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
       assert.deepEqual(botified.downloadFileCalls, [
@@ -1811,6 +1827,54 @@ describe("task service Botified orchestration", () => {
       assert.equal(await readFile(artifactPath, "utf8"), "hello from published artifact");
     } finally {
       await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects published artifact metadata that does not match downloaded bytes without persisting it", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-artifacts-integrity-"));
+    const artifactBytes = new TextEncoder().encode("verified artifact content");
+    const actualSha256 = createHash("sha256").update(artifactBytes).digest("hex");
+
+    for (const declared of [
+      { sizeBytes: artifactBytes.byteLength + 1, sha256: actualSha256, label: "size" },
+      { sizeBytes: artifactBytes.byteLength, sha256: "0".repeat(64), label: "sha256" }
+    ]) {
+      const published = {
+        cursor: "c1",
+        seq: 1,
+        session_id: "s1",
+        type: "file.published",
+        payload: {
+          file_id: `integrity_${declared.label}`,
+          filename: "artifact.txt",
+          size_bytes: declared.sizeBytes,
+          sha256: declared.sha256
+        }
+      };
+      const botified = new FakeBotifiedClient([
+        { status: "ok", events: [published], nextCursor: "c1" }
+      ], {
+        downloads: {
+          [published.payload.file_id]: artifactBytes
+        }
+      });
+
+      try {
+        const { services, store, userId, projectId, endpointId } = await setupTaskServices(botified, { dataRoot });
+        await assert.rejects(
+          () => services.tasks.createTask(userId, projectId, { prompt: "publish", endpointId }),
+          new RegExp(`artifact ${declared.label} does not match downloaded bytes`)
+        );
+        const [task] = await store.listTasksForProject(projectId);
+        assert.ok(task, "task should remain available for a later retry");
+        assert.deepEqual(await store.listTaskArtifacts(task.id), []);
+        assert.deepEqual(await store.listTaskEvents(task.id), []);
+        const project = await store.findProject(projectId);
+        assert.ok(project, "expected project fixture");
+        await assertMissing(path.join(dataRoot, project.rootPath, "tasks", task.id, "artifacts"));
+      } finally {
+        await rm(dataRoot, { recursive: true, force: true });
+      }
     }
   });
 
@@ -2264,6 +2328,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       stateReads?: BotifiedRuntimeStateResult[];
       downloads?: Record<string, Uint8Array>;
       downloadFailures?: Record<string, Error[]>;
+      downloadMetadata?: Record<string, { sizeBytes?: number; sha256?: string }>;
     } = {}
   ) {}
 
@@ -2313,11 +2378,13 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       throw failure;
     }
     const bytes = this.options.downloads?.[fileId] ?? new Uint8Array();
+    const metadata = this.options.downloadMetadata?.[fileId];
     return {
       bytes,
       filename: `${fileId}.txt`,
       mimeType: "text/plain",
-      sizeBytes: bytes.byteLength
+      sizeBytes: metadata?.sizeBytes ?? bytes.byteLength,
+      ...(metadata?.sha256 !== undefined ? { sha256: metadata.sha256 } : {})
     };
   }
 

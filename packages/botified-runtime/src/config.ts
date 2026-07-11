@@ -1,4 +1,5 @@
 import type { EndpointCapability, ModelEndpoint } from "../../contracts/src/api.js";
+import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 
 export interface BotifiedTaskRuntimeInput {
   taskId: string;
@@ -148,7 +149,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     },
     files: {
       root_dir: "files",
-      max_file_bytes: 52_428_800,
+      max_file_bytes: MAX_TASK_ARTIFACT_BYTES,
       max_upload_files: 16,
       max_upload_request_bytes: 104_857_600,
       max_message_files: 16,

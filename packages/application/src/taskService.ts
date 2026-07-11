@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { chmod, chown, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
@@ -451,9 +451,15 @@ export class TaskService {
           ...artifact,
           name: normalizeArtifactDisplayName(artifact.name, artifact.fileId)
         };
-        await this.downloadAndStoreTaskArtifact(task, state.baseUrl, serviceKey, productArtifact, download.fileId);
-        await this.store.appendTaskArtifacts([productArtifact]);
-        existingFileIds.add(productArtifact.fileId);
+        const verifiedArtifact = await this.downloadAndStoreTaskArtifact(
+          task,
+          state.baseUrl,
+          serviceKey,
+          productArtifact,
+          download.fileId
+        );
+        await this.store.appendTaskArtifacts([verifiedArtifact]);
+        existingFileIds.add(verifiedArtifact.fileId);
       }
     }
     if (projection.events.length > 0) {
@@ -626,20 +632,34 @@ export class TaskService {
     serviceKey: string,
     artifact: AgentTaskArtifact,
     botifiedFileId: string
-  ): Promise<void> {
+  ): Promise<AgentTaskArtifact> {
     const downloaded = await this.callBotified("download file", () =>
       this.botified.downloadFile(baseUrl, serviceKey, botifiedFileId)
     );
-    const { root, filePath } = await this.taskArtifactStoragePath(task, artifact);
+    const actualBytes = downloaded.bytes.byteLength;
+    if (artifact.bytes !== actualBytes) {
+      throw new ProductError("Published artifact size does not match downloaded bytes", 502);
+    }
+    const actualSha256 = createHash("sha256").update(downloaded.bytes).digest("hex");
+    if (artifact.sha256 !== undefined && artifact.sha256.toLowerCase() !== actualSha256) {
+      throw new ProductError("Published artifact sha256 does not match downloaded bytes", 502);
+    }
+    const verifiedArtifact: AgentTaskArtifact = {
+      ...artifact,
+      bytes: actualBytes,
+      sha256: actualSha256
+    };
+    const { root, filePath } = await this.taskArtifactStoragePath(task, verifiedArtifact);
     await mkdir(root, { recursive: true });
     try {
       await writeFile(filePath, downloaded.bytes, { flag: "wx" });
     } catch (error) {
       if (isAlreadyExists(error)) {
-        return;
+        return verifiedArtifact;
       }
       throw error;
     }
+    return verifiedArtifact;
   }
 
   private async taskArtifactStoragePath(task: AgentTask, artifact: AgentTaskArtifact): Promise<{ root: string; filePath: string }> {

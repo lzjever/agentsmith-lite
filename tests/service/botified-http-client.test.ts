@@ -4,6 +4,7 @@ import {
   BotifiedHttpError,
   FetchBotifiedRuntimeHttpClient
 } from "../../packages/ports/src/botified.js";
+import { MAX_TASK_ARTIFACT_BYTES } from "../../packages/domain/src/sandboxDefaults.js";
 
 type FetchCall = {
   url: string;
@@ -221,6 +222,48 @@ describe("Botified HTTP client", () => {
       sizeBytes: 5,
       sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     });
+  });
+
+  it("rejects a Botified artifact whose declared content length exceeds the product limit", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async () =>
+      new Response(null, {
+        status: 200,
+        headers: { "content-length": String(MAX_TASK_ARTIFACT_BYTES + 1) }
+      })
+    );
+
+    await assert.rejects(
+      client.downloadFile("http://botified.local", "service-secret", "oversize"),
+      (error: unknown) => {
+        assert.ok(error instanceof BotifiedHttpError);
+        assert.equal(error.status, 413);
+        assert.equal(error.code, "artifact_too_large");
+        return true;
+      }
+    );
+  });
+
+  it("stops a chunked Botified artifact when its downloaded bytes exceed the product limit", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(MAX_TASK_ARTIFACT_BYTES));
+          controller.enqueue(new Uint8Array([1]));
+          controller.close();
+        }
+      });
+      return new Response(body, { status: 200 });
+    });
+
+    await assert.rejects(
+      client.downloadFile("http://botified.local", "service-secret", "chunked-oversize"),
+      (error: unknown) => {
+        assert.ok(error instanceof BotifiedHttpError);
+        assert.equal(error.status, 413);
+        assert.equal(error.code, "artifact_too_large");
+        return true;
+      }
+    );
   });
 
   it("raises structured HTTP errors without swallowing server details", async () => {

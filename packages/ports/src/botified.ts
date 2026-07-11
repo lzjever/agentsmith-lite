@@ -1,3 +1,5 @@
+import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
+
 export interface BotifiedRuntimeHttpClient {
   health(baseUrl: string, serviceKey?: string): Promise<{ status: "ok" }>;
   readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult>;
@@ -245,7 +247,7 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       throw this.httpError(response, await readJsonBody(response));
     }
 
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = await readArtifactBytes(response);
     const result: BotifiedDownloadFileResult = {
       bytes,
       sizeBytes: bytes.byteLength
@@ -479,6 +481,58 @@ function filenameFromContentDisposition(value: string | null): string | undefine
   }
   const bare = /(?:^|;)\s*filename=([^;]+)/i.exec(value)?.[1];
   return bare?.trim();
+}
+
+async function readArtifactBytes(response: Response): Promise<Uint8Array> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (Number.isSafeInteger(declaredBytes) && declaredBytes > MAX_TASK_ARTIFACT_BYTES) {
+      throw artifactTooLargeError();
+    }
+  }
+
+  if (!response.body) {
+    return new Uint8Array();
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_TASK_ARTIFACT_BYTES) {
+        await reader.cancel();
+        throw artifactTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function artifactTooLargeError(): BotifiedHttpError {
+  return new BotifiedHttpError({
+    status: 413,
+    code: "artifact_too_large",
+    message: `Botified artifact exceeds the ${MAX_TASK_ARTIFACT_BYTES}-byte limit`,
+    retryable: false,
+    responseBody: {}
+  });
 }
 
 async function readJsonBody(response: Response): Promise<unknown> {
