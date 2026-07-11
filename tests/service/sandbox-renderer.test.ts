@@ -155,6 +155,11 @@ describe("sandbox manifest renderer", () => {
         port: "http"
       }
     });
+    assert.deepEqual(executor.readinessProbe, {
+      exec: {
+        command: ["bash", "-c", "</dev/tcp/127.0.0.1/3110"]
+      }
+    });
     assert.equal(container.resources.requests.cpu, "250m");
     assert.equal(container.resources.requests.memory, "512Mi");
     assert.equal(container.resources.limits.cpu, "1");

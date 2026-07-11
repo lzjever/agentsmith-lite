@@ -213,6 +213,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             image: input.image,
             imagePullPolicy: "IfNotPresent",
             command: ["bash-executor", "--listen", "127.0.0.1:3110"],
+            readinessProbe: {
+              exec: {
+                command: ["bash", "-c", "</dev/tcp/127.0.0.1/3110"]
+              }
+            },
             env: [],
             resources: {
               requests: {
