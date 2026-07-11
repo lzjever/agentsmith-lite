@@ -12,12 +12,14 @@ import { renderSandboxResources } from "../../packages/sandbox-controller/src/ma
 import { sandboxResourceNamesForTask } from "../../packages/sandbox-controller/src/resourceNames.js";
 
 describe("sandbox reconciler", () => {
-  it("classifies a full-identity runner Pod terminal failure before it can be re-adopted", () => {
+  it("classifies a full-identity required task container failure before it can be re-adopted", () => {
     const run = sandboxRun();
     for (const [status, expected] of [
       [{ phase: "Failed" }, { reason: "pod_failed" }],
       [{ containerStatuses: [{ name: "botified-server", state: { terminated: { exitCode: 23 } } }] }, { reason: "runner_terminated", exitCode: 23 }],
-      [{ containerStatuses: [{ name: "botified-server", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }]
+      [{ containerStatuses: [{ name: "botified-server", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }],
+      [{ containerStatuses: [{ name: "bash-executor", state: { terminated: { exitCode: 24 } } }] }, { reason: "runner_terminated", exitCode: 24 }],
+      [{ containerStatuses: [{ name: "bash-executor", state: { waiting: { reason: "CrashLoopBackOff" } } }] }, { reason: "runner_crash_loop_back_off" }]
     ] as const) {
       const pod = renderedResource(run, "Pod");
       pod.status = status;

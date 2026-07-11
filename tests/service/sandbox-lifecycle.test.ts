@@ -330,9 +330,10 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.findTask(run.taskId))?.status, "completed");
   });
 
-  it("fails a nonterminal task and cleans a full-identity failed runner Pod without deleting artifacts", async () => {
+  it("fails a nonterminal task and cleans a full-identity failed executor Pod without touching another run", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
+    const otherRun = sandboxRunFor("task2", "run2");
     await store.createTask(taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
@@ -340,15 +341,16 @@ describe("sandbox lifecycle service", () => {
     assert.ok(pod);
     pod.status = {
       containerStatuses: [{
-        name: "botified-server",
+        name: "bash-executor",
         state: { terminated: { exitCode: 41 } }
       }]
     };
     const cleaner = new FakeRuntimeDirectoryCleaner();
+    const port = new FakeLifecyclePort([...resources, ...createdResourcesForRun(otherRun)]);
     const service = new SandboxLifecycleService(store, {
       dataRoot: "/workspace",
       namespace: run.namespace,
-      port: new FakeLifecyclePort(resources),
+      port,
       runtimeDirectoryCleaner: cleaner,
       now: () => new Date("2026-07-04T00:00:00.000Z")
     });
@@ -366,6 +368,10 @@ describe("sandbox lifecycle service", () => {
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
+    assert.equal(
+      port.deletedRefs.some((ref) => Object.values(otherRun.resourceNames).includes(ref.name)),
+      false
+    );
   });
 
   it("returns persisted and observed state without exposing secrets", async () => {

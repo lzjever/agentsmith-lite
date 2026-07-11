@@ -15,6 +15,8 @@ export type SandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "
 export type SandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
 export type SandboxTerminalFailureReason = "pod_failed" | "runner_terminated" | "runner_crash_loop_back_off";
 
+const REQUIRED_TASK_CONTAINER_NAMES = new Set(["botified-server", "bash-executor"]);
+
 export interface SandboxTerminalFailure {
   reason: SandboxTerminalFailureReason;
   exitCode?: number;
@@ -447,19 +449,24 @@ function terminalFailureForExpectedRunnerPod(
     return { reason: "pod_failed" };
   }
   const containerStatuses = Array.isArray(status?.containerStatuses) ? status.containerStatuses : [];
-  const runner = containerStatuses.find((candidate) => asRecord(candidate)?.name === "botified-server");
-  const state = asRecord(asRecord(runner)?.state);
-  const terminated = asRecord(state?.terminated);
-  if (isNonZeroExitCode(terminated?.exitCode)) {
-    const exitCode = boundedNonZeroExitCode(terminated?.exitCode);
-    return {
-      reason: "runner_terminated",
-      ...(exitCode !== null ? { exitCode } : {})
-    };
-  }
-  const waiting = asRecord(state?.waiting);
-  if (waiting?.reason === "CrashLoopBackOff") {
-    return { reason: "runner_crash_loop_back_off" };
+  for (const containerStatus of containerStatuses) {
+    const container = asRecord(containerStatus);
+    if (!REQUIRED_TASK_CONTAINER_NAMES.has(String(container?.name))) {
+      continue;
+    }
+    const state = asRecord(container?.state);
+    const terminated = asRecord(state?.terminated);
+    if (isNonZeroExitCode(terminated?.exitCode)) {
+      const exitCode = boundedNonZeroExitCode(terminated?.exitCode);
+      return {
+        reason: "runner_terminated",
+        ...(exitCode !== null ? { exitCode } : {})
+      };
+    }
+    const waiting = asRecord(state?.waiting);
+    if (waiting?.reason === "CrashLoopBackOff") {
+      return { reason: "runner_crash_loop_back_off" };
+    }
   }
   return null;
 }
