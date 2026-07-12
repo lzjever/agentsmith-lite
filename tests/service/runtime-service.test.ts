@@ -7,9 +7,11 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import { RuntimeService } from "../../packages/application/src/runtimeService.js";
 import type { SandboxReapInput } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
-import type { ModelCredential, ModelCredentialResolver } from "../../packages/openai-compatible-client/src/index.js";
+import type { } from "../../packages/openai-compatible-client/src/index.js";
 import {
   type BotifiedAbortResult,
+  type BotifiedDeliveryMessageInput,
+  type BotifiedDeliveryReceipt,
   type BotifiedDownloadFileResult,
   type BotifiedPostMessageResult,
   type BotifiedRuntimeHttpClient,
@@ -25,6 +27,39 @@ import type {
 } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 
 describe("live sandbox runtime service", () => {
+  it("runs provider maintenance without a live sandbox", async () => {
+    let expired = 0;
+    const runtime = new RuntimeService(
+      { async syncActiveTasksOnce() { return { activeTaskCount: 0, syncedTaskIds: [], failedTaskIds: [] }; } },
+      { async reapSandboxRunsOnce(input: SandboxReapInput) { return emptyReapResult(input); } },
+      { async expireProviderReservations() { expired += 1; } }
+    );
+    await runtime.tickOnce();
+    assert.equal(expired, 1);
+  });
+  it("recovers a restarted stopping task as cancelled before fenced cleanup", async () => {
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const livePort = new FakeLiveSandboxPort();
+    const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "cancel after restart", endpointId });
+    const run = await store.sandboxRuns.get(task.runId);
+    assert.ok(run);
+    await store.updateTaskStatusIfNonterminal(task.id, "stopping", task.updatedAt);
+    await store.sandboxRuns.updateWithFencing(run!.runId, run!.fencingToken, { ...run!, phase: "stopping", cleanupStatus: "cleanup_requested", fencingToken: run!.fencingToken + 1, updatedAt: task.updatedAt });
+    livePort.removePod();
+    const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
+    await runtime.tickOnce();
+    const finalized = await store.findTask(task.id);
+    assert.equal(finalized?.terminalReason, "cancelled");
+    assert.equal(finalized?.artifactProjectionStatus, "draining");
+    assert.equal(finalized?.cleanupStatus, "pending");
+    assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks, 0);
+    assert.deepEqual((await store.listProjectAuditEvents(projectId)).filter((event)=>event.resourceId===task.id).map((event)=>event.action),["task.create","task.cancel"]);
+    await runtime.tickOnce();
+    assert.equal((await store.findTask(task.id))?.status, "cancelled");
+    assert.equal((await store.findTask(task.id))?.cleanupStatus, "completed");
+    assert.equal(await store.sandboxRuns.get(task.runId), null);
+  });
   it("keeps a pending terminal failure nonterminal so a later sync can complete and persist its artifact", async () => {
     const botified = new FakeBotifiedClient([
       { status: "ok", events: [], nextCursor: "c0" },
@@ -42,6 +77,8 @@ describe("live sandbox runtime service", () => {
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
     const task = await services.tasks.createTask(userId, projectId, { prompt: "recover after crash", endpointId });
+    await services.tasks.syncActiveTasksOnce();
+    await services.tasks.syncActiveTasksOnce();
     livePort.markPodFailed();
     const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
 
@@ -52,12 +89,17 @@ describe("live sandbox runtime service", () => {
     await runtime.tickOnce();
     assert.equal((await store.findTask(task.id))?.status, "completed");
     assert.deepEqual((await store.listTaskArtifacts(task.id)).map((artifact) => artifact.fileId), ["recovered-file"]);
-    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
+    assert.equal((await store.findTask(task.id))?.cleanupStatus, "completed");
+    assert.equal(await store.sandboxRuns.get(task.runId), null);
   });
 
-  it("retries a factory-wired unavailable final sync, then reclaims the failed Pod with settlement state", async () => {
+  it("keeps a failed Pod when the final artifact tail remains unavailable", async () => {
     const botified = new FakeBotifiedClient([
       { status: "ok", events: [], nextCursor: "c0" },
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
+      new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
@@ -68,6 +110,8 @@ describe("live sandbox runtime service", () => {
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
     const task = await services.tasks.createTask(userId, projectId, { prompt: "crash after ready", endpointId });
+    await services.tasks.syncActiveTasksOnce();
+    await services.tasks.syncActiveTasksOnce();
     livePort.markPodFailed();
     const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
 
@@ -88,15 +132,12 @@ describe("live sandbox runtime service", () => {
     assert.equal(run?.terminalFailure?.syncStatus, "unavailable");
     assert.equal(run?.terminalFailure?.syncAttempts, 3);
     assert.equal((await store.findTask(task.id))?.status, "failed");
-    assert.equal(run?.cleanupStatus, "cleaned");
-    assert.deepEqual(livePort.deletedRefs.map((ref: KubernetesResourceRef) => ref.kind), [
-      "Pod",
-      "Service",
-      "NetworkPolicy",
-      "ConfigMap",
-      "Secret",
-      "ServiceAccount"
-    ]);
+    assert.equal((await store.findTask(task.id))?.terminalReason, "failed");
+    assert.equal(run?.cleanupStatus, "cleanup_requested");
+    await runtime.tickOnce();
+    assert.equal((await store.findTask(task.id))?.artifactProjectionStatus, "failed");
+    assert.equal((await store.findTask(task.id))?.cleanupStatus, "pending");
+    assert.deepEqual(livePort.deletedRefs, []);
   });
 
   it("syncs active task timelines and reaps terminal sandboxes in one tick", async () => {
@@ -113,7 +154,9 @@ describe("live sandbox runtime service", () => {
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
     const task = await services.tasks.createTask(userId, projectId, { prompt: "finish later", endpointId });
-    assert.equal(task.status, "running");
+    await services.tasks.syncActiveTasksOnce();
+    await services.tasks.syncActiveTasksOnce();
+    assert.equal((await store.findTask(task.id))?.status, "running");
 
     const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
     const result = await runtime.tickOnce();
@@ -124,8 +167,9 @@ describe("live sandbox runtime service", () => {
     assert.equal(result.sandboxReap.dryRun, false);
     assert.deepEqual(result.sandboxReap.errors, []);
     assert.equal((await store.findTask(task.id))?.status, "completed");
-    assert.equal((await store.sandboxRuns.get(task.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c0"]);
+    assert.equal((await store.findTask(task.id))?.cleanupStatus, "completed");
+    assert.equal(await store.sandboxRuns.get(task.runId), null);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c0", "c1", "c1"]);
     assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), [
       "Pod",
       "Service",
@@ -153,6 +197,8 @@ describe("live sandbox runtime service", () => {
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
     const firstTask = await services.tasks.createTask(userId, projectId, { prompt: "first", endpointId });
     const secondTask = await services.tasks.createTask(userId, projectId, { prompt: "second", endpointId });
+    await services.tasks.syncActiveTasksOnce();
+    await services.tasks.syncActiveTasksOnce();
 
     const runtime = new RuntimeService(services.tasks, services.sandboxLifecycle);
     const result = await runtime.tickOnce();
@@ -163,7 +209,8 @@ describe("live sandbox runtime service", () => {
     assert.equal((await store.findTask(firstTask.id))?.status, "running");
     assert.equal((await store.findTask(secondTask.id))?.status, "completed");
     assert.deepEqual(result.sandboxReap.errors, []);
-    assert.equal((await store.sandboxRuns.get(secondTask.runId))?.cleanupStatus, "cleaned");
+    assert.equal((await store.findTask(secondTask.id))?.cleanupStatus, "completed");
+    assert.equal(await store.sandboxRuns.get(secondTask.runId), null);
     assert.ok(livePort.listManagedResourcesCalls > 0, "tick should run the sandbox reaper even after a task sync error");
   });
 
@@ -251,7 +298,21 @@ describe("live sandbox runtime service", () => {
     runtime.stopLoop();
     assert.deepEqual(clearedTimers, ["timer"]);
   });
+
+  it("keeps a successful task sync result when the independent sandbox reap fails", async () => {
+    const runtime = new RuntimeService(
+      { async syncActiveTasksOnce() { return { activeTaskCount: 1, syncedTaskIds: ["task-ok"], failedTaskIds: [] }; } },
+      { async reapSandboxRunsOnce() { throw new Error("kubernetes unavailable"); } }
+    );
+    const result = await runtime.tickOnce();
+    assert.deepEqual(result.taskSync.syncedTaskIds, ["task-ok"]);
+    assert.deepEqual(result.sandboxReap.errors, ["Sandbox reap failed"]);
+  });
 });
+
+function emptyReapResult(input: SandboxReapInput) {
+  return { namespace: "agentsmith", runCounts: { total: 0, active: 0, cleanupRequested: 0, deleting: 0, cleaned: 0, starting: 0, running: 0, stopping: 0, expired: 0 }, activeTaskCount: 0, observedResourceCounts: {}, cleanupPlan: { targets: [], recentFailures: [] }, recentCleanupFailures: [], actionSummary: [], errors: [], dryRun: input.apply !== true, storedRunIds: [] };
+}
 
 async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: FakeLiveSandboxPort) {
   const store = createLocalInMemoryProductStore();
@@ -262,10 +323,6 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
     sessionSecret: "test-session-secret-at-least-32-chars",
     botifiedClient: botified,
     botifiedServiceKeyFactory: () => "test-service-key",
-    modelCredentialResolver: new FakeCredentialResolver({
-      apiKey: "sk-real-model-key",
-      baseUrl: "https://models.example.com/v1"
-    }),
     liveSandbox: {
       port: livePort,
       sleep: livePort.sleep
@@ -274,12 +331,13 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
   const { user } = await services.auth.loginAfterBootstrap("test-admin-password");
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "openai-compatible", baseUrl: "https://models.example.com/v1", secret: "sk-real-model-key" });
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, {
     name: "openai-compatible",
     protocol: "openai_chat_completions",
     baseUrl: "https://models.example.com/v1",
     model: "gpt-compatible",
-    apiKeySecretRef: "secret/openai",
+    credentialId: credential.id,
     capabilities: ["text", "tool_calls"],
     requestTimeoutSecs: 45
   });
@@ -306,6 +364,15 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
     this.postMessageCalls.push({ baseUrl, serviceKey, message });
     return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
+  }
+
+  async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+    const posted = await this.postMessage(baseUrl, serviceKey, input.text);
+    return { accepted: posted.accepted, deliveryKey: input.deliveryKey, requestHash: input.requestHash, ...(posted.messageId ? { messageId: posted.messageId } : {}), ...(posted.cursor ? { cursor: posted.cursor } : {}) };
+  }
+
+  async queryDeliveryReceipt(): Promise<BotifiedDeliveryReceipt | null> {
+    return null;
   }
 
   async readState() {
@@ -341,16 +408,6 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   }
 }
 
-class FakeCredentialResolver implements ModelCredentialResolver {
-  readonly calls: string[] = [];
-
-  constructor(private readonly credential: ModelCredential) {}
-
-  resolveCredential(secretRef: string): ModelCredential {
-    this.calls.push(secretRef);
-    return this.credential;
-  }
-}
 
 class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   readonly appliedResources: KubernetesResource[] = [];
@@ -400,6 +457,10 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
     const pod = this.resources.find((resource) => resource.kind === "Pod");
     assert.ok(pod);
     pod.status = { phase: "Failed" };
+  }
+
+  removePod(): void {
+    this.resources = this.resources.filter((resource) => resource.kind !== "Pod");
   }
 }
 

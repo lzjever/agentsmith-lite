@@ -3,7 +3,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, it } from "node:test";
 import type { ChatMessage, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
-import { EnvModelCredentialResolver, FetchOpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
+import { FetchOpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("FetchOpenAICompatibleClient", () => {
   const servers: http.Server[] = [];
@@ -53,6 +53,33 @@ describe("FetchOpenAICompatibleClient", () => {
     await new FetchOpenAICompatibleClient().completeChat(endpointFixture({ baseUrl }), [{ role: "user", content: "hi" }], { apiKey: "secret" });
 
     assert.equal(seenUrl, "/chat/completions");
+  });
+
+  it("validates OpenAI-compatible credentials through the models endpoint without returning provider content", async () => {
+    let seenUrl = "";
+    const baseUrl = await serve(async (req, res) => { seenUrl = req.url ?? ""; sendJson(res, 200, { data: [] }); });
+    const result = await new FetchOpenAICompatibleClient().validateEndpoint!(endpointFixture({ baseUrl }), "sk-test-secret");
+    assert.deepEqual(result, { status: "healthy" });
+    assert.equal(seenUrl, "/models");
+  });
+
+  it("discovers a bounded, de-duplicated provider model list without creating a catalog", async () => {
+    const baseUrl = await serve(async (_req, res) => sendJson(res, 200, { data: [{ id: "z-model" }, { id: "a-model" }, { id: "a-model" }, { id: 3 }] }));
+
+    const result = await new FetchOpenAICompatibleClient().discoverModels!({ baseUrl, credentialId: "credential_1", requestTimeoutSecs: 30 }, "sk-test-secret");
+
+    assert.deepEqual(result, { models: ["a-model", "z-model"], health: { status: "healthy", checkedAt: null, errorCategory: null } });
+  });
+
+  it("returns a sanitized health category for rejected validation without reading a provider body", async () => {
+    const baseUrl = await serve(async (_req, res) => {
+      sendJson(res, 401, { error: { message: "invalid sk-provider-secret" } });
+    });
+
+    const result = await new FetchOpenAICompatibleClient().validateEndpoint!(endpointFixture({ baseUrl }), "sk-provider-secret");
+
+    assert.deepEqual(result, { status: "unavailable", errorCategory: "auth" });
+    assert.doesNotMatch(JSON.stringify(result), /sk-provider-secret/);
   });
 
   it("maps timeout to ProductError 504 without leaking the api key", async () => {
@@ -131,73 +158,6 @@ describe("FetchOpenAICompatibleClient", () => {
   }
 });
 
-describe("EnvModelCredentialResolver", () => {
-  const envNames = [
-    "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI",
-    "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI"
-  ];
-  const originalEnv = new Map<string, string | undefined>();
-
-  afterEach(() => {
-    for (const name of envNames) {
-      const value = originalEnv.get(name);
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
-      }
-    }
-    originalEnv.clear();
-  });
-
-  it("maps secret refs to configured model API key and base URL env vars", () => {
-    rememberEnv();
-    process.env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI = "sk-env-openai";
-    process.env.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI = "https://models.example.com/v1";
-
-    assert.deepEqual(new EnvModelCredentialResolver().resolveCredential("secret/openai"), {
-      apiKey: "sk-env-openai",
-      baseUrl: "https://models.example.com/v1"
-    });
-  });
-
-  it("rejects invalid secret refs before reading environment", () => {
-    rememberEnv();
-    process.env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI = "sk-env-openai";
-    process.env.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI = "https://models.example.com/v1";
-
-    assert.throws(
-      () => new EnvModelCredentialResolver().resolveCredential("secret/open_ai"),
-      (error: unknown) => error instanceof ProductError && error.statusCode === 400
-    );
-  });
-
-  it("requires both model API key and base URL env vars", () => {
-    rememberEnv();
-    process.env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI = "sk-env-openai";
-    delete process.env.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI;
-    assert.throws(
-      () => new EnvModelCredentialResolver().resolveCredential("secret/openai"),
-      (error: unknown) => error instanceof ProductError && error.statusCode === 500
-    );
-
-    delete process.env.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI;
-    process.env.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI = "https://models.example.com/v1";
-    assert.throws(
-      () => new EnvModelCredentialResolver().resolveCredential("secret/openai"),
-      (error: unknown) => error instanceof ProductError && error.statusCode === 500
-    );
-  });
-
-  function rememberEnv(): void {
-    for (const name of envNames) {
-      if (!originalEnv.has(name)) {
-        originalEnv.set(name, process.env[name]);
-      }
-    }
-  }
-});
-
 function endpointFixture(overrides: Partial<ModelEndpoint> = {}): ModelEndpoint {
   return {
     id: "endp_test",
@@ -206,7 +166,7 @@ function endpointFixture(overrides: Partial<ModelEndpoint> = {}): ModelEndpoint 
     protocol: "openai_chat_completions",
     baseUrl: "https://models.example.com/v1",
     model: "gpt-compatible",
-    apiKeySecretRef: "secret/openai",
+    credentialId: "cred_test",
     capabilities: ["text"],
     requestTimeoutSecs: 30,
     createdAt: "2026-01-01T00:00:00.000Z",

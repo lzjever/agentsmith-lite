@@ -1,9 +1,51 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
-import { renderAppManifests } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
+import { renderAppManifests as renderAppManifestResources } from "../../packages/sandbox-controller/src/appManifestRenderer.js";
+
+function renderAppManifests(input: Parameters<typeof renderAppManifestResources>[0]) {
+  return renderAppManifestResources({
+    ...input,
+    env: { APP_PUBLIC_BASE_URL: "http://localhost:3000", ...input.env }
+  });
+}
 
 describe("app manifest rendering", () => {
+  it("puts credential encryption keys only in the API application Secret", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {
+        APP_CREDENTIAL_ENCRYPTION_KEY: "credential-key",
+        APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: "previous-key"
+      }
+    });
+    const serialized = JSON.stringify(manifests);
+    const secret = manifests.find((manifest) => manifest.kind === "Secret" && manifest.metadata.name === "agentsmith-lite-app-secrets");
+    const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
+    const web = manifests.find((manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-web");
+    const sandbox = manifests.find((manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api") as DeploymentResource | undefined;
+
+    assert.equal((secret?.stringData as Record<string, string> | undefined)?.APP_CREDENTIAL_ENCRYPTION_KEY, "credential-key");
+    assert.equal((secret?.stringData as Record<string, string> | undefined)?.APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS, "previous-key");
+    assert.equal((configMap?.data as Record<string, string> | undefined)?.APP_CREDENTIAL_ENCRYPTION_KEY, undefined);
+    assert.doesNotMatch(JSON.stringify(web), /APP_CREDENTIAL_ENCRYPTION_KEY|credential-key/);
+    assert.doesNotMatch(JSON.stringify(sandbox?.spec.template.spec.containers[0]), /APP_CREDENTIAL_ENCRYPTION_KEY|credential-key/);
+    assert.match(serialized, /credential-key/);
+  });
+  it("binds the API to the pod interface", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const config = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
+
+    assert.equal((config?.data as Record<string, string> | undefined)?.APP_BIND_ADDRESS, "0.0.0.0");
+  });
+
   it("renders an Ingress from the public HTTPS URL with class, TLS, labels, and namespace", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -27,7 +69,7 @@ describe("app manifest rendering", () => {
     assert.equal(ingress.metadata.labels["app.kubernetes.io/part-of"], "agentsmith-lite");
     assert.equal(ingress.metadata.labels["app.kubernetes.io/managed-by"], "agentsmith-lite");
     assert.equal(ingress.metadata.labels["agentsmith-lite/managed-by"], "agentsmith-lite");
-    assert.equal(ingress.metadata.labels["app.kubernetes.io/component"], "api");
+    assert.equal(ingress.metadata.labels["app.kubernetes.io/component"], undefined);
     assert.equal(ingress.spec.ingressClassName, "nginx");
     assert.deepEqual(ingress.spec.tls, [{ hosts: ["agentsmith.example.com"], secretName: "agentsmith-lite-tls" }]);
     assert.deepEqual(ingress.spec.rules, [
@@ -36,11 +78,21 @@ describe("app manifest rendering", () => {
         http: {
           paths: [
             {
-              path: "/app",
+              path: "/app/api/v1",
               pathType: "Prefix",
               backend: {
                 service: {
                   name: "agentsmith-lite-api",
+                  port: { name: "http" }
+                }
+              }
+            },
+            {
+              path: "/app",
+              pathType: "Prefix",
+              backend: {
+                service: {
+                  name: "agentsmith-lite-web",
                   port: {
                     name: "http"
                   }
@@ -90,47 +142,59 @@ describe("app manifest rendering", () => {
       | undefined;
 
     assert.ok(ingress, "non-local public URL should render an Ingress");
-    assert.equal(ingress.spec.rules[0]?.http.paths[0]?.path, "/");
+    assert.equal(ingress.spec.rules[0]?.http.paths[0]?.path, "/api/v1");
     assert.equal(ingress.spec.ingressClassName, undefined);
     assert.equal(ingress.spec.tls, undefined);
 
-    for (const publicUrl of [undefined, "http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"]) {
+    for (const publicUrl of ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"]) {
       const localManifests = renderAppManifests({
         namespace: "agentsmith",
         imageTag: "dev",
-        env: publicUrl === undefined ? {} : { APP_PUBLIC_BASE_URL: publicUrl },
+        env: { APP_PUBLIC_BASE_URL: publicUrl },
         secrets: {}
       });
 
       assert.equal(
         localManifests.some((manifest) => manifest.kind === "Ingress"),
         false,
-        `${publicUrl ?? "default public URL"} should not render an Ingress`
+        `${publicUrl} should not render an Ingress`
       );
     }
   });
 
-  it("renders API health probes under the public base path", () => {
+  it("requires APP_PUBLIC_BASE_URL", () => {
+    assert.throws(
+      () => renderAppManifestResources({ namespace: "agentsmith", imageTag: "dev", env: {}, secrets: {} }),
+      /APP_PUBLIC_BASE_URL is required/
+    );
+  });
+
+  it("renders separate API and web health probes under the public base path", () => {
     assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com/app"), {
-      readiness: "/app/api/health",
-      liveness: "/app/api/health",
-      startup: "/app/api/health"
+      readiness: "/app/api/v1/health",
+      liveness: "/app/api/v1/health",
+      startup: "/app/api/v1/health"
     });
     assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com"), {
-      readiness: "/api/health",
-      liveness: "/api/health",
-      startup: "/api/health"
+      readiness: "/api/v1/health",
+      liveness: "/api/v1/health",
+      startup: "/api/v1/health"
+    });
+    assert.deepEqual(webHealthProbePaths("https://agentsmith.example.com/app"), {
+      readiness: "/app/health",
+      liveness: "/app/health",
+      startup: "/app/health"
     });
   });
 
   it("normalizes trailing slashes in the public base path for Ingress and API health probes", () => {
     const publicBaseUrl = "https://agentsmith.example.com/app//";
 
-    assert.equal(apiIngressPath(publicBaseUrl), "/app");
+    assert.equal(apiIngressPath(publicBaseUrl), "/app/api/v1");
     assert.deepEqual(apiHealthProbePaths(publicBaseUrl), {
-      readiness: "/app/api/health",
-      liveness: "/app/api/health",
-      startup: "/app/api/health"
+      readiness: "/app/api/v1/health",
+      liveness: "/app/api/v1/health",
+      startup: "/app/api/v1/health"
     });
   });
 
@@ -161,9 +225,9 @@ describe("app manifest rendering", () => {
         OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
         OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         OIDC_CLIENT_ID: "agentsmith-lite",
-        OIDC_ADMIN_EMAILS: "ops@example.test",
-        OIDC_ADMIN_SUBJECTS: "keycloak-ops-subject",
         AGENTSMITH_LITE_SANDBOX_MODE: "live",
+        AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS: "60000",
+        AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS: "120000",
         AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
         AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
@@ -220,18 +284,16 @@ describe("app manifest rendering", () => {
     assert.equal(configMapData?.OIDC_ISSUER_URL, "https://keycloak.example.test/realms/agentsmith");
     assert.equal(configMapData?.OIDC_BACKCHANNEL_BASE_URL, "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith");
     assert.equal(configMapData?.OIDC_CLIENT_ID, "agentsmith-lite");
-    assert.equal(configMapData?.OIDC_ADMIN_EMAILS, "ops@example.test");
-    assert.equal(configMapData?.OIDC_ADMIN_SUBJECTS, "keycloak-ops-subject");
     assert.equal(configMapData?.OIDC_CLIENT_SECRET, undefined);
     assert.equal(secretData?.OIDC_CLIENT_SECRET, "oidc-client-secret");
     assert.equal(secretData?.BUILTIN_ADMIN_INITIAL_PASSWORD, undefined);
     assert.equal(secretData?.OIDC_ISSUER_URL, undefined);
     assert.equal(secretData?.OIDC_BACKCHANNEL_BASE_URL, undefined);
     assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
-    assert.equal(secretData?.OIDC_ADMIN_EMAILS, undefined);
-    assert.equal(secretData?.OIDC_ADMIN_SUBJECTS, undefined);
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS, "60000");
+    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "120000");
     assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
@@ -332,13 +394,6 @@ describe("app manifest rendering", () => {
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
       {
-        name: "OIDC admin emails in secrets",
-        env: {},
-        secrets: { OIDC_ADMIN_EMAILS: "DO_NOT_PRINT_OIDC_ADMIN_EMAILS" },
-        error: /OIDC_ADMIN_EMAILS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
-      },
-      {
         name: "OIDC mode missing secret",
         env: {
           AUTH_MODE: "oidc",
@@ -369,16 +424,6 @@ describe("app manifest rendering", () => {
         error: /OIDC_BACKCHANNEL_BASE_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
-      {
-        name: "builtin mode with non-empty OIDC admin subjects",
-        env: {
-          AUTH_MODE: "builtin_admin",
-          OIDC_ADMIN_SUBJECTS: "DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS"
-        },
-        secrets: {},
-        error: /OIDC_ADMIN_SUBJECTS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
-      }
     ];
 
     for (const candidate of cases) {
@@ -606,6 +651,13 @@ function apiIngressPath(publicBaseUrl: string): string | undefined {
     | IngressResource
     | undefined;
   return ingress?.spec.rules[0]?.http.paths[0]?.path;
+}
+
+function webHealthProbePaths(publicBaseUrl: string): { readiness: string | undefined; liveness: string | undefined; startup: string | undefined } {
+  const manifests = renderAppManifests({ namespace: "agentsmith", imageTag: "dev", env: { APP_PUBLIC_BASE_URL: publicBaseUrl }, secrets: {} });
+  const deployment = manifests.find((manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-web") as DeploymentResource | undefined;
+  const container = deployment?.spec.template.spec.containers.find((candidate) => candidate.name === "web");
+  return { readiness: container?.readinessProbe?.httpGet.path, liveness: container?.livenessProbe?.httpGet.path, startup: container?.startupProbe?.httpGet.path };
 }
 
 interface RoleResource {

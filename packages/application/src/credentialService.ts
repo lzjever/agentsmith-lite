@@ -1,0 +1,33 @@
+import { createHash } from "node:crypto";
+import type { CreateProjectCredentialInput, ProjectCredential, RotateProjectCredentialInput, StoredProjectCredential } from "../../contracts/src/api.js";
+import { NotFoundError, ProductError } from "../../domain/src/errors.js";
+import { newId, nowIso } from "../../domain/src/ids.js";
+import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
+import type { ProductStore } from "../../ports/src/store.js";
+import { credentialAad, type CredentialCrypto } from "./credentialCrypto.js";
+import { AuthorizationService } from "./authorizationService.js";
+
+export class CredentialService {
+  constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService, private readonly crypto: CredentialCrypto) {}
+  async list(userId:string, projectId:string): Promise<ProjectCredential[]> { await this.authorization.requireProject(userId,projectId,"view"); return this.store.listProjectCredentials(projectId); }
+  async create(userId:string, projectId:string, input:CreateProjectCredentialInput): Promise<ProjectCredential> { await this.authorization.requireProject(userId,projectId,"admin"); const now=nowIso(); const id=newId("cred"); const saved=await this.store.createProjectCredential(this.encrypt({id,projectId,name:required(input.name,"credential.name"),baseUrl:normalizeOpenAICompatibleBaseUrl(required(input.baseUrl,"credential.baseUrl")),secret:required(input.secret,"credential.secret"),version:1,createdAt:now,lastRotatedAt:null,updatedAt:now})); await this.audit(projectId,userId,"credential.create",saved.id,{credentialVersion:saved.version}); return saved; }
+  async rotate(userId:string, projectId:string, credentialId:string, input:RotateProjectCredentialInput): Promise<ProjectCredential> { await this.authorization.requireProject(userId,projectId,"admin"); const existing=await this.require(projectId,credentialId); const now=nowIso(); const updated=this.encrypt({id:existing.id,projectId,name:existing.name,baseUrl:existing.baseUrl,secret:required(input.secret,"credential.secret"),version:existing.version+1,createdAt:existing.createdAt,lastRotatedAt:now,updatedAt:now}); const saved=await this.store.updateProjectCredential(updated); if(!saved) throw new NotFoundError("Credential not found"); await this.audit(projectId,userId,"credential.rotate",saved.id,{credentialVersion:saved.version}); return saved; }
+  async remove(userId:string, projectId:string, credentialId:string): Promise<void> { await this.authorization.requireProject(userId,projectId,"admin"); const existing=await this.require(projectId,credentialId); if ((await this.store.listEndpointsForProject(projectId)).some((endpoint) => endpoint.credentialId === credentialId)) throw new ProductError("Credential cannot be deleted while endpoints reference it", 409); if(!(await this.store.deleteProjectCredential(credentialId))) throw new NotFoundError("Credential not found"); await this.audit(projectId,userId,"credential.delete",credentialId,{credentialVersion:existing.version}); }
+  async resolve(projectId:string, credentialId:string): Promise<{apiKey:string;baseUrl:string}> { const value=await this.require(projectId,credentialId); return {apiKey:this.crypto.decrypt({algorithm:"aes-256-gcm",keyId:value.keyId,nonce:Buffer.from(value.nonce),ciphertext:Buffer.from(value.ciphertext),authTag:Buffer.from(value.authTag)},credentialAad({credentialId:value.id,projectId:value.projectId,type:"api_key",version:value.version})),baseUrl:value.baseUrl}; }
+  async importLegacyAliasesFromEnvironment(env: Record<string, string | undefined>): Promise<void> {
+    for (const legacy of await this.store.listLegacyEndpointCredentialAliases()) {
+      const suffix = legacy.secretRef.replace(/^secret\//, "").toUpperCase().replaceAll("-", "_");
+      if (!/^secret\/[a-z0-9][a-z0-9-]{0,62}$/.test(legacy.secretRef)) throw new ProductError("Legacy credential alias is invalid", 500);
+      const secret = env[`AGENTSMITH_LITE_MODEL_API_KEY_${suffix}`];
+      const configuredBaseUrl = env[`AGENTSMITH_LITE_MODEL_BASE_URL_${suffix}`];
+      if (!secret || !configuredBaseUrl || normalizeOpenAICompatibleBaseUrl(configuredBaseUrl, 500) !== normalizeOpenAICompatibleBaseUrl(legacy.baseUrl, 500)) throw new ProductError("Legacy credential alias could not be imported", 500);
+      const imported = await this.createImported(legacy.projectId, legacy.secretRef.slice("secret/".length), legacy.baseUrl, secret);
+      if (!(await this.store.bindEndpointCredential(legacy.endpointId, imported.id))) throw new ProductError("Legacy credential binding could not be imported", 500);
+    }
+  }
+  private async require(projectId:string,id:string): Promise<StoredProjectCredential> { const value=await this.store.findProjectCredential(id); if(!value||value.projectId!==projectId) throw new NotFoundError("Credential not found"); return value; }
+  private async createImported(projectId:string,name:string,baseUrl:string,secret:string): Promise<ProjectCredential> { const now=nowIso(); const id=newId("cred"); return this.store.createProjectCredential(this.encrypt({id,projectId,name,baseUrl:normalizeOpenAICompatibleBaseUrl(baseUrl),secret,version:1,createdAt:now,lastRotatedAt:null,updatedAt:now})); }
+  private async audit(projectId:string,actorId:string,action:Extract<import("../../contracts/src/api.js").ProjectAuditAction,`credential.${string}`>,resourceId:string,detail:import("../../contracts/src/api.js").ProjectAuditSafeDetail):Promise<void>{await this.store.appendProjectAuditEvent({id:newId("audit"),projectId,actorId,action,status:"accepted",resourceKind:"credential",resourceId,detail,createdAt:nowIso()})}
+  private encrypt(input:{id:string;projectId:string;name:string;baseUrl:string;secret:string;version:number;createdAt:string;lastRotatedAt:string|null;updatedAt:string}): StoredProjectCredential { const encrypted=this.crypto.encrypt(input.secret,credentialAad({credentialId:input.id,projectId:input.projectId,type:"api_key",version:input.version})); return {id:input.id,projectId:input.projectId,name:input.name,type:"api_key",baseUrl:input.baseUrl,fingerprint:createHash("sha256").update(input.secret).digest("hex").slice(0,16),version:input.version,createdAt:input.createdAt,lastRotatedAt:input.lastRotatedAt,updatedAt:input.updatedAt,keyId:encrypted.keyId,nonce:encrypted.nonce,ciphertext:encrypted.ciphertext,authTag:encrypted.authTag}; }
+}
+function required(value:string,name:string): string { const normalized=value.trim(); if(!normalized) throw new ProductError(`${name} is required`); return normalized; }

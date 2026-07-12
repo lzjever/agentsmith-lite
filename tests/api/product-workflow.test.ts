@@ -7,12 +7,13 @@ import { after, before, describe, it } from "node:test";
 import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
-import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
+import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("api product workflow", () => {
   let baseUrl = "";
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
+  let idempotencySequence = 0;
   const chatCalls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
 
   before(async () => {
@@ -21,13 +22,7 @@ describe("api product workflow", () => {
       port: 0,
       dataRoot,
       builtinAdminPassword: "admin-password",
-      chatClient: fakeChatClient(chatCalls),
-      modelCredentialResolver: fakeResolver({
-        "secret/openai": {
-          apiKey: "sk-from-api-workflow",
-          baseUrl: "https://models.example.com/v1"
-        }
-      })
+      providerClient: fakeChatClient(chatCalls),
     });
     baseUrl = api.baseUrl;
     closeServer = api.close;
@@ -39,48 +34,89 @@ describe("api product workflow", () => {
   });
 
   it("logs in and exercises workspace, project, endpoint, chat, file CRUD, and task resources", async () => {
-    const health = await fetch(baseUrl + "/api/health").then((response) => response.json());
+    const health = await fetch(baseUrl + "/api/v1/health").then((response) => response.json());
     assert.equal(health.status, "ok");
 
-    await post("/api/auth/bootstrap", { password: "admin-password" });
-    const login = await post("/api/auth/login", {
+    await post("/api/v1/auth/bootstrap", { password: "admin-password" });
+    const login = await post("/api/v1/auth/login", {
       email: "admin@agentsmith-lite.local",
       password: "admin-password"
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const csrf = (await login.json()).csrfToken;
 
-    const workspace = await postJson("/api/workspaces", { name: "Ops" }, cookie, csrf);
-    const project = await postJson(`/api/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
-    const endpoint = await postJson(`/api/projects/${project.id}/endpoints`, {
+    const workspace = await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf);
+    const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
+    const credential = await postJson(`/api/v1/projects/${project.id}/credentials`, { name: "OpenAI-compatible credential", baseUrl: "https://models.example.com/v1", secret: "sk-from-api-workflow" }, cookie, csrf);
+    const endpoint = await postJson(`/api/v1/projects/${project.id}/endpoints`, {
       name: "OpenAI-compatible endpoint",
       protocol: "openai_chat_completions",
       baseUrl: "https://models.example.com/v1",
       model: "gpt-compatible",
-      apiKeySecretRef: "secret/openai",
+      credentialId: credential.id,
       capabilities: ["text", "tool_calls"],
       requestTimeoutSecs: 30
     }, cookie, csrf);
     assertNoApiKeySecretRef(endpoint);
     assert.equal(endpoint.hasCredentialRef, true);
-    assert.equal(endpoint.apiKeySecretRef, undefined);
+    assert.equal(endpoint.credentialId, credential.id);
 
-    const endpoints = await requestJson("GET", `/api/projects/${project.id}/endpoints`, undefined, cookie);
+    const endpoints = await requestJson("GET", `/api/v1/projects/${project.id}/endpoints`, undefined, cookie);
     assertNoApiKeySecretRef(endpoints);
     assert.equal(endpoints[0]?.hasCredentialRef, true);
-
-    const chat = await postJson(`/api/projects/${project.id}/chat`, {
-      endpointId: endpoint.id,
-      messages: [{ role: "user", content: "hello" }]
+    assert.equal(endpoints[0]?.credentialId, credential.id);
+    const updatedEndpoint = await requestJson("PATCH", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, {
+      name: "Updated endpoint",
+      protocol: "openai_chat_completions",
+      baseUrl: "https://models.example.com/v1",
+      model: "updated-compatible",
+      capabilities: ["text", "tool_calls"],
+      requestTimeoutSecs: 45
     }, cookie, csrf);
+    assert.equal(updatedEndpoint.name, "Updated endpoint");
+    assert.equal(updatedEndpoint.model, "updated-compatible");
+    assert.equal(updatedEndpoint.credentialId, credential.id);
+    assert.equal(updatedEndpoint.hasCredentialRef, true);
+    const disposableEndpoint = await postJson(`/api/v1/projects/${project.id}/endpoints`, {
+      name: "Disposable endpoint",
+      protocol: "openai_chat_completions",
+      baseUrl: "https://models.example.com/v1",
+      model: "gpt-compatible",
+      credentialId: credential.id,
+      capabilities: ["text", "tool_calls"],
+      requestTimeoutSecs: 30
+    }, cookie, csrf);
+    const replacementCredential = await postJson(`/api/v1/projects/${project.id}/credentials`, { name: "Replacement credential", baseUrl: "https://models.example.com/v1", secret: "replacement-api-secret" }, cookie, csrf);
+    const reboundEndpoint = await requestJson("PATCH", `/api/v1/projects/${project.id}/endpoints/${disposableEndpoint.id}`, {
+      name: disposableEndpoint.name,
+      protocol: disposableEndpoint.protocol,
+      baseUrl: disposableEndpoint.baseUrl,
+      model: disposableEndpoint.model,
+      credentialId: replacementCredential.id,
+      capabilities: disposableEndpoint.capabilities,
+      requestTimeoutSecs: disposableEndpoint.requestTimeoutSecs
+    }, cookie, csrf);
+    assert.equal(reboundEndpoint.credentialId, replacementCredential.id);
+    assertNoApiKeySecretRef(reboundEndpoint);
+    const disposableThread = await postJson(`/api/v1/projects/${project.id}/chat/threads`, { endpointId: disposableEndpoint.id }, cookie, csrf);
+    assert.deepEqual(
+      await requestJson("DELETE", `/api/v1/projects/${project.id}/endpoints/${disposableEndpoint.id}`, undefined, cookie, csrf),
+      { deleted: true }
+    );
+    const retainedThreads = await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads`, undefined, cookie);
+    assert.equal(retainedThreads.find((item: { id: string }) => item.id === disposableThread.id)?.endpointId, null);
+
+    const thread = await postJson(`/api/v1/projects/${project.id}/chat/threads`, { endpointId: endpoint.id }, cookie, csrf);
+    const chat = await postChatStream(`/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, { content: "hello", afterMessageId: null }, cookie, csrf);
+    const chatHistory = await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, undefined, cookie);
     const filePath = "files/docs/readme.md";
     const fileContent = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
     const uploadedFile = await requestRawFile(project.id, filePath, fileContent, cookie, csrf);
-    const listedRootFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=files`, undefined, cookie);
-    const listedNestedFiles = await requestJson("GET", `/api/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
+    const listedRootFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=files`, undefined, cookie);
+    const listedNestedFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
     const downloadedFile = await request(
       "GET",
-      `/api/projects/${project.id}/files/download?path=${encodeURIComponent(filePath)}`,
+      `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(filePath)}`,
       undefined,
       cookie
     );
@@ -89,19 +125,19 @@ describe("api product workflow", () => {
     await requestRawFile(project.id, unicodeFilePath, unicodeFileContent, cookie, csrf);
     const downloadedUnicodeFile = await request(
       "GET",
-      `/api/projects/${project.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
+      `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
       undefined,
       cookie
     );
     await assertApiError(
-      await request("GET", `/api/projects/${project.id}/files/download`, undefined, cookie),
+      await request("GET", `/api/v1/projects/${project.id}/files/download`, undefined, cookie),
       400,
       "Missing path query parameter"
     );
     await assertApiError(
       await request(
         "GET",
-        `/api/projects/${project.id}/files/download?path=${encodeURIComponent("files/docs")}`,
+        `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent("files/docs")}`,
         undefined,
         cookie
       ),
@@ -109,27 +145,30 @@ describe("api product workflow", () => {
       "Path is a directory"
     );
     await assertApiError(
-      await request("DELETE", `/api/projects/${project.id}/files`, { path: "files" }, cookie, csrf),
+      await request("DELETE", `/api/v1/projects/${project.id}/files`, { path: "files" }, cookie, csrf),
       400,
       "Cannot delete the files root"
     );
+    assert.equal((await requestJson("GET", `/api/v1/projects/${project.id}/files?path=files`, undefined, cookie)).entries.length, 1);
     await assertApiError(
-      await request("DELETE", `/api/projects/${project.id}/files`, { path: "files/missing.txt" }, cookie, csrf),
+      await request("DELETE", `/api/v1/projects/${project.id}/files`, { path: "files/missing.txt" }, cookie, csrf),
       404,
       "File not found"
     );
-    const deletedFile = await requestJson("DELETE", `/api/projects/${project.id}/files`, {
+    const deletedFile = await requestJson("DELETE", `/api/v1/projects/${project.id}/files`, {
       path: filePath
     }, cookie, csrf);
-    const task = await postJson(`/api/projects/${project.id}/tasks`, {
+    const task = await postJson(`/api/v1/projects/${project.id}/tasks`, {
       prompt: "write a file",
       endpointId: endpoint.id
     }, cookie, csrf);
-    const dashboard = await requestJson("GET", "/api/dashboard", undefined, cookie);
+    const dashboard = await requestJson("GET", "/api/v1/dashboard", undefined, cookie);
 
     assertNoApiKeySecretRef(dashboard);
     assert.equal(dashboard.endpoints[0]?.hasCredentialRef, true);
+    assert.equal(dashboard.endpoints[0]?.credentialId, credential.id);
     assert.equal(chat.message.content, "server-side fake chat response");
+    assert.deepEqual(chatHistory.map((message: { role: string; content: string }) => [message.role, message.content]), [["user", "hello"], ["assistant", "server-side fake chat response"]]);
     assert.equal(chatCalls.length, 1);
     assert.equal(chatCalls[0]?.endpoint.id, endpoint.id);
     assert.deepEqual(chatCalls[0]?.messages, [{ role: "user", content: "hello" }]);
@@ -137,10 +176,10 @@ describe("api product workflow", () => {
     assert.deepEqual(chat.endpointSnapshot, {
       id: endpoint.id,
       baseUrl: "https://models.example.com/v1",
-      model: "gpt-compatible",
+      model: "updated-compatible",
       protocol: "openai_chat_completions"
     });
-    assert.deepEqual(uploadedFile, { path: filePath, bytes: fileContent.byteLength });
+    assert.deepEqual(uploadedFile, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
     assert.equal(listedRootFiles.entries.some((entry: { name: string; path: string; type: string }) =>
       entry.path === "files/docs" && entry.name === "docs" && entry.type === "directory"
     ), true);
@@ -160,10 +199,20 @@ describe("api product workflow", () => {
     );
     assert.deepEqual(new Uint8Array(await downloadedUnicodeFile.arrayBuffer()), unicodeFileContent);
     assert.deepEqual(deletedFile, { deleted: true });
-    assert.equal(task.status, "running");
-    assert.equal(task.sandbox.resources.some((resource: { kind: string }) => resource.kind === "Pod"), true);
+    assert.equal(task.status, "completed");
+    assert.equal(task.terminalReason, "not_executed");
+    assert.deepEqual(task.sandbox.resources, []);
 
-    const traversal = await fetch(baseUrl + `/api/projects/${project.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
+    await assertApiError(
+      await request("DELETE", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, undefined, cookie, csrf),
+      409,
+      "Endpoint cannot be deleted while tasks reference it"
+    );
+    const threadAfterBlockedDelete = (await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads`, undefined, cookie))
+      .find((item: { id: string }) => item.id === thread.id);
+    assert.equal(threadAfterBlockedDelete?.endpointId, endpoint.id);
+
+    const traversal = await fetch(baseUrl + `/api/v1/projects/${project.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
       method: "PUT",
       headers: {
         "content-type": "application/octet-stream",
@@ -174,7 +223,7 @@ describe("api product workflow", () => {
     });
     assert.equal(traversal.status, 400);
 
-    const unauthenticatedUpload = await fetch(baseUrl + `/api/projects/${project.id}/files?path=files/forbidden.bin`, {
+    const unauthenticatedUpload = await fetch(baseUrl + `/api/v1/projects/${project.id}/files?path=files/forbidden.bin`, {
       method: "PUT",
       headers: { "content-type": "application/octet-stream" },
       body: Buffer.from([0x01])
@@ -182,7 +231,7 @@ describe("api product workflow", () => {
     assert.equal(unauthenticatedUpload.status, 401);
 
     const tooLargeUpload = await rawRequest(
-      `/api/projects/${project.id}/files?path=files/too-large.bin`,
+      `/api/v1/projects/${project.id}/files?path=files/too-large.bin`,
       cookie,
       csrf,
       { "content-length": String(MAX_PROJECT_FILE_BYTES + 1) }
@@ -190,12 +239,44 @@ describe("api product workflow", () => {
     assert.equal(tooLargeUpload.status, 413);
     assert.deepEqual(tooLargeUpload.body, { error: `Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit` });
 
-    const forbidden = await fetch(baseUrl + `/api/workspaces`, {
+    const forbidden = await fetch(baseUrl + `/api/v1/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
       body: JSON.stringify({ name: "Missing CSRF" })
     });
     assert.equal(forbidden.status, 403);
+  });
+
+  it("stores browser file MIME types as raw bytes", async () => {
+    await post("/api/v1/auth/bootstrap", { password: "admin-password" });
+    const login = await post("/api/v1/auth/login", {
+      email: "admin@agentsmith-lite.local",
+      password: "admin-password"
+    });
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+    const csrf = (await login.json()).csrfToken;
+    const workspace = await postJson("/api/v1/workspaces", { name: "Upload MIME types" }, cookie, csrf);
+    const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Browser files" }, cookie, csrf);
+    const uploads = [
+      { path: "files/note.txt", contentType: "text/plain;charset=UTF-8", bytes: Uint8Array.from([0x7b, 0x22, 0x6e, 0x6f, 0x74, 0x65, 0x22, 0x7d]) },
+      { path: "files/image.png", contentType: "image/png", bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+      { path: "files/data.bin", contentType: "application/octet-stream", bytes: Uint8Array.from([0x00, 0xff, 0x41]) }
+    ];
+
+    for (const upload of uploads) {
+      assert.deepEqual(
+        await requestRawFile(project.id, upload.path, upload.bytes, cookie, csrf, upload.contentType),
+        { path: upload.path, bytes: upload.bytes.byteLength, mediaType: upload.contentType.split(";", 1)[0] }
+      );
+      const downloaded = await request(
+        "GET",
+        `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(upload.path)}`,
+        undefined,
+        cookie
+      );
+      assert.equal(downloaded.status, 200);
+      assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()), upload.bytes);
+    }
   });
 
   async function post(pathname: string, body: unknown) {
@@ -208,6 +289,15 @@ describe("api product workflow", () => {
 
   async function postJson(pathname: string, body: unknown, cookie: string, csrf: string) {
     return requestJson("POST", pathname, body, cookie, csrf);
+  }
+
+  async function postChatStream(pathname: string, body: unknown, cookie: string, csrf: string) {
+    const response = await request("POST", pathname, body, cookie, csrf);
+    assert.equal(response.status, 200);
+    const frame = (await response.text()).split("\n\n").find((value) => value.startsWith("event: done"));
+    const data = frame ? /^data: (.+)$/m.exec(frame)?.[1] : undefined;
+    assert.ok(data);
+    return JSON.parse(data);
   }
 
   async function requestJson(method: string, pathname: string, body: unknown, cookie: string, csrf?: string) {
@@ -223,6 +313,9 @@ describe("api product workflow", () => {
     if (csrf) {
       headers["x-csrf-token"] = csrf;
     }
+    if (pathname.includes("/tasks") && ["POST","PATCH","DELETE"].includes(method)) {
+      headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
+    }
     const requestInit: RequestInit = { method, headers };
     if (body) {
       requestInit.body = JSON.stringify(body);
@@ -230,11 +323,18 @@ describe("api product workflow", () => {
     return fetch(baseUrl + pathname, requestInit);
   }
 
-  async function requestRawFile(projectId: string, filePath: string, bytes: Uint8Array, cookie: string, csrf: string) {
-    const response = await fetch(baseUrl + `/api/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`, {
+  async function requestRawFile(
+    projectId: string,
+    filePath: string,
+    bytes: Uint8Array,
+    cookie: string,
+    csrf: string,
+    contentType = "application/octet-stream"
+  ) {
+    const response = await fetch(baseUrl + `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`, {
       method: "PUT",
       headers: {
-        "content-type": "application/octet-stream",
+        "content-type": contentType,
         cookie,
         "x-csrf-token": csrf
       },
@@ -281,6 +381,9 @@ describe("api product workflow", () => {
 
 function fakeChatClient(calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }>): OpenAICompatibleClient {
   return {
+    async validateEndpoint() {
+      return { status: "healthy" };
+    },
     async completeChat(endpoint, messages, options): Promise<ChatResponse> {
       calls.push({ endpoint, messages, apiKey: options.apiKey });
       return {
@@ -296,7 +399,7 @@ function fakeChatClient(calls: Array<{ endpoint: ModelEndpoint; messages: ChatMe
   };
 }
 
-function fakeResolver(values: Record<string, { apiKey: string; baseUrl: string }>): ModelCredentialResolver {
+function fakeResolver(values: Record<string, { apiKey: string; baseUrl: string }>) {
   return {
     resolveCredential(secretRef: string): { apiKey: string; baseUrl: string } {
       const value = values[secretRef];
@@ -307,5 +410,5 @@ function fakeResolver(values: Record<string, { apiKey: string; baseUrl: string }
 }
 
 function assertNoApiKeySecretRef(value: unknown): void {
-  assert.doesNotMatch(JSON.stringify(value), /apiKeySecretRef/);
+  assert.doesNotMatch(JSON.stringify(value), /sk-from-api-workflow|replacement-api-secret|apiKeySecretRef|api_key_secret_ref|ciphertext|authTag|nonce|keyId/);
 }

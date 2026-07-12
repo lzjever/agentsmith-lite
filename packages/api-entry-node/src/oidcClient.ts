@@ -97,7 +97,9 @@ class OpenIdConnectClient implements OidcClientAdapter {
     return {
       issuer: issuerFromClaims(claims.iss) ?? this.issuerUrl,
       subject: claims.sub,
-      email: typeof claims.email === "string" ? claims.email : undefined
+      email: typeof claims.email === "string" ? claims.email : "",
+      emailVerified: claims.email_verified === true,
+      ...(typeof claims.picture === "string" && claims.picture.trim() ? { pictureUrl: claims.picture.trim() } : {})
     };
   }
 }

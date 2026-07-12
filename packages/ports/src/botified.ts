@@ -4,6 +4,8 @@ export interface BotifiedRuntimeHttpClient {
   health(baseUrl: string, serviceKey?: string): Promise<{ status: "ok" }>;
   readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult>;
   postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult>;
+  postMessageWithDelivery?(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt>;
+  queryDeliveryReceipt?(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null>;
   readTimeline(
     baseUrl: string,
     serviceKey: string,
@@ -18,6 +20,20 @@ export interface BotifiedRuntimeHttpClient {
 export interface BotifiedPostMessageResult {
   accepted: boolean;
   kind?: string;
+  messageId?: string;
+  cursor?: string;
+}
+
+export interface BotifiedDeliveryMessageInput {
+  text: string;
+  deliveryKey: string;
+  requestHash: string;
+}
+
+export interface BotifiedDeliveryReceipt {
+  accepted: boolean;
+  deliveryKey: string;
+  requestHash: string;
   messageId?: string;
   cursor?: string;
 }
@@ -116,9 +132,11 @@ export class BotifiedHttpError extends Error {
 
 export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient {
   readonly #fetchImpl: BotifiedFetch;
+  readonly #requestTimeoutMs: number;
 
-  constructor(fetchImpl: BotifiedFetch = (input, init) => fetch(input, init)) {
+  constructor(fetchImpl: BotifiedFetch = (input, init) => fetch(input, init), requestTimeoutMs = 10_000) {
     this.#fetchImpl = fetchImpl;
+    this.#requestTimeoutMs = requestTimeoutMs;
   }
 
   async health(baseUrl: string, _serviceKey?: string): Promise<{ status: "ok" }> {
@@ -189,6 +207,31 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       result.cursor = cursor;
     }
     return result;
+  }
+
+  async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+    const body = await this.requestJson(baseUrl, "/v1/messages", {
+      method: "POST",
+      serviceKey,
+      body: JSON.stringify({ text: input.text, delivery_key: input.deliveryKey, request_hash: input.requestHash }),
+      headers: { "content-type": "application/json" }
+    });
+    return deliveryReceiptFromBody(body, input);
+  }
+
+  async queryDeliveryReceipt(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null> {
+    try {
+      const body = await this.requestJson(baseUrl, "/v1/deliveries/" + encodeURIComponent(deliveryKey), {
+        method: "GET",
+        serviceKey
+      });
+      const record = asRecord(body);
+      if (record?.found === false) return null;
+      return deliveryReceiptFromBody(body, { deliveryKey, requestHash: "" });
+    } catch (error) {
+      if (error instanceof BotifiedHttpError && error.status === 404) return null;
+      throw error;
+    }
   }
 
   async readTimeline(
@@ -297,7 +340,8 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
   private async fetchTimeline(baseUrl: string, serviceKey: string, path: string): Promise<Response> {
     return this.#fetchImpl(buildUrl(baseUrl, path), {
       method: "GET",
-      headers: authHeaders(serviceKey)
+      headers: authHeaders(serviceKey),
+      signal: AbortSignal.timeout(this.#requestTimeoutMs)
     });
   }
 
@@ -321,7 +365,8 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     }
     const requestInit: RequestInit = {
       method: input.method,
-      headers
+      headers,
+      signal: AbortSignal.timeout(this.#requestTimeoutMs)
     };
     if (input.body !== undefined) {
       requestInit.body = input.body;
@@ -603,6 +648,27 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     return value as Record<string, unknown>;
   }
   return undefined;
+}
+
+function deliveryReceiptFromBody(body: unknown, fallback: Pick<BotifiedDeliveryMessageInput, "deliveryKey" | "requestHash">): BotifiedDeliveryReceipt {
+  const record = asRecord(body);
+  const deliveryKey = stringField(record, "delivery_key") ?? fallback.deliveryKey;
+  const requestHash = stringField(record, "request_hash") ?? fallback.requestHash;
+  if (!deliveryKey || !requestHash || record?.ok !== true) {
+    throw new BotifiedHttpError({
+      status: 200,
+      code: "invalid_delivery_receipt",
+      message: "Botified delivery response did not contain an accepted receipt",
+      retryable: true,
+      responseBody: body
+    });
+  }
+  const result: BotifiedDeliveryReceipt = { accepted: true, deliveryKey, requestHash };
+  const messageId = stringField(record, "message_id");
+  const cursor = stringField(record, "timeline_cursor");
+  if (messageId !== undefined) result.messageId = messageId;
+  if (cursor !== undefined) result.cursor = cursor;
+  return result;
 }
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {

@@ -1,0 +1,1 @@
+alter table project_alert_rules add constraint project_alert_rules_alert_type_check check (alert_type in ('active_tasks_limit','provider_requests_limit','provider_tokens_limit','provider_cost_limit','project_file_bytes_limit','endpoint_failure','provider_failure','task_failure','sandbox_failure'));

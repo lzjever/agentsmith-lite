@@ -5,11 +5,13 @@ P0 Botified consumption is fixed as vendored source from pinned commit:
 - pin file: `third_party/botified/PINNED_SOURCE.json`
 - runtime entrypoint: `botified serve`
 
-The app does not expose Botified's TUI as product runtime. The runner Dockerfile builds the vendored source and the entrypoint execs:
+AgentSmith server uses Botified exclusively through its service API. The runner Dockerfile builds the vendored service runtime and the entrypoint execs:
 
 ```bash
 botified serve --config /etc/botified/botified-config.yaml
 ```
+
+AgentSmith owns the `bash-executor` sidecar and its loopback protocol; the pinned vendored Botified fork is the compatible runtime for that boundary. Do not substitute the stock Botified v0.4.14 release: it publishes no external executor or MCP client and runs built-in Bash inside the Botified process.
 
 `packages/botified-runtime` owns:
 
@@ -62,4 +64,4 @@ When `sandbox_runtime_state` is missing, `TaskService` rebuilds the non-secret B
 
 Timeline reads reuse the shared projection rules in `packages/botified-runtime`. Projection redacts secret-like field names and value-level secret-like strings such as bearer tokens, Botified service keys, and OpenAI-compatible API keys, including inside arrays and nested objects. Botified `/v1/timeline` envelopes are projected from their `data` field, with legacy `payload` test fakes still accepted as a fallback. Existing Botified sequence numbers are passed back into the projection so repeated reads are idempotent. The safe `timeline_cursor` returned by `POST /v1/messages` seeds the same runtime `timelineCursor` used by later reads, so the first forward sync does not fall back to `GET /v1/timeline?tail=1`; secret-like or missing cursors are ignored.
 
-`POST /api/tasks/{taskId}/cancel` derives the same service key and calls the Botified abort port before the task is marked `stopping`. After a successful abort, live mode writes cleanup intent and triggers one scoped cleanup pass. Botified abort failures are returned from the task API as structured errors containing `code`, redacted `message`, `retryable`, and cursor details when Botified supplies them.
+`POST /api/v1/tasks/{taskId}/cancel` derives the same service key and calls the Botified abort port before the task is marked `stopping`. After a successful abort, live mode writes cleanup intent and triggers one scoped cleanup pass. Botified abort failures are returned from the task API as structured errors containing `code`, redacted `message`, `retryable`, and cursor details when Botified supplies them.

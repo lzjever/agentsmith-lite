@@ -1,7 +1,13 @@
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
+import {
+  parseCredentialEncryptionConfig,
+  type CredentialEncryptionConfig
+} from "../../application/src/credentialCrypto.js";
 
 export type AuthMode = "builtin_admin" | "oidc";
 export type SandboxMode = "dry-run" | "live";
+
+export const DEFAULT_API_BIND_ADDRESS = "127.0.0.1";
 
 export interface RuntimeAuthConfig {
   mode: AuthMode;
@@ -13,17 +19,19 @@ export interface OidcRuntimeConfig {
   backchannelBaseUrl?: string;
   clientId: string;
   clientSecret: string;
-  adminEmails?: string[];
-  adminSubjects?: string[];
+}
+
+export type { CredentialEncryptionConfig };
+
+export function requireCredentialEncryptionConfig(env: Record<string, string | undefined>): CredentialEncryptionConfig {
+  return parseCredentialEncryptionConfig(env);
 }
 
 const oidcRuntimeKeys = [
   "OIDC_ISSUER_URL",
   "OIDC_BACKCHANNEL_BASE_URL",
   "OIDC_CLIENT_ID",
-  "OIDC_CLIENT_SECRET",
-  "OIDC_ADMIN_EMAILS",
-  "OIDC_ADMIN_SUBJECTS"
+  "OIDC_CLIENT_SECRET"
 ] as const;
 
 export function parseAuthMode(value: string | undefined): AuthMode {
@@ -54,15 +62,11 @@ export function requireOidcRuntimeConfig(env: Record<string, string | undefined>
   const backchannelBaseUrl = optionalHttpUrl(env.OIDC_BACKCHANNEL_BASE_URL, "OIDC_BACKCHANNEL_BASE_URL");
   const clientId = requireNonEmpty(env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
   const clientSecret = requireNonEmpty(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
-  const adminEmails = parseList(env.OIDC_ADMIN_EMAILS).map((email) => email.toLowerCase());
-  const adminSubjects = parseList(env.OIDC_ADMIN_SUBJECTS);
   return {
     issuerUrl,
     ...(backchannelBaseUrl ? { backchannelBaseUrl } : {}),
     clientId,
-    clientSecret,
-    ...(adminEmails.length > 0 ? { adminEmails } : {}),
-    ...(adminSubjects.length > 0 ? { adminSubjects } : {})
+    clientSecret
   };
 }
 
@@ -77,17 +81,30 @@ export function parseSandboxMode(value: string | undefined): SandboxMode {
   throw new Error("AGENTSMITH_LITE_SANDBOX_MODE must be either dry-run or live");
 }
 
+export function parseApiBindAddress(value: string | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed || DEFAULT_API_BIND_ADDRESS;
+}
+
 export function optionalRuntimeTickIntervalMs(value: string | undefined): number | undefined {
+  return optionalPositiveIntegerMs(value, "AGENTSMITH_LITE_RUNTIME_TICK_MS");
+}
+
+export function optionalLiveSandboxDurationMs(value: string | undefined, name: string): number | undefined {
+  return optionalPositiveIntegerMs(value, name);
+}
+
+function optionalPositiveIntegerMs(value: string | undefined, name: string): number | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {
     return undefined;
   }
   if (!/^[1-9]\d*$/.test(trimmed)) {
-    throw new Error("AGENTSMITH_LITE_RUNTIME_TICK_MS must be a positive integer");
+    throw new Error(`${name} must be a positive integer`);
   }
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed)) {
-    throw new Error("AGENTSMITH_LITE_RUNTIME_TICK_MS must be a positive integer");
+    throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
 }
@@ -139,13 +156,6 @@ function parseHttpUrl(value: string, name: string): string {
     throw new Error(`${name} must be an http or https URL when AUTH_MODE=oidc`);
   }
   return parsed.toString().replace(/\/$/, "");
-}
-
-function parseList(value: string | undefined): string[] {
-  return (value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
 }
 
 function rejectOidcRuntimeConfigForBuiltinAuth(env: Record<string, string | undefined>): void {

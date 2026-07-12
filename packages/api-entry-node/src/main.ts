@@ -1,7 +1,16 @@
 import path from "node:path";
 import { FetchBotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import { SandboxKubernetesPort } from "../../sandbox-controller/src/kubernetesPort.js";
-import { optionalRuntimeTickIntervalMs, parseRuntimeAuthConfig, parseSandboxMode, parseSandboxNamespaceLimit } from "./runtimeConfig.js";
+import {
+  optionalLiveSandboxDurationMs,
+  optionalRuntimeTickIntervalMs,
+  parseApiBindAddress,
+  requireCredentialEncryptionConfig,
+  parseRuntimeAuthConfig,
+  parseSandboxMode,
+  parseSandboxNamespaceLimit
+} from "./runtimeConfig.js";
+import { createCredentialCrypto } from "../../application/src/credentialCrypto.js";
 import { createOpenIdConnectClient } from "./oidcClient.js";
 import { createApiServer } from "./server.js";
 
@@ -9,9 +18,11 @@ const MODEL_CA_BUNDLE_PATH = "/etc/agentsmith-lite/model-ca/ca.crt";
 const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+const host = parseApiBindAddress(process.env.APP_BIND_ADDRESS);
 const dataRoot = process.env.AGENTSMITH_LITE_DATA_DIR ?? path.resolve(".data");
 const builtinAdminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD ?? "admin-password";
 const sessionSecret = process.env.APP_SESSION_SECRET ?? "dev-session-secret";
+const credentialCrypto = createCredentialCrypto(requireCredentialEncryptionConfig(process.env));
 const authConfig = parseRuntimeAuthConfig(process.env);
 const sandboxMode = parseSandboxMode(process.env.AGENTSMITH_LITE_SANDBOX_MODE);
 const sandboxNamespaceLimit = parseSandboxNamespaceLimit(process.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT);
@@ -24,20 +35,26 @@ if (!modelCaConfigMap && modelCaConfigKey) {
 const runtimeTickIntervalMs = liveSandboxEnabled
   ? optionalRuntimeTickIntervalMs(process.env.AGENTSMITH_LITE_RUNTIME_TICK_MS)
   : undefined;
+const liveSandboxIdleTimeoutMs = liveSandboxEnabled
+  ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS, "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS")
+  : undefined;
+const liveSandboxMaxLifetimeMs = liveSandboxEnabled
+  ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS")
+  : undefined;
 const oidcClient = authConfig.mode === "oidc" && authConfig.oidc
   ? await createOpenIdConnectClient(authConfig.oidc)
   : undefined;
 
 const server = await createApiServer({
   port,
+  host,
   dataRoot,
   authMode: authConfig.mode,
   builtinAdminPassword,
   sessionSecret,
+  credentialCrypto,
   ...(process.env.APP_PUBLIC_BASE_URL ? { publicBaseUrl: process.env.APP_PUBLIC_BASE_URL } : {}),
   ...(oidcClient ? { oidcClient } : {}),
-  ...(authConfig.oidc?.adminEmails ? { oidcAdminEmails: authConfig.oidc.adminEmails } : {}),
-  ...(authConfig.oidc?.adminSubjects ? { oidcAdminSubjects: authConfig.oidc.adminSubjects } : {}),
   namespace: process.env.KUBE_NAMESPACE ?? "agentsmith",
   pvcName: process.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
   botifiedRunnerImage: process.env.BOTIFIED_RUNNER_IMAGE ?? "agentsmith-lite/botified-runner:dev",
@@ -52,6 +69,8 @@ const server = await createApiServer({
       }
     : {}),
   ...(runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs } : {}),
+  ...(liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs } : {}),
+  ...(liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs } : {}),
   ...(liveSandboxEnabled
     ? {
         botifiedClient: new FetchBotifiedRuntimeHttpClient(),
@@ -62,4 +81,4 @@ const server = await createApiServer({
     : {})
 });
 
-console.log(`AgentSmith Lite API listening on ${server.baseUrl}`);
+console.log(`AgentSmith Lite API listening on ${host}:${port} (${server.baseUrl})`);

@@ -1,14 +1,19 @@
 import type { EndpointCapability, ModelEndpoint } from "../../contracts/src/api.js";
 import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 
+// Keep an ordinary long Bash call attached past the sandbox's 30-minute idle TTL.
+// Both values are intentionally bounded so a task cannot run indefinitely.
+const DEFAULT_BASH_DETACH_AFTER_SECS = 31 * 60;
+const MAX_BASH_TIMEOUT_SECS = 35 * 60;
+
 export interface BotifiedTaskRuntimeInput {
   taskId: string;
   projectMountPath: string;
   taskHomePath: string;
   botifiedDataPath: string;
   serviceKeyEnv: string;
-  modelApiKeyEnv: string;
-  modelCaBundlePath?: string;
+  providerApiKeyEnv: string;
+  providerBaseUrl: string;
   servicePort?: number;
 }
 
@@ -119,10 +124,10 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     tools: {
       enabled: enabledTools(input.endpoint),
       execution: {
-        default_detach_after_secs: 1,
-        max_detach_after_secs: 10,
-        default_timeout_secs: 120,
-        max_timeout_secs: 1800,
+        default_detach_after_secs: DEFAULT_BASH_DETACH_AFTER_SECS,
+        max_detach_after_secs: DEFAULT_BASH_DETACH_AFTER_SECS,
+        default_timeout_secs: MAX_BASH_TIMEOUT_SECS,
+        max_timeout_secs: MAX_BASH_TIMEOUT_SECS,
         max_concurrent_tasks: 4,
         callback_output_tail_bytes: 8192,
         max_task_output_bytes: 16_777_216,
@@ -193,10 +198,9 @@ export function serializeBotifiedConfig(config: BotifiedConfig): string {
 function providerConfig(endpoint: ModelEndpoint, task: BotifiedTaskRuntimeInput): BotifiedProviderConfig {
   return {
     name: endpoint.name,
-    base_url: endpoint.baseUrl,
+    base_url: task.providerBaseUrl,
     model: endpoint.model,
-    api_key_env: task.modelApiKeyEnv,
-    ...(task.modelCaBundlePath ? { ca_bundle_path: task.modelCaBundlePath } : {}),
+    api_key_env: task.providerApiKeyEnv,
     request_timeout_secs: endpoint.requestTimeoutSecs,
     priority: 10,
     capabilities: endpoint.capabilities,

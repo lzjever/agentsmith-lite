@@ -18,22 +18,47 @@
     "packages/api-entry-node"
   ],
   "scripts": {
-    "clean": "rm -rf dist",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-web-assets.mjs",
+    "clean": "rm -rf dist .next",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.node.json && npm run build:web",
+    "build:web": "APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL:?APP_PUBLIC_BASE_URL is required to build the Next application} next build && node scripts/web/prepare-standalone.mjs",
     "test": "npm run build && env -u POSTGRES_APP_URL node --test \"dist/tests/**/*.test.js\"",
     "db:migrate": "node scripts/db/apply-migrations.mjs",
     "test:postgres": "npm run db:migrate && npm run build && node --test \"dist/tests/integration/postgres*.test.js\"",
-    "dev:api": "npm run build && node dist/packages/api-entry-node/src/main.js",
-    "dev:web": "npm run dev:api",
-    "dev": "npm run dev:api",
-    "e2e:web-product": "npm run build && node e2e/web-product/web-product.mjs",
-    "e2e:web-product-oidc": "npm run build && node e2e/web-product-oidc/web-product-oidc.mjs",
-    "visual:screenshot": "npm run build && node scripts/visual/screenshot.mjs"
+    "build:api": "tsc -p tsconfig.node.json",
+    "dev:api": "npm run build:api && node dist/packages/api-entry-node/src/main.js",
+    "dev:web": "next dev",
+    "start:web": "node .next/standalone/server.js",
+    "dev": "bash scripts/dev/start.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
+    "@testing-library/react": "^16.3.0",
     "@types/node": "^24.10.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "autoprefixer": "^10.4.21",
+    "jsdom": "^26.1.0",
+    "next": "^16.0.1",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.3",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@radix-ui/react-alert-dialog": "^1.1.19",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-select": "^2.3.3",
+    "@radix-ui/react-tabs": "^1.1.17",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@tanstack/react-table": "^8.21.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.3.0"
   }
 }

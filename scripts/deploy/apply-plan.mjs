@@ -6,22 +6,24 @@ import { createAppDeployPlan, formatKubectlCommand } from "../../dist/packages/s
 import { readEnvOnlyContractFile } from "./env-contract.mjs";
 
 const args = parseArgs(process.argv.slice(2));
+const manifestOut = await resolveManifestOut(args.out);
 const contract = args.env ? await readEnvOnlyContractFile(args.env) : { env: {} };
 const env = { ...process.env, ...contract.env };
 if (args.images_lock) {
   const imageRefs = parseAppImagesLock(await readFile(args.images_lock, "utf8"));
-  validateAppManifestImagesAgainstLock(await readManifestText(args.out), imageRefs);
+  validateAppManifestImagesAgainstLock(await readManifestText(manifestOut), imageRefs);
 }
-const appDeployPlan = createAppDeployPlan({ out: args.out, timeout: args.timeout, env });
-const apiRolloutStatus = appDeployPlan.at(-1);
-if (!apiRolloutStatus) {
-  throw new Error("app deploy plan is missing API rollout status");
+const appDeployPlan = createAppDeployPlan({ out: manifestOut, timeout: args.timeout, env });
+const rolloutStatuses = appDeployPlan.slice(-2);
+if (rolloutStatuses.length !== 2) {
+  throw new Error("app deploy plan is missing workload rollout statuses");
 }
-const kubectlGlobalArgs = apiRolloutStatus.args.slice(0, -4);
+const kubectlGlobalArgs = rolloutStatuses[0].args.slice(0, -4);
 const plan = [
-  ...appDeployPlan.slice(0, -1),
+  ...appDeployPlan.slice(0, -2),
   { executable: "kubectl", args: [...kubectlGlobalArgs, "rollout", "restart", "deploy/agentsmith-lite-api"] },
-  apiRolloutStatus
+  { executable: "kubectl", args: [...kubectlGlobalArgs, "rollout", "restart", "deploy/agentsmith-lite-web"] },
+  ...rolloutStatuses
 ];
 
 if (args.dry_run) {
@@ -75,4 +77,9 @@ async function readManifestText(out) {
     return readFile(path.join(out, "all.yaml"), "utf8");
   }
   return readFile(out, "utf8");
+}
+
+async function resolveManifestOut(out) {
+  const outStat = await stat(out);
+  return outStat.isDirectory() ? path.join(out, "all.yaml") : out;
 }

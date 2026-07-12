@@ -1,4 +1,5 @@
 import type { KubernetesResource, SandboxRenderResult } from "../../contracts/src/api.js";
+import { APP_KUBERNETES_CONTAINER_PORT } from "./appManifestRenderer.js";
 import { sandboxResourceLabels } from "./labels.js";
 import { kubernetesDnsLabelName, sandboxResourceNamesForTask } from "./resourceNames.js";
 
@@ -28,13 +29,11 @@ export interface SandboxRenderInput {
   botifiedPort: number;
   serviceKeySecretName: string;
   serviceKeySecretKey?: string;
-  modelApiKeySecretKey?: string;
   cpuRequest: string;
   memoryRequest: string;
   cpuLimit: string;
   memoryLimit: string;
   modelCa?: SandboxModelCaReference;
-  modelEndpointBaseUrl?: string;
   resourceNames?: SandboxResourceNameOverrides;
 }
 
@@ -48,8 +47,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const serviceName = kubernetesDnsLabelName(input.resourceNames?.service ?? generatedNames.service);
   const serviceKeySecretName = kubernetesDnsLabelName(input.serviceKeySecretName);
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
-  const modelApiKeySecretKey = input.modelApiKeySecretKey ?? "MODEL_API_KEY";
   const taskSubPath = `${input.projectSubPath}/tasks/${input.taskId}`;
+  const inputSubPath = `${taskSubPath}/inputs`;
   const modelCaVolume = input.modelCa
     ? {
         name: "model-ca",
@@ -94,8 +93,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       },
       type: "Opaque",
       stringData: {
-        [serviceKeySecretKey]: "<redacted-generated-per-task>",
-        [modelApiKeySecretKey]: "<redacted-model-api-key>"
+        [serviceKeySecretKey]: "<redacted-generated-per-task>"
       }
     },
     {
@@ -155,15 +153,6 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                     key: serviceKeySecretKey
                   }
                 }
-              },
-              {
-                name: "MODEL_API_KEY",
-                valueFrom: {
-                  secretKeyRef: {
-                    name: serviceKeySecretName,
-                    key: modelApiKeySecretKey
-                  }
-                }
               }
             ],
             resources: {
@@ -187,7 +176,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               {
                 name: "project-files",
                 mountPath: "/workspace/project",
-                subPath: input.projectSubPath,
+                subPath: inputSubPath,
                 readOnly: true
               },
               {
@@ -242,7 +231,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               {
                 name: "project-files",
                 mountPath: "/workspace/project",
-                subPath: input.projectSubPath,
+                subPath: inputSubPath,
                 readOnly: true
               },
               {
@@ -323,13 +312,12 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             ]
           }
         ],
-        egress: renderEgressRules(input.modelEndpointBaseUrl)
+        egress: renderEgressRules()
       }
     }
   ];
 
   return {
-    dryRun: true,
     namespace: input.namespace,
     resources
   };
@@ -348,13 +336,8 @@ interface NetworkPolicyEgressRule {
   ports: Array<{ protocol: "TCP" | "UDP"; port: number }>;
 }
 
-interface ClusterServiceEndpoint {
-  serviceName: string;
-  namespace: string;
-}
-
-function renderEgressRules(modelEndpointBaseUrl: string | undefined): NetworkPolicyEgressRule[] {
-  return [dnsEgressRule(), modelEndpointEgressRule(modelEndpointBaseUrl)];
+function renderEgressRules(): NetworkPolicyEgressRule[] {
+  return [dnsEgressRule(), brokerEgressRule()];
 }
 
 function dnsEgressRule(): NetworkPolicyEgressRule {
@@ -373,79 +356,17 @@ function dnsEgressRule(): NetworkPolicyEgressRule {
   };
 }
 
-function modelEndpointEgressRule(modelEndpointBaseUrl: string | undefined): NetworkPolicyEgressRule {
-  const endpoint = parseModelEndpoint(modelEndpointBaseUrl);
-  const clusterService = endpoint ? parseClusterServiceEndpoint(endpoint.hostname) : null;
-  if (endpoint && clusterService) {
-    return {
-      to: [
-        {
-          namespaceSelector: {
-            matchLabels: {
-              "kubernetes.io/metadata.name": clusterService.namespace
-            }
-          },
-          podSelector: {
-            matchLabels: {
-              "app.kubernetes.io/name": clusterService.serviceName
-            }
-          }
-        }
-      ],
-      ports: clusterServiceModelPorts(endpoint.port)
-    };
-  }
+function brokerEgressRule(): NetworkPolicyEgressRule {
   return {
+    to: [{ podSelector: { matchLabels: {
+      "app.kubernetes.io/component": "api",
+      "agentsmith-lite/managed-by": "agentsmith-lite"
+    } } }],
     ports: [
       {
         protocol: "TCP",
-        port: endpoint?.port ?? 443
+        port: APP_KUBERNETES_CONTAINER_PORT
       }
     ]
   };
-}
-
-function parseModelEndpoint(modelEndpointBaseUrl: string | undefined): { hostname: string; port: number } | null {
-  if (!modelEndpointBaseUrl) {
-    return null;
-  }
-  try {
-    const parsed = new URL(modelEndpointBaseUrl);
-    const port = parsed.port ? Number(parsed.port) : 443;
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      return null;
-    }
-    return {
-      hostname: parsed.hostname.replace(/\.$/, "").toLowerCase(),
-      port
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseClusterServiceEndpoint(hostname: string): ClusterServiceEndpoint | null {
-  const parts = hostname.split(".");
-  const serviceName = parts[0];
-  const namespace = parts[1];
-  const isClusterLocalService =
-    parts.length >= 5 && parts[2] === "svc" && parts[3] === "cluster" && parts[4] === "local";
-  const isShortService = parts.length === 3 && parts[2] === "svc";
-  if (!isClusterLocalService && !isShortService) {
-    return null;
-  }
-  if (!isDnsLabel(serviceName) || !isDnsLabel(namespace)) {
-    return null;
-  }
-  return { serviceName, namespace };
-}
-
-function clusterServiceModelPorts(servicePort: number): Array<{ protocol: "TCP"; port: number }> {
-  // Local HTTPS services may be evaluated by NetworkPolicy after Service DNAT to the pod targetPort.
-  const ports = servicePort === 443 ? [443, 8443] : [servicePort];
-  return ports.map((port) => ({ protocol: "TCP", port }));
-}
-
-function isDnsLabel(value: string | undefined): value is string {
-  return typeof value === "string" && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(value) && value.length <= 63;
 }

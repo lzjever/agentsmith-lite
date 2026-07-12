@@ -1,6 +1,6 @@
 import { createHash, scrypt as scryptCallback, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { AuthSession, StoredUser, User, UserRole } from "../../contracts/src/api.js";
+import type { AuthSession, PublicUser, StoredUser } from "../../contracts/src/api.js";
 import { ForbiddenError, UnauthorizedError } from "../../domain/src/errors.js";
 import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -10,49 +10,33 @@ const BUILTIN_ADMIN_ID = "user_builtin_admin";
 const BUILTIN_ADMIN_EMAIL = "admin@agentsmith-lite.local";
 
 export interface LoginResult {
-  user: User;
+  user: PublicUser;
   sessionId: string;
   csrfToken: string;
   expiresAt: string;
 }
 
 export interface SessionPrincipal {
-  user: User;
+  user: PublicUser;
   csrfToken: string;
 }
 
 export interface ExternalPrincipal {
   issuer: string;
   subject: string;
-  email?: string | undefined;
-}
-
-export interface OidcAdminAllowlist {
-  emails?: readonly string[];
-  subjects?: readonly string[];
+  email: string;
+  emailVerified?: boolean;
+  pictureUrl?: string;
 }
 
 export class AuthService {
-  private readonly oidcAdminEmails: Set<string>;
-  private readonly oidcAdminSubjects: Set<string>;
-
   constructor(
     private readonly store: ProductStore,
     private readonly builtinAdminPassword: string,
-    private readonly sessionSecret: string,
-    oidcAdminAllowlist: OidcAdminAllowlist = {}
-  ) {
-    this.oidcAdminEmails = new Set((oidcAdminAllowlist.emails ?? []).flatMap((email) => {
-      const normalized = normalizeEmail(email);
-      return normalized ? [normalized] : [];
-    }));
-    this.oidcAdminSubjects = new Set((oidcAdminAllowlist.subjects ?? []).flatMap((subject) => {
-      const trimmed = subject.trim();
-      return trimmed ? [trimmed] : [];
-    }));
-  }
+    private readonly sessionSecret: string
+  ) {}
 
-  async bootstrapBuiltInAdmin(): Promise<{ created: boolean; user: User }> {
+  async bootstrapBuiltInAdmin(): Promise<{ created: boolean; user: PublicUser }> {
     const existing = await this.store.findUserById(BUILTIN_ADMIN_ID);
     if (existing) {
       return { created: false, user: publicUser(existing) };
@@ -61,7 +45,7 @@ export class AuthService {
     const user: StoredUser = {
       id: BUILTIN_ADMIN_ID,
       email: BUILTIN_ADMIN_EMAIL,
-      role: "admin",
+      emailVerified: false,
       passwordHash: await hashPassword(this.builtinAdminPassword),
       createdAt: timestamp,
       updatedAt: timestamp
@@ -90,10 +74,12 @@ export class AuthService {
 
   async loginExternalPrincipal(principal: ExternalPrincipal): Promise<LoginResult> {
     const userId = externalUserId(principal);
-    const role = this.roleForExternalPrincipal(principal);
-    const existing = await this.store.findUserById(userId);
-    const storedUser = existing ? await this.ensureExternalUserRole(existing, role) : await this.createExternalUser(userId, principal, role);
-    const session = await this.createSession(userId);
+    requireVerifiedExternalEmail(principal);
+    const existing = await this.store.findUserByOidcSubject(principal.issuer, principal.subject);
+    const storedUser = existing
+      ? await this.updateExternalIdentity(existing, principal)
+      : await this.resolveExternalUser(userId, principal);
+    const session = await this.createSession(storedUser.id);
     return {
       user: publicUser(storedUser),
       sessionId: session.id,
@@ -106,7 +92,7 @@ export class AuthService {
     return (await this.store.countUsers()) > 0;
   }
 
-  async requireSession(sessionId: string | null): Promise<User> {
+  async requireSession(sessionId: string | null): Promise<PublicUser> {
     return (await this.requireSessionPrincipal(sessionId)).user;
   }
 
@@ -161,12 +147,15 @@ export class AuthService {
     return `sha256:${Buffer.from(this.sessionSecret).toString("base64url").slice(0, 12)}`;
   }
 
-  private async createExternalUser(userId: string, principal: ExternalPrincipal, role: UserRole): Promise<StoredUser> {
+  private async createExternalUser(userId: string, principal: ExternalPrincipal): Promise<StoredUser> {
     const timestamp = nowIso();
     const user: StoredUser = {
       id: userId,
       email: externalEmail(principal),
-      role,
+      oidcIssuer: requireExternalPrincipalField(principal.issuer, "issuer"),
+      oidcSubject: requireExternalPrincipalField(principal.subject, "subject"),
+      emailVerified: true,
+      ...(safePictureUrl(principal.pictureUrl) ? { pictureUrl: safePictureUrl(principal.pictureUrl)! } : {}),
       passwordHash: "external:oidc",
       createdAt: timestamp,
       updatedAt: timestamp
@@ -175,30 +164,83 @@ export class AuthService {
     return user;
   }
 
-  private async ensureExternalUserRole(user: StoredUser, role: UserRole): Promise<StoredUser> {
-    if (user.role === role) {
+  private async resolveExternalUser(userId: string, principal: ExternalPrincipal): Promise<StoredUser> {
+    let bound: StoredUser | null;
+    try {
+      bound = await this.store.bindLegacyExternalIdentity({
+        userId,
+        issuer: requireExternalPrincipalField(principal.issuer, "issuer"),
+        subject: requireExternalPrincipalField(principal.subject, "subject"),
+        email: externalEmail(principal),
+        updatedAt: nowIso()
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const concurrentlyBound = await this.store.findUserByOidcSubject(principal.issuer, principal.subject);
+      if (concurrentlyBound) {
+        return this.updateExternalIdentity(concurrentlyBound, principal);
+      }
+      throw new UnauthorizedError("OIDC identity does not match the existing user");
+    }
+    if (bound) {
+      return bound;
+    }
+
+    const concurrentlyBound = await this.store.findUserByOidcSubject(principal.issuer, principal.subject);
+    if (concurrentlyBound) {
+      return this.updateExternalIdentity(concurrentlyBound, principal);
+    }
+    if (await this.store.findUserById(userId)) {
+      throw new UnauthorizedError("OIDC identity does not match the existing user");
+    }
+
+    try {
+      return await this.createExternalUser(userId, principal);
+    } catch (error) {
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const createdConcurrently = await this.store.findUserByOidcSubject(principal.issuer, principal.subject);
+      if (createdConcurrently) {
+        return this.updateExternalIdentity(createdConcurrently, principal);
+      }
+      throw new UnauthorizedError("OIDC identity does not match the existing user");
+    }
+  }
+
+  private async updateExternalIdentity(user: StoredUser, principal: ExternalPrincipal): Promise<StoredUser> {
+    const email = externalEmail(principal);
+    const pictureUrl = safePictureUrl(principal.pictureUrl);
+    if (user.email === email && user.emailVerified && user.oidcIssuer === principal.issuer && user.oidcSubject === principal.subject && user.pictureUrl === pictureUrl) {
       return user;
     }
+    const emailOwner = await this.store.findUserByEmail(email);
+    if (emailOwner && emailOwner.id !== user.id) {
+      throw new UnauthorizedError("OIDC identity could not be authenticated");
+    }
+    const { pictureUrl: _previousPictureUrl, ...userWithoutPicture } = user;
     const updated = {
-      ...user,
-      role,
+      ...userWithoutPicture,
+      email,
+      oidcIssuer: principal.issuer,
+      oidcSubject: principal.subject,
+      emailVerified: true,
+      ...(pictureUrl ? { pictureUrl } : {}),
       updatedAt: nowIso()
     };
-    await this.store.updateUser(updated);
+    try {
+      await this.store.updateUser(updated);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new UnauthorizedError("OIDC identity could not be authenticated");
+      }
+      throw error;
+    }
     return updated;
   }
 
-  private roleForExternalPrincipal(principal: ExternalPrincipal): UserRole {
-    const email = normalizeEmail(principal.email);
-    if (email && this.oidcAdminEmails.has(email)) {
-      return "admin";
-    }
-    const subject = requireExternalPrincipalField(principal.subject, "subject");
-    if (this.oidcAdminSubjects.has(subject)) {
-      return "admin";
-    }
-    return "member";
-  }
 }
 
 async function hashPassword(password: string, salt = randomBytes(16).toString("hex")): Promise<string> {
@@ -216,9 +258,14 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
   return expected.length === derived.length && timingSafeEqual(expected, derived);
 }
 
-function publicUser(user: StoredUser): User {
-  const { passwordHash: _passwordHash, ...publicFields } = user;
+function publicUser(user: StoredUser): PublicUser {
+  const { passwordHash: _passwordHash, oidcIssuer: _issuer, oidcSubject: _subject, ...publicFields } = user;
   return structuredClone(publicFields);
+}
+
+function safePictureUrl(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  try { const parsed = new URL(value.trim()); return parsed.protocol === "https:" ? parsed.toString() : undefined; } catch { return undefined; }
 }
 
 function externalUserId(principal: ExternalPrincipal): string {
@@ -230,12 +277,17 @@ function externalUserId(principal: ExternalPrincipal): string {
 
 function externalEmail(principal: ExternalPrincipal): string {
   const email = normalizeEmail(principal.email);
-  if (email) {
-    return email;
+  if (!email) {
+    throw new UnauthorizedError("OIDC principal email is required");
   }
-  const subject = requireExternalPrincipalField(principal.subject, "subject");
-  const digest = createHash("sha256").update(subject).digest("hex").slice(0, 16);
-  return `oidc-${digest}@agentsmith-lite.local`;
+  return email;
+}
+
+function requireVerifiedExternalEmail(principal: ExternalPrincipal): void {
+  externalEmail(principal);
+  if (principal.emailVerified !== true) {
+    throw new UnauthorizedError("OIDC principal email must be verified");
+  }
 }
 
 function normalizeEmail(value: string | undefined): string | undefined {
@@ -249,4 +301,8 @@ function requireExternalPrincipalField(value: string, name: string): string {
     throw new UnauthorizedError(`OIDC principal ${name} is required`);
   }
   return trimmed;
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }

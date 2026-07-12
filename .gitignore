@@ -1,8 +1,11 @@
 node_modules/
 dist/
+.next/
+tsconfig.tsbuildinfo
 out/
 .data/
 .dev/
 .env
 *.log
 third_party/botified/target/
+packages/bash-executor/target/

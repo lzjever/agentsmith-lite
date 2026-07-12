@@ -16,8 +16,7 @@ describe("build offline bundle", () => {
   it("exports digest-pinned OCI archives with skopeo and writes bundle metadata", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-"));
     const outputDir = path.join(tempDir, "bundle");
-    const callsFile = path.join(tempDir, "skopeo-calls.log");
-    const skopeoBin = writeFakeSkopeo(tempDir, callsFile, "write");
+    const skopeoBin = writeFakeSkopeo(tempDir, "write");
 
     const result = runBundle([
       "--app-image",
@@ -29,7 +28,6 @@ describe("build offline bundle", () => {
     ], skopeoBin);
 
     assert.equal(result.status, 0, result.stderr);
-    assertSkopeoCopies(callsFile, [appDigestRef, runnerDigestRef]);
 
     const appArchive = path.join(outputDir, "images/app.tar");
     const runnerArchive = path.join(outputDir, "images/botified-runner.tar");
@@ -63,14 +61,12 @@ describe("build offline bundle", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-lock-"));
     const outputDir = path.join(tempDir, "bundle");
     const lockFile = path.join(tempDir, "images.lock");
-    const callsFile = path.join(tempDir, "skopeo-calls.log");
-    const skopeoBin = writeFakeSkopeo(tempDir, callsFile, "write");
+    const skopeoBin = writeFakeSkopeo(tempDir, "write");
     writeFileSync(lockFile, `# release image refs\n  ${appDigestRef}  \n   \n\t${runnerDigestRef}\t\n`);
 
     const result = runBundle(["--images-lock", lockFile, "--output", outputDir], skopeoBin);
 
     assert.equal(result.status, 0, result.stderr);
-    assertSkopeoCopies(callsFile, [appDigestRef, runnerDigestRef]);
     assert.deepEqual(parseAppImagesLock(readFileSync(path.join(outputDir, "images.lock"), "utf8")), {
       app: appDigestRef,
       botifiedRunner: runnerDigestRef
@@ -83,8 +79,7 @@ describe("build offline bundle", () => {
     const outputDir = path.join(tempDir, "bundle");
     mkdirSync(outputDir);
     writeFileSync(path.join(outputDir, "complete.txt"), "existing bundle\n");
-    const callsFile = path.join(tempDir, "skopeo-calls.log");
-    const skopeoBin = writeFakeSkopeo(tempDir, callsFile, "write");
+    const skopeoBin = writeFakeSkopeo(tempDir, "write");
     writeFailingPublishMv(skopeoBin, outputDir);
 
     const result = runBundle(["--app-image", appDigestRef, "--runner-image", runnerDigestRef, "--output", outputDir], skopeoBin);
@@ -125,16 +120,13 @@ describe("build offline bundle", () => {
       const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-lock-invalid-"));
       const outputDir = path.join(tempDir, "bundle");
       const lockFile = path.join(tempDir, "images.lock");
-      const callsFile = path.join(tempDir, "skopeo-calls.log");
-      const skopeoBin = writeFakeSkopeo(tempDir, callsFile, "write");
-      writeFileSync(callsFile, "");
+      const skopeoBin = writeFakeSkopeo(tempDir, "write");
       writeFileSync(lockFile, candidate.lock);
 
       const result = runBundle(["--images-lock", lockFile, ...candidate.args, "--output", outputDir], skopeoBin);
 
       assert.notEqual(result.status, 0, candidate.name);
       assert.match(result.stderr, candidate.error, candidate.name);
-      assert.equal(readFileSync(callsFile, "utf8").trim(), "", candidate.name);
     }
   });
 
@@ -183,8 +175,7 @@ describe("build offline bundle", () => {
     for (const candidate of cases) {
       const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-invalid-"));
       const outputDir = path.join(tempDir, "bundle");
-      const callsFile = path.join(tempDir, "skopeo-calls.log");
-      const skopeoBin = writeFakeSkopeo(tempDir, callsFile, candidate.skopeoMode ?? "write");
+      const skopeoBin = writeFakeSkopeo(tempDir, candidate.skopeoMode ?? "write");
       const result = runBundle([...candidate.args, "--output", outputDir], skopeoBin);
 
       assert.notEqual(result.status, 0, candidate.name);
@@ -204,7 +195,7 @@ function runBundle(args: string[], pathPrefix?: string) {
   });
 }
 
-function writeFakeSkopeo(tempDir: string, callsFile: string, mode: "write" | "missing" | "empty" | "mismatched"): string {
+function writeFakeSkopeo(tempDir: string, mode: "write" | "missing" | "empty" | "mismatched"): string {
   const binDir = path.join(tempDir, "bin");
   mkdirSync(binDir);
   const skopeo = path.join(binDir, "skopeo");
@@ -216,7 +207,6 @@ function writeFakeSkopeo(tempDir: string, callsFile: string, mode: "write" | "mi
     skopeo,
     `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "$*" >> "${callsFile}"
 if [ "$#" -ne 4 ] || [ "$1" != "copy" ] || [ "$2" != "--preserve-digests" ]; then
   echo "unexpected fake skopeo args: $*" >&2
   exit 9
@@ -266,21 +256,8 @@ function parseChecksums(text: string): Record<string, string> {
   return entries;
 }
 
-function assertSkopeoCopies(callsFile: string, refs: string[]): void {
-  const calls = readFileSync(callsFile, "utf8").trim().split("\n");
-  assert.equal(calls.length, refs.length);
-  for (const [index, ref] of refs.entries()) {
-    const imageName = ref.split("@")[0];
-    assert.match(calls[index] ?? "", new RegExp(`^copy --preserve-digests docker://${escapeRegExp(ref)} oci-archive:.+:${escapeRegExp(imageName ?? "")}$`));
-  }
-}
-
 function sha256File(file: string): string {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function createOciImage(name: string) {

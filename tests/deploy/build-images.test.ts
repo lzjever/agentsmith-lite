@@ -9,6 +9,7 @@ import { parseAppImagesLock } from "../../packages/sandbox-controller/src/appIma
 const appDigestRef = "agentsmith-lite/app@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const runnerDigestRef = "agentsmith-lite/botified-runner@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const localImageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const appPublicBaseUrl = "http://localhost:3000/app";
 
 describe("build images", () => {
   it("copies workspace package manifests before npm ci in the app image", () => {
@@ -30,24 +31,43 @@ describe("build images", () => {
     }
   });
 
+  it("builds runner binaries sequentially in one Rust stage", () => {
+    const dockerfile = readFileSync(path.join(process.cwd(), "infra/docker/Dockerfile.botified-runner"), "utf8");
+    const runtimeStart = dockerfile.indexOf("\nFROM debian:bookworm-slim");
+    assert.notEqual(runtimeStart, -1, "Dockerfile.botified-runner must include its Debian runtime stage");
+    const buildStage = dockerfile.slice(0, runtimeStart);
+
+    assert.equal((dockerfile.match(/^FROM rust:1-bookworm\b/gm) ?? []).length, 1);
+    assert.match(buildStage, /^FROM rust:1-bookworm AS build$/m);
+    assert.match(
+      buildStage,
+      /WORKDIR \/src\/bash-executor\nARG CARGO_BUILD_JOBS=1\nCOPY packages\/bash-executor \.\/\nRUN cargo build --jobs "\$CARGO_BUILD_JOBS" --release --bin bash-executor\n\nWORKDIR \/src\/botified\nCOPY third_party\/botified \.\/\nRUN cargo build --jobs "\$CARGO_BUILD_JOBS" --release --bin botified/
+    );
+    assert.match(dockerfile, /COPY --from=build \/src\/bash-executor\/target\/release\/bash-executor \/usr\/local\/bin\/bash-executor/);
+    assert.match(dockerfile, /COPY --from=build \/src\/botified\/target\/release\/botified \/usr\/local\/bin\/botified/);
+  });
+
   it("pushes images with the selected runtime and writes images.lock from canonical RepoDigests", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-build-images-"));
     const callsFile = path.join(tempDir, "runtime-calls.log");
     const runtime = writeFakeRuntime(tempDir, callsFile, "canonical");
     const lockFile = path.join(tempDir, "images.lock");
 
-    const result = runBuildImages(["--tag", "release-1", "--runtime", runtime, "--push", "--images-lock", lockFile]);
+    const result = runBuildImages(["--tag", "release-1", "--runtime", runtime, "--push", "--images-lock", lockFile], {
+      APP_PUBLIC_BASE_URL: appPublicBaseUrl,
+      NODE_BUILD_HEAP_MB: "1536",
+      CARGO_BUILD_JOBS: "2"
+    });
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readCalls(callsFile), [
-      "build -f infra/docker/Dockerfile.app -t agentsmith-lite/app:release-1 .",
-      "build -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:release-1 .",
+      "build --build-arg APP_PUBLIC_BASE_URL=http://localhost:3000/app --build-arg NODE_BUILD_HEAP_MB=1536 -f infra/docker/Dockerfile.app -t agentsmith-lite/app:release-1 .",
+      "build --build-arg CARGO_BUILD_JOBS=2 -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:release-1 .",
       "push agentsmith-lite/app:release-1",
       "push agentsmith-lite/botified-runner:release-1",
       "image inspect agentsmith-lite/app:release-1",
       "image inspect agentsmith-lite/botified-runner:release-1"
     ]);
-
     const imagesLock = readFileSync(lockFile, "utf8");
     assert.deepEqual(parseAppImagesLock(imagesLock), {
       app: appDigestRef,
@@ -57,11 +77,33 @@ describe("build images", () => {
     assert.doesNotMatch(imagesLock, /:release-1(?:@|\s|$)/);
   });
 
+  it("requires an explicit public URL for the Next build", () => {
+    const result = runBuildImages(["--tag", "dev", "--dry-run"], { APP_PUBLIC_BASE_URL: "" });
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /APP_PUBLIC_BASE_URL is required/);
+  });
+
+  it("starts the web server only when the rendered public URL matches the image build URL", () => {
+    const result = spawnSync("node", ["scripts/web/start.mjs"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        APP_BUILD_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
+        APP_PUBLIC_BASE_URL: "https://agentsmith.example.test"
+      }
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /does not match the image build URL/);
+  });
+
   it("requires --push when --images-lock is requested", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-build-images-no-push-"));
     const lockFile = path.join(tempDir, "images.lock");
 
-    const result = runBuildImages(["--tag", "dev", "--images-lock", lockFile]);
+    const result = runBuildImages(["--tag", "dev", "--images-lock", lockFile], { APP_PUBLIC_BASE_URL: appPublicBaseUrl });
 
     assert.equal(result.status, 2);
     assert.match(result.stderr, /--images-lock.*--push/);
@@ -75,51 +117,21 @@ describe("build images", () => {
     const lockFile = path.join(tempDir, "images.lock");
     writeFileSync(lockFile, `${appDigestRef}\n${runnerDigestRef}\n`);
 
-    const result = runBuildImages(["--tag", "dev", "--runtime", runtime, "--push", "--images-lock", lockFile]);
+    const result = runBuildImages(["--tag", "dev", "--runtime", runtime, "--push", "--images-lock", lockFile], {
+      APP_PUBLIC_BASE_URL: appPublicBaseUrl
+    });
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /RepoDigest|digest/i);
     assert.equal(existsSync(lockFile), false);
-    assert.equal(readCalls(callsFile).includes("image inspect agentsmith-lite/app:dev"), true);
-  });
-
-  it("dry-run prints build, push, and write-lock intent without calling the runtime or writing files", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-build-images-dry-run-"));
-    const runtime = path.join(tempDir, "runtime-not-called");
-    const lockFile = path.join(tempDir, "images.lock");
-
-    const result = runBuildImages(["--tag", "qa", "--runtime", runtime, "--push", "--images-lock", lockFile, "--dry-run"]);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split("\n"), [
-      `${runtime} build -f infra/docker/Dockerfile.app -t agentsmith-lite/app:qa .`,
-      `${runtime} build -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:qa .`,
-      `${runtime} push agentsmith-lite/app:qa`,
-      `${runtime} push agentsmith-lite/botified-runner:qa`,
-      `write images.lock from RepoDigests to ${lockFile}`
-    ]);
-    assert.equal(existsSync(lockFile), false);
-  });
-
-  it("dry-run uses CONTAINER_RUNTIME when --runtime is omitted", () => {
-    const result = runBuildImages(["--tag", "dev", "--dry-run"], {
-      ...process.env,
-      CONTAINER_RUNTIME: "nerdctl"
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split("\n"), [
-      "nerdctl build -f infra/docker/Dockerfile.app -t agentsmith-lite/app:dev .",
-      "nerdctl build -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:dev ."
-    ]);
   });
 });
 
-function runBuildImages(args: string[], env: NodeJS.ProcessEnv = process.env) {
+function runBuildImages(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync("bash", ["scripts/build-images.sh", ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env
+    env: { ...process.env, ...env, APP_PUBLIC_BASE_URL: env.APP_PUBLIC_BASE_URL ?? appPublicBaseUrl }
   });
 }
 

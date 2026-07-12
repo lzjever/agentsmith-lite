@@ -10,6 +10,7 @@ export interface RuntimeTaskServicePort {
 export interface RuntimeSandboxLifecyclePort {
   reapSandboxRunsOnce(input: SandboxReapInput): Promise<SandboxReapResult>;
 }
+export interface RuntimeProviderSettlementPort { expireProviderReservations(): Promise<void>; }
 
 export type RuntimeTimerHandle = { unref?: () => void } | number | string;
 
@@ -31,16 +32,22 @@ export class RuntimeService {
   constructor(
     private readonly tasks: RuntimeTaskServicePort,
     private readonly sandboxLifecycle: RuntimeSandboxLifecyclePort,
+    private readonly providerSettlementsOrConfig: RuntimeProviderSettlementPort | RuntimeServiceConfig = {},
     private readonly config: RuntimeServiceConfig = {}
   ) {}
 
   async tickOnce(): Promise<RuntimeTickResult> {
+    if ("expireProviderReservations" in this.providerSettlementsOrConfig) {
+      try {
+        await this.providerSettlementsOrConfig.expireProviderReservations();
+      } catch {
+        // Provider-expiry is one bounded maintenance item; task sync and reaping still run.
+      }
+    }
     let taskSync: ActiveTaskSyncResult;
-    let taskSyncError: unknown;
     try {
       taskSync = await this.tasks.syncActiveTasksOnce();
-    } catch (error) {
-      taskSyncError = error;
+    } catch {
       taskSync = {
         activeTaskCount: 0,
         syncedTaskIds: [],
@@ -48,10 +55,9 @@ export class RuntimeService {
       };
     }
 
-    const sandboxReap = await this.sandboxLifecycle.reapSandboxRunsOnce({ apply: true });
-    if (taskSyncError !== undefined) {
-      throw taskSyncError;
-    }
+    let sandboxReap:SandboxReapResult;
+    try{sandboxReap=await this.sandboxLifecycle.reapSandboxRunsOnce({apply:true});}
+    catch{sandboxReap=emptySandboxReapResult();}
     return { taskSync, sandboxReap };
   }
 
@@ -59,8 +65,9 @@ export class RuntimeService {
     if (this.timer !== null) {
       return;
     }
-    const intervalMs = resolveTickIntervalMs(this.config.tickIntervalMs);
-    const setTimer = this.config.setInterval ?? defaultSetInterval;
+    const config = "expireProviderReservations" in this.providerSettlementsOrConfig ? this.config : this.providerSettlementsOrConfig;
+    const intervalMs = resolveTickIntervalMs(config.tickIntervalMs);
+    const setTimer = config.setInterval ?? defaultSetInterval;
     const timer = setTimer(() => {
       this.runScheduledTick();
     }, intervalMs);
@@ -73,7 +80,8 @@ export class RuntimeService {
     if (this.timer === null) {
       return;
     }
-    const clearTimer = this.config.clearInterval ?? defaultClearInterval;
+    const config = "expireProviderReservations" in this.providerSettlementsOrConfig ? this.config : this.providerSettlementsOrConfig;
+    const clearTimer = config.clearInterval ?? defaultClearInterval;
     clearTimer(this.timer);
     this.timer = null;
   }
@@ -89,6 +97,8 @@ export class RuntimeService {
       });
   }
 }
+
+function emptySandboxReapResult():SandboxReapResult{return{namespace:"",activeTaskCount:0,runCounts:{total:0,active:0,cleanupRequested:0,deleting:0,cleaned:0,starting:0,running:0,stopping:0,expired:0},observedResourceCounts:{},cleanupPlan:{targets:[],recentFailures:[]},recentCleanupFailures:[],actionSummary:[],errors:["Sandbox reap failed"],dryRun:false,storedRunIds:[]};}
 
 function defaultSetInterval(callback: () => void, intervalMs: number): RuntimeTimerHandle {
   return setInterval(callback, intervalMs);

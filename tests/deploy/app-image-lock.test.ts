@@ -14,7 +14,7 @@ describe("deploy app images.lock", () => {
     const input = {
       namespace: "agentsmith",
       imageTag: "dev",
-      env: {},
+      env: { APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/" },
       secrets: {},
       imageRefs: {
         app: appDigestRef,
@@ -41,6 +41,7 @@ describe("deploy app images.lock", () => {
     assert.equal(deployment?.spec.template.spec.containers[0]?.image, appDigestRef);
     assert.equal(job?.spec.template.spec.containers[0]?.image, appDigestRef);
     assert.equal(configMap?.data.BOTIFIED_RUNNER_IMAGE, runnerDigestRef);
+    assert.equal(configMap?.data.APP_PUBLIC_BASE_URL, "https://agentsmith.example.test/");
   });
 
   it("rejects images.lock files missing app or runner refs, duplicates, mutable tags, or invalid digests", () => {
@@ -68,7 +69,7 @@ describe("deploy app images.lock", () => {
       const envFile = path.join(tempDir, "substrate.env");
       const lockFile = path.join(tempDir, "images.lock");
       const outDir = path.join(tempDir, "manifests");
-      writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+      writeRenderEnv(envFile, "https://agentsmith.example.test/");
       writeFileSync(lockFile, candidate.lock);
 
       const result = spawnSync(
@@ -90,7 +91,7 @@ describe("deploy app images.lock", () => {
     const envFile = path.join(tempDir, "substrate.env");
     const lockFile = path.join(tempDir, "images.lock");
     const outDir = path.join(tempDir, "manifests");
-    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+    writeRenderEnv(envFile, "https://agentsmith.example.test/app");
     writeFileSync(lockFile, `${appDigestRef}\n${runnerDigestRef}\n`);
 
     const result = spawnSync(
@@ -108,6 +109,9 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, new RegExp(escapeRegExp(runnerDigestRef)));
     assert.doesNotMatch(manifest, /agentsmith-lite\/app:dev/);
     assert.doesNotMatch(manifest, /agentsmith-lite\/botified-runner:dev/);
+    assert.match(manifest, /APP_PUBLIC_BASE_URL: "https:\/\/agentsmith\.example\.test\/app"/);
+    assert.match(manifest, /path: "\/app"/);
+    assert.match(manifest, /path: "\/app\/health"/);
   });
 
   it("render.sh writes an app Ingress manifest into per-resource output and all.yaml", () => {
@@ -163,7 +167,6 @@ describe("deploy app images.lock", () => {
       appEnvFile,
       [
         "AGENTSMITH_LITE_SANDBOX_MODE=live",
-        "BOTIFIED_RUNNER_IMAGE=registry.example.test/agentsmith/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333",
         "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=https://models.example.test/v1",
         ""
       ].join("\n")
@@ -197,7 +200,8 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, /ingressClassName: "nginx"/);
     assert.match(manifest, /secretName: "agentsmith-lite-tls"/);
     assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: "live"/);
-    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: "registry\.example\.test\/agentsmith\/botified-runner@sha256:3333333333333333333333333333333333333333333333333333333333333333"/);
+    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: "agentsmith-lite\/botified-runner:dev"/);
+    assert.doesNotMatch(manifest, /registry\.example\.test\/agentsmith\/botified-runner/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https:\/\/models\.example\.test\/v1"/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-overlay-model-key"/);
     assert.match(manifest, /POSTGRES_APP_URL: "postgresql:\/\/app:secret@db\/agentsmith"/);
@@ -227,6 +231,10 @@ describe("deploy app images.lock", () => {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function writeRenderEnv(envFile: string, publicBaseUrl: string): void {
+  writeFileSync(envFile, `KUBE_NAMESPACE=agentsmith\nAPP_PUBLIC_BASE_URL=${publicBaseUrl}\n`);
 }
 
 function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): void {

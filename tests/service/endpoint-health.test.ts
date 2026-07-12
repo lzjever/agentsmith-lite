@@ -1,0 +1,84 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { createApplicationServices } from "../../packages/application/src/factory.js";
+
+test("endpoint save validates with the bound write-only credential and exposes only safe health metadata", async () => {
+  const calls: Array<{ apiKey: string; baseUrl: string }> = [];
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot: "/tmp/agentsmith-endpoint-health",
+    builtinAdminPassword: "admin-password",
+    providerClient: { completeChat: async () => { throw new Error("not used"); }, validateEndpoint: async (endpoint, apiKey) => { calls.push({ apiKey, baseUrl: endpoint.baseUrl }); return { status: "healthy" }; } }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
+
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+
+  assert.deepEqual(calls, [{ apiKey: "never-expose-this", baseUrl: credential.baseUrl }]);
+  assert.equal(endpoint.health?.status, "healthy");
+  assert.equal(endpoint.health?.errorCategory, null);
+  assert.ok(endpoint.health?.checkedAt);
+  assert.doesNotMatch(JSON.stringify(endpoint), /never-expose-this/);
+  assert.deepEqual((await store.listSettledProjectProviderSettlements(project.id, "1970-01-01T00:00:00.000Z")).map((settlement) => settlement.endpointId), [null]);
+  assert.equal((await store.findProjectResourceUsage(project.id))?.providerRequests, 1);
+});
+
+test("endpoint save rejects a sanitized validation failure without persisting an unusable endpoint", async () => {
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot: "/tmp/agentsmith-endpoint-health-failure",
+    builtinAdminPassword: "admin-password",
+    providerClient: { completeChat: async () => { throw new Error("not used"); }, validateEndpoint: async () => ({ status: "unavailable", errorCategory: "auth" }) }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
+
+  await assert.rejects(() => services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 }), /Endpoint validation failed: auth/);
+  assert.deepEqual(await services.endpoints.listEndpoints(user.id, project.id), []);
+  assert.deepEqual((await store.listSettledProjectProviderSettlements(project.id, "1970-01-01T00:00:00.000Z")).map((settlement) => settlement.endpointId), [null]);
+  assert.equal((await store.findProjectResourceUsage(project.id))?.providerRequests, 1);
+});
+
+test("endpoint model discovery and recheck persist only safe health transitions", async () => {
+  let outcome: "healthy" | "unavailable" = "healthy";
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot: "/tmp/agentsmith-endpoint-recheck",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => outcome === "healthy" ? { status: "healthy" } : { status: "unavailable", errorCategory: "auth" },
+      discoverModels: async () => ({ models: ["z-model", "a-model", "a-model"], health: { status: "healthy", checkedAt: null, errorCategory: null } })
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
+  const discovered = await services.endpoints.discoverModels(user.id, project.id, { baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 });
+  assert.deepEqual(discovered.models, ["z-model", "a-model", "a-model"]);
+  assert.equal(discovered.health.status, "healthy");
+  assert.ok(discovered.health.checkedAt);
+
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "a-model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  await services.endpoints.discoverModels(user.id, project.id, { endpointId: endpoint.id, baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 });
+  outcome = "unavailable";
+  const unavailable = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
+  assert.deepEqual(unavailable.health?.status, "unavailable");
+  assert.equal(unavailable.health?.errorCategory, "auth");
+  assert.doesNotMatch(JSON.stringify(unavailable), /never-expose-this/);
+
+  outcome = "healthy";
+  const recovered = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
+  assert.equal(recovered.health?.status, "healthy");
+  assert.equal(recovered.health?.errorCategory, null);
+  const settlements = await store.listSettledProjectProviderSettlements(project.id, "1970-01-01T00:00:00.000Z");
+  assert.equal(settlements.filter((settlement) => settlement.endpointId === null).length, 2);
+  assert.equal(settlements.filter((settlement) => settlement.endpointId === endpoint.id).length, 3);
+});

@@ -4,4 +4,5 @@ out/
 .data/
 .git/
 *.log
-
+third_party/botified/target/
+packages/bash-executor/target/

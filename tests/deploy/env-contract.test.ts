@@ -6,6 +6,28 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 describe("deploy env contract", () => {
+  it("accepts credential encryption keys only from the app secrets overlay", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-credential-key-"));
+    const appSecretsFile = path.join(tempDir, "app.secrets.env");
+    writeFileSync(appSecretsFile, [
+      "APP_CREDENTIAL_ENCRYPTION_KEY=credential-key",
+      "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS=previous-key"
+    ].join("\n") + "\n");
+
+    const allowed = runContract(["export", "--app-secrets", appSecretsFile]);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.deepEqual(readAssignments(allowed.stdout), {
+      APP_CREDENTIAL_ENCRYPTION_KEY: "credential-key",
+      APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: "previous-key"
+    });
+
+    const appEnvFile = path.join(tempDir, "app.env");
+    writeFileSync(appEnvFile, "APP_CREDENTIAL_ENCRYPTION_KEY=credential-key\n");
+    const rejected = runContract(["export", "--app-env", appEnvFile]);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /APP_CREDENTIAL_ENCRYPTION_KEY/);
+  });
+
   it("rejects the installer namespace from app overlays", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-installer-namespace-overlay-"));
     const appEnvFile = path.join(tempDir, "app.env");
@@ -100,57 +122,6 @@ describe("deploy env contract", () => {
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
-  it("accepts OIDC admin allowlist config from app env overlays", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-oidc-app-env-"));
-    const envFile = path.join(tempDir, "substrate.env");
-    const secretsFile = path.join(tempDir, "substrate.secrets.env");
-    const appEnvFile = path.join(tempDir, "app.env");
-    writeFileSync(
-      envFile,
-      [
-        "KUBE_NAMESPACE=agentsmith-preview",
-        "APP_PUBLIC_BASE_URL=https://agentsmith.example.test/app",
-        "AUTH_MODE=oidc",
-        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
-        "OIDC_CLIENT_ID=agentsmith-lite",
-        ""
-      ].join("\n")
-    );
-    writeFileSync(
-      secretsFile,
-      [
-        "POSTGRES_APP_URL=postgresql://app:secret@db/agentsmith",
-        "APP_SESSION_SECRET=app-session-secret-at-least-32-chars",
-        "OIDC_CLIENT_SECRET=oidc-client-secret",
-        ""
-      ].join("\n")
-    );
-    writeFileSync(
-      appEnvFile,
-      [
-        "OIDC_ADMIN_EMAILS=ops@example.test",
-        "OIDC_ADMIN_SUBJECTS=keycloak-ops-subject",
-        ""
-      ].join("\n")
-    );
-
-    const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile]);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(readAssignments(result.stdout), {
-      KUBE_NAMESPACE: "agentsmith-preview",
-      APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
-      AUTH_MODE: "oidc",
-      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
-      OIDC_CLIENT_ID: "agentsmith-lite",
-      POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
-      APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
-      OIDC_CLIENT_SECRET: "oidc-client-secret",
-      OIDC_ADMIN_EMAILS: "ops@example.test",
-      OIDC_ADMIN_SUBJECTS: "keycloak-ops-subject"
-    });
-  });
-
   it("rejects OIDC core metadata from app env overlays", () => {
     for (const key of ["OIDC_ISSUER_URL", "OIDC_BACKCHANNEL_BASE_URL", "OIDC_CLIENT_ID"]) {
       const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-oidc-core-app-env-${key}-`));
@@ -171,31 +142,6 @@ describe("deploy env contract", () => {
       writeFileSync(appEnvFile, `${key}=DO_NOT_PRINT_${key}\n`);
 
       const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile]);
-
-      assert.notEqual(result.status, 0, key);
-      assert.match(result.stderr, new RegExp(key), key);
-      assert.doesNotMatch(result.stderr + result.stdout, new RegExp(`DO_NOT_PRINT_${key}`), key);
-    }
-  });
-
-  it("rejects OIDC admin allowlist config from substrate env", () => {
-    for (const key of ["OIDC_ADMIN_EMAILS", "OIDC_ADMIN_SUBJECTS"]) {
-      const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-oidc-admin-substrate-${key}-`));
-      const envFile = path.join(tempDir, "substrate.env");
-      const secretsFile = path.join(tempDir, "substrate.secrets.env");
-      writeFileSync(
-        envFile,
-        [
-          "AUTH_MODE=oidc",
-          "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
-          "OIDC_CLIENT_ID=agentsmith-lite",
-          `${key}=DO_NOT_PRINT_${key}`,
-          ""
-        ].join("\n")
-      );
-      writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
-
-      const result = runContract(["export", "--env", envFile, "--secrets", secretsFile]);
 
       assert.notEqual(result.status, 0, key);
       assert.match(result.stderr, new RegExp(key), key);
@@ -237,20 +183,6 @@ describe("deploy env contract", () => {
         secretsContents: "OIDC_CLIENT_SECRET=\n",
         error: /OIDC_CLIENT_ID/,
         leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
-      },
-      {
-        name: "OIDC admin emails in substrate env",
-        envContents: "AUTH_MODE=builtin_admin\nOIDC_ADMIN_EMAILS=DO_NOT_PRINT_OIDC_ADMIN_EMAILS\n",
-        secretsContents: "OIDC_CLIENT_SECRET=\n",
-        error: /OIDC_ADMIN_EMAILS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
-      },
-      {
-        name: "OIDC admin subjects in substrate env",
-        envContents: "AUTH_MODE=builtin_admin\nOIDC_ADMIN_SUBJECTS=DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS\n",
-        secretsContents: "OIDC_CLIENT_SECRET=\n",
-        error: /OIDC_ADMIN_SUBJECTS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
       },
       {
         name: "builtin with non-empty OIDC client secret",
@@ -300,20 +232,6 @@ describe("deploy env contract", () => {
         error: /OIDC_BACKCHANNEL_BASE_URL/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
-      {
-        name: "OIDC admin emails misplaced in secrets",
-        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
-        secretsContents: "OIDC_ADMIN_EMAILS=DO_NOT_PRINT_OIDC_ADMIN_EMAILS\nOIDC_CLIENT_SECRET=secret\n",
-        error: /non-secret config key OIDC_ADMIN_EMAILS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_EMAILS/
-      },
-      {
-        name: "OIDC admin subjects misplaced in secrets",
-        envContents: "AUTH_MODE=oidc\nOIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith\nOIDC_CLIENT_ID=agentsmith-lite\n",
-        secretsContents: "OIDC_ADMIN_SUBJECTS=DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS\nOIDC_CLIENT_SECRET=secret\n",
-        error: /non-secret config key OIDC_ADMIN_SUBJECTS/,
-        leakedValue: /DO_NOT_PRINT_OIDC_ADMIN_SUBJECTS/
-      }
     ];
 
     for (const candidate of cases) {
@@ -389,6 +307,8 @@ describe("deploy env contract", () => {
         "AGENTSMITH_LITE_DATA_DIR=\"/agentsmith-lite-data\"",
         "AGENTSMITH_LITE_SANDBOX_MODE=live",
         "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
+        "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS=60000",
+        "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS=120000",
         "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
         "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI='https://models.example.test/v1'",
         "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP=local-model-ca",
@@ -411,6 +331,8 @@ describe("deploy env contract", () => {
       AGENTSMITH_LITE_DATA_DIR: "/agentsmith-lite-data",
       AGENTSMITH_LITE_SANDBOX_MODE: "live",
       AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: "7",
+      AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS: "60000",
+      AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS: "120000",
       AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
       AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.test/v1",
       AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: "local-model-ca",

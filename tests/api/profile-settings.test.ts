@@ -1,0 +1,40 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { after, before, describe, it } from "node:test";
+import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+
+describe("profile and settings API", () => {
+  let api: RunningApiServer; let root = ""; let cookie = ""; let csrf = ""; let workspaceId = ""; let projectId = "";
+  before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password" }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
+  after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
+  it("projects a public profile and applies idempotent settings and lifecycle mutations", async () => {
+    const profile = await json("GET", "/api/v1/me/profile");
+    assert.equal(profile.user.email, "admin@agentsmith-lite.local");
+    assert.equal("oidcIssuer" in profile.user, false);
+    assert.equal("oidcSubject" in profile.user, false);
+    const updatedProfile = await json("PATCH", "/api/v1/me/profile", { displayName: "Admin", timezone: "UTC" });
+    assert.equal(updatedProfile.preferences.displayName, "Admin");
+
+    const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace" }, "workspace-settings");
+    assert.equal(workspace.workspace.name, "New workspace");
+    const replayedWorkspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace" }, "workspace-settings");
+    assert.deepEqual(replayedWorkspace, workspace);
+    const mismatch = await call("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "Different workspace" }, "workspace-settings");
+    assert.equal(mismatch.response.status, 409);
+    assert.deepEqual(mismatch.body, { error: "Idempotency-Key was already used with a different request" });
+
+    const missingKey = await call("POST", `/api/v1/projects/${projectId}/settings/archive`);
+    assert.equal(missingKey.response.status, 400);
+    assert.deepEqual(missingKey.body, { error: "Idempotency-Key header is required" });
+    const archived = await json("POST", `/api/v1/projects/${projectId}/settings/archive`, undefined, "project-archive");
+    const replayedArchive = await json("POST", `/api/v1/projects/${projectId}/settings/archive`, undefined, "project-archive");
+    assert.deepEqual(replayedArchive, archived);
+    const audit = await json("GET", `/api/v1/projects/${projectId}/audit`);
+    const archiveEvents = audit.items.filter((event: { action: string }) => event.action === "project.archive");
+    assert.deepEqual(archiveEvents.map((event: { status: string; detail?: unknown }) => ({ status: event.status, detail: event.detail })), [{ status: "accepted", detail: {} }]);
+  });
+  async function call(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const response = await fetch(`${api.baseUrl}${pathname}`, { method, headers: { ...(cookie ? { cookie, "x-csrf-token": csrf } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }), ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { response, body: await response.json() as any }; }
+  async function json(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const result = await call(method, pathname, body, idempotencyKey); assert.equal(result.response.status, 200); return result.body; }
+});

@@ -6,6 +6,7 @@ kubectl_bin=
 kubeconfig=
 kube_context=
 namespace=
+tag=dev
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -47,6 +48,14 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       namespace="$2"
+      shift 2
+      ;;
+    --tag)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "--tag requires a value" >&2
+        exit 2
+      fi
+      tag="$2"
       shift 2
       ;;
     *)
@@ -94,8 +103,8 @@ if ! docker_bin="$(command -v docker)"; then
 fi
 
 images=(
-  "agentsmith-lite/app:dev"
-  "agentsmith-lite/botified-runner:dev"
+  "agentsmith-lite/app:${tag}"
+  "agentsmith-lite/botified-runner:${tag}"
 )
 
 for image in "${images[@]}"; do
@@ -113,7 +122,8 @@ for image in "${images[@]}"; do
 done
 
 kubectl_args=(--kubeconfig "$kubeconfig" --context "$kube_context" --namespace "$namespace")
-api_deployment="$("$kubectl_bin" "${kubectl_args[@]}" get deployment/agentsmith-lite-api --ignore-not-found -o name)"
-if [ -n "$api_deployment" ]; then
-  "$kubectl_bin" "${kubectl_args[@]}" rollout restart deployment/agentsmith-lite-api
-fi
+for deployment in agentsmith-lite-api agentsmith-lite-web; do
+  if "$kubectl_bin" "${kubectl_args[@]}" get "deployment/$deployment" --ignore-not-found -o name | grep -q .; then
+    "$kubectl_bin" "${kubectl_args[@]}" rollout restart "deployment/$deployment"
+  fi
+done

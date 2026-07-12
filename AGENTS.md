@@ -9,7 +9,7 @@ This repo owns product code only:
 - Web UI as a thin product API client;
 - OpenAI-compatible endpoint management and calls;
 - project files, task events, artifacts, cancel, TTL, and reap;
-- Botified client, runner image, runtime config;
+- compatible vendored Botified fork, AgentSmith-owned loopback Bash executor, runner image, and runtime config;
 - sandbox manifest rendering/reconciliation;
 - app image, app offline bundle, and deploy helpers.
 
@@ -29,6 +29,17 @@ renaming it.
 Developer-selected checks should be narrow, named after the product path they
 exercise, print concise stdout/stderr, and exit non-zero on failure.
 
+## Development Loop
+
+- Run the API and Next development servers directly for normal frontend, API, and business-logic work. Prefer in-place changes, hot reload, and focused checks.
+- Agent teams may work in parallel, but agents must not spawn subagents or start concurrent test/build tasks. Tests default to small, single-process runs scheduled serially by the coordinator. Do not run Postgres, image builds, containers, or heavy K8s tasks in parallel.
+- Do not rebuild images or redeploy the full K8s application by default after ordinary source changes.
+- Validate against local K8s only when a change crosses the K8s runtime boundary, such as pods, PVCs, RBAC, JuiceFS, sandbox containers, TTL, or resource cleanup.
+- Build images, import them into k3s, and perform a complete deployment only for relevant deployment changes, explicit stage acceptance, handoff, or release.
+- Playwright may target the development servers or an existing deployment when explicitly selected for the current change. It must not become a default gate.
+- Fail fast and fix in place. Do not use repeated packaging and redeployment as a substitute for focused business-logic testing.
+- Do not generate build reports, test evidence, acceptance reports, or workflow artifacts for this loop.
+
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
@@ -41,14 +52,13 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 ## Product Boundaries
 
 - All business logic belongs on the server.
-- Web UI and future product TUI only call product APIs.
-- TUI may import generated product API types or a thin HTTP client only; it must not carry agent business logic.
-- TUI must not import `application`, `ports`, `sandbox-controller`, `botified-runtime`, `openai-compatible-client`, `adapters-postgres`, or K8s clients.
-- TUI must not call `/api/operator/*`.
+- The product is English-only. Do not add i18n libraries, translation catalogs, locale-aware routing, locale URL prefixes, or speculative localization abstractions.
+- Web UI only calls product APIs and must not carry agent business logic.
+- AgentSmith server interacts with Botified exclusively through Botified service APIs.
 - No LLMUP, Codex runner core, JVS, WebDAV, file mount/sync daemon, AFSCP, or ASBCP.
 
 ## Substrate Boundary
 
 This repo consumes `substrate.env` and `substrate.secrets.env`; it does not install K8s, Keycloak, PostgreSQL, S3-compatible storage, or JuiceFS CSI.
 
-App runtime may consume product secrets such as `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, and `OIDC_CLIENT_SECRET`. Raw S3 credentials, JuiceFS metadata URLs, and Keycloak admin secrets must not enter Web/UI/TUI/Botified runtime.
+App runtime may consume product secrets such as `POSTGRES_APP_URL`, `APP_SESSION_SECRET`, and `OIDC_CLIENT_SECRET`. Raw S3 credentials, JuiceFS metadata URLs, and Keycloak admin secrets must not enter Web UI or Botified runtime.

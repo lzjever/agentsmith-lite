@@ -1,15 +1,28 @@
 import path from "node:path";
-import { EnvModelCredentialResolver, FetchOpenAICompatibleClient, type ModelCredentialResolver, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
+import { FetchOpenAICompatibleClient, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthService } from "./authService.js";
+import { AuthorizationService } from "./authorizationService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
+import { MembershipService } from "./membershipService.js";
 import { RuntimeService } from "./runtimeService.js";
 import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "./sandboxLifecycleService.js";
 import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type ModelCaReference, type TaskLiveSandboxConfig } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
+import { ProjectPolicyService } from "./projectPolicyService.js";
+import { ProfileService } from "./profileService.js";
+import { SettingsService } from "./settingsService.js";
+import { ContextService } from "./contextService.js";
+import { NotificationService } from "./notificationService.js";
+import { AlertRuleService } from "./alertRuleService.js";
+import { CredentialService } from "./credentialService.js";
+import { createCredentialCrypto, type CredentialCrypto } from "./credentialCrypto.js";
+import { DeletionService } from "./deletionService.js";
+import { WorkspaceMembershipService } from "./workspaceMembershipService.js";
+import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
 
 export const DEFAULT_SESSION_SECRET = "dev-session-secret";
 export const DEFAULT_BUILTIN_ADMIN_PASSWORD = "admin-password";
@@ -20,16 +33,14 @@ export interface CreateApplicationServicesInput {
   dataRoot: string;
   builtinAdminPassword: string;
   sessionSecret?: string;
-  oidcAdminEmails?: string[];
-  oidcAdminSubjects?: string[];
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
-  chatClient?: OpenAICompatibleClient;
-  modelCredentialResolver?: ModelCredentialResolver;
+  providerClient?: OpenAICompatibleClient;
+  credentialCrypto?: CredentialCrypto;
   modelCa?: ModelCaReference;
   liveSandbox?: TaskLiveSandboxConfig;
   requireBuiltinAdminPasswordForLiveSandbox?: boolean;
@@ -37,12 +48,18 @@ export interface CreateApplicationServicesInput {
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
+  taskDeliveryLeaseMs?: number;
+  taskMaintenanceLeaseMs?: number;
+  taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
 }
 
 export function createApplicationServices(input: CreateApplicationServicesInput) {
-  const workspaces = new WorkspaceService(input.store);
-  const endpoints = new EndpointService(input.store, workspaces);
+  const authorization = new AuthorizationService(input.store);
+  const policies = new ProjectPolicyService(input.store, authorization);
+  const workspaces = new WorkspaceService(input.store, authorization, policies);
+  const memberships = new MembershipService(input.store, authorization);
+  const workspaceMemberships = new WorkspaceMembershipService(input.store, authorization);
   const files = new FileService();
   const builtinAdminPassword = input.liveSandbox && input.requireBuiltinAdminPasswordForLiveSandbox !== false
     ? requireLiveSandboxBuiltinAdminPassword(input.builtinAdminPassword)
@@ -50,15 +67,24 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const sessionSecret = input.liveSandbox
     ? requireLiveSandboxSessionSecret(input.sessionSecret)
     : input.sessionSecret ?? DEFAULT_SESSION_SECRET;
-  const auth = new AuthService(input.store, builtinAdminPassword, sessionSecret, {
-    emails: input.oidcAdminEmails ?? [],
-    subjects: input.oidcAdminSubjects ?? []
-  });
-  const modelCredentialResolver = input.modelCredentialResolver ?? new EnvModelCredentialResolver();
+  const auth = new AuthService(input.store, builtinAdminPassword, sessionSecret);
+  const profile = new ProfileService(input.store);
+  const settings = new SettingsService(input.store, authorization);
+  const contexts = new ContextService(input.store, workspaces);
+  const notifications = new NotificationService(input.store);
+  const alertRules = new AlertRuleService(input.store, authorization);
+  const credentialCrypto = input.credentialCrypto ?? createCredentialCrypto({ primary: { id: "test", value: Buffer.alloc(32, 1) }, previous: [] });
+  const credentials = new CredentialService(input.store, authorization, credentialCrypto);
+  const providerClient = input.providerClient ?? new FetchOpenAICompatibleClient();
+  const providerBroker = new OpenAIProviderBroker(providerClient, policies);
+  const endpoints = new EndpointService(input.store, workspaces, credentials, providerBroker);
   const chat = new ChatService(
+    input.store,
+    workspaces,
     endpoints,
-    input.chatClient ?? new FetchOpenAICompatibleClient(),
-    modelCredentialResolver
+    providerBroker,
+    credentials,
+    policies
   );
   const namespace = input.namespace ?? "agentsmith";
   const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
@@ -71,6 +97,19 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
       async syncTerminalFailureRun(runId) {
         return tasks.syncTerminalFailureRun(runId);
       }
+    },
+    artifactProjection: {
+      async projectPublishedArtifactsForRun(runId) {
+        return tasks.projectPublishedArtifactsForRun(runId);
+      }
+    },
+    taskLifecycle: {
+      async finalizeTaskForRunCleanup(taskId, reason) {
+        return tasks.finalizeTaskForRunCleanup(taskId, reason);
+      },
+      async canCleanupTaskRuntime(taskId) {
+        return tasks.canCleanupTaskRuntime(taskId);
+      }
     }
   });
   const taskConfig = {
@@ -79,12 +118,15 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     pvcName: input.pvcName ?? "agentsmith-lite-files",
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",
     botifiedServiceKeySecret: sessionSecret,
-    modelCredentialResolver,
+    credentials,
     ...(input.modelCa ? { modelCa: input.modelCa } : {}),
     sandboxLifecycle,
     ...(input.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: input.sandboxNamespaceLimit } : {}),
     ...(input.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: input.liveSandboxMaxLifetimeMs } : {}),
     ...(input.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: input.liveSandboxIdleTimeoutMs } : {}),
+    ...(input.taskDeliveryLeaseMs !== undefined ? { deliveryLeaseMs: input.taskDeliveryLeaseMs } : {}),
+    ...(input.taskMaintenanceLeaseMs !== undefined ? { maintenanceLeaseMs: input.taskMaintenanceLeaseMs } : {}),
+    ...(input.taskRetryDelayMs !== undefined ? { retryDelayMs: input.taskRetryDelayMs } : {}),
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})
@@ -94,19 +136,33 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     workspaces,
     endpoints,
     input.botifiedClient ?? new DryRunBotifiedRuntimeHttpClient(),
-    taskConfig
+    taskConfig,
+    policies
   );
-  const runtime = new RuntimeService(tasks, sandboxLifecycle, {
+  const runtime = new RuntimeService(tasks, sandboxLifecycle, policies, {
     ...(input.runtimeTickIntervalMs !== undefined ? { tickIntervalMs: input.runtimeTickIntervalMs } : {})
   });
+  const deletion = new DeletionService(input.store, tasks, input.dataRoot);
 
   return {
     auth,
+    profile,
+    settings,
+    contexts,
+    notifications,
+    alertRules,
+    credentials,
+    authorization,
+    memberships,
+    workspaceMemberships,
     workspaces,
     endpoints,
+    providerBroker,
     chat,
     files,
+    policies,
     tasks,
+    deletion,
     runtime,
     sandboxLifecycle,
     dataRoot: input.dataRoot,

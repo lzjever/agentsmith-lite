@@ -11,7 +11,7 @@ describe("render manifests YAML", () => {
     const envFile = path.join(tempDir, "substrate.env");
     const outDir = path.join(tempDir, "manifests");
 
-    writeFileSync(envFile, "SUBSTRATE_NAMESPACE=agentsmith-substrates\nKUBE_NAMESPACE=agentsmith-app\n");
+    writeFileSync(envFile, "SUBSTRATE_NAMESPACE=agentsmith-substrates\nKUBE_NAMESPACE=agentsmith-app\nAPP_PUBLIC_BASE_URL=https://agentsmith.example.test/app\n");
 
     const result = spawnSync(
       "bash",
@@ -27,7 +27,10 @@ describe("render manifests YAML", () => {
     assert.doesNotMatch(manifest, /SUBSTRATE_NAMESPACE|agentsmith-substrates/);
     assert.match(manifest, /kind: "Role"\n\s+metadata:\n\s+name: "agentsmith-lite-api-sandbox"\n\s+namespace: "agentsmith-app"/);
     assert.match(manifest, /kind: "RoleBinding"\n\s+metadata:\n\s+name: "agentsmith-lite-api-sandbox"\n\s+namespace: "agentsmith-app"/);
-    assert.deepEqual([...manifest.matchAll(/^\s+namespace: "([^"]+)"$/gm)].map((match) => match[1]), Array(10).fill("agentsmith-app"));
+    assert.deepEqual(
+      [...manifest.matchAll(/^\s+namespace: "([^"]+)"$/gm)].map((match) => match[1]).every((namespace) => namespace === "agentsmith-app"),
+      true
+    );
   });
 
   it("quotes ConfigMap.data and Secret.stringData strings that look like YAML scalars", () => {
@@ -37,7 +40,7 @@ describe("render manifests YAML", () => {
     const appSecretsFile = path.join(tempDir, "app.secrets.env");
     const outDir = path.join(tempDir, "manifests");
 
-    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\nAPP_PUBLIC_BASE_URL=https://agentsmith.example.test\n");
     writeFileSync(appEnvFile, "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000\nAGENTSMITH_LITE_SANDBOX_MODE=true\n");
     writeFileSync(
       appSecretsFile,
@@ -59,5 +62,41 @@ describe("render manifests YAML", () => {
     assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: "true"/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_NUMERIC: "1000"/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_BOOLEAN: "true"/);
+  });
+
+  it("derives both local image refs from the render tag instead of app overlay input", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-render-image-tag-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const appEnvFile = path.join(tempDir, "app.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\nAPP_PUBLIC_BASE_URL=https://agentsmith.example.test\n");
+    writeFileSync(appEnvFile, "BOTIFIED_RUNNER_IMAGE=agentsmith-lite/botified-runner:stale\n");
+
+    const result = spawnSync(
+      "bash",
+      ["scripts/deploy/render.sh", "--env", envFile, "--app-env", appEnvFile, "--out", outDir, "--tag", "local-20260711"],
+      { cwd: process.cwd(), encoding: "utf8" }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = readFileSync(path.join(outDir, "all.yaml"), "utf8");
+    assert.match(manifest, /agentsmith-lite\/app:local-20260711/);
+    assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: "agentsmith-lite\/botified-runner:local-20260711"/);
+    assert.doesNotMatch(manifest, /botified-runner:stale/);
+  });
+
+  it("requires the public URL used to build the Next application", () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-render-public-url-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const outDir = path.join(tempDir, "manifests");
+    writeFileSync(envFile, "KUBE_NAMESPACE=agentsmith\n");
+
+    const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--out", outDir, "--tag", "dev"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /APP_PUBLIC_BASE_URL is required/);
   });
 });

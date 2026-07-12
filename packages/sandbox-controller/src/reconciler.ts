@@ -67,7 +67,6 @@ export interface SandboxRunState extends SandboxIdentity {
   directories: SandboxRunDirectories;
   resourceLimits: SandboxRunResourceLimits;
   modelCa?: SandboxRunModelCaReference;
-  modelEndpointBaseUrl?: string;
   expiresAt?: string | null;
   idleExpiresAt?: string | null;
   timelineCursor?: string | null;
@@ -225,8 +224,11 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
       if (resource.kind !== kind || !isAgentsmithManaged(resource)) {
         continue;
       }
-      const belongsToDesiredRun = input.desiredRuns.some((run) => hasRunIdentity(resource, run));
-      if (belongsToDesiredRun && desiredKnownResourceKeys.has(resourceKey(resource))) {
+      const matchingDesiredRun = input.desiredRuns.find((run) => hasRunIdentity(resource, run));
+      if (
+        matchingDesiredRun &&
+        (shouldCleanup(matchingDesiredRun, input.now) !== null || desiredKnownResourceKeys.has(resourceKey(resource)))
+      ) {
         continue;
       }
       const labels = resourceIdentityLabels(resource);
@@ -288,7 +290,7 @@ function cleanupRunResources(
 ): SandboxReconcileAction[] {
   const actions: SandboxReconcileAction[] = [];
   const observed = observedCoreResourcesForRun(run, observedResources);
-  if (observed.size === 0) {
+  if (observed.length === 0) {
     actions.push({
       type: "store_run_state",
       run: nextRunState(run, { phase: "cleaned", cleanupStatus: "cleaned" }),
@@ -298,18 +300,19 @@ function cleanupRunResources(
   }
 
   for (const kind of DELETE_ORDER) {
-    const resource = observed.get(kind);
-    if (!resource) {
-      continue;
+    for (const resource of observed) {
+      if (resource.kind !== kind) {
+        continue;
+      }
+      actions.push({
+        type: "delete_resource",
+        runId: run.runId,
+        kind,
+        name: resource.metadata.name,
+        labels: identityLabels(run),
+        resource: structuredClone(resource)
+      });
     }
-    actions.push({
-      type: "delete_resource",
-      runId: run.runId,
-      kind,
-      name: resource.metadata.name,
-      labels: identityLabels(run),
-      resource: structuredClone(resource)
-    });
   }
 
   actions.push({
@@ -360,7 +363,6 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     cpuLimit: run.resourceLimits.cpuLimit,
     memoryLimit: run.resourceLimits.memoryLimit,
     ...(run.modelCa ? { modelCa: run.modelCa } : {}),
-    ...(run.modelEndpointBaseUrl ? { modelEndpointBaseUrl: run.modelEndpointBaseUrl } : {}),
     resourceNames
   }).resources;
 }
@@ -385,21 +387,12 @@ function expectedCoreResourceName(run: SandboxRunState, kind: SandboxCoreResourc
 function observedCoreResourcesForRun(
   run: SandboxRunState,
   observedResources: KubernetesResource[]
-): Map<SandboxCoreResourceKind, KubernetesResource> {
-  const observed = new Map<SandboxCoreResourceKind, KubernetesResource>();
-  for (const kind of DELETE_ORDER) {
-    const expectedName = expectedCoreResourceName(run, kind);
-    const resource = observedResources.find((candidate) =>
-      candidate.kind === kind &&
-      candidate.metadata.name === expectedName &&
-      candidate.metadata.namespace === run.namespace &&
-      hasRunIdentity(candidate, run)
-    );
-    if (resource) {
-      observed.set(kind, resource);
-    }
-  }
-  return observed;
+): KubernetesResource[] {
+  return observedResources.filter((resource) =>
+    DELETE_ORDER.some((kind) => resource.kind === kind) &&
+    resource.metadata.namespace === run.namespace &&
+    hasRunIdentity(resource, run)
+  );
 }
 
 function shouldCleanup(run: SandboxRunState, now: Date): "phase" | "expired" | "idle_expired" | null {

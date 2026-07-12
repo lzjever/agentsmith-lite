@@ -138,15 +138,6 @@ describe("sandbox manifest renderer", () => {
             key: "BOTIFIED_SERVICE_KEY"
           }
         }
-      },
-      {
-        name: "MODEL_API_KEY",
-        valueFrom: {
-          secretKeyRef: {
-            name: "botified-t1",
-            key: "MODEL_API_KEY"
-          }
-        }
       }
     ]);
     assert.deepEqual(container.readinessProbe, {
@@ -168,7 +159,7 @@ describe("sandbox manifest renderer", () => {
     assert.notEqual(container.securityContext.privileged, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
     assert.equal(projectMount.mountPath, "/workspace/project");
-    assert.equal(projectMount.subPath, "workspaces/w1/projects/p1");
+    assert.equal(projectMount.subPath, "workspaces/w1/projects/p1/tasks/t1/inputs");
     assert.equal(projectMount.readOnly, true);
     assert.equal(taskHomeMount.subPath, "workspaces/w1/projects/p1/tasks/t1/home");
     assert.notEqual(taskHomeMount.readOnly, true);
@@ -204,27 +195,24 @@ describe("sandbox manifest renderer", () => {
     const dnsEgress = networkPolicy.spec.egress.find(
       (rule) => hasNamespaceSelectorDestination(rule) && hasPort(rule, "UDP", 53)
     );
-    const externalModelEgress = networkPolicy.spec.egress.find(
-      (rule) => hasUnscopedDestination(rule) && hasPort(rule, "TCP", 443)
-    );
+    const brokerEgress = networkPolicy.spec.egress.find(hasApiBrokerDestination);
     assert.ok(dnsEgress, "NetworkPolicy should preserve DNS UDP/53 egress");
     assert.deepEqual(dnsEgress.ports, [{ protocol: "UDP", port: 53 }]);
-    assert.ok(externalModelEgress, "NetworkPolicy should allow external TCP/443 model endpoint egress");
-    assert.deepEqual(externalModelEgress.ports, [{ protocol: "TCP", port: 443 }]);
+    assert.ok(brokerEgress, "NetworkPolicy should allow only the in-cluster API broker");
+    assert.deepEqual(brokerEgress.ports, [{ protocol: "TCP", port: 3000 }]);
     assert.ok(
       networkPolicy.spec.egress.every(
         (rule) =>
           Array.isArray(rule.ports) &&
           rule.ports.length > 0 &&
           rule.ports.every(
-            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 443)
+            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 3000)
           )
       ),
-      "NetworkPolicy egress should stay limited to DNS and TCP/443"
+      "NetworkPolicy egress should stay limited to DNS and API broker TCP/3000"
     );
     assert.deepEqual(secret?.stringData, {
-      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
-      MODEL_API_KEY: "<redacted-model-api-key>"
+      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>"
     });
 
     const serialized = JSON.stringify(rendered.resources);
@@ -240,7 +228,7 @@ describe("sandbox manifest renderer", () => {
     assert.ok(!serialized.includes('"privileged":true'));
   });
 
-  it("narrows model egress for a configured in-cluster OpenAI-compatible service", () => {
+  it("always routes model egress only through the in-cluster API broker", () => {
     const input = {
       namespace: "agentsmith-lite-e2e",
       workspaceId: "w1",
@@ -255,8 +243,7 @@ describe("sandbox manifest renderer", () => {
       cpuRequest: "250m",
       memoryRequest: "512Mi",
       cpuLimit: "1",
-      memoryLimit: "1Gi",
-      modelEndpointBaseUrl: "https://agentsmith-lite-local-openai.agentsmith-lite-e2e.svc.cluster.local/v1"
+      memoryLimit: "1Gi"
     };
 
     const rendered = renderSandboxResources(input);
@@ -265,16 +252,13 @@ describe("sandbox manifest renderer", () => {
       | NetworkPolicyResource
       | undefined;
     assert.ok(networkPolicy);
-    const modelEgress = networkPolicy.spec.egress.find(hasLocalOpenAiDestination);
-    assert.ok(modelEgress, "NetworkPolicy should allow the configured local model service pods");
-    assert.deepEqual(modelEgress.ports, [
-      { protocol: "TCP", port: 443 },
-      { protocol: "TCP", port: 8443 }
-    ]);
+    const brokerEgress = networkPolicy.spec.egress.find(hasApiBrokerDestination);
+    assert.ok(brokerEgress, "NetworkPolicy should allow API broker pods");
+    assert.deepEqual(brokerEgress.ports, [{ protocol: "TCP", port: 3000 }]);
     assert.equal(
       networkPolicy.spec.egress.some((rule) => hasUnscopedDestination(rule) && hasPort(rule, "TCP", 443)),
       false,
-      "cluster service model egress should not keep the unscoped external TCP/443 rule"
+      "brokered sandboxes should not keep the unscoped external TCP/443 rule"
     );
   });
 
@@ -329,7 +313,7 @@ describe("sandbox manifest renderer", () => {
           Array.isArray(rule.ports) &&
           rule.ports.length > 0 &&
           rule.ports.every(
-            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 443)
+            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 3000)
           )
       )
     );
@@ -435,14 +419,15 @@ function hasUnscopedDestination(rule: NetworkPolicyEgressRule): boolean {
   return rule.to === undefined || rule.to.length === 0;
 }
 
-function hasLocalOpenAiDestination(rule: NetworkPolicyEgressRule): boolean {
+function hasApiBrokerDestination(rule: NetworkPolicyEgressRule): boolean {
   return (
     rule.to?.some(
       (destination) =>
-        JSON.stringify(destination.namespaceSelector) ===
-          JSON.stringify({ matchLabels: { "kubernetes.io/metadata.name": "agentsmith-lite-e2e" } }) &&
         JSON.stringify(destination.podSelector) ===
-          JSON.stringify({ matchLabels: { "app.kubernetes.io/name": "agentsmith-lite-local-openai" } })
+          JSON.stringify({ matchLabels: {
+            "app.kubernetes.io/component": "api",
+            "agentsmith-lite/managed-by": "agentsmith-lite"
+          } })
     ) ?? false
   );
 }

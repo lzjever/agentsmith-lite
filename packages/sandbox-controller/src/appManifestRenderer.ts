@@ -4,6 +4,11 @@ import type { AppImageRefs } from "./appImageLock.js";
 
 const MODEL_CA_BUNDLE_PATH = "/etc/agentsmith-lite/model-ca/ca.crt";
 const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
+export const APP_KUBERNETES_SERVICE_NAME = "agentsmith-lite-api";
+export const APP_KUBERNETES_SERVICE_PORT = 80;
+export const APP_KUBERNETES_CONTAINER_PORT = 3000;
+export const WEB_KUBERNETES_SERVICE_NAME = "agentsmith-lite-web";
+export const WEB_KUBERNETES_SERVICE_PORT = 80;
 
 export interface AppManifestInput {
   namespace: string;
@@ -15,12 +20,15 @@ export interface AppManifestInput {
 
 export function renderAppManifests(input: AppManifestInput): KubernetesResource[] {
   const auth = resolveAuthConfig(input);
-  const publicBaseUrl = input.env.APP_PUBLIC_BASE_URL?.trim() || "http://localhost:3000";
+  const publicBaseUrl = requirePublicBaseUrl(input.env.APP_PUBLIC_BASE_URL);
   const parsedPublicBaseUrl = parsePublicBaseUrl(publicBaseUrl);
   const publicBasePath = normalizedPublicBasePath(parsedPublicBaseUrl.pathname);
-  const apiHealthPath = publicPathFor(publicBasePath, "/api/health");
+  const apiHealthPath = publicPathFor(publicBasePath, "/api/v1/health");
+  const webHealthPath = publicPathFor(publicBasePath, "/health");
   const appDataRoot = resolveAppDataRoot(input.env);
   const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
+  const liveSandboxIdleTtlMs = input.env.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS?.trim();
+  const liveSandboxMaxLifetimeMs = input.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS?.trim();
   const modelCa = resolveModelCa(input);
   const labels = {
     "app.kubernetes.io/name": "agentsmith-lite",
@@ -29,11 +37,12 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
     "agentsmith-lite/managed-by": "agentsmith-lite"
   };
   const apiLabels = { ...labels, "app.kubernetes.io/component": "api" };
+  const webLabels = { ...labels, "app.kubernetes.io/component": "web" };
   const modelBaseUrlConfig = Object.fromEntries(
     Object.entries(input.env).filter(([key]) => key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_"))
   );
   const appSecretData: Record<string, string> = {};
-  const appSecretKeys = Object.keys(input.secrets).filter((key) => auth.secretKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_"));
+  const appSecretKeys = Object.keys(input.secrets).filter((key) => auth.secretKeys.has(key) || isAppRuntimeSecretKey(key));
   for (const key of appSecretKeys) {
     const value = input.secrets[key];
     if (value) {
@@ -42,7 +51,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   }
   const appImage = input.imageRefs?.app ?? `agentsmith-lite/app:${input.imageTag}`;
   const runnerImage = input.imageRefs?.botifiedRunner ?? input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`;
-  const ingress = renderAppIngress(input, parsedPublicBaseUrl, publicBasePath, apiLabels);
+  const ingress = renderAppIngress(input, parsedPublicBaseUrl, publicBasePath, labels);
 
   return [
     {
@@ -50,6 +59,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       kind: "ConfigMap",
       metadata: { name: "agentsmith-lite-config", namespace: input.namespace, labels },
       data: {
+        APP_BIND_ADDRESS: "0.0.0.0",
         APP_PUBLIC_BASE_URL: publicBaseUrl,
         AGENTSMITH_LITE_DATA_DIR: appDataRoot,
         JUICEFS_PVC_NAME: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
@@ -57,6 +67,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
         AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
           input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
+        ...(liveSandboxIdleTtlMs ? { AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS: liveSandboxIdleTtlMs } : {}),
+        ...(liveSandboxMaxLifetimeMs ? { AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS: liveSandboxMaxLifetimeMs } : {}),
         ...(runtimeTickMs ? { AGENTSMITH_LITE_RUNTIME_TICK_MS: runtimeTickMs } : {}),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
         ...auth.configMapData,
@@ -70,6 +82,41 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     },
     {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: WEB_KUBERNETES_SERVICE_NAME, namespace: input.namespace, labels: webLabels },
+      spec: {
+        replicas: 1,
+        selector: { matchLabels: webLabels },
+        template: {
+          metadata: { labels: webLabels },
+          spec: {
+            containers: [
+              {
+                name: "web",
+                image: appImage,
+                command: ["node", "scripts/web/start.mjs"],
+                ports: [{ containerPort: APP_KUBERNETES_CONTAINER_PORT }],
+                readinessProbe: webHealthProbe(webHealthPath),
+                livenessProbe: webHealthProbe(webHealthPath),
+                startupProbe: webHealthProbe(webHealthPath),
+                env: [{ name: "APP_PUBLIC_BASE_URL", value: publicBaseUrl }]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: { name: WEB_KUBERNETES_SERVICE_NAME, namespace: input.namespace, labels: webLabels },
+      spec: {
+        selector: webLabels,
+        ports: [{ name: "http", port: WEB_KUBERNETES_SERVICE_PORT, targetPort: APP_KUBERNETES_CONTAINER_PORT }]
+      }
+    },
+    {
       apiVersion: "v1",
       kind: "Secret",
       metadata: { name: "agentsmith-lite-app-secrets", namespace: input.namespace, labels },
@@ -79,7 +126,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
     {
       apiVersion: "apps/v1",
       kind: "Deployment",
-      metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels: apiLabels },
+      metadata: { name: APP_KUBERNETES_SERVICE_NAME, namespace: input.namespace, labels: apiLabels },
       spec: {
         replicas: 1,
         selector: { matchLabels: apiLabels },
@@ -91,7 +138,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
               {
                 name: "api",
                 image: appImage,
-                ports: [{ containerPort: 3000 }],
+                ports: [{ containerPort: APP_KUBERNETES_CONTAINER_PORT }],
                 readinessProbe: apiHealthProbe(apiHealthPath),
                 livenessProbe: apiHealthProbe(apiHealthPath),
                 startupProbe: apiHealthProbe(apiHealthPath),
@@ -158,10 +205,10 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
     {
       apiVersion: "v1",
       kind: "Service",
-      metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels: apiLabels },
+      metadata: { name: APP_KUBERNETES_SERVICE_NAME, namespace: input.namespace, labels: apiLabels },
       spec: {
         selector: apiLabels,
-        ports: [{ name: "http", port: 80, targetPort: 3000 }]
+        ports: [{ name: "http", port: APP_KUBERNETES_SERVICE_PORT, targetPort: APP_KUBERNETES_CONTAINER_PORT }]
       }
     },
     ...(ingress ? [ingress] : []),
@@ -297,6 +344,14 @@ function parsePublicBaseUrl(publicBaseUrl: string): URL {
   }
 }
 
+function requirePublicBaseUrl(value: string | undefined): string {
+  const publicBaseUrl = value?.trim();
+  if (!publicBaseUrl) {
+    throw new Error("APP_PUBLIC_BASE_URL is required");
+  }
+  return publicBaseUrl;
+}
+
 function normalizedPublicBasePath(publicPathname: string): string {
   return publicPathname.replace(/\/+$/, "") || "/";
 }
@@ -312,6 +367,10 @@ function apiHealthProbe(path: string): { httpGet: { path: string; port: number }
       port: 3000
     }
   };
+}
+
+function webHealthProbe(path: string): { httpGet: { path: string; port: number } } {
+  return { httpGet: { path, port: APP_KUBERNETES_CONTAINER_PORT } };
 }
 
 function renderAppIngress(input: AppManifestInput, parsed: URL, publicBasePath: string, labels: Record<string, string>): KubernetesResource | undefined {
@@ -330,11 +389,21 @@ function renderAppIngress(input: AppManifestInput, parsed: URL, publicBasePath: 
         http: {
           paths: [
             {
+              path: publicPathFor(publicBasePath, "/api/v1"),
+              pathType: "Prefix",
+              backend: {
+                service: {
+                  name: APP_KUBERNETES_SERVICE_NAME,
+                  port: { name: "http" }
+                }
+              }
+            },
+            {
               path: publicBasePath,
               pathType: "Prefix",
               backend: {
                 service: {
-                  name: "agentsmith-lite-api",
+                  name: WEB_KUBERNETES_SERVICE_NAME,
                   port: {
                     name: "http"
                   }
@@ -376,9 +445,7 @@ function resolveAuthConfig(input: AppManifestInput): {
   const oidcConfigKeys = [
     "OIDC_ISSUER_URL",
     "OIDC_BACKCHANNEL_BASE_URL",
-    "OIDC_CLIENT_ID",
-    "OIDC_ADMIN_EMAILS",
-    "OIDC_ADMIN_SUBJECTS"
+    "OIDC_CLIENT_ID"
   ];
   for (const key of ["AUTH_MODE", ...oidcConfigKeys]) {
     if (Object.hasOwn(input.secrets, key)) {
@@ -411,8 +478,6 @@ function resolveAuthConfig(input: AppManifestInput): {
   const issuerUrl = requireAuthConfig(input.env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
   const backchannelBaseUrl = optionalAuthConfig(input.env.OIDC_BACKCHANNEL_BASE_URL);
   const clientId = requireAuthConfig(input.env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");
-  const adminEmails = optionalAuthConfig(input.env.OIDC_ADMIN_EMAILS);
-  const adminSubjects = optionalAuthConfig(input.env.OIDC_ADMIN_SUBJECTS);
   requireAuthConfig(input.secrets.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET");
   baseSecretKeys.add("OIDC_CLIENT_SECRET");
   return {
@@ -420,12 +485,16 @@ function resolveAuthConfig(input: AppManifestInput): {
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: issuerUrl,
       ...(backchannelBaseUrl ? { OIDC_BACKCHANNEL_BASE_URL: backchannelBaseUrl } : {}),
-      OIDC_CLIENT_ID: clientId,
-      ...(adminEmails ? { OIDC_ADMIN_EMAILS: adminEmails } : {}),
-      ...(adminSubjects ? { OIDC_ADMIN_SUBJECTS: adminSubjects } : {})
+      OIDC_CLIENT_ID: clientId
     },
     secretKeys: baseSecretKeys
   };
+}
+
+function isAppRuntimeSecretKey(key: string): boolean {
+  return key === "APP_CREDENTIAL_ENCRYPTION_KEY"
+    || key === "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS"
+    || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
 }
 
 function requireAuthConfig(value: string | undefined, key: string): string {

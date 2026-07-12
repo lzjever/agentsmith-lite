@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -171,6 +171,71 @@ describe("file CRUD service", () => {
         (error) => productError(error, 400, /Path uses a symlink/)
       );
       assert.equal(await readFile(targetPath, "utf8"), "keep me");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically replaces uploads so concurrent reads see a complete old or new file", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
+    try {
+      const service = new FileService();
+      const target = path.join(root, "files", "snapshot.txt");
+      const previous = Buffer.alloc(1024 * 1024, "a");
+      const replacement = Buffer.alloc(8 * 1024 * 1024, "b");
+      await service.uploadFile(root, { path: "files/snapshot.txt", bytes: previous });
+
+      let complete = false;
+      const upload = service.uploadFile(root, { path: "files/snapshot.txt", bytes: replacement }).finally(() => {
+        complete = true;
+      });
+      while (!complete) {
+        const bytes = await readFile(target);
+        assert.ok(bytes.equals(previous) || bytes.equals(replacement));
+      }
+      await upload;
+      assert.deepEqual(await readFile(target), replacement);
+      assert.deepEqual(await readdir(path.dirname(target)), ["snapshot.txt"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the previous file when locked byte accounting rejects an overwrite", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-accounting-"));
+    const service = new FileService();
+    try {
+      await service.uploadFile(root, { path: "files/locked.txt", bytes: Buffer.from("before") });
+      await assert.rejects(
+        () => service.uploadFileWithAccounting(root, { path: "files/locked.txt", bytes: Buffer.from("after") }, {
+          record: async () => { throw new ProductError("Project project file bytes limit reached", 409); }
+        }),
+        /project file bytes limit reached/
+      );
+      assert.equal(Buffer.from((await service.downloadFile(root, "files/locked.txt")).bytes).toString(), "before");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent charged uploads so rejected quota writes leave no file behind", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-concurrent-accounting-"));
+    const service = new FileService();
+    let used = 0;
+    const accounting = {
+      async record(_path: string, delta: number) {
+        if (used + delta > 4) throw new ProductError("Project project file bytes limit reached", 409);
+        used += delta;
+      }
+    };
+    try {
+      const results = await Promise.allSettled([
+        service.uploadFileWithAccounting(root, { path: "files/one.txt", bytes: Buffer.from("four") }, accounting),
+        service.uploadFileWithAccounting(root, { path: "files/two.txt", bytes: Buffer.from("four") }, accounting)
+      ]);
+      assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+      assert.equal(used, 4);
+      assert.equal((await service.listFiles(root)).entries.filter((entry) => entry.type === "file").length, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

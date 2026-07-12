@@ -19,9 +19,16 @@ const appEnvKeys = new Set([
   "AGENTSMITH_LITE_DATA_DIR",
   "AGENTSMITH_LITE_SANDBOX_MODE",
   "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT",
+  "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS",
+  "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS",
   "AGENTSMITH_LITE_RUNTIME_TICK_MS",
   "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP",
   "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY"
+]);
+
+const appSecretKeys = new Set([
+  "APP_CREDENTIAL_ENCRYPTION_KEY",
+  "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS"
 ]);
 
 const productSecretKeys = new Set([
@@ -37,12 +44,7 @@ const oidcCoreSubstrateEnvKeys = [
 ];
 const oidcCoreSubstrateEnvKeySet = new Set(oidcCoreSubstrateEnvKeys);
 
-const oidcAdminAllowlistAppEnvKeys = [
-  "OIDC_ADMIN_EMAILS",
-  "OIDC_ADMIN_SUBJECTS"
-];
-const oidcAdminAllowlistAppEnvKeySet = new Set(oidcAdminAllowlistAppEnvKeys);
-const oidcRuntimeEnvKeys = [...oidcCoreSubstrateEnvKeys, ...oidcAdminAllowlistAppEnvKeys];
+const oidcRuntimeEnvKeys = oidcCoreSubstrateEnvKeys;
 
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
@@ -266,18 +268,6 @@ function classifyAuthMetadataKey(key, kind, value) {
     }
     return "oidc-public-metadata-in-secrets";
   }
-  if (oidcAdminAllowlistAppEnvKeySet.has(key)) {
-    if (kind === "app-env" && value.trim() !== "") {
-      return "allow";
-    }
-    if (kind === "app-env") {
-      return "ignore";
-    }
-    if (kind === "env") {
-      return "app-only-in-substrate";
-    }
-    return "oidc-public-metadata-in-secrets";
-  }
   return null;
 }
 
@@ -332,7 +322,7 @@ function isProductSecretKey(key) {
 }
 
 function isAppSecretKey(key) {
-  return key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
+  return appSecretKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
 }
 
 function isSubstrateOnlyKey(key) {

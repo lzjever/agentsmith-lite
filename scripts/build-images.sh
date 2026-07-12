@@ -52,6 +52,15 @@ fi
 
 app_image="agentsmith-lite/app:${tag}"
 runner_image="agentsmith-lite/botified-runner:${tag}"
+node_build_heap_mb="${NODE_BUILD_HEAP_MB:-2048}"
+cargo_build_jobs="${CARGO_BUILD_JOBS:-1}"
+
+if [ -z "${APP_PUBLIC_BASE_URL:-}" ]; then
+  echo "APP_PUBLIC_BASE_URL is required to build the Next application" >&2
+  exit 2
+fi
+APP_PUBLIC_BASE_URL="$(node scripts/public-base-url.mjs "$APP_PUBLIC_BASE_URL")"
+export APP_PUBLIC_BASE_URL
 
 run_runtime() {
   if [ "$dry_run" = true ]; then
@@ -141,8 +150,8 @@ write_images_lock() {
   mv "$temp_lock" "$lock_file"
 }
 
-run_runtime build -f infra/docker/Dockerfile.app -t "$app_image" .
-run_runtime build -f infra/docker/Dockerfile.botified-runner -t "$runner_image" .
+run_runtime build --build-arg "APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL}" --build-arg "NODE_BUILD_HEAP_MB=${node_build_heap_mb}" -f infra/docker/Dockerfile.app -t "$app_image" .
+run_runtime build --build-arg "CARGO_BUILD_JOBS=${cargo_build_jobs}" -f infra/docker/Dockerfile.botified-runner -t "$runner_image" .
 
 if [ "$push" = true ]; then
   run_runtime push "$app_image"

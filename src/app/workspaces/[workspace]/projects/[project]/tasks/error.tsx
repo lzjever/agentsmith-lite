@@ -1,0 +1,9 @@
+"use client";
+
+import { PageLayout } from "../../../../../../components/layout/PageLayout";
+import { PageState } from "../../../../../../components/layout/PageState";
+import { Button } from "../../../../../../components/ui/button";
+
+export default function TasksError({ reset }: { reset: () => void }) {
+  return <PageLayout><PageState><div className="text-center"><p className="text-error">The task view could not be opened.</p><Button className="mt-4" onClick={reset}>Try again</Button></div></PageState></PageLayout>;
+}

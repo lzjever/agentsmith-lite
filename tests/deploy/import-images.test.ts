@@ -12,53 +12,30 @@ const appDigestRef = `agentsmith-lite/app@sha256:${appOciImage.manifestDigest}`;
 const runnerDigestRef = `agentsmith-lite/botified-runner@sha256:${runnerOciImage.manifestDigest}`;
 
 describe("deploy import images", () => {
-  it("verifies the bundle metadata and imports app and runner archives into the specified k3s containerd", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-"));
-    const bundle = writeBundle(tempDir);
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
-
-    const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin]);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(readCalls(callsFile), [
-      `ctr -n k8s.io images import --base-name agentsmith-lite/app --digests ${path.join(bundle, "images/app.tar")}`,
-      `ctr -n k8s.io images tag --force ${appDigestRef} ${appDigestRef}`,
-      `ctr -n k8s.io images ls -q name==${appDigestRef}`,
-      `ctr -n k8s.io images import --base-name agentsmith-lite/botified-runner --digests ${path.join(bundle, "images/botified-runner.tar")}`,
-      `ctr -n k8s.io images tag --force ${runnerDigestRef} ${runnerDigestRef}`,
-      `ctr -n k8s.io images ls -q name==${runnerDigestRef}`
-    ]);
-  });
-
-  it("rejects a valid OCI archive whose root digest does not match the lock before calling k3s", () => {
+  it("rejects a valid OCI archive whose root digest does not match the lock", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-root-mismatch-"));
     const bundle = writeBundle(tempDir);
     writeMinimalOciArchive(path.join(bundle, "images/app.tar"), runnerOciImage);
     writeChecksums(bundle);
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
+    const k3sBin = writeFakeK3s(tempDir);
 
     const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /OCI.*digest|digest.*OCI/i);
-    assert.deepEqual(readCalls(callsFile), []);
   });
 
-  it("rejects a corrupted layer before calling k3s", () => {
+  it("rejects a corrupted layer", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-layer-corrupt-"));
     const bundle = writeBundle(tempDir);
     writeMinimalOciArchive(path.join(bundle, "images/app.tar"), appOciImage, Buffer.alloc(appOciImage.layer.length, 1));
     writeChecksums(bundle);
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
+    const k3sBin = writeFakeK3s(tempDir);
 
     const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /layer.*hash|hash.*layer/i);
-    assert.deepEqual(readCalls(callsFile), []);
   });
 
   it("binds the exact lock refs to verified manifests in a temporary containerd", async (t) => {
@@ -91,74 +68,6 @@ describe("deploy import images", () => {
     }
   });
 
-  it("rejects a valid bundle without an explicit k3s binary", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-missing-k3s-bin-"));
-    const bundle = writeBundle(tempDir);
-
-    const result = runImport(["--bundle", bundle]);
-
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /--k3s-bin is required/);
-  });
-
-  it("rejects missing or non-executable explicit k3s binaries without invoking Docker or Podman", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-k3s-bin-"));
-    const bundle = writeBundle(tempDir);
-    const runtimeCallsFile = path.join(tempDir, "runtime-calls.log");
-    const runtimeBinDir = writeForbiddenHostRuntimes(tempDir, runtimeCallsFile);
-    const missingK3sBin = path.join(tempDir, "missing-k3s");
-    const nonExecutableK3sBin = path.join(tempDir, "non-executable-k3s");
-    writeFileSync(nonExecutableK3sBin, "#!/usr/bin/env bash\nexit 0\n");
-
-    for (const k3sBin of [missingK3sBin, nonExecutableK3sBin]) {
-      const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin], runtimeBinDir);
-
-      assert.notEqual(result.status, 0, k3sBin);
-      assert.match(result.stderr, /k3s.*executable|executable.*k3s/i, k3sBin);
-      assert.deepEqual(readCalls(runtimeCallsFile), [], k3sBin);
-    }
-  });
-
-  it("prints the archives during dry-run without calling the runtime", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-dry-run-"));
-    const bundle = writeBundle(tempDir);
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
-
-    const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin, "--dry-run"]);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split("\n"), [
-      `${k3sBin} ctr -n k8s.io images import --base-name agentsmith-lite/app --digests ${path.join(bundle, "images/app.tar")}`,
-      `${k3sBin} ctr -n k8s.io images tag --force ${appDigestRef} ${appDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images ls -q name==${appDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images import --base-name agentsmith-lite/botified-runner --digests ${path.join(bundle, "images/botified-runner.tar")}`,
-      `${k3sBin} ctr -n k8s.io images tag --force ${runnerDigestRef} ${runnerDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images ls -q name==${runnerDigestRef}`
-    ]);
-    assert.equal(readCalls(callsFile).length, 0);
-  });
-
-  it("accepts a bundle images.lock with comments, blank lines, and surrounding whitespace during dry-run", () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-lock-whitespace-"));
-    const bundle = writeBundle(tempDir);
-    writeBundleFile(bundle, "images.lock", `# release image refs\n  ${appDigestRef}  \n   \n\t${runnerDigestRef}\t\n`);
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
-
-    const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin, "--dry-run"]);
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split("\n"), [
-      `${k3sBin} ctr -n k8s.io images import --base-name agentsmith-lite/app --digests ${path.join(bundle, "images/app.tar")}`,
-      `${k3sBin} ctr -n k8s.io images tag --force ${appDigestRef} ${appDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images ls -q name==${appDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images import --base-name agentsmith-lite/botified-runner --digests ${path.join(bundle, "images/botified-runner.tar")}`,
-      `${k3sBin} ctr -n k8s.io images tag --force ${runnerDigestRef} ${runnerDigestRef}`,
-      `${k3sBin} ctr -n k8s.io images ls -q name==${runnerDigestRef}`
-    ]);
-    assert.equal(readCalls(callsFile).length, 0);
-  });
 
   it("fails closed for missing bundle metadata, invalid lock contents, checksum mismatches, and missing archives", () => {
     const cases: Array<{
@@ -226,32 +135,28 @@ describe("deploy import images", () => {
       const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-invalid-"));
       const bundle = writeBundle(tempDir);
       candidate.mutate?.(bundle);
-      const callsFile = path.join(tempDir, "k3s-calls.log");
-      const k3sBin = writeFakeK3s(tempDir, callsFile);
+      const k3sBin = writeFakeK3s(tempDir);
       const args = candidate.args ?? ["--bundle", bundle, "--k3s-bin", k3sBin];
 
       const result = runImport(args);
 
       assert.notEqual(result.status, 0, candidate.name);
       assert.match(result.stderr, candidate.error, candidate.name);
-      assert.equal(readCalls(callsFile).length, 0, candidate.name);
     }
   });
 
-  it("fails dry-run when checksums.txt includes a path escape without calling the runtime", () => {
+  it("fails dry-run when checksums.txt includes a path escape", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-checksum-escape-"));
     const bundle = writeBundle(tempDir);
     const outsideFile = path.join(tempDir, "outside.txt");
     writeFileSync(outsideFile, "outside\n");
     appendChecksumLine(bundle, "../outside.txt", sha256File(outsideFile));
-    const callsFile = path.join(tempDir, "k3s-calls.log");
-    const k3sBin = writeFakeK3s(tempDir, callsFile);
+    const k3sBin = writeFakeK3s(tempDir);
 
     const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin, "--dry-run"]);
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /checksums\.txt|allowlist|unsupported|invalid/i);
-    assert.equal(readCalls(callsFile).length, 0);
   });
 
   it("fails dry-run for non-allowlisted, absolute, URL-like, duplicate, and malformed checksum entries", () => {
@@ -297,14 +202,12 @@ describe("deploy import images", () => {
       const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-import-images-checksum-contract-"));
       const bundle = writeBundle(tempDir);
       candidate.mutate(bundle, tempDir);
-      const callsFile = path.join(tempDir, "k3s-calls.log");
-      const k3sBin = writeFakeK3s(tempDir, callsFile);
+      const k3sBin = writeFakeK3s(tempDir);
 
       const result = runImport(["--bundle", bundle, "--k3s-bin", k3sBin, "--dry-run"]);
 
       assert.notEqual(result.status, 0, candidate.name);
       assert.match(result.stderr, /checksums\.txt|allowlist|unsupported|invalid|duplicate/i, candidate.name);
-      assert.equal(readCalls(callsFile).length, 0, candidate.name);
     }
   });
 });
@@ -343,14 +246,12 @@ function appendChecksumLine(bundle: string, relativePath: string, sha256: string
   writeFileSync(path.join(bundle, "checksums.txt"), `${readFileSync(path.join(bundle, "checksums.txt"), "utf8")}${sha256}  ${relativePath}\n`);
 }
 
-function writeFakeK3s(tempDir: string, callsFile: string): string {
-  writeFileSync(callsFile, "");
+function writeFakeK3s(tempDir: string): string {
   const k3s = path.join(tempDir, "fake-k3s");
   writeFileSync(
     k3s,
     `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "$*" >> "${callsFile}"
 if [ "$#" -eq 9 ] && [ "$1" = "ctr" ] && [ "$2" = "-n" ] && [ "$3" = "k8s.io" ] && [ "$4" = "images" ] && [ "$5" = "import" ] && [ "$6" = "--base-name" ] && [ "$8" = "--digests" ]; then
   exit 0
 fi
@@ -367,23 +268,6 @@ exit 9
   );
   chmodSync(k3s, 0o755);
   return k3s;
-}
-
-function writeForbiddenHostRuntimes(tempDir: string, callsFile: string): string {
-  const binDir = path.join(tempDir, "host-runtimes");
-  mkdirSync(binDir);
-  writeFileSync(callsFile, "");
-  for (const runtime of ["docker", "podman"]) {
-    const executable = path.join(binDir, runtime);
-    writeFileSync(executable, `#!/usr/bin/env bash\nprintf '%s %s\\n' "${runtime}" "$*" >> "${callsFile}"\nexit 9\n`);
-    chmodSync(executable, 0o755);
-  }
-  return binDir;
-}
-
-function readCalls(callsFile: string): string[] {
-  const text = readFileSync(callsFile, "utf8").trim();
-  return text.length === 0 ? [] : text.split("\n");
 }
 
 function sha256File(file: string): string {

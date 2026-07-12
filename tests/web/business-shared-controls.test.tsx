@@ -1,0 +1,111 @@
+import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
+import { afterEach, describe, it } from "node:test";
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+import React, { useState } from "react";
+import { apiClient, type EndpointInput, type ProjectCredential, type ProjectSettings, type WorkspaceSettings } from "../../src/lib/api/client.js";
+
+installDom();
+const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { EndpointDialog } = await import("../../src/components/endpoints/EndpointDialog.js");
+const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
+const { WorkspaceSettingsPage } = await import("../../src/components/settings/WorkspaceSettingsPage.js");
+
+const timestamp = "2026-07-11T00:00:00.000Z";
+const credentials: ProjectCredential[] = [{ id: "credential_1", projectId: "project_1", name: "DeepSeek", type: "api_key", baseUrl: "https://api.deepseek.test/v1", fingerprint: "key-123", version: 1, createdAt: timestamp, lastRotatedAt: null, updatedAt: timestamp }];
+const projectSettings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", ownerUserId: "owner_1", name: "Project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp }, capabilities: { canManageSettings: true } };
+const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: timestamp, updatedAt: timestamp }, capabilities: { canManageSettings: true } };
+
+afterEach(() => cleanup());
+
+describe("business shared controls", () => {
+  it("binds an endpoint credential and base URL through the shared Select", async () => {
+    const changes: EndpointInput[] = [];
+    const view = render(<EndpointHarness onChange={(value) => changes.push(value)} />);
+    const credential = screen.getByRole("combobox", { name: "Credential" });
+    assert.equal((credential as HTMLButtonElement).disabled, false);
+    const bridge = document.querySelector("select");
+    assert.ok(bridge, "shared Select should render its native form bridge");
+    fireEvent.change(bridge, { target: { value: credentials[0]!.id } });
+    await waitFor(() => assert.equal(changes.length, 1));
+    assert.equal(changes[0]?.credentialId, credentials[0]!.id);
+    assert.equal(changes[0]?.baseUrl, credentials[0]!.baseUrl);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tool calls" }));
+    await waitFor(() => assert.deepEqual(changes.at(-1)?.capabilities, ["text", "tool_calls"]));
+    view.rerender(<EndpointHarness saving onChange={() => undefined} />);
+    assert.equal((screen.getByRole("combobox", { name: "Credential" }) as HTMLButtonElement).disabled, true);
+  });
+
+  it("transfers project ownership from the shared owner Select", async () => {
+    const original = snapshotClient();
+    const transfers: string[] = [];
+    apiClient.projectSettings = async () => projectSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }, { projectId: "project_1", userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp }];
+    apiClient.transferProjectOwner = async (_projectId, userId) => { transfers.push(userId); return { transferred: true }; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const owner = await screen.findByRole("combobox", { name: "New project owner" });
+      fireEvent.click(owner);
+      fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
+      const actions = screen.getAllByRole("button", { name: "Transfer ownership" });
+      fireEvent.click(actions[0]!);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
+      await waitFor(() => assert.deepEqual(transfers, ["member_1"]));
+    } finally { restoreClient(original); }
+  });
+
+  it("transfers workspace ownership from the shared owner Select", async () => {
+    const original = snapshotClient();
+    const transfers: string[] = [];
+    apiClient.workspaceSettings = async () => workspaceSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.workspaceMembers = async () => [{ workspaceId: "workspace_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }, { workspaceId: "workspace_1", userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp }];
+    apiClient.transferWorkspaceOwner = async (_workspaceId, userId) => { transfers.push(userId); return { transferred: true }; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      const owner = await screen.findByRole("combobox", { name: "New workspace owner" });
+      fireEvent.click(owner);
+      fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Transfer ownership" })[0]!);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
+      await waitFor(() => assert.deepEqual(transfers, ["member_1"]));
+    } finally { restoreClient(original); }
+  });
+
+  it("shows an explicit empty state when ownership has no eligible recipient", async () => {
+    const original = snapshotClient();
+    apiClient.projectSettings = async () => projectSettings;
+    apiClient.workspaceSettings = async () => workspaceSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }];
+    apiClient.workspaceMembers = async () => [{ workspaceId: "workspace_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }];
+    try {
+      const project = render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      await screen.findByText("There are no other project members eligible to become owner.");
+      assert.equal(screen.queryByRole("combobox", { name: "New project owner" }), null);
+      project.unmount();
+      render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      await screen.findByText("There are no other workspace members eligible to become owner.");
+      assert.equal(screen.queryByRole("combobox", { name: "New workspace owner" }), null);
+    } finally { restoreClient(original); }
+  });
+});
+
+function EndpointHarness({ saving = false, onChange }: { saving?: boolean; onChange: (value: EndpointInput) => void }) {
+  const [input, setInput] = useState<EndpointInput>({ name: "Endpoint", baseUrl: "", model: "deepseek-chat", credentialId: "", capabilities: ["text"], requestTimeoutSecs: 30 });
+  return <EndpointDialog open input={input} editing={false} saving={saving} discovering={false} models={[]} canSubmit error="" credentials={credentials} onDiscoverModels={() => undefined} onDismissError={() => undefined} onOpenChange={() => undefined} onChange={(value) => { setInput(value); onChange(value); }} onSubmit={(event) => event.preventDefault()} />;
+}
+
+function snapshotClient() { return { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, transferProjectOwner: apiClient.transferProjectOwner, transferWorkspaceOwner: apiClient.transferWorkspaceOwner }; }
+function restoreClient(value: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, value); }
+function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
+
+function installDom() {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
+  Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
+  Object.assign(dom.window.HTMLElement.prototype, { hasPointerCapture() { return false; }, setPointerCapture() {}, releasePointerCapture() {}, scrollIntoView() {} });
+  if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
+}

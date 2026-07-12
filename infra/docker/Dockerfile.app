@@ -1,5 +1,7 @@
 FROM node:24-bookworm-slim
 WORKDIR /app
+ARG APP_PUBLIC_BASE_URL
+ARG NODE_BUILD_HEAP_MB=2048
 COPY package.json package-lock.json ./
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/domain/package.json packages/domain/package.json
@@ -12,7 +14,9 @@ COPY packages/openai-compatible-client/package.json packages/openai-compatible-c
 COPY packages/api-entry-node/package.json packages/api-entry-node/package.json
 RUN npm ci
 COPY . .
-RUN npm run build
+ENV APP_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
+ENV APP_BUILD_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
+RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build
 ENV PORT=3000
 EXPOSE 3000
 CMD ["node", "dist/packages/api-entry-node/src/main.js"]

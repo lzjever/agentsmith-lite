@@ -3,6 +3,7 @@ import path from "node:path";
 import { parseAppImagesLock } from "../../dist/packages/sandbox-controller/src/appImageLock.js";
 import { renderAppManifests } from "../../dist/packages/sandbox-controller/src/appManifestRenderer.js";
 import { readContractFiles } from "./env-contract.mjs";
+import { publicBaseUrl } from "../public-base-url.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.env || !args.out) {
@@ -15,8 +16,10 @@ const { env, secrets } = await readContractFiles({
   appEnvFile: args.app_env,
   appSecretsFile: args.app_secrets
 });
+env.APP_PUBLIC_BASE_URL = publicBaseUrl(env.APP_PUBLIC_BASE_URL);
 const namespace = env.KUBE_NAMESPACE ?? "agentsmith";
 const tag = args.tag ?? "dev";
+env.BOTIFIED_RUNNER_IMAGE = `agentsmith-lite/botified-runner:${tag}`;
 const imageRefs = args.images_lock ? parseAppImagesLock(await readFile(args.images_lock, "utf8")) : undefined;
 const manifests = renderAppManifests({ namespace, imageTag: tag, env, secrets, imageRefs });
 await mkdir(args.out, { recursive: true });

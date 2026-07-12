@@ -1,7 +1,8 @@
 import { lstat, realpath, rm } from "node:fs/promises";
 import path from "node:path";
-import type { AgentTaskStatus, KubernetesResource } from "../../contracts/src/api.js";
+import type { AgentTaskStatus, KubernetesResource, TaskTerminalReason } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
+import { nowIso } from "../../domain/src/ids.js";
 import type {
   PersistedSandboxRunState,
   PersistedSandboxTerminalFailure,
@@ -18,6 +19,7 @@ import {
   type SandboxRunState
 } from "../../sandbox-controller/src/reconciler.js";
 import { SANDBOX_LABEL_KEYS } from "../../sandbox-controller/src/labels.js";
+import { recordProjectFailure } from "./projectPolicyService.js";
 
 export interface SandboxKubernetesInventoryPort {
   listManagedResources(namespace: string): Promise<KubernetesResource[]>;
@@ -42,10 +44,21 @@ export interface SandboxLifecycleServiceConfig {
   deleteResourceErrorConfirmAttempts?: number;
   deleteResourceErrorConfirmDelayMs?: number;
   terminalFailureSync?: SandboxTerminalFailureSyncPort;
+  artifactProjection?: SandboxArtifactProjectionPort;
+  taskLifecycle?: SandboxTaskLifecyclePort;
 }
 
 export interface SandboxTerminalFailureSyncPort {
   syncTerminalFailureRun(runId: string): Promise<SandboxTerminalFailureSyncResult>;
+}
+
+export interface SandboxArtifactProjectionPort {
+  projectPublishedArtifactsForRun(runId: string): Promise<void>;
+}
+
+export interface SandboxTaskLifecyclePort {
+  finalizeTaskForRunCleanup(taskId: string, reason: Extract<TaskTerminalReason, "failed" | "expired" | "cancelled">): Promise<void>;
+  canCleanupTaskRuntime(taskId: string): Promise<boolean>;
 }
 
 export type SandboxTerminalFailureSyncResult =
@@ -68,7 +81,7 @@ export interface RuntimeDirectoryCleaner {
   removeRuntimePath(absolutePath: string): Promise<void>;
 }
 
-export type SandboxRuntimeDirectoryName = "home" | "botified" | "artifacts";
+export type SandboxRuntimeDirectoryName = "home" | "botified" | "inputs" | "artifacts";
 
 export interface SandboxRuntimeDirectoryTarget {
   type: "runtime_directory";
@@ -195,29 +208,34 @@ export class SandboxLifecycleService {
       throw new ProductError("Sandbox lifecycle Kubernetes port is not configured", 409);
     }
 
-    const terminalFailureTransitionErrors = await this.persistTerminalFailureTransitions(plan.actions, result);
-    if (terminalFailureTransitionErrors.length > 0) {
-      result.errors.push(...terminalFailureTransitionErrors);
-      return result;
-    }
+    const blockedRunIds = new Set<string>();
+    const terminalFailureTransitions = await this.persistTerminalFailureTransitions(plan.actions, result);
+    result.errors.push(...terminalFailureTransitions.errors);
+    for (const runId of terminalFailureTransitions.blockedRunIds) blockedRunIds.add(runId);
 
     const cleanupRuns = await this.loadRuns(input);
-    const terminalFailureSyncErrors = await this.syncTerminalFailureRuns(cleanupRuns.activeRuns);
-    if (terminalFailureSyncErrors.length > 0) {
-      result.errors.push(...terminalFailureSyncErrors);
-      return result;
-    }
-    const cleanupReconcilePlan = this.plan(cleanupRuns.activeRuns, observed.resources);
-    result.cleanupPlan = this.cleanupPlan(cleanupRuns.activeRuns, cleanupReconcilePlan.actions, cleanupRuns.allRuns);
+    const terminalFailureSync = await this.syncTerminalFailureRuns(cleanupRuns.activeRuns, blockedRunIds);
+    result.errors.push(...terminalFailureSync.errors);
+    for (const runId of terminalFailureSync.blockedRunIds) blockedRunIds.add(runId);
+    const preparedRuns = await this.loadRuns(input);
+    const cleanupReconcilePlan = this.plan(preparedRuns.activeRuns, observed.resources);
+    result.cleanupPlan = this.cleanupPlan(preparedRuns.activeRuns, cleanupReconcilePlan.actions, preparedRuns.allRuns);
     result.recentCleanupFailures = result.cleanupPlan.recentFailures;
     if (plan.actions.some((action) => action.type === "store_run_state" && action.reason === "terminal_runner_failure")) {
       result.actionSummary.push(...cleanupReconcilePlan.actions.map(actionSummary));
     }
-    const mutationErrors = await this.applyCleanupActions(this.config.port, cleanupReconcilePlan.actions);
-    result.errors.push(...mutationErrors);
-    if (mutationErrors.length > 0) {
-      return result;
-    }
+    const lifecycleCandidates = cleanupReconcilePlan.actions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
+    const lifecycleGate = await this.prepareTaskLifecycleBeforeRuntimeCleanup(lifecycleCandidates, preparedRuns.activeRuns);
+    result.errors.push(...lifecycleGate.errors);
+    for (const runId of lifecycleGate.blockedRunIds) blockedRunIds.add(runId);
+    let cleanupActions = cleanupReconcilePlan.actions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
+    const artifactProjection = await this.projectArtifactsBeforeRuntimeCleanup(cleanupActions);
+    result.errors.push(...artifactProjection.errors);
+    for (const runId of artifactProjection.blockedRunIds) blockedRunIds.add(runId);
+    cleanupActions = cleanupActions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
+    const mutations = await this.applyCleanupActions(this.config.port, cleanupActions);
+    result.errors.push(...mutations.errors);
+    for (const runId of mutations.blockedRunIds) blockedRunIds.add(runId);
 
     const refreshed = await this.observe(input);
     result.errors.push(...refreshed.errors);
@@ -232,6 +250,9 @@ export class SandboxLifecycleService {
     result.recentCleanupFailures = finalCleanupPlan.recentFailures;
     result.actionSummary.push(...finalPlan.actions.map(actionSummary));
     for (const action of finalPlan.actions) {
+      if (blockedRunIds.has(reconcileActionRunId(action))) {
+        continue;
+      }
       if (action.type !== "store_run_state") {
         continue;
       }
@@ -245,17 +266,12 @@ export class SandboxLifecycleService {
         if (cleanupError) {
           result.errors.push(cleanupError.message);
           await this.persistCleanupFailure(claimed, cleanupError.target, cleanupError.message);
-          const afterFailureRuns = await this.loadRuns(input);
-          result.runCounts = runCounts(afterFailureRuns.allRuns);
-          const afterFailurePlan = this.cleanupPlan(afterFailureRuns.activeRuns, finalPlan.actions, afterFailureRuns.allRuns);
-          result.cleanupPlan = afterFailurePlan;
-          result.recentCleanupFailures = afterFailurePlan.recentFailures;
-          return result;
+          blockedRunIds.add(action.run.runId);
+          continue;
         }
         const transition = await this.persistRunTransition(action.run, claimed);
         if (transition) {
           result.storedRunIds.push(transition.stored.runId);
-          await this.advanceTaskAfterRunTransition(transition.previous, transition.stored);
         } else {
           result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
         }
@@ -264,13 +280,15 @@ export class SandboxLifecycleService {
       const transition = await this.persistRunTransition(action.run);
       if (transition) {
         result.storedRunIds.push(transition.stored.runId);
-        await this.advanceTaskAfterRunTransition(transition.previous, transition.stored);
       } else {
         result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
       }
     }
     const afterRuns = await this.loadRuns(input);
     result.runCounts = runCounts(afterRuns.allRuns);
+    const afterPlan = this.plan(afterRuns.activeRuns, refreshed.resources);
+    result.cleanupPlan = this.cleanupPlan(afterRuns.activeRuns, afterPlan.actions, afterRuns.allRuns);
+    result.recentCleanupFailures = result.cleanupPlan.recentFailures;
     return result;
   }
 
@@ -358,33 +376,95 @@ export class SandboxLifecycleService {
   private async applyCleanupActions(
     port: SandboxLifecycleKubernetesPort,
     actions: SandboxReconcileAction[]
-  ): Promise<string[]> {
+  ): Promise<{ blockedRunIds: Set<string>; errors: string[] }> {
+    const blockedRunIds = new Set<string>();
     const errors: string[] = [];
     for (const action of actions) {
       if (action.type === "delete_resource") {
+        if (blockedRunIds.has(action.runId)) continue;
         let ref: KubernetesResourceRef;
         try {
           ref = resourceRef(action.resource);
         } catch (error) {
-          errors.push(errorMessage(error));
-          return errors;
+          blockedRunIds.add(action.runId);
+          errors.push(sanitizeCleanupError(errorMessage(error)));
+          continue;
         }
         try {
           const result = await port.deleteResource(ref, action.labels);
           if (result !== "fence_mismatch") {
             continue;
           }
+          blockedRunIds.add(action.runId);
           errors.push(`Kubernetes delete fence mismatch for ${action.kind}/${action.name}`);
         } catch (error) {
           if (await this.deleteTargetGoneOrTerminatingAfterFreshObserves(port, action)) {
             continue;
           }
-          errors.push(errorMessage(error));
+          blockedRunIds.add(action.runId);
+          errors.push(sanitizeCleanupError(errorMessage(error)));
         }
-        return errors;
       }
     }
-    return errors;
+    return { blockedRunIds, errors };
+  }
+
+  private async projectArtifactsBeforeRuntimeCleanup(actions: SandboxReconcileAction[]): Promise<{ blockedRunIds: Set<string>; errors: string[] }> {
+    const projector = this.config.artifactProjection;
+    const blockedRunIds = new Set<string>();
+    const errors: string[] = [];
+    if (!projector) {
+      return { blockedRunIds, errors };
+    }
+    // A successful inventory with no run Pod proves that Botified is already gone.
+    // Do not make deletion of the remaining app-owned resources depend on that endpoint.
+    const runIds = new Set(actions
+      .filter((action): action is Extract<SandboxReconcileAction, { type: "delete_resource" }> =>
+        action.type === "delete_resource" && action.kind === "Pod"
+      )
+      .map((action) => action.runId));
+    for (const runId of runIds) {
+      try {
+        await projector.projectPublishedArtifactsForRun(runId);
+      } catch (error) {
+        blockedRunIds.add(runId);
+        errors.push(`Sandbox run ${runId} artifact projection failed before runtime cleanup: ${sanitizeCleanupError(errorMessage(error))}`);
+      }
+    }
+    return { blockedRunIds, errors };
+  }
+
+  private async prepareTaskLifecycleBeforeRuntimeCleanup(
+    actions: SandboxReconcileAction[],
+    runs: PersistedSandboxRunState[]
+  ): Promise<{ blockedRunIds: Set<string>; errors: string[] }> {
+    const lifecycle = this.config.taskLifecycle;
+    const blockedRunIds = new Set<string>();
+    const errors: string[] = [];
+    const runsById = new Map(runs.map((run) => [run.runId, run]));
+    for (const runId of runtimeCleanupRunIds(actions)) {
+      const run = runsById.get(runId);
+      if (!run) continue;
+      if (!lifecycle) {
+        const task = await this.store.findTask(run.taskId);
+        if (task && !task.terminalReason) {
+          blockedRunIds.add(runId);
+          errors.push(`Sandbox run ${runId} task finalization is unavailable before runtime cleanup`);
+        }
+        continue;
+      }
+      try {
+        const reason: Extract<TaskTerminalReason, "failed" | "expired" | "cancelled"> = run.terminalFailure
+          ? "failed"
+          : runWasExpired(run, this.config.now?.() ?? new Date()) ? "expired" : "cancelled";
+        await lifecycle.finalizeTaskForRunCleanup(run.taskId, reason);
+        if (!await lifecycle.canCleanupTaskRuntime(run.taskId)) blockedRunIds.add(runId);
+      } catch (error) {
+        blockedRunIds.add(runId);
+        errors.push(`Sandbox run ${runId} task finalization failed before runtime cleanup: ${sanitizeCleanupError(errorMessage(error))}`);
+      }
+    }
+    return { blockedRunIds, errors };
   }
 
   private async deleteTargetGoneOrTerminatingAfterFreshObserves(
@@ -445,7 +525,8 @@ export class SandboxLifecycleService {
   private async persistTerminalFailureTransitions(
     actions: SandboxReconcileAction[],
     result: SandboxReapResult
-  ): Promise<string[]> {
+  ): Promise<{ blockedRunIds: Set<string>; errors: string[] }> {
+    const blockedRunIds = new Set<string>();
     const errors: string[] = [];
     for (const action of actions) {
       if (action.type !== "store_run_state" || action.reason !== "terminal_runner_failure") {
@@ -453,6 +534,7 @@ export class SandboxLifecycleService {
       }
       const transition = await this.persistTerminalFailureTransition(action.run);
       if (transition === "conflict") {
+        blockedRunIds.add(action.run.runId);
         errors.push(`Sandbox run ${action.run.runId} fencing token changed before terminal failure could be stored`);
         continue;
       }
@@ -460,11 +542,14 @@ export class SandboxLifecycleService {
         result.storedRunIds.push(transition.stored.runId);
       }
     }
-    return errors;
+    return { blockedRunIds, errors };
   }
 
-  private async syncTerminalFailureRuns(runs: SandboxRunState[]): Promise<string[]> {
+  private async syncTerminalFailureRuns(runs: SandboxRunState[], alreadyBlocked: Set<string>): Promise<{ blockedRunIds: Set<string>; errors: string[] }> {
+    const blockedRunIds = new Set<string>();
+    const errors: string[] = [];
     for (const run of runs) {
+      if (alreadyBlocked.has(run.runId)) continue;
       if (!run.terminalFailure) {
         continue;
       }
@@ -473,7 +558,8 @@ export class SandboxLifecycleService {
         continue;
       }
       if (current.terminalFailure.syncStatus === "synced" || current.terminalFailure.syncStatus === "unavailable") {
-        await this.markTerminalFailureTaskFailed(current);
+        try { await this.markTerminalFailureTaskFailed(current); }
+        catch (error) { blockedRunIds.add(current.runId); errors.push(`Sandbox run ${current.runId} task finalization failed: ${sanitizeCleanupError(errorMessage(error))}`); }
         continue;
       }
       let outcome: SandboxTerminalFailureSyncResult;
@@ -484,17 +570,22 @@ export class SandboxLifecycleService {
       }
       const settlement = await this.persistTerminalFailureSyncOutcome(current.runId, outcome);
       if (settlement === "conflict") {
-        return [`Sandbox run ${current.runId} fencing token changed before terminal failure sync could be stored`];
+        blockedRunIds.add(current.runId);
+        errors.push(`Sandbox run ${current.runId} fencing token changed before terminal failure sync could be stored`);
+        continue;
       }
       if (settlement === "skipped") {
         continue;
       }
       if (settlement.waiting) {
-        return [settlement.error];
+        blockedRunIds.add(current.runId);
+        errors.push(settlement.error);
+        continue;
       }
-      await this.markTerminalFailureTaskFailed(settlement.run);
+      try { await this.markTerminalFailureTaskFailed(settlement.run); }
+      catch (error) { blockedRunIds.add(current.runId); errors.push(`Sandbox run ${current.runId} task finalization failed: ${sanitizeCleanupError(errorMessage(error))}`); }
     }
-    return [];
+    return { blockedRunIds, errors };
   }
 
   private async persistTerminalFailureSyncOutcome(
@@ -535,11 +626,16 @@ export class SandboxLifecycleService {
   }
 
   private async markTerminalFailureTaskFailed(run: PersistedSandboxRunState): Promise<void> {
-    await this.store.updateTaskStatusIfNonterminal(
-      run.taskId,
-      "failed",
-      (this.config.now?.() ?? new Date()).toISOString()
-    );
+    const lifecycle = this.config.taskLifecycle;
+    const task = await this.store.findTask(run.taskId);
+    if (task && !task.terminalReason && !lifecycle) throw new ProductError("Task lifecycle finalizer is not configured", 409);
+    if (lifecycle) await lifecycle.finalizeTaskForRunCleanup(run.taskId, "failed");
+    const timestamp = nowIso();
+    const endpointId=task?.endpointId;
+    await recordProjectFailure(this.store,"sandbox_failure",{
+      id:`audit_sandbox_failed_${run.runId}`,projectId:run.projectId,actorId:null,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,
+      detail:{taskId:run.taskId,...(endpointId?{endpointId}:{})},createdAt:timestamp
+    },endpointId?{endpointId}:{});
   }
 
   private async persistTerminalFailureTransition(
@@ -613,21 +709,6 @@ export class SandboxLifecycleService {
     });
   }
 
-  private async advanceTaskAfterRunTransition(
-    previous: PersistedSandboxRunState,
-    stored: PersistedSandboxRunState
-  ): Promise<void> {
-    const task = await this.store.findTask(stored.taskId);
-    if (!task || isTerminalTaskStatus(task.status)) {
-      return;
-    }
-    const now = this.config.now?.() ?? new Date();
-    if (stored.cleanupStatus !== "cleaned" && stored.phase !== "cleaned") {
-      return;
-    }
-    const status: AgentTaskStatus = runWasExpired(previous, now) ? "expired" : "cleaned";
-    await this.store.updateTaskStatusIfNonterminal(stored.taskId, status, now.toISOString());
-  }
 }
 
 export async function requestSandboxRunCleanup(
@@ -709,11 +790,27 @@ function cleanupTargetsForAction(action: SandboxReconcileAction): SandboxCleanup
   }
 }
 
+function reconcileActionRunId(action: SandboxReconcileAction): string {
+  return action.type === "store_run_state" ? action.run.runId : action.runId;
+}
+
+function runtimeCleanupRunIds(actions: SandboxReconcileAction[]): Set<string> {
+  const runIds = new Set<string>();
+  for (const action of actions) {
+    if (action.type === "delete_resource") runIds.add(action.runId);
+    if (action.type === "store_run_state" && (action.reason === "cleanup_in_progress" || action.reason === "cleanup_complete")) {
+      runIds.add(action.run.runId);
+    }
+  }
+  return runIds;
+}
+
 function runtimeDirectoryTargets(run: PersistedSandboxRunState, dataRoot?: string): SandboxRuntimeDirectoryTarget[] {
   const paths = runtimeDirectoryPaths(run, dataRoot);
   return [
     runtimeDirectoryTarget(run, "home", paths.home, "delete", "cleanup_candidate"),
     runtimeDirectoryTarget(run, "botified", paths.botified, "delete", "cleanup_candidate"),
+    runtimeDirectoryTarget(run, "inputs", paths.inputs, "delete", "cleanup_candidate"),
     runtimeDirectoryTarget(run, "artifacts", paths.artifacts, "retain", "durable")
   ];
 }
@@ -723,9 +820,11 @@ function runtimeDirectoryPaths(
   dataRoot?: string
 ): Record<SandboxRuntimeDirectoryName, string> {
   if (!dataRoot) {
+    const taskRoot = path.posix.dirname(run.directories.taskHome);
     return {
       home: run.directories.taskHome,
       botified: run.directories.botified,
+      inputs: path.posix.join(taskRoot, "inputs"),
       artifacts: run.directories.artifacts
     };
   }
@@ -733,6 +832,7 @@ function runtimeDirectoryPaths(
   return {
     home: path.resolve(taskRoot, "home"),
     botified: path.resolve(taskRoot, "botified"),
+    inputs: path.resolve(taskRoot, "inputs"),
     artifacts: path.resolve(taskRoot, "artifacts")
   };
 }

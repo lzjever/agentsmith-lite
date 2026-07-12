@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 import {
-  BotifiedHttpError,
   type BotifiedAbortResult,
+  type BotifiedDeliveryMessageInput,
+  type BotifiedDeliveryReceipt,
   type BotifiedPostMessageResult,
   type BotifiedRuntimeHttpClient,
   type BotifiedTimelineReadResult,
@@ -32,6 +33,7 @@ describe("task events API", () => {
   });
 
   it("returns and downloads server-projected artifacts without UI-facing Botified routes or secrets", async () => {
+    const store = createLocalInMemoryProductStore();
     const artifactBytes = new TextEncoder().encode("api artifact bytes");
     const botified = new FakeBotifiedClient([
       {
@@ -47,7 +49,7 @@ describe("task events API", () => {
               filename: "../bad/报告\"\r\n.txt",
               mime_type: "text/markdown",
               size_bytes: artifactBytes.byteLength,
-              sha256: "b".repeat(64),
+              sha256: "6c839ab9cab51908aff7e97713dfeaf25eec58eb99b3ed52b31dfedf4b0699d3",
               download_url: "http://botified.internal/v1/files/f1?service_key=api-service-key"
             }
           }
@@ -61,36 +63,42 @@ describe("task events API", () => {
       dataRoot,
       builtinAdminPassword: "admin-password",
       botifiedClient: botified,
-      botifiedServiceKeyFactory: () => "api-service-key"
+      botifiedServiceKeyFactory: () => "api-service-key",
+      store
     });
     const auth = await createProjectWithEndpoint(api.baseUrl);
 
-    const task = await auth.requestJson("POST", `/api/projects/${auth.projectId}/tasks`, {
+    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
       prompt: "make notes",
       endpointId: auth.endpointId
     });
-    const events = await auth.requestJson("GET", `/api/tasks/${task.id}/events`);
-    const artifacts = await auth.requestJson("GET", `/api/tasks/${task.id}/artifacts`);
+    const stored = await store.findTask(task.id as string);
+    assert.ok(stored);
+    await store.updateTask({ ...stored, executionMode: "live", status: "running", terminalReason: null, terminalizedAt: null, startIntentStatus: "dispatched", artifactProjectionStatus: "pending", cleanupStatus: "pending", cleanupCompletedAt: null });
+    await store.jsonDocs.put("sandbox_runtime_state", task.id as string, { botifiedBaseUrl: "http://botified.internal" });
+    const events = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/events`);
+    const artifacts = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/artifacts`);
     const leakedJson = JSON.stringify({ events, artifacts });
 
     assert.deepEqual(events.map((event: { kind: string; botifiedSeq: number }) => [event.kind, event.botifiedSeq]), [
       ["artifact", 2]
     ]);
     assert.equal(task.prompt, "make notes");
+    assert.equal(task.executionMode, "dry-run");
     assert.deepEqual(artifacts.map((artifact: { fileId: string; name: string; bytes: number; sha256?: string }) => [
       artifact.fileId,
       artifact.name,
       artifact.bytes,
       artifact.sha256
-    ]), [["f1", "报告\".txt", artifactBytes.byteLength, "b".repeat(64)]]);
-    assert.equal(botified.postMessageCalls[0]?.serviceKey, "api-service-key");
+    ]), [["f1", "报告\".txt", artifactBytes.byteLength, "6c839ab9cab51908aff7e97713dfeaf25eec58eb99b3ed52b31dfedf4b0699d3"]]);
+    assert.equal(botified.readTimelineCalls[0]?.serviceKey, "api-service-key");
     assert.equal(botified.downloadFileCalls[0]?.serviceKey, "api-service-key");
     assert.doesNotMatch(leakedJson, /api-service-key|botified\.internal|download_url|\/v1\/files/);
 
-    const anonymousDownload = await fetch(`${api.baseUrl}/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
+    const anonymousDownload = await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
     assert.equal(anonymousDownload.status, 401);
 
-    const download = await auth.request("GET", `/api/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
+    const download = await auth.request("GET", `/api/v1/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
     assert.equal(download.status, 200);
     assert.equal(download.headers.get("content-type"), "application/octet-stream");
     assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
@@ -120,7 +128,7 @@ describe("task events API", () => {
       store
     });
     const auth = await createProjectWithEndpoint(api.baseUrl);
-    const task = await auth.requestJson("POST", `/api/projects/${auth.projectId}/tasks`, {
+    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
       prompt: "download old artifact",
       endpointId: auth.endpointId
     });
@@ -140,7 +148,7 @@ describe("task events API", () => {
     await mkdir(artifactDir, { recursive: true });
     await writeFile(path.join(artifactDir, "art_header--.txt"), artifactBytes);
 
-    const download = await auth.request("GET", `/api/tasks/${task.id}/artifacts/${artifact.id}/download`);
+    const download = await auth.request("GET", `/api/v1/tasks/${task.id}/artifacts/${artifact.id}/download`);
     assert.equal(download.status, 200);
     assert.equal(download.headers.get("content-type"), "application/octet-stream");
     assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
@@ -155,7 +163,31 @@ describe("task events API", () => {
     assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
   });
 
-  it("aborts through the Botified port and returns abort failures as structured errors", async () => {
+  it("starts a linked successor when a terminal task receives a follow-up", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    api = await createApiServer({ port: 0, dataRoot, builtinAdminPassword: "admin-password", botifiedClient: botified, botifiedServiceKeyFactory: () => "api-service-key", store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const source = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt: "source task", endpointId: auth.endpointId });
+    const persistedSource = await store.findTask(source.id as string);
+    assert.ok(persistedSource);
+    await store.updateTask({ ...persistedSource, status: "completed", updatedAt: "2026-07-11T00:00:00.000Z" });
+
+    const followUp = await auth.requestJson("POST", `/api/v1/tasks/${source.id}/follow-ups`, { prompt: "continue from the completed result" });
+    assert.equal(followUp.taskId, source.id);
+    assert.ok(followUp.followUpTaskId);
+
+    const unchangedSource = await auth.requestJson("GET", `/api/v1/tasks/${source.id}`);
+    const successor = await auth.requestJson("GET", `/api/v1/tasks/${followUp.followUpTaskId}`);
+    assert.equal(unchangedSource.status, "completed");
+    assert.equal(successor.sourceTaskId, source.id);
+    assert.equal(successor.prompt, "continue from the completed result");
+    assert.equal(successor.endpointId, auth.endpointId);
+    assert.equal(successor.terminalReason, "not_executed");
+    assert.equal(botified.postMessageCalls.length, 0);
+  });
+
+  it("keeps dry-run not_executed first-wins when cancellation is requested", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
     api = await createApiServer({
       port: 0,
@@ -165,53 +197,15 @@ describe("task events API", () => {
       botifiedServiceKeyFactory: () => "api-service-key"
     });
     const auth = await createProjectWithEndpoint(api.baseUrl);
-    const task = await auth.requestJson("POST", `/api/projects/${auth.projectId}/tasks`, {
+    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
       prompt: "cancel me",
       endpointId: auth.endpointId
     });
 
-    const cancelled = await auth.requestJson("POST", `/api/tasks/${task.id}/cancel`, {});
-    assert.equal(cancelled.status, "stopping");
-    assert.equal(botified.abortCalls.length, 1);
-    assert.equal(botified.abortCalls[0]?.serviceKey, "api-service-key");
-
-    const failingBotified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
-    failingBotified.abortError = new BotifiedHttpError({
-      status: 503,
-      code: "runner_unavailable",
-      message: "runner leaked Bearer bsk_api_secret and sk-real-model-key",
-      retryable: true,
-      responseBody: { error: { code: "runner_unavailable" } },
-      timelineCursor: "cursor-bsk_api_secret",
-      historyBoundary: "boundary sk-real-model-key"
-    });
-    await api.close();
-    api = await createApiServer({
-      port: 0,
-      dataRoot,
-      builtinAdminPassword: "admin-password",
-      botifiedClient: failingBotified,
-      botifiedServiceKeyFactory: () => "api-service-key"
-    });
-    const failingAuth = await createProjectWithEndpoint(api.baseUrl);
-    const failingTask = await failingAuth.requestJson("POST", `/api/projects/${failingAuth.projectId}/tasks`, {
-      prompt: "cancel me too",
-      endpointId: failingAuth.endpointId
-    });
-    const response = await failingAuth.request("POST", `/api/tasks/${failingTask.id}/cancel`, {});
-
-    assert.equal(response.status, 503);
-    const responseBody = await response.json();
-    assert.deepEqual(responseBody, {
-      error: {
-        code: "runner_unavailable",
-        message: "Botified abort failed: runner leaked Bearer <redacted> and sk-<redacted>",
-        retryable: true,
-        timelineCursor: "cursor-bsk_<redacted>",
-        historyBoundary: "boundary sk-<redacted>"
-      }
-    });
-    assert.doesNotMatch(JSON.stringify(responseBody), /bsk_api_secret|sk-real-model-key/);
+    const cancelled = await auth.requestJson("POST", `/api/v1/tasks/${task.id}/cancel`, {});
+    assert.equal(cancelled.status, "completed");
+    assert.equal(cancelled.terminalReason, "not_executed");
+    assert.equal(botified.abortCalls.length, 0);
   });
 
   it("fails fast when live sandbox mode has no persistent product store", async () => {
@@ -276,7 +270,8 @@ describe("task events API", () => {
         dataRoot,
         builtinAdminPassword: "production-admin-password",
         sessionSecret: validProductionSessionSecret,
-        liveSandbox
+        liveSandbox,
+        store: createLocalInMemoryProductStore()
       });
       assert.match(api.baseUrl, /^http:\/\/127\.0\.0\.1:/);
     } finally {
@@ -325,12 +320,13 @@ describe("task events API", () => {
 });
 
 async function createProjectWithEndpoint(baseUrl: string) {
-  await fetch(baseUrl + "/api/auth/bootstrap", {
+  let idempotencySequence = 0;
+  await fetch(baseUrl + "/api/v1/auth/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ password: "admin-password" })
   });
-  const login = await fetch(baseUrl + "/api/auth/login", {
+  const login = await fetch(baseUrl + "/api/v1/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -346,6 +342,9 @@ async function createProjectWithEndpoint(baseUrl: string) {
     if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       headers["x-csrf-token"] = csrf;
     }
+    if (pathname.includes("/tasks") && ["POST", "PATCH", "DELETE"].includes(method)) {
+      headers["idempotency-key"] = `task-events-${++idempotencySequence}`;
+    }
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
       init.body = JSON.stringify(body);
@@ -360,14 +359,15 @@ async function createProjectWithEndpoint(baseUrl: string) {
     return response.json();
   };
 
-  const workspace = await requestJson("POST", "/api/workspaces", { name: "Ops" });
-  const project = await requestJson("POST", `/api/workspaces/${workspace.id}/projects`, { name: "Demo" });
-  const endpoint = await requestJson("POST", `/api/projects/${project.id}/endpoints`, {
+  const workspace = await requestJson("POST", "/api/v1/workspaces", { name: "Ops" });
+  const project = await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" });
+  const credential = await requestJson("POST", `/api/v1/projects/${project.id}/credentials`, { name: "Mock credential", baseUrl: "https://models.example.com/v1", secret: "sk-real-model-key" });
+  const endpoint = await requestJson("POST", `/api/v1/projects/${project.id}/endpoints`, {
     name: "Mock endpoint",
     protocol: "openai_chat_completions",
     baseUrl: "https://models.example.com/v1",
     model: "gpt-compatible",
-    apiKeySecretRef: "secret/mock",
+    credentialId: credential.id,
     capabilities: ["text", "tool_calls"],
     requestTimeoutSecs: 30
   });
@@ -397,6 +397,15 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
     this.postMessageCalls.push({ baseUrl, serviceKey, message });
     return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
+  }
+
+  async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+    const posted = await this.postMessage(baseUrl, serviceKey, input.text);
+    return { accepted: posted.accepted, deliveryKey: input.deliveryKey, requestHash: input.requestHash, ...(posted.messageId ? { messageId: posted.messageId } : {}), ...(posted.cursor ? { cursor: posted.cursor } : {}) };
+  }
+
+  async queryDeliveryReceipt(): Promise<BotifiedDeliveryReceipt | null> {
+    return null;
   }
 
   async readState() {

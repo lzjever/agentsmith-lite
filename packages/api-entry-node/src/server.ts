@@ -1,8 +1,7 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import {
   DEFAULT_SESSION_SECRET,
@@ -11,11 +10,13 @@ import {
   requireLiveSandboxSessionSecret
 } from "../../application/src/factory.js";
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
+import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import type { ChatMessage, CreateEndpointInput, ModelEndpoint, PublicModelEndpoint } from "../../contracts/src/api.js";
+import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, type ChatMessage, type CreateEndpointInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
+import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
-import type { ModelCredentialResolver, OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
+import { FetchOpenAICompatibleClient, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import type { AuthMode } from "./runtimeConfig.js";
@@ -23,35 +24,38 @@ import type { OidcClientAdapter } from "./oidcClient.js";
 
 export interface ApiServerOptions {
   port: number;
+  host?: string;
   dataRoot: string;
   authMode?: AuthMode;
   builtinAdminPassword: string;
   sessionSecret?: string;
+  credentialCrypto?: CredentialCrypto;
   publicBaseUrl?: string;
   publicBasePath?: string;
   oidcClient?: OidcClientAdapter;
-  oidcAdminEmails?: string[];
-  oidcAdminSubjects?: string[];
   namespace?: string;
   pvcName?: string;
   botifiedRunnerImage?: string;
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
-  chatClient?: OpenAICompatibleClient;
-  modelCredentialResolver?: ModelCredentialResolver;
+  providerClient?: OpenAICompatibleClient;
   modelCa?: ModelCaReference;
   liveSandbox?: TaskLiveSandboxConfig;
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   liveSandboxMaxLifetimeMs?: number;
   liveSandboxIdleTimeoutMs?: number;
+  taskDeliveryLeaseMs?: number;
+  taskMaintenanceLeaseMs?: number;
+  taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
   store?: ProductStore;
 }
 
 export interface RunningApiServer {
   baseUrl: string;
+  listenAddress: string;
   close(): Promise<void>;
 }
 
@@ -71,41 +75,45 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
   }
   await mkdir(options.dataRoot, { recursive: true });
   const store = options.store ?? createInMemoryProductStore();
+  const providerClient = options.providerClient ?? new FetchOpenAICompatibleClient();
   const effectiveSessionSecret = options.sessionSecret ?? DEFAULT_SESSION_SECRET;
   const serviceOptions = {
     store,
     dataRoot: options.dataRoot,
     builtinAdminPassword: options.builtinAdminPassword,
     sessionSecret: effectiveSessionSecret,
-    ...(options.oidcAdminEmails ? { oidcAdminEmails: options.oidcAdminEmails } : {}),
-    ...(options.oidcAdminSubjects ? { oidcAdminSubjects: options.oidcAdminSubjects } : {}),
+    ...(options.credentialCrypto ? { credentialCrypto: options.credentialCrypto } : {}),
     ...(options.namespace ? { namespace: options.namespace } : {}),
     ...(options.pvcName ? { pvcName: options.pvcName } : {}),
     ...(options.botifiedRunnerImage ? { botifiedRunnerImage: options.botifiedRunnerImage } : {}),
     ...(options.botifiedClient ? { botifiedClient: options.botifiedClient } : {}),
     ...(options.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: options.botifiedServiceKeyFactory } : {}),
     ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
-    ...(options.chatClient ? { chatClient: options.chatClient } : {}),
-    ...(options.modelCredentialResolver ? { modelCredentialResolver: options.modelCredentialResolver } : {}),
+    providerClient,
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
     ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
     ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
+    ...(options.taskDeliveryLeaseMs !== undefined ? { taskDeliveryLeaseMs: options.taskDeliveryLeaseMs } : {}),
+    ...(options.taskMaintenanceLeaseMs !== undefined ? { taskMaintenanceLeaseMs: options.taskMaintenanceLeaseMs } : {}),
+    ...(options.taskRetryDelayMs !== undefined ? { taskRetryDelayMs: options.taskRetryDelayMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
     requireBuiltinAdminPasswordForLiveSandbox: authMode === "builtin_admin",
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
+  await services.credentials.importLegacyAliasesFromEnvironment(process.env);
   const appBasePath = appBasePathFromOptions(options.publicBaseUrl, options.publicBasePath);
 
   const server = http.createServer(async (req, res) => {
     try {
       const requestUrl = new URL(req.url ?? "/", "http://localhost");
-      if (appBasePath && (req.method === "GET" || req.method === "HEAD") && requestUrl.pathname === appBasePath) {
-        return sendRedirect(res, 302, `${appBasePath}/`);
-      }
-      const routedUrl = routeUrlForAppBasePath(requestUrl, appBasePath);
+      // Sandboxes call this internal route through the ClusterIP Service. It must not
+      // inherit a public ingress mount path such as /app.
+      const routedUrl = brokerRouteFor(requestUrl.pathname)
+        ? requestUrl
+        : routeUrlForAppBasePath(requestUrl, appBasePath);
       if (!routedUrl) {
         throw new ProductError("Route not found", 404);
       }
@@ -120,23 +128,22 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
           ...(options.oidcClient ? { oidcClient: options.oidcClient } : {})
         });
       } else {
-        await serveWeb(req, res, routedUrl);
+        throw new ProductError("Route not found", 404);
       }
     } catch (error) {
       handleError(res, error);
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(options.port, resolve));
+  await new Promise<void>((resolve) => server.listen({ port: options.port, host: options.host }, resolve));
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("API server did not expose a TCP address");
   }
-  if (options.liveSandbox) {
-    services.runtime.startLoop();
-  }
+  services.runtime.startLoop();
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    listenAddress: address.address,
     close: () => new Promise((resolve, reject) => {
       services.runtime.stopLoop();
       server.close((error) => error ? reject(error) : resolve());
@@ -156,23 +163,34 @@ interface AuthRouteContext {
   oidcClient?: OidcClientAdapter;
 }
 
-async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, services: Services, auth: AuthRouteContext): Promise<void> {
+async function routeApi(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  services: Services,
+  auth: AuthRouteContext
+): Promise<void> {
   const method = req.method ?? "GET";
   const segments = url.pathname.split("/").filter(Boolean);
 
-  if (url.pathname === "/api") {
+  const brokerRoute = brokerRouteFor(url.pathname);
+  if (brokerRoute && method === "POST") {
+    return forwardBotifiedChatCompletion(req, res, services, brokerRoute);
+  }
+
+  if (url.pathname === "/api" || !url.pathname.startsWith("/api/v1/")) {
     throw new ProductError("Route not found", 404);
   }
 
-  if (method === "GET" && url.pathname === "/api/health") {
+  if (method === "GET" && url.pathname === "/api/v1/health") {
     return sendJson(res, 200, { status: "ok", version: "0.1.0" });
   }
 
-  if (method === "GET" && url.pathname === "/api/bootstrap") {
+  if (method === "GET" && url.pathname === "/api/v1/bootstrap") {
     return sendJson(res, 200, { authMode: auth.authMode, hasAdmin: await services.auth.hasAnyUser() });
   }
 
-  if (method === "POST" && url.pathname === "/api/auth/bootstrap") {
+  if (method === "POST" && url.pathname === "/api/v1/auth/bootstrap") {
     if (auth.authMode !== "builtin_admin") {
       throw new ProductError("Route not found", 404);
     }
@@ -183,7 +201,7 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     return sendJson(res, 200, await services.auth.bootstrapBuiltInAdmin());
   }
 
-  if (method === "POST" && url.pathname === "/api/auth/login") {
+  if (method === "POST" && url.pathname === "/api/v1/auth/login") {
     if (auth.authMode !== "builtin_admin") {
       throw new ProductError("Route not found", 404);
     }
@@ -193,23 +211,25 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     return sendJson(res, 200, result);
   }
 
-  if (method === "GET" && url.pathname === "/api/auth/oidc/start") {
+  if (method === "GET" && url.pathname === "/api/v1/auth/oidc/start") {
     if (auth.authMode !== "oidc" || !auth.oidcClient) {
       throw new ProductError("Route not found", 404);
     }
     const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl, auth.appBasePath);
+    const returnTo = oidcReturnTo(url.searchParams.get("returnTo"), auth.appBasePath);
     const authorization = await auth.oidcClient.createAuthorizationRequest({ redirectUri });
     res.setHeader("set-cookie", [serializeAuthCookie("asl_oidc_tx", encodeOidcTransaction({
         state: authorization.state,
         codeVerifier: authorization.codeVerifier,
         nonce: authorization.nonce,
         redirectUri,
+        returnTo,
         createdAt: Date.now()
       }, auth.sessionSecret), oidcTransactionCookiePath(auth.appBasePath), 600, auth.secureCookies)]);
     return sendRedirect(res, 302, authorization.authorizationUrl);
   }
 
-  if (method === "GET" && url.pathname === "/api/auth/oidc/callback") {
+  if (method === "GET" && url.pathname === "/api/v1/auth/oidc/callback") {
     if (auth.authMode !== "oidc" || !auth.oidcClient) {
       throw new ProductError("Route not found", 404);
     }
@@ -225,7 +245,11 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       serializeAuthCookie("asl_session", result.sessionId, sessionCookiePath(auth.appBasePath), 43200, auth.secureCookies),
       serializeAuthCookie("asl_oidc_tx", "", oidcTransactionCookiePath(auth.appBasePath), 0, auth.secureCookies)
     ]);
-    return sendRedirect(res, 302, appHomePath(auth.appBasePath));
+    return sendRedirect(res, 302, transaction.returnTo ?? appHomePath(auth.appBasePath));
+  }
+
+  if (!isKnownApiRoutePath(url.pathname)) {
+    throw new ProductError("Route not found", 404);
   }
 
   const sessionId = getCookie(req, "asl_session");
@@ -235,17 +259,26 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     await services.auth.requireCsrf(sessionId, req.headers["x-csrf-token"]?.toString() ?? null);
   }
 
-  if (method === "GET" && url.pathname === "/api/me") {
+  if (method === "GET" && url.pathname === "/api/v1/me") {
     return sendJson(res, 200, { user, csrfToken: sessionPrincipal.csrfToken });
   }
+  if (url.pathname === "/api/v1/me/profile") {
+    if (method === "GET") return sendJson(res, 200, await services.profile.getProfile(user.id));
+    if (method === "PATCH") return sendJson(res, 200, await services.profile.updateProfile(user.id, await readJson(req)));
+  }
+  if (url.pathname === "/api/v1/notifications" && method === "GET") return sendJson(res, 200, await services.notifications.list(user.id, url.searchParams.get("unread") === "true"));
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "notifications" && segments[3]) {
+    if (segments[4] === "read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markRead(user.id, segments[3]));
+    if (method === "DELETE") return sendJson(res, 200, await services.notifications.dismiss(user.id, segments[3]));
+  }
 
-  if (method === "POST" && url.pathname === "/api/auth/logout") {
+  if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
     await services.auth.logout(sessionId);
     res.setHeader("set-cookie", [serializeAuthCookie("asl_session", "", sessionCookiePath(auth.appBasePath), 0, auth.secureCookies)]);
     return sendJson(res, 200, { loggedOut: true });
   }
 
-  if (method === "GET" && url.pathname === "/api/dashboard") {
+  if (method === "GET" && url.pathname === "/api/v1/dashboard") {
     const dashboard = await services.dashboard(user.id);
     return sendJson(res, 200, {
       health: { status: "ok", version: "0.1.0" },
@@ -255,33 +288,54 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
     });
   }
 
-  if (segments[0] === "api" && segments[1] === "operator" && segments[2] === "sandbox") {
-    requireAdmin(user);
-    if (segments[3] === "status" && method === "GET") {
-      const runId = url.searchParams.get("runId");
-      return sendJson(res, 200, await services.sandboxLifecycle.getSandboxStatus(runId ? { runId } : {}));
-    }
-    if (segments[3] === "reap" && method === "POST") {
-      const body = await readJson(req);
-      return sendJson(res, 200, await services.sandboxLifecycle.reapSandboxRunsOnce({
-        ...(typeof body.runId === "string" ? { runId: body.runId } : {}),
-        apply: body.apply === true,
-        dryRun: body.apply !== true
-      }));
-    }
-  }
-
-  if (method === "GET" && url.pathname === "/api/workspaces") {
+  if (method === "GET" && url.pathname === "/api/v1/workspaces") {
     return sendJson(res, 200, await services.workspaces.listWorkspaces(user.id));
   }
 
-  if (method === "POST" && url.pathname === "/api/workspaces") {
-    const body = await readJson(req);
-    return sendJson(res, 200, await services.workspaces.createWorkspace(user.id, { name: asString(body.name) }));
+  if (method === "GET" && url.pathname === "/api/v1/projects") {
+    const workspaces = await services.workspaces.listWorkspaces(user.id);
+    return sendJson(res, 200, workspaces.flatMap((workspace) => workspace.projects));
   }
 
-  if (segments[0] === "api" && segments[1] === "workspaces" && segments[2] && segments[3] === "projects") {
-    const workspaceId = segments[2];
+  if (url.pathname === "/api/v1/context") {
+    if (method === "GET") {
+      return sendJson(res, 200, await services.contexts.list(user.id, contextTargetFromQuery(url)));
+    }
+    if (method === "PUT") {
+      const body = await readJson(req);
+      return sendJson(res, 200, await services.contexts.upsert(user.id, {
+        ...contextTargetFromBody(body),
+        contextKey: asString(body.contextKey),
+        ...(body.previousContextKey === undefined ? {} : { previousContextKey: asString(body.previousContextKey) }),
+        ...(body.expectedVersion === undefined ? {} : { expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") }),
+        content: asString(body.content),
+        contentType: asContextContentType(body.contentType)
+      }));
+    }
+    if (method === "DELETE") {
+      const body = await readJson(req);
+      await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey) });
+      return sendJson(res, 200, { deleted: true });
+    }
+  }
+
+  if (method === "POST" && url.pathname === "/api/v1/workspaces") {
+    const body = await readJson(req);
+    const created = await services.workspaces.createWorkspace(user.id, { name: asString(body.name) });
+    const workspace = (await services.workspaces.listWorkspaces(user.id)).find((candidate) => candidate.id === created.id);
+    if (!workspace) {
+      throw new ProductError("Created workspace could not be loaded", 500);
+    }
+    return sendJson(res, 200, workspace);
+  }
+
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments.length === 4 && method === "DELETE") {
+    const workspaceId=segments[3];const result=await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.delete",requireIdempotencyKey(req),{workspaceId},workspaceId,async()=>{await services.deletion.deleteWorkspace(user.id,workspaceId);return{deleted:true as const}});
+    return sendJson(res, 200, result);
+  }
+
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "projects") {
+    const workspaceId = segments[3];
     if (method === "POST") {
       const body = await readJson(req);
       return sendJson(res, 200, await services.workspaces.createProject(user.id, workspaceId, {
@@ -290,11 +344,80 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
       }));
     }
   }
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "members") {
+    const workspaceId = segments[3];
+    if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
+    if (!segments[5] && method === "GET") return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId));
+    if (!segments[5] && method === "POST") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asProjectMemberIdentity(body), asWorkspaceMembershipRole(body.role))); }
+    if (method === "PATCH") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role))); }
+    if (method === "DELETE") { const body = await readJson(req); await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId)); return sendJson(res, 200, { deleted: true }); }
+  }
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "settings") {
+    const workspaceId = segments[3];
+    if (method === "GET") return sendJson(res, 200, await services.settings.workspace(user.id, workspaceId));
+    if (method === "PATCH") {const body=await readJson(req);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.settings.update",requireIdempotencyKey(req),body,workspaceId,()=>services.settings.updateWorkspace(user.id,workspaceId,body)));}
+    if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.archive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.archiveWorkspace(user.id,workspaceId)));
+    if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.unarchive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.unarchiveWorkspace(user.id,workspaceId)));
+  }
 
-  if (segments[0] === "api" && segments[1] === "projects" && segments[2]) {
-    const projectId = segments[2];
-    if (segments[3] === "endpoints") {
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "projects" && segments[3]) {
+    const projectId = segments[3];
+    if (segments.length === 4 && method === "DELETE") {
+      const result=await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.delete",requireIdempotencyKey(req),"project.delete",async()=>{await services.deletion.deleteProject(user.id,projectId);return{deleted:true as const}});
+      return sendJson(res, 200, result);
+    }
+    if (segments[4] === "capabilities" && method === "GET") {
+      return sendJson(res, 200, await services.workspaces.projectCapabilities(user.id, projectId));
+    }
+    if (segments[4] === "settings") {
+      if (method === "GET") return sendJson(res, 200, await services.settings.project(user.id, projectId));
+      if (method === "PATCH") {const body=await readJson(req);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,body);await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
+      if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.archive",requireIdempotencyKey(req),"project.archive",()=>services.settings.archiveProject(user.id,projectId)));
+      if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId)));
+    }
+    if (segments[4] === "members") {
+      if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.owner.transfer",requireIdempotencyKey(req),{projectId,userId:target},projectId,async()=>{await services.memberships.transferOwner(user.id,projectId,target);await services.settings.auditProjectLifecycle(projectId,user.id,"project.owner.transfer");return{transferred:true as const}})); }
       if (method === "GET") {
+        return sendJson(res, 200, await services.memberships.listMembers(user.id, projectId));
+      }
+      if (method === "POST") {
+        const body = await readJson(req);
+        return sendJson(res, 200, await services.memberships.addMember(
+          user.id,
+          projectId,
+          asProjectMemberIdentity(body),
+          asProjectMembershipRole(body.role)
+        ));
+      }
+      if (method === "PATCH") {
+        const body = await readJson(req);
+        return sendJson(res, 200, await services.memberships.changeMember(
+          user.id,
+          projectId,
+          asUserId(body.userId),
+          asProjectMembershipRole(body.role)
+        ));
+      }
+      if (method === "DELETE") {
+        const body = await readJson(req);
+        await services.memberships.removeMember(user.id, projectId, asUserId(body.userId));
+        return sendJson(res, 200, { deleted: true });
+      }
+    }
+    if (segments[4] === "credentials") {
+      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.credentials.list(user.id, projectId));
+      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req))));
+      if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req))));
+      if (segments[5] && method === "DELETE") { await services.credentials.remove(user.id, projectId, segments[5]); return sendJson(res, 200, { deleted: true }); }
+    }
+    if (segments[4] === "endpoints") {
+      if (segments[5] === "models" && method === "POST") {
+        return sendJson(res, 200, await services.endpoints.discoverModels(user.id, projectId, asEndpointModelDiscoveryInput(await readJson(req))));
+      }
+      if (segments[5] && segments[6] === "health" && method === "POST") {
+        return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5])));
+      }
+      if (!segments[5] && method === "GET") {
         const endpoints = await services.endpoints.listEndpoints(user.id, projectId);
         return sendJson(res, 200, endpoints.map(toPublicEndpoint));
       }
@@ -302,72 +425,159 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
         const endpoint = await services.endpoints.createEndpoint(user.id, projectId, asEndpointInput(await readJson(req)));
         return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
+      if (segments[5] && method === "PATCH") {
+        const endpoint = await services.endpoints.updateEndpoint(user.id, projectId, segments[5], asEndpointUpdateInput(await readJson(req)));
+        return sendJson(res, 200, toPublicEndpoint(endpoint));
+      }
+      if (segments[5] && method === "DELETE") {
+        await services.endpoints.deleteEndpoint(user.id, projectId, segments[5]);
+        return sendJson(res, 200, { deleted: true });
+      }
     }
-    if (segments[3] === "chat" && method === "POST") {
-      const body = await readJson(req);
-      return sendJson(res, 200, await services.chat.sendChat(user.id, projectId, asString(body.endpointId), asMessages(body.messages)));
+    if (segments[4] === "chat" && segments[5] === "threads") {
+      if (!segments[6] && method === "GET") {
+        const query = url.searchParams.get("query")?.trim();
+        return sendJson(res, 200, query ? await services.chat.searchThreads(user.id, projectId, query) : await services.chat.listThreads(user.id, projectId));
+      }
+      if (!segments[6] && method === "POST") {
+        const body = await readJson(req);
+        assertOnlyKeys(body,["endpointId"]);
+        return sendJson(res, 200, await services.chat.createThread(user.id, projectId, asString(body.endpointId)));
+      }
+      if (segments[6] && !segments[7] && method === "PATCH") { const body=await readJson(req);assertOnlyKeys(body,["title","pinned","starred"]); return sendJson(res,200,await services.chat.updateThreadMetadata(user.id,projectId,segments[6],{...(Object.hasOwn(body,"title")?{title:body.title===null?null:asString(body.title)}:{}),...(Object.hasOwn(body,"pinned")?{pinned:asBoolean(body.pinned,"pinned")}:{}) ,...(Object.hasOwn(body,"starred")?{starred:asBoolean(body.starred,"starred")}:{})})); }
+      if (segments[6] && !segments[7] && method === "DELETE") { await services.chat.deleteThread(user.id,projectId,segments[6]); return sendJson(res,200,{deleted:true}); }
+      if (segments[6] && segments[7] === "messages") {
+        const threadId=segments[6];const messageId=segments[8];const action=segments[9];
+        if(messageId&&!action&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["content","expectedVersion"]);return sendJson(res,200,await services.chat.editMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),asString(body.content)));}
+        if(messageId&&!action&&method==="DELETE"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);await services.chat.deleteMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"));return sendJson(res,200,{deleted:true});}
+        if(messageId&&action==="branch"&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.branchMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion")));}
+        if(messageId&&action==="retry"&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendChatRetryStream(req,res,services,user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"));}
+        if(!messageId&&method==="GET")return sendJson(res,200,await services.chat.listMessages(user.id,projectId,threadId));
+        if(!messageId&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["content","afterMessageId"]);return sendChatStream(req,res,services,user.id,projectId,threadId,asString(body.content),body.afterMessageId===null?null:asString(body.afterMessageId));}
+      }
     }
-    if (segments[3] === "files") {
-      const project = await services.workspaces.requireProjectForUser(user.id, projectId);
-      const projectRoot = services.projectAbsoluteRoot(project.rootPath);
-
-      if (!segments[4] && method === "GET") {
+    if (segments[4] === "policy") {
+      if (method === "GET") return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId));
+      if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req))));
+    }
+    if (segments[4] === "usage" && method === "GET") return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
+    if (segments[4] === "alerts") {
+      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.policies.alerts(user.id, projectId));
+      if (segments[5] && segments[6] === "acknowledge" && method === "POST") return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5]));
+      if (segments[5] && segments[6] === "silence" && method === "POST") return sendJson(res,200,await services.alertRules.silence(user.id,projectId,segments[5],(await readJson(req)).silencedUntil));
+      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.policies.transitionAlert(user.id, projectId, segments[5], asProjectAlertTransition(await readJson(req))));
+    }
+    if (segments[4] === "alert-rules") {
+      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.alertRules.list(user.id, projectId));
+      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req))));
+      if (segments[5] && segments[6] === "test" && method === "POST") return sendJson(res,200,await services.alertRules.test(user.id,projectId,segments[5]));
+      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req))));
+      if (segments[5] && method === "DELETE") return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5]));
+    }
+    if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
+    if (segments[4] === "files") {
+      if (!segments[5] && method === "GET") {
+        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
+        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
       }
-      if (!segments[4] && method === "PUT") {
-        return sendJson(res, 200, await services.files.uploadFile(projectRoot, {
-          path: requiredSearchParam(url, "path"),
-          bytes: await readProjectFileBytes(req)
-        }));
+      if (!segments[5] && method === "PUT") {
+        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
+        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+        const filePath = requiredSearchParam(url, "path");
+        const bytes = await readRawProjectFileBytes(req);
+        const written = await services.files.uploadFileWithAccounting(projectRoot, {
+          path: filePath, bytes
+        }, {
+          record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
+        });
+        await services.policies.recordOperation(projectId, user.id, "file.upload", "accepted", written.path, "file", {
+          filePath: written.path,
+          bytes: written.bytes,
+          mediaType: written.mediaType
+        });
+        return sendJson(res, 200, written);
       }
-      if (!segments[4] && method === "DELETE") {
+      if (!segments[5] && method === "DELETE") {
+        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
+        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const body = await readJson(req);
-        return sendJson(res, 200, await services.files.deleteFile(projectRoot, asString(body.path)));
+        const filePath = asString(body.path);
+        const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
+          record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
+        });
+        await services.policies.recordOperation(projectId, user.id, "file.delete", "accepted", filePath, "file", {
+          filePath,
+          bytes: deleted.bytes,
+          mediaType: deleted.mediaType
+        });
+        return sendJson(res, 200, deleted.response);
       }
-      if (segments[4] === "download" && method === "GET") {
+      if (segments[5] === "download" && method === "GET") {
+        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
+        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         return sendProjectFileDownload(res, await services.files.downloadFile(projectRoot, requiredSearchParam(url, "path")));
       }
     }
-    if (segments[3] === "tasks") {
+    if (segments[4] === "tasks") {
+      if (segments[5] === "summaries" && method === "GET") return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId));
       if (method === "GET") {
-        return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId));
+        return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId, asTaskListQuery(url.searchParams)));
       }
       if (method === "POST") {
         const body = await readJson(req);
+        assertOnlyKeys(body,["prompt","endpointId","title","inputPaths"]);
         return sendJson(res, 200, await services.tasks.createTask(user.id, projectId, {
           prompt: asString(body.prompt),
-          endpointId: asString(body.endpointId)
-        }));
+          endpointId: asString(body.endpointId),
+          ...(body.title!==undefined?{title:asString(body.title)}:{}),
+          ...(body.inputPaths!==undefined?{inputPaths:asStringArray(body.inputPaths,"inputPaths")}:{})
+        },requireIdempotencyKey(req)));
       }
     }
   }
 
-  if (segments[0] === "api" && segments[1] === "tasks" && segments[2]) {
-    const taskId = segments[2];
-    if (segments[3] === "events" && method === "GET") {
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "tasks" && segments[3]) {
+    const taskId = segments[3];
+    if (!segments[4] && method === "GET") return sendJson(res,200,await services.tasks.getTask(user.id,taskId));
+    if (!segments[4] && method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
+    if (!segments[4] && method === "DELETE") return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));
+    if (segments[4] === "summary" && method === "GET") return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId));
+    if (segments[4] === "follow-ups") {
+      if(!segments[5]&&method==="GET")return sendJson(res,200,await services.tasks.listTaskFollowUps(user.id,taskId));
+      if(!segments[5]&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["prompt"]);return sendJson(res,200,await services.tasks.followUpTask(user.id,taskId,asString(body.prompt),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["prompt"]);return sendJson(res,200,await services.tasks.editTaskFollowUp(user.id,taskId,segments[5],asString(body.prompt),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="DELETE")return sendJson(res,200,await services.tasks.deleteTaskFollowUp(user.id,taskId,segments[5],requireIdempotencyKey(req)));
+    }
+    if (segments[4] === "retry" && method === "POST") return sendJson(res,200,await services.tasks.retryTask(user.id,taskId,requireIdempotencyKey(req)));
+    if (segments[4] === "duplicate" && method === "POST") return sendJson(res,200,await services.tasks.duplicateTask(user.id,taskId,requireIdempotencyKey(req)));
+    if (segments[4] === "archive" && method === "POST") return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req)));
+    if (segments[4] === "transcript" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.taskTranscript(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})}));
+    if (segments[4] === "transcript" && segments[5] === "stream" && method === "GET") return sendTaskTranscriptStream(res,services,user.id,taskId,url);
+    if (segments[4] === "events" && method === "GET") {
       try {
         return sendJson(res, 200, await services.tasks.listTaskEvents(user.id, taskId));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
     }
-    if (segments[3] === "artifacts" && segments[4] && segments[5] === "download" && method === "GET") {
+    if (segments[4] === "artifacts" && segments[5] && segments[6] === "download" && method === "GET") {
       try {
-        return sendArtifactDownload(res, await services.tasks.downloadTaskArtifact(user.id, taskId, segments[4]));
+        return sendArtifactDownload(res, await services.tasks.downloadTaskArtifact(user.id, taskId, segments[5]));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
     }
-    if (segments[3] === "artifacts" && !segments[4] && method === "GET") {
+    if (segments[4] === "artifacts" && !segments[5] && method === "GET") {
       try {
-        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId));
+        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, { ...(url.searchParams.get("mediaType") ? { mediaType: url.searchParams.get("mediaType")! } : {}), ...(url.searchParams.get("preview") === "true" ? { previewOnly: true } : {}) }));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
     }
-    if (segments[3] === "cancel" && method === "POST") {
+    if (segments[4] === "cancel" && method === "POST") {
       try {
-        return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId));
+        return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId,requireIdempotencyKey(req)));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
@@ -375,6 +585,299 @@ async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL, ser
   }
 
   throw new ProductError("Route not found", 404);
+}
+
+interface BrokerRoute {
+  taskId: string;
+  runId: string;
+}
+
+const MAX_BOTIFIED_CHAT_COMPLETION_BYTES = 1_048_576;
+const MAX_PROVIDER_USAGE_OBSERVER_BYTES = 65_536;
+const BOTIFIED_CHAT_COMPLETION_FIELDS = new Set([
+  "model",
+  "messages",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "stream",
+  "stream_options",
+  "temperature",
+  "top_p",
+  "max_tokens",
+  "max_completion_tokens",
+  "stop",
+  "response_format",
+  "seed"
+]);
+
+function brokerRouteFor(pathname: string): BrokerRoute | null {
+  const match = /^\/api\/internal\/tasks\/([^/]+)\/runs\/([^/]+)\/v1\/chat\/completions$/.exec(pathname);
+  if (!match) {
+    return null;
+  }
+  try {
+    return { taskId: decodeURIComponent(match[1]!), runId: decodeURIComponent(match[2]!) };
+  } catch {
+    throw new ProductError("Broker route identifiers must be percent-encoded UTF-8", 400);
+  }
+}
+
+async function forwardBotifiedChatCompletion(
+  req: IncomingMessage,
+  res: ServerResponse,
+  services: Services,
+  route: BrokerRoute
+): Promise<void> {
+  const authorization = req.headers.authorization;
+  const serviceKey = typeof authorization === "string" && /^Bearer (.+)$/.test(authorization)
+    ? authorization.slice("Bearer ".length)
+    : "";
+  if (!serviceKey) {
+    throw new ProductError("Unauthorized Botified task key", 401);
+  }
+  const authorized = await services.tasks.authorizeBotifiedChatCompletion(route.taskId, route.runId, serviceKey);
+  const request = await readBotifiedChatCompletionRequest(req, authorized.endpoint.model);
+  await services.providerBroker.forwardChatCompletion(
+    { endpoint: authorized.endpoint, settlementEndpointId: authorized.endpoint.id, apiKey: authorized.apiKey, actorId: null, taskId: route.taskId },
+    request,
+    brokerRequestHeaders(req),
+    async (response) => {
+      const usage = await sendProviderResponse(res, response);
+      return { value: undefined, ...(usage ? { usage } : {}) };
+    }
+  );
+}
+
+function brokerRequestHeaders(req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of ["content-type", "accept", "openai-beta"]) {
+    const value = req.headers[name];
+    if (typeof value === "string") {
+      headers[name] = value;
+    }
+  }
+  return headers;
+}
+
+async function readBotifiedChatCompletionRequest(
+  req: IncomingMessage,
+  endpointModel: string
+): Promise<Record<string, unknown>> {
+  const contentType = firstHeaderValue(req.headers["content-type"]);
+  if (!contentType || !/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    throw new ProductError("Botified chat completions require application/json", 415);
+  }
+  const contentLength = firstHeaderValue(req.headers["content-length"]);
+  if (contentLength !== undefined) {
+    const declaredBytes = Number(contentLength);
+    if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
+      throw new ProductError("Content-Length must be a non-negative integer");
+    }
+    if (declaredBytes > MAX_BOTIFIED_CHAT_COMPLETION_BYTES) {
+      throw new ProductError("Botified chat completion request exceeds the allowed size", 413);
+    }
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_BOTIFIED_CHAT_COMPLETION_BYTES) {
+      throw new ProductError("Botified chat completion request exceeds the allowed size", 413);
+    }
+    chunks.push(bytes);
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8"));
+  } catch {
+    throw new ProductError("Botified chat completion request must be valid JSON");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ProductError("Botified chat completion request must be a JSON object");
+  }
+  const request = body as Record<string, unknown>;
+  for (const field of Object.keys(request)) {
+    if (!BOTIFIED_CHAT_COMPLETION_FIELDS.has(field)) {
+      throw new ProductError(`Botified chat completion field is not allowed: ${field}`);
+    }
+  }
+  if (request.model !== endpointModel) {
+    throw new ProductError("Botified chat completion model must match the task endpoint", 403);
+  }
+  if (!Array.isArray(request.messages) || request.messages.length === 0 || request.messages.some((message) => !message || typeof message !== "object" || Array.isArray(message))) {
+    throw new ProductError("Botified chat completion messages must be a non-empty array of objects");
+  }
+  if (request.tools !== undefined && !Array.isArray(request.tools)) {
+    throw new ProductError("Botified chat completion tools must be an array");
+  }
+  if (request.stream !== undefined && typeof request.stream !== "boolean") {
+    throw new ProductError("Botified chat completion stream must be a boolean");
+  }
+  return request;
+}
+
+async function sendProviderResponse(
+  res: ServerResponse,
+  response: Response
+): Promise<import("../../contracts/src/api.js").ProviderUsage | undefined> {
+  const headers: Record<string, string> = {};
+  // Node's fetch can decode the response body, leaving representation metadata stale.
+  for (const name of ["content-type", "cache-control", "x-request-id"]) {
+    const value = response.headers.get(name);
+    if (value) {
+      headers[name] = value;
+    }
+  }
+  res.writeHead(response.status, headers);
+  if (!response.body) {
+    res.end();
+    return undefined;
+  }
+  const observer = providerUsageObserver(response.headers.get("content-type"));
+  let clientClosed = false;
+  res.once("close", () => { clientClosed = true; });
+  const reader = response.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const usage = observer.observe(value);
+    if (!clientClosed && !res.write(Buffer.from(value))) {
+      await new Promise<void>((resolve) => { res.once("drain", resolve); res.once("close", resolve); });
+    }
+  }
+  const usage = observer.finish();
+  if (!clientClosed) res.end();
+  return usage;
+}
+
+interface ProviderUsageObserver {
+  observe(chunk: Uint8Array): import("../../contracts/src/api.js").ProviderUsage | undefined;
+  finish(): import("../../contracts/src/api.js").ProviderUsage | undefined;
+}
+
+function providerUsageObserver(contentType: string | null): ProviderUsageObserver {
+  return contentType?.toLowerCase().startsWith("text/event-stream")
+    ? new SseProviderUsageObserver()
+    : new JsonProviderUsageObserver();
+}
+
+class SseProviderUsageObserver implements ProviderUsageObserver {
+  private readonly decoder = new TextDecoder();
+  private pending = "";
+  private usage: import("../../contracts/src/api.js").ProviderUsage | undefined;
+
+  observe(chunk: Uint8Array): import("../../contracts/src/api.js").ProviderUsage | undefined {
+    const previous = this.usage;
+    this.consume(this.decoder.decode(chunk, { stream: true }));
+    return this.usage === previous ? undefined : this.usage;
+  }
+
+  finish(): import("../../contracts/src/api.js").ProviderUsage | undefined {
+    this.consume(this.decoder.decode());
+    if (this.pending.length > 0) {
+      this.consumeLine(this.pending);
+      this.pending = "";
+    }
+    return this.usage;
+  }
+
+  private consume(text: string): void {
+    this.pending += text;
+    if (this.pending.length > MAX_PROVIDER_USAGE_OBSERVER_BYTES && !this.pending.includes("\n")) {
+      this.pending = "";
+      return;
+    }
+    let lineEnd: number;
+    while ((lineEnd = this.pending.indexOf("\n")) >= 0) {
+      const line = this.pending.slice(0, lineEnd);
+      this.pending = this.pending.slice(lineEnd + 1);
+      this.consumeLine(line);
+    }
+    if (this.pending.length > MAX_PROVIDER_USAGE_OBSERVER_BYTES) {
+      this.pending = "";
+    }
+  }
+
+  private consumeLine(line: string): void {
+    const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (!normalized.startsWith("data:")) {
+      return;
+    }
+    const data = normalized.slice("data:".length).trimStart();
+    if (!data || data === "[DONE]") {
+      return;
+    }
+    try {
+      const usage = providerUsageFromPayload(JSON.parse(data));
+      if (usage) {
+        this.usage = usage;
+      }
+    } catch {
+      // Malformed provider event frames must not delay or fail the response stream.
+    }
+  }
+}
+
+class JsonProviderUsageObserver implements ProviderUsageObserver {
+  private readonly chunks: Uint8Array[] = [];
+  private totalBytes = 0;
+  private overflowed = false;
+
+  observe(chunk: Uint8Array): import("../../contracts/src/api.js").ProviderUsage | undefined {
+    if (this.overflowed) {
+      return undefined;
+    }
+    this.totalBytes += chunk.byteLength;
+    if (this.totalBytes > MAX_PROVIDER_USAGE_OBSERVER_BYTES) {
+      this.chunks.length = 0;
+      this.overflowed = true;
+      return undefined;
+    }
+    this.chunks.push(chunk);
+    return undefined;
+  }
+
+  finish(): import("../../contracts/src/api.js").ProviderUsage | undefined {
+    if (this.overflowed || this.totalBytes === 0) {
+      return undefined;
+    }
+    try {
+      return providerUsageFromPayload(JSON.parse(Buffer.concat(this.chunks, this.totalBytes).toString("utf8")));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function isKnownApiRoutePath(pathname: string): boolean {
+  return [
+    "/api/v1/me",
+    "/api/v1/me/profile",
+    "/api/v1/notifications",
+    "/api/v1/auth/logout",
+    "/api/v1/dashboard",
+    "/api/v1/workspaces",
+    "/api/v1/projects",
+    "/api/v1/context"
+  ].includes(pathname) ||
+    /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+(?:\/(?:capabilities|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+$/.test(pathname) ||
+    /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/files(?:\/download)?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:events|artifacts|cancel|summary|retry|duplicate|archive|transcript(?:\/stream)?|follow-ups(?:\/[^/]+)?))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
 function appBasePathFromOptions(publicBaseUrl: string | undefined, publicBasePath: string | undefined): string {
@@ -431,47 +934,11 @@ function serializeAuthCookie(name: string, value: string, cookiePath: string, ma
 }
 
 function oidcTransactionCookiePath(appBasePath: string): string {
-  return `${appBasePath}/api/auth/oidc`;
+  return `${appBasePath}/api/v1/auth/oidc`;
 }
 
 function appHomePath(appBasePath: string): string {
   return appBasePath ? `${appBasePath}/` : "/";
-}
-
-async function serveWeb(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-  const webRoot = findWebRoot();
-  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
-  const safe = path.normalize(requested).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(webRoot, safe);
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(filePath);
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      throw new ProductError("Route not found", 404);
-    }
-    throw error;
-  }
-  const contentType = contentTypeFor(filePath);
-  res.writeHead(200, { "content-type": contentType });
-  res.end(bytes);
-}
-
-function findWebRoot(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(process.cwd(), "dist/src/web"),
-    path.resolve(process.cwd(), "src/web"),
-    path.resolve(here, "../../../src/web")
-  ];
-  return candidates.find((candidate) => candidate && candidate.length > 0) ?? path.resolve("src/web");
-}
-
-function contentTypeFor(filePath: string): string {
-  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
-  if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
-  if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
-  return "text/html; charset=utf-8";
 }
 
 function contentDispositionFilename(input: string): string {
@@ -513,6 +980,41 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+async function sendChatStream(req: IncomingMessage, res: ServerResponse, services: Services, userId: string, projectId: string, threadId: string, content: string,afterMessageId:string|null): Promise<void> {
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) controller.abort();
+  });
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
+  };
+  const event = (type: string, value: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
+  try {
+    const result = await services.chat.streamMessage(userId, projectId, threadId, content,afterMessageId, controller.signal, (delta) => { start(); event("delta", { delta }); });
+    start();
+    event("done", result);
+  } catch (error) {
+    if (!started) throw error;
+    if (!controller.signal.aborted) event("error", { error: error instanceof Error ? error.message : "Chat request failed" });
+  } finally { if (started) res.end(); }
+}
+
+async function sendTaskTranscriptStream(res:ServerResponse,services:Services,userId:string,taskId:string,url:URL):Promise<void>{
+  const page=await services.tasks.taskTranscript(userId,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})});
+  res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache","connection":"keep-alive","x-accel-buffering":"no"});
+  for(const item of page.items)res.write(`event: transcript\ndata: ${JSON.stringify(item)}\n\n`);
+  res.write(`event: cursor\ndata: ${JSON.stringify({nextCursor:page.nextCursor})}\n\n`);
+  res.end();
+}
+
+async function sendChatRetryStream(req:IncomingMessage,res:ServerResponse,services:Services,userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number):Promise<void>{
+  const controller=new AbortController();res.on("close",()=>{if(!res.writableEnded)controller.abort();});let started=false;const start=()=>{if(started)return;started=true;res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache",connection:"keep-alive","x-accel-buffering":"no"});};const event=(type:string,value:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
+  try{const result=await services.chat.retryMessage(userId,projectId,threadId,messageId,expectedVersion,controller.signal,(delta)=>{start();event("delta",{delta});});start();event("done",result);}catch(error){if(!started)throw error;if(!controller.signal.aborted)event("error",{error:error instanceof Error?error.message:"Chat retry failed"});}finally{if(started)res.end();}
+}
+
 function sendRedirect(res: ServerResponse, status: 302, location: string): void {
   res.writeHead(status, { location });
   res.end();
@@ -523,7 +1025,7 @@ function sendArtifactDownload(
   download: Awaited<ReturnType<Services["tasks"]["downloadTaskArtifact"]>>
 ): void {
   res.writeHead(200, {
-    "content-type": "application/octet-stream",
+    "content-type": safeDownloadMediaType(download.artifact.mediaType),
     "content-length": String(download.bytes.byteLength),
     "content-disposition": contentDispositionFilename(download.artifact.name || download.artifact.fileId),
     "x-content-type-options": "nosniff"
@@ -537,7 +1039,7 @@ function sendProjectFileDownload(
 ): void {
   const bytes = Buffer.from(download.bytes);
   res.writeHead(200, {
-    "content-type": "application/octet-stream",
+    "content-type": download.mediaType,
     "content-length": String(bytes.byteLength),
     "content-disposition": contentDispositionFilename(download.filename),
     "x-content-type-options": "nosniff"
@@ -545,11 +1047,28 @@ function sendProjectFileDownload(
   res.end(bytes);
 }
 
+function safeDownloadMediaType(value: string | null | undefined): string {
+  return value && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(value)
+    ? value
+    : "application/octet-stream";
+}
+
 function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {
-  const { apiKeySecretRef: _apiKeySecretRef, ...publicEndpoint } = endpoint;
   return {
-    ...publicEndpoint,
-    hasCredentialRef: true
+    id: endpoint.id,
+    projectId: endpoint.projectId,
+    name: endpoint.name,
+    protocol: endpoint.protocol,
+    baseUrl: endpoint.baseUrl,
+    model: endpoint.model,
+    credentialId: endpoint.credentialId,
+    capabilities: endpoint.capabilities,
+    requestTimeoutSecs: endpoint.requestTimeoutSecs,
+    ...(endpoint.health ? { health: endpoint.health } : {}),
+    hasCredentialRef: endpoint.credentialId.length > 0,
+    taskEligible: endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls"),
+    createdAt: endpoint.createdAt,
+    updatedAt: endpoint.updatedAt
   };
 }
 
@@ -609,11 +1128,73 @@ function asString(value: unknown): string {
   }
   return value;
 }
+function asStringArray(value:unknown,field:string):string[]{if(!Array.isArray(value)||value.some((item)=>typeof item!=="string"))throw new ProductError(`${field} must be an array of strings`);return value;}
+function asPositiveQueryInteger(value:string,field:string):number{const parsed=Number(value);if(!Number.isInteger(parsed)||parsed<1)throw new ProductError(`${field} must be a positive integer`);return parsed;}
+function requireIdempotencyKey(req:IncomingMessage):string{const value=req.headers["idempotency-key"];if(typeof value!=="string"||!value.trim())throw new ProductError("Idempotency-Key header is required",400);if(value.trim().length>200)throw new ProductError("Idempotency-Key must be at most 200 characters",400);return value.trim();}
 
-function requireAdmin(user: { role: string }): void {
-  if (user.role !== "admin") {
-    throw new ProductError("Admin role is required", 403);
+function asTaskListQuery(params:URLSearchParams):TaskListQuery{
+  const query:TaskListQuery={};const search=params.get("search");if(search)query.search=search;
+  const status=params.get("status");if(status)query.statuses=status.split(",").filter(Boolean) as NonNullable<TaskListQuery["statuses"]>;
+  const archived=params.get("archived");if(archived){if(!["exclude","include","only"].includes(archived))throw new ProductError("Task archived filter is invalid");query.archived=archived as NonNullable<TaskListQuery["archived"]>;}
+  const sort=params.get("sort");if(sort){if(!["created_at","updated_at","title","status"].includes(sort))throw new ProductError("Task sort is invalid");query.sort=sort as NonNullable<TaskListQuery["sort"]>;}
+  const direction=params.get("direction");if(direction){if(direction!=="asc"&&direction!=="desc")throw new ProductError("Task sort direction is invalid");query.direction=direction;}
+  const cursor=params.get("cursor");if(cursor)query.cursor=cursor;const limit=params.get("limit");if(limit)query.limit=asPositiveQueryInteger(limit,"limit");return query;
+}
+function asBoolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new ProductError(`${field} must be a boolean`); return value; }
+function asPositiveInteger(value:unknown,field:string):number{if(typeof value!=="number"||!Number.isInteger(value)||value<1)throw new ProductError(`${field} must be a positive integer`);return value;}
+function assertOnlyKeys(value:Record<string,unknown>,allowed:string[]):void{const unexpected=Object.keys(value).find((key)=>!allowed.includes(key));if(unexpected)throw new ProductError(`Unsupported field: ${unexpected}`,400);}
+
+function contextTargetFromQuery(url: URL): { workspaceId: string; projectId?: string; scope: ProjectContextScope } {
+  return {
+    workspaceId: requiredSearchParam(url, "workspaceId"),
+    ...(url.searchParams.has("projectId") ? { projectId: requiredSearchParam(url, "projectId") } : {}),
+    scope: asContextScope(requiredSearchParam(url, "scope"))
+  };
+}
+
+function contextTargetFromBody(body: Record<string, unknown>): { workspaceId: string; projectId?: string; scope: ProjectContextScope } {
+  return {
+    workspaceId: asString(body.workspaceId),
+    ...(body.projectId === undefined || body.projectId === null ? {} : { projectId: asString(body.projectId) }),
+    scope: asContextScope(body.scope)
+  };
+}
+
+function asContextScope(value: unknown): ProjectContextScope {
+  if (value === "workspace_shared" || value === "workspace_personal" || value === "project_shared" || value === "project_personal") return value;
+  throw new ProductError("Invalid context scope");
+}
+
+function asContextContentType(value: unknown): ContextContentType {
+  if (value === "text" || value === "json" || value === "markdown" || value === "yaml") return value;
+  throw new ProductError("Invalid context content type");
+}
+
+function asProjectMemberIdentity(body: Record<string, unknown>): { email?: string; issuer?: string; subject?: string } {
+  return {
+    ...(typeof body.email === "string" ? { email: body.email } : {}),
+    ...(typeof body.issuer === "string" ? { issuer: body.issuer } : {}),
+    ...(typeof body.subject === "string" ? { subject: body.subject } : {})
+  };
+}
+
+function asUserId(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ProductError("Expected string field userId");
   }
+  return value;
+}
+
+function asProjectMembershipRole(value: unknown): ManagedProjectMembershipRole {
+  if (value === "admin" || value === "member" || value === "viewer") {
+    return value;
+  }
+  throw new ProductError("Project membership role must be admin, member, or viewer");
+}
+
+function asWorkspaceMembershipRole(value: unknown): ManagedWorkspaceMembershipRole {
+  if (value === "admin" || value === "member" || value === "viewer") return value;
+  throw new ProductError("Workspace member role must be admin, member, or viewer");
 }
 
 function requiredSearchParam(url: URL, name: string): string {
@@ -629,6 +1210,7 @@ interface OidcTransaction {
   codeVerifier: string;
   nonce?: string | undefined;
   redirectUri: string;
+  returnTo?: string;
   createdAt: number;
 }
 
@@ -679,23 +1261,34 @@ function isOidcTransaction(value: unknown): value is OidcTransaction {
     (candidate.nonce === undefined || typeof candidate.nonce === "string") &&
     typeof candidate.redirectUri === "string" &&
     candidate.redirectUri.length > 0 &&
+    (candidate.returnTo === undefined || (typeof candidate.returnTo === "string" && candidate.returnTo.startsWith("/"))) &&
     typeof candidate.createdAt === "number" &&
     Number.isFinite(candidate.createdAt);
+}
+
+function oidcReturnTo(value: string | null, appBasePath: string): string {
+  const home = appHomePath(appBasePath);
+  if (!value) return home;
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return home;
+  try {
+    const parsed = new URL(value, "https://agentsmith.local");
+    if (parsed.origin !== "https://agentsmith.local") return home;
+    const pathname = parsed.pathname;
+    if (appBasePath && pathname !== appBasePath && !pathname.startsWith(`${appBasePath}/`)) return home;
+    if (!appBasePath && !pathname.startsWith("/")) return home;
+    return `${pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return home;
+  }
 }
 
 function oidcRedirectUri(req: IncomingMessage, publicBaseUrl: string | undefined, appBasePath: string): string {
   const baseUrl = publicBaseUrl?.trim() || requestOrigin(req);
   const parsed = new URL(baseUrl);
-  parsed.pathname = `${appBasePath}/api/auth/oidc/callback`;
+  parsed.pathname = `${appBasePath}/api/v1/auth/oidc/callback`;
   parsed.search = "";
   parsed.hash = "";
   return parsed.toString();
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return error instanceof Error &&
-    "code" in error &&
-    ["ENOENT", "ENOTDIR", "EISDIR"].includes(String((error as { code?: unknown }).code));
 }
 
 function requestOrigin(req: IncomingMessage): string {
@@ -714,11 +1307,7 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
-async function readProjectFileBytes(req: IncomingMessage): Promise<Uint8Array> {
-  const contentType = firstHeaderValue(req.headers["content-type"]);
-  if (!contentType?.toLowerCase().startsWith("application/octet-stream")) {
-    throw new ProductError("Project file uploads require Content-Type application/octet-stream");
-  }
+async function readRawProjectFileBytes(req: IncomingMessage): Promise<Uint8Array> {
   const contentLength = firstHeaderValue(req.headers["content-length"]);
   if (contentLength !== undefined) {
     const declaredBytes = Number(contentLength);
@@ -776,8 +1365,80 @@ function asEndpointInput(body: Record<string, unknown>): CreateEndpointInput {
     protocol,
     baseUrl: asString(body.baseUrl),
     model: asString(body.model),
-    apiKeySecretRef: asString(body.apiKeySecretRef),
+    credentialId: asString(body.credentialId),
     capabilities: body.capabilities,
     requestTimeoutSecs: body.requestTimeoutSecs
   };
+}
+
+function asCredentialCreateInput(body: Record<string, unknown>): import("../../contracts/src/api.js").CreateProjectCredentialInput {
+  return { name: asString(body.name), baseUrl: asString(body.baseUrl), secret: asString(body.secret) };
+}
+
+function asCredentialRotateInput(body: Record<string, unknown>): import("../../contracts/src/api.js").RotateProjectCredentialInput {
+  return { secret: asString(body.secret) };
+}
+
+function asEndpointUpdateInput(body: Record<string, unknown>): UpdateEndpointInput {
+  const input = asEndpointInput({
+    ...body,
+    credentialId: body.credentialId ?? ""
+  });
+  const { credentialId: _credentialId, ...withoutCredential } = input;
+  return {
+    ...withoutCredential,
+    ...(body.credentialId === undefined ? {} : { credentialId: input.credentialId })
+  };
+}
+
+function asEndpointModelDiscoveryInput(body: Record<string, unknown>): DiscoverEndpointModelsInput {
+  if (typeof body.requestTimeoutSecs !== "number") throw new ProductError("Endpoint requestTimeoutSecs is required");
+  return {
+    ...(body.endpointId === undefined ? {} : { endpointId: asString(body.endpointId) }),
+    baseUrl: asString(body.baseUrl),
+    credentialId: asString(body.credentialId),
+    requestTimeoutSecs: body.requestTimeoutSecs
+  };
+}
+
+function asPolicyInput(body: Record<string, unknown>): import("../../contracts/src/api.js").UpdateProjectResourcePolicyInput {
+  const fields = ["activeTasksLimit", "providerRequestsLimit", "providerTokensLimit", "providerCostLimit", "projectFileBytesLimit"] as const;
+  const input: import("../../contracts/src/api.js").UpdateProjectResourcePolicyInput = {};
+  for (const field of fields) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (value !== null && typeof value !== "number") throw new ProductError(`${field} must be a number or null`);
+    input[field] = value;
+  }
+  if(Object.hasOwn(body,"endpointWindows")){if(!Array.isArray(body.endpointWindows))throw new ProductError("endpointWindows must be an array");input.endpointWindows=body.endpointWindows as import("../../contracts/src/api.js").EndpointPolicyWindow[]}
+  return input;
+}
+
+function asAlertRuleCreateInput(body:Record<string,unknown>){if(!("alertType" in body))throw new ProductError("Alert rule body must contain alertType");return body}
+
+function asAlertRuleUpdateInput(body:Record<string,unknown>){if(Object.keys(body).length===0)throw new ProductError("Alert rule update cannot be empty");return body}
+
+function asAuditQuery(params:URLSearchParams):import("../../contracts/src/api.js").ProjectAuditQuery{const value:import("../../contracts/src/api.js").ProjectAuditQuery={};const limit=params.get("limit");if(limit!==null){const parsed=Number(limit);if(!Number.isInteger(parsed)||parsed<1||parsed>100)throw new ProductError("Audit limit must be between 1 and 100");value.limit=parsed}const cursor=params.get("cursor");if(cursor){const split=cursor.lastIndexOf("|");if(split<1||!Number.isFinite(Date.parse(cursor.slice(0,split)))||!cursor.slice(split+1))throw new ProductError("Audit cursor is invalid");value.cursor=cursor}for(const key of ["from","to"] as const){const item=params.get(key);if(item){if(!Number.isFinite(Date.parse(item)))throw new ProductError(`Audit ${key} timestamp is invalid`);value[key]=new Date(item).toISOString()}}const action=params.get("action");if(action){if(!auditActions.has(action))throw new ProductError("Audit action is invalid");value.action=action as import("../../contracts/src/api.js").ProjectAuditAction}const status=params.get("status");if(status==="accepted"||status==="rejected")value.status=status;else if(status)throw new ProductError("Audit status is invalid");const kind=params.get("resourceKind");if(kind){if(!auditResourceKinds.has(kind))throw new ProductError("Audit resource kind is invalid");value.resourceKind=kind as import("../../contracts/src/api.js").ProjectAuditResourceKind}return value}
+const auditActions=new Set<string>(PROJECT_AUDIT_ACTIONS);const auditResourceKinds=new Set<string>(PROJECT_AUDIT_RESOURCE_KINDS);
+
+function asProjectAlertTransition(body: Record<string, unknown>): "resolved" | "dismissed" {
+  if (Object.keys(body).length !== 1 || (body.status !== "resolved" && body.status !== "dismissed")) throw new ProductError("Project alert status must be resolved or dismissed");
+  return body.status;
+}
+
+function providerUsageFromPayload(payload: unknown): import("../../contracts/src/api.js").ProviderUsage | undefined {
+  try {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return undefined;
+    }
+    const body = payload as { usage?: Record<string, unknown> };
+    const usage = body.usage;
+    if (!usage) return undefined;
+    const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    const tokens = number(usage.total_tokens) ?? (number(usage.prompt_tokens) !== undefined && number(usage.completion_tokens) !== undefined ? number(usage.prompt_tokens)! + number(usage.completion_tokens)! : undefined);
+    const cost = number(usage.cost) ?? number(usage.total_cost);
+    return tokens === undefined && cost === undefined ? undefined : { ...(tokens === undefined ? {} : { tokens }), ...(cost === undefined ? {} : { cost }) };
+  } catch {
+    return undefined;
+  }
 }

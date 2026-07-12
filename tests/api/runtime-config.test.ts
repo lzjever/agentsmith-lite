@@ -1,16 +1,59 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import { describe, it } from "node:test";
 import {
+  DEFAULT_API_BIND_ADDRESS,
+  optionalLiveSandboxDurationMs,
   optionalRuntimeTickIntervalMs,
+  parseApiBindAddress,
   parseAuthMode,
   parseRuntimeAuthConfig,
   parseSandboxMode,
   parseSandboxNamespaceLimit,
+  requireCredentialEncryptionConfig,
   requireOidcRuntimeConfig
 } from "../../packages/api-entry-node/src/runtimeConfig.js";
+import { randomBytes } from "node:crypto";
+import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 describe("runtime config", () => {
+  it("requires a base64url credential encryption primary key and accepts a previous key ring", () => {
+    const primary = randomBytes(32).toString("base64url");
+    const previous = randomBytes(32).toString("base64url");
+    const config = requireCredentialEncryptionConfig({
+      APP_CREDENTIAL_ENCRYPTION_KEY: primary,
+      APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: previous
+    });
+    assert.equal(config.previous.length, 1);
+    assert.throws(() => requireCredentialEncryptionConfig({}), /APP_CREDENTIAL_ENCRYPTION_KEY/);
+  });
+
+  it("defaults the API listener to loopback and accepts an explicit pod interface", () => {
+    assert.equal(parseApiBindAddress(undefined), DEFAULT_API_BIND_ADDRESS);
+    assert.equal(parseApiBindAddress("   "), DEFAULT_API_BIND_ADDRESS);
+    assert.equal(parseApiBindAddress(" 0.0.0.0 "), "0.0.0.0");
+  });
+
+  it("listens on the configured pod interface", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "agentsmith-api-bind-"));
+    const server = await createApiServer({
+      port: 0,
+      host: parseApiBindAddress("0.0.0.0"),
+      dataRoot,
+      builtinAdminPassword: "admin-password"
+    });
+
+    try {
+      assert.equal(server.listenAddress, "0.0.0.0");
+    } finally {
+      await server.close();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("parses builtin admin and OIDC auth modes while keeping empty values on the builtin default", () => {
     assert.equal(parseAuthMode(undefined), "builtin_admin");
     assert.equal(parseAuthMode(""), "builtin_admin");
@@ -35,18 +78,14 @@ describe("runtime config", () => {
       OIDC_ISSUER_URL: "",
       OIDC_CLIENT_ID: "",
       OIDC_CLIENT_SECRET: "",
-      OIDC_BACKCHANNEL_BASE_URL: "",
-      OIDC_ADMIN_EMAILS: "",
-      OIDC_ADMIN_SUBJECTS: ""
+      OIDC_BACKCHANNEL_BASE_URL: ""
     }), { mode: "builtin_admin" });
 
     for (const key of [
       "OIDC_ISSUER_URL",
       "OIDC_BACKCHANNEL_BASE_URL",
       "OIDC_CLIENT_ID",
-      "OIDC_CLIENT_SECRET",
-      "OIDC_ADMIN_EMAILS",
-      "OIDC_ADMIN_SUBJECTS"
+      "OIDC_CLIENT_SECRET"
     ]) {
       assert.throws(
         () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin", [key]: "DO_NOT_PRINT_OIDC_VALUE" }),
@@ -59,18 +98,14 @@ describe("runtime config", () => {
       OIDC_ISSUER_URL: " https://keycloak.example.test/realms/agentsmith ",
       OIDC_BACKCHANNEL_BASE_URL: " http://keycloak.keycloak.svc.cluster.local/realms/agentsmith ",
       OIDC_CLIENT_ID: " agentsmith-lite ",
-      OIDC_CLIENT_SECRET: " client-secret ",
-      OIDC_ADMIN_EMAILS: " OIDC.Admin@Example.Test, ops@example.test ,, ",
-      OIDC_ADMIN_SUBJECTS: " keycloak-admin-subject, service-account-admin "
+      OIDC_CLIENT_SECRET: " client-secret "
     }), {
       mode: "oidc",
       oidc: {
         issuerUrl: "https://keycloak.example.test/realms/agentsmith",
         backchannelBaseUrl: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         clientId: "agentsmith-lite",
-        clientSecret: "client-secret",
-        adminEmails: ["oidc.admin@example.test", "ops@example.test"],
-        adminSubjects: ["keycloak-admin-subject", "service-account-admin"]
+        clientSecret: "client-secret"
       }
     });
 
@@ -115,6 +150,15 @@ describe("runtime config", () => {
         /AGENTSMITH_LITE_RUNTIME_TICK_MS must be a positive integer/
       );
     }
+  });
+
+  it("parses optional live sandbox duration overrides", () => {
+    assert.equal(optionalLiveSandboxDurationMs(undefined, "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS"), undefined);
+    assert.equal(optionalLiveSandboxDurationMs(" 60000 ", "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS"), 60_000);
+    assert.throws(
+      () => optionalLiveSandboxDurationMs("0", "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS"),
+      /AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS must be a positive integer/
+    );
   });
 
   it("parses namespace sandbox limits with the product default and fail-closed invalid values", () => {

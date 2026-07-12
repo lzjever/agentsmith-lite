@@ -417,6 +417,37 @@ describe("sandbox reconciler", () => {
     assert.deepEqual(afterDelete.actions.map(actionSummary), ["store_run_state:run1:cleaned:cleanup_complete"]);
   });
 
+  it("cleans every full-identity task resource, including extra ServiceAccounts, while retaining mismatches", () => {
+    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    const legacyServiceAccount = observedResource("ServiceAccount", "asl-task-task1-legacy", sandboxIdentityLabels(run));
+    legacyServiceAccount.metadata.uid = "legacy-service-account-uid";
+    const mismatchedServiceAccount = observedResource("ServiceAccount", "asl-task-task1-other", sandboxIdentityLabels(run));
+    delete mismatchedServiceAccount.metadata.labels["agentsmith-lite/run-id"];
+    const observedResources = [...createdResourcesForRun(sandboxRun()), legacyServiceAccount, mismatchedServiceAccount];
+
+    const plan = reconcileSandboxRuns({
+      namespace: run.namespace,
+      desiredRuns: [run],
+      observedResources,
+      now: new Date("2026-07-04T00:00:05.000Z")
+    });
+    const deletes = plan.actions.filter(isDeleteAction);
+
+    assert.deepEqual(deletes.map((action) => `${action.kind}:${action.name}`), [
+      "Pod:asl-task-t1",
+      "Service:asl-task-t1",
+      "NetworkPolicy:asl-task-t1",
+      "ConfigMap:asl-task-t1-config",
+      "Secret:asl-botified-t1",
+      "ServiceAccount:asl-task-t1",
+      "ServiceAccount:asl-task-task1-legacy"
+    ]);
+    assert.equal(deletes.find((action) => action.name === "asl-task-task1-legacy")?.resource.metadata.uid, "legacy-service-account-uid");
+
+    const applied = applySandboxReconcileActions({ observedResources, actions: plan.actions });
+    assert.deepEqual(applied.observedResources.map((resource) => resource.metadata.name), ["asl-task-task1-other"]);
+  });
+
   it("moves expired and idle-expired runs into cleanup", () => {
     const created = createdResourcesForRun(sandboxRun());
     const expired = sandboxRun({

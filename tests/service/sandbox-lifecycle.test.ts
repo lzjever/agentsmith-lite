@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { createApplicationServices } from "../../packages/application/src/factory.js";
 import { SandboxLifecycleService, type RuntimeDirectoryCleaner } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { SandboxKubernetesPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
@@ -22,6 +23,32 @@ import {
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
 describe("sandbox lifecycle service", () => {
+  it("keeps Botified resources when artifact projection fails before cleanup", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    await store.sandboxRuns.put(run);
+    const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
+    const projectedRuns: string[] = [];
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port,
+      artifactProjection: {
+        async projectPublishedArtifactsForRun(runId) {
+          projectedRuns.push(runId);
+          throw new Error("Botified artifact download failed");
+        }
+      }
+    });
+
+    const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.deepEqual(projectedRuns, [run.runId]);
+    assert.match(result.errors[0] ?? "", /artifact projection failed before runtime cleanup/);
+    assert.deepEqual(port.deletedRefs, []);
+    assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
+  });
+
   it("skips a stale cleanup claim and continues reaping later independent runs", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
@@ -63,7 +90,8 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(laterRun.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task2/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/inputs"
     ]);
   });
 
@@ -366,7 +394,8 @@ describe("sandbox lifecycle service", () => {
     assert.equal(stored?.terminalFailure?.syncStatus, "synced");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
     ]);
     assert.equal(
       port.deletedRefs.some((ref) => Object.values(otherRun.resourceNames).includes(ref.name)),
@@ -404,6 +433,7 @@ describe("sandbox lifecycle service", () => {
       [
         ["home", "delete"],
         ["botified", "delete"],
+        ["inputs", "delete"],
         ["artifacts", "retain"]
       ]
     );
@@ -467,7 +497,8 @@ describe("sandbox lifecycle service", () => {
     ]);
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
     ]);
     const saved = await store.sandboxRuns.get(run.runId);
     assert.equal(saved?.phase, "cleaned");
@@ -508,7 +539,8 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
     ]);
   });
 
@@ -712,7 +744,8 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
     ]);
   });
 
@@ -754,7 +787,8 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
     ]);
   });
 
@@ -976,7 +1010,7 @@ describe("sandbox lifecycle service", () => {
     assert.doesNotMatch(JSON.stringify({ result, saved }), /bsk_|sk-real|MODEL_API_KEY/);
   });
 
-  it("marks non-terminal tasks expired when expired sandbox runs are reaped without overwriting terminal tasks", async () => {
+  it("finalizes expiring sandbox tasks before runtime cleanup without overwriting an existing terminal status", async () => {
     const store = createLocalInMemoryProductStore();
     const runningRun = sandboxRun({
       expiresAt: "2026-07-03T23:59:59.000Z",
@@ -994,21 +1028,39 @@ describe("sandbox lifecycle service", () => {
       ...createdResourcesForRun(asObservedActiveRun(runningRun)),
       ...createdResourcesForRun(asObservedActiveRun(completedRun))
     ]);
-    const service = new SandboxLifecycleService(store, {
-      dataRoot: "/workspace",
-      namespace: "agentsmith",
-      port,
-      now: () => new Date("2026-07-04T00:00:00.000Z")
-    });
+    const services = createApplicationServices({ store, dataRoot: "/workspace", builtinAdminPassword: "admin-password", sandboxLifecyclePort: port });
 
-    const result = await service.reapSandboxRunsOnce({ apply: true });
+    const result = await services.sandboxLifecycle.reapSandboxRunsOnce({ apply: true });
 
     assert.equal(result.dryRun, false);
     assert.deepEqual(result.errors, []);
-    assert.equal((await store.sandboxRuns.get(runningRun.runId))?.cleanupStatus, "cleaned");
-    assert.equal((await store.sandboxRuns.get(completedRun.runId))?.cleanupStatus, "cleaned");
-    assert.equal((await store.findTask(runningRun.taskId))?.status, "expired");
-    assert.equal((await store.findTask(completedRun.taskId))?.status, "completed");
+    const expired = await store.findTask(runningRun.taskId);
+    const completed = await store.findTask(completedRun.taskId);
+    assert.equal(expired?.status, "expired");
+    assert.equal(expired?.terminalReason, "expired");
+    assert.equal(completed?.status, "completed");
+    assert.equal(completed?.terminalReason, "completed");
+    assert.equal(expired?.artifactProjectionStatus, "draining");
+    assert.equal(expired?.cleanupStatus, "pending");
+    assert.deepEqual((await store.listProjectAuditEvents(runningRun.projectId)).map((event) => [event.resourceId, event.action]), [[runningRun.taskId, "task.expired"], [completedRun.taskId, "task.completed"]]);
+  });
+
+  it("releases an active task reservation once when cleanup is retried", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    await store.createProject({ id: run.projectId, workspaceId: run.workspaceId, name: "P", ownerUserId: "user1", rootPath: run.projectSubPath, taskConcurrencyLimit: 1, createdAt: run.createdAt, updatedAt: run.updatedAt });
+    await store.createProjectResourcePolicy({ projectId: run.projectId, activeTasksLimit: 1, providerRequestsLimit: null, providerTokensLimit: null, providerCostLimit: null, projectFileBytesLimit: null, createdAt: run.createdAt, updatedAt: run.updatedAt });
+    await store.upsertProjectResourceUsage({ projectId: run.projectId, activeTasks: 1, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: run.updatedAt });
+    await store.createTask(taskForRun(run, "running"));
+    await store.sandboxRuns.put(run);
+    const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
+    const service = new SandboxLifecycleService(store, { dataRoot: "/workspace", namespace: run.namespace, port, now: () => new Date("2026-07-04T00:00:00.000Z") });
+
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
+
+    assert.equal((await store.findTask(run.taskId))?.status, "cleaned");
+    assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks, 0);
   });
 
   it("deletes full-identity orphaned resources but never recreates missing active resources", async () => {
@@ -1286,8 +1338,8 @@ function taskForRun(run: SandboxRunState, status: "running" | "completed") {
     prompt: "build",
     status,
     runId: run.runId,
+    executionMode: "live" as const,
     sandbox: {
-      dryRun: true as const,
       namespace: run.namespace,
       resources: []
     },

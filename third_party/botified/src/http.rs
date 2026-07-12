@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -16,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_loop::InputUrgency;
@@ -72,23 +74,77 @@ struct HttpState {
     file_store: Option<FileStore>,
     auto_message_id_prefix: String,
     next_message_id: Arc<AtomicU64>,
+    delivery_store: Option<Arc<DeliveryStore>>,
 }
 
 impl HttpState {
     fn new(service: Service, service_key: Option<String>) -> Self {
         let file_store = service.file_store();
+        let delivery_store = file_store.as_ref().map(|store| DeliveryStore::new(
+            store.options().root_dir.join("delivery-receipts"),
+        ));
         Self {
             service,
             service_key,
             file_store,
             auto_message_id_prefix: new_auto_message_id_prefix(),
             next_message_id: Arc::new(AtomicU64::new(1)),
+            delivery_store,
         }
     }
 
     fn next_message_id(&self) -> String {
         let id = self.next_message_id.fetch_add(1, Ordering::SeqCst);
         format!("msg_{}_{}", self.auto_message_id_prefix, id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeliveryReceipt {
+    delivery_key: String,
+    request_hash: String,
+    message_id: String,
+    timeline_cursor: String,
+}
+
+#[derive(Clone)]
+struct DeliveryStore {
+    root: PathBuf,
+}
+
+impl DeliveryStore {
+    fn new(root: PathBuf) -> Arc<Self> {
+        Arc::new(Self { root })
+    }
+
+    fn path(&self, key: &str) -> Result<PathBuf, ApiError> {
+        if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
+            return Err(ApiError::invalid_request("delivery_key must be an ASCII token"));
+        }
+        Ok(self.root.join(format!("{key}.json")))
+    }
+
+    fn get(&self, key: &str) -> Result<Option<DeliveryReceipt>, ApiError> {
+        let path = self.path(key)?;
+        match fs::read_to_string(path) {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_corrupt", "delivery receipt is corrupt", true)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true)),
+        }
+    }
+
+    fn put(&self, receipt: &DeliveryReceipt) -> Result<(), ApiError> {
+        fs::create_dir_all(&self.root)
+            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))?;
+        let path = self.path(&receipt.delivery_key)?;
+        let temp = self.root.join(format!(".{}.tmp", receipt.delivery_key));
+        let bytes = serde_json::to_vec(receipt)
+            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))?;
+        fs::write(&temp, bytes)
+            .and_then(|_| fs::rename(&temp, &path))
+            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))
     }
 }
 
@@ -128,6 +184,7 @@ fn build_router(state: HttpState, max_upload_request_bytes: u64) -> Router {
             "/v1/messages",
             post(messages_handler).layer(DefaultBodyLimit::max(MAX_HTTP_JSON_BYTES)),
         )
+        .route("/v1/deliveries/:delivery_key", get(delivery_receipt_handler))
         .route(
             "/v1/files",
             post(upload_files_handler).layer(DefaultBodyLimit::max(files_upload_limit)),
@@ -168,12 +225,27 @@ async fn messages_handler(
     authorize(&headers, state.service_key.as_deref())?;
 
     let body = parse_json_body(body)?;
+    let delivery = delivery_from_body(&body)?;
+    if let Some(delivery) = delivery.as_ref() {
+        let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
+        if let Some(receipt) = store.get(&delivery.delivery_key)? {
+            if receipt.request_hash != delivery.request_hash {
+                return Err(ApiError::message_conflict("delivery_key was already used with a different request_hash"));
+            }
+            return Ok(Json(message_response_from_receipt(receipt)));
+        }
+    }
     if let Some(response) = slash_command_response(&state.service, &body) {
         return Ok(Json(response));
     }
 
     let client_message_id = message_id_from_body(&body)?;
-    let message_id = client_message_id.unwrap_or_else(|| state.next_message_id());
+    if let (Some(delivery), Some(client_message_id)) = (delivery.as_ref(), client_message_id.as_ref()) {
+        if delivery.delivery_key != *client_message_id {
+            return Err(ApiError::invalid_request("client_message_id must equal delivery_key when delivery_key is supplied"));
+        }
+    }
+    let message_id = delivery.as_ref().map(|value| value.delivery_key.clone()).or(client_message_id).unwrap_or_else(|| state.next_message_id());
     let urgency_result = input_urgency_from_body(&body);
     let input = parse_user_input(body).map_err(ApiError::from_attachment)?;
     let content = bind_user_input_content(&state, &message_id, input)?;
@@ -206,7 +278,7 @@ async fn messages_handler(
         }
     };
 
-    Ok(Json(json!(MessageResponse {
+    let response = MessageResponse {
         ok: true,
         kind: message_response_kind(outcome.submit_status),
         input_id: message_id.clone(),
@@ -218,7 +290,39 @@ async fn messages_handler(
         content_kind: content_summary.content_kind,
         queue_length: outcome.service_status.queue_length,
         state: outcome.service_status.state,
-    })))
+        delivery_key: delivery.as_ref().map(|value| value.delivery_key.clone()),
+        request_hash: delivery.as_ref().map(|value| value.request_hash.clone()),
+    };
+    if let Some(delivery) = delivery {
+        let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
+        store.put(&DeliveryReceipt {
+            delivery_key: delivery.delivery_key,
+            request_hash: delivery.request_hash,
+            message_id: response.message_id.clone(),
+            timeline_cursor: response.timeline_cursor.clone(),
+        })?;
+    }
+    Ok(Json(json!(response)))
+}
+
+async fn delivery_receipt_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(delivery_key): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, state.service_key.as_deref())?;
+    let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
+    match store.get(&delivery_key)? {
+        Some(receipt) => Ok(Json(json!({
+            "ok": true,
+            "found": true,
+            "delivery_key": receipt.delivery_key,
+            "request_hash": receipt.request_hash,
+            "message_id": receipt.message_id,
+            "timeline_cursor": receipt.timeline_cursor,
+        }))),
+        None => Ok(Json(json!({ "ok": true, "found": false }))),
+    }
 }
 
 fn bind_user_input_content(
@@ -1547,6 +1651,44 @@ fn message_id_from_body(body: &Value) -> Result<Option<String>, ApiError> {
     Ok(Some(message_id.to_owned()))
 }
 
+#[derive(Clone)]
+struct DeliveryInput {
+    delivery_key: String,
+    request_hash: String,
+}
+
+fn delivery_from_body(body: &Value) -> Result<Option<DeliveryInput>, ApiError> {
+    let Some(key) = body.get("delivery_key") else {
+        if body.get("request_hash").is_some() {
+            return Err(ApiError::invalid_request("request_hash requires delivery_key"));
+        }
+        return Ok(None);
+    };
+    let key = key.as_str().map(str::trim).filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::invalid_request("delivery_key must be a non-empty string"))?;
+    let hash = body.get("request_hash").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::invalid_request("request_hash must be a non-empty string"))?;
+    Ok(Some(DeliveryInput { delivery_key: key.to_owned(), request_hash: hash.to_owned() }))
+}
+
+fn message_response_from_receipt(receipt: DeliveryReceipt) -> Value {
+    json!({
+        "ok": true,
+        "kind": "idempotent",
+        "input_id": receipt.message_id,
+        "message_id": receipt.message_id,
+        "timeline_cursor": receipt.timeline_cursor,
+        "content_preview": "",
+        "content_bytes": 0,
+        "content_truncated": false,
+        "content_kind": "text",
+        "queue_length": 0,
+        "state": "idle",
+        "delivery_key": receipt.delivery_key,
+        "request_hash": receipt.request_hash,
+    })
+}
+
 fn timeline_stream_body(service: Service, cursor: String) -> Body {
     Body::from_stream(stream::unfold(
         TimelineStreamState::new(service, cursor),
@@ -1932,6 +2074,10 @@ struct MessageResponse {
     content_kind: &'static str,
     queue_length: usize,
     state: ServiceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1976,6 +2122,10 @@ impl ApiError {
 
     fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, false)
+    }
+
+    fn delivery_store_unavailable() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "delivery_receipt_unavailable", "delivery receipt storage is unavailable", true)
     }
 
     fn message_conflict(message: impl Into<String>) -> Self {

@@ -1,0 +1,117 @@
+import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembership, ProjectMembershipView, StoredUser } from "../../contracts/src/api.js";
+import { NotFoundError, ProductError } from "../../domain/src/errors.js";
+import { newId, nowIso } from "../../domain/src/ids.js";
+import type { ProductStore } from "../../ports/src/store.js";
+import { AuthorizationService } from "./authorizationService.js";
+
+export interface ProjectMemberIdentity {
+  email?: string;
+  issuer?: string;
+  subject?: string;
+}
+
+export class MembershipService {
+  constructor(
+    private readonly store: ProductStore,
+    private readonly authorization: AuthorizationService
+  ) {}
+
+  async listMembers(actorUserId: string, projectId: string): Promise<ProjectMembershipView[]> {
+    await this.authorization.requireProject(actorUserId, projectId, "view");
+    return this.store.listProjectMemberships(projectId);
+  }
+
+  async addMember(actorUserId: string, projectId: string, identity: ProjectMemberIdentity, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
+    let memberId: string | null = null;
+    try {
+      await this.authorization.requireProject(actorUserId, projectId, "admin");
+      const user = await this.findVerifiedIdentity(identity);
+      memberId = user.id;
+      await this.requireNotOwner(projectId, user.id);
+      const timestamp = nowIso();
+      const membership = await this.store.upsertProjectMembership({ projectId, userId: user.id, role, createdAt: timestamp, updatedAt: timestamp });
+      await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
+      return membership;
+    } catch (error) {
+      await this.audit(projectId, actorUserId, "membership.add", memberId, "rejected");
+      throw error;
+    }
+  }
+
+  async changeMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
+    let memberId: string | null = null;
+    try {
+      await this.authorization.requireProject(actorUserId, projectId, "admin");
+      memberId = requireUserId(userId);
+      await this.requireNotOwner(projectId, memberId);
+      const membership = await this.store.updateProjectMembership({
+        projectId,
+        userId: memberId,
+        role,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      });
+      if (!membership) {
+        throw new NotFoundError("Project membership not found");
+      }
+      await this.audit(projectId, actorUserId, "membership.change", memberId, "accepted");
+      return membership;
+    } catch (error) {
+      await this.audit(projectId, actorUserId, "membership.change", memberId, "rejected");
+      throw error;
+    }
+  }
+
+  async removeMember(actorUserId: string, projectId: string, userId: string): Promise<void> {
+    let memberId: string | null = null;
+    try {
+      await this.authorization.requireProject(actorUserId, projectId, "admin");
+      memberId = requireUserId(userId);
+      await this.requireNotOwner(projectId, memberId);
+      if (!(await this.store.deleteProjectMembership(projectId, memberId))) {
+        throw new NotFoundError("Project membership not found");
+      }
+      await this.audit(projectId, actorUserId, "membership.remove", memberId, "accepted");
+    } catch (error) {
+      await this.audit(projectId, actorUserId, "membership.remove", memberId, "rejected");
+      throw error;
+    }
+  }
+  async transferOwner(actorUserId:string,projectId:string,targetUserId:string):Promise<void>{const project=await this.authorization.requireProject(actorUserId,projectId,"view");if(project.ownerUserId!==actorUserId)throw new ProductError("Project owner access required",403);const target=requireUserId(targetUserId);if(!(await this.store.transferProjectOwner(projectId,actorUserId,target,nowIso())))throw new ProductError("Target must be a different existing project member",409)}
+
+  private async audit(projectId: string, actorId: string, action: MembershipAuditAction, resourceId: string | null, status: "accepted" | "rejected"): Promise<void> {
+    await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind: "member", resourceId, createdAt: nowIso() });
+  }
+
+  private async requireNotOwner(projectId: string, userId: string): Promise<void> {
+    if ((await this.store.findProjectMembership(projectId, userId))?.role === "owner") {
+      throw new ProductError("Project owner membership cannot be changed or removed", 409);
+    }
+  }
+
+  private async findVerifiedIdentity(identity: ProjectMemberIdentity): Promise<StoredUser> {
+    const email = identity.email?.trim().toLowerCase();
+    const issuer = identity.issuer?.trim();
+    const subject = identity.subject?.trim();
+    const byEmail = email ? await this.store.findVerifiedUserByEmail(email) : null;
+    const bySubject = issuer && subject ? await this.store.findUserByOidcSubject(issuer, subject) : null;
+    if ((email && (issuer || subject)) || (!email && !(issuer && subject))) {
+      throw new ProductError("Specify either a verified email or an OIDC issuer and subject");
+    }
+    const user = byEmail ?? bySubject;
+    if (!user || !user.emailVerified) {
+      throw new NotFoundError("Verified identity not found");
+    }
+    return user;
+  }
+}
+
+type MembershipAuditAction = Extract<ProjectAuditAction, `membership.${string}`>;
+
+function requireUserId(value: string): string {
+  const userId = value.trim();
+  if (!userId) {
+    throw new ProductError("Project member userId is required");
+  }
+  return userId;
+}

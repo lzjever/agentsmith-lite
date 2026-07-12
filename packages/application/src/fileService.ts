@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   DeleteProjectFileResponse,
@@ -15,6 +16,37 @@ import { FilePathValidationService } from "./filePathValidationService.js";
 interface ResolvedProjectFilePath {
   normalizedPath: string;
   absolutePath: string;
+}
+
+interface DeletedProjectFile {
+  response: DeleteProjectFileResponse;
+  bytes: number;
+  mediaType: string;
+}
+
+interface FileByteAccounting {
+  record(path: string, delta: number): Promise<void>;
+}
+
+const projectFileOperations = new Map<string, Promise<void>>();
+
+export async function withProjectFileLock<T>(projectRoot: string, action: () => Promise<T>): Promise<T> {
+  const key = path.resolve(projectRoot);
+  const previous = projectFileOperations.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  projectFileOperations.set(key, current);
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+    if (projectFileOperations.get(key) === current) {
+      projectFileOperations.delete(key);
+    }
+  }
 }
 
 export class FileService {
@@ -52,17 +84,37 @@ export class FileService {
   }
 
   async uploadFile(projectRoot: string, input: UploadProjectFileInput): Promise<ProjectFileWriteResponse> {
+    return this.uploadFileWithAccounting(projectRoot, input, { record: async () => undefined });
+  }
+
+  async uploadFileWithAccounting(projectRoot: string, input: UploadProjectFileInput, accounting: FileByteAccounting): Promise<ProjectFileWriteResponse> {
     if (input.bytes.byteLength > MAX_PROJECT_FILE_BYTES) {
       throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
     }
-    const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
-    await mkdir(path.dirname(absolutePath), { recursive: true });
-    await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
-    await writeFile(absolutePath, input.bytes);
-    return {
-      path: normalizedPath,
-      bytes: input.bytes.byteLength
-    };
+    return withProjectFileLock(projectRoot, async () => {
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
+      const previous = await readOptionalRegularFile(absolutePath);
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
+      const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.tmp`);
+      try {
+        await writeFile(temporaryPath, input.bytes, { flag: "wx" });
+        await rename(temporaryPath, absolutePath);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+      const written = await lstat(absolutePath);
+      if (!written.isFile()) {
+        throw new ProductError("Written path is not a regular file");
+      }
+      try {
+        await accounting.record(normalizedPath, written.size - (previous?.byteLength ?? 0));
+      } catch (error) {
+        await restoreOptionalRegularFile(absolutePath, previous);
+        throw error;
+      }
+      return { path: normalizedPath, bytes: written.size, mediaType: detectProjectFileMediaType(input.bytes, normalizedPath) };
+    });
   }
 
   async listFiles(projectRoot: string, input = "files"): Promise<ProjectFileListResponse> {
@@ -102,11 +154,13 @@ export class FileService {
         };
       }
       if (entryStat.isFile()) {
+        const bytes = await readFile(path.join(absolutePath, entry.name));
         return {
           name: entry.name,
           path: entryPath,
           type: "file",
           size: entryStat.size,
+          mediaType: detectProjectFileMediaType(bytes, entryPath),
           updatedAt: entryStat.mtime.toISOString()
         };
       }
@@ -130,10 +184,12 @@ export class FileService {
       if (!entryStat.isFile()) {
         throw new ProductError("Path is not a regular file");
       }
+      const bytes = await readFile(absolutePath);
       return {
         path: normalizedPath,
         filename: path.posix.basename(normalizedPath),
-        bytes: await readFile(absolutePath)
+        bytes,
+        mediaType: detectProjectFileMediaType(bytes, normalizedPath)
       };
     } catch (error) {
       if (error instanceof ProductError) {
@@ -146,32 +202,64 @@ export class FileService {
     }
   }
 
+  async fileSize(projectRoot: string, input: string): Promise<number> {
+    const { absolutePath } = await this.resolveProjectFilesPath(projectRoot, input);
+    try {
+      const entry = await lstat(absolutePath);
+      if (!entry.isFile()) {
+        throw new ProductError("Path is not a regular file");
+      }
+      return entry.size;
+    } catch (error) {
+      if (isNotFound(error)) return 0;
+      throw error;
+    }
+  }
+
   async deleteFile(projectRoot: string, input: string): Promise<DeleteProjectFileResponse> {
-    const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
-    if (normalizedPath === "files") {
-      throw new ProductError("Cannot delete the files root");
-    }
-    let entryStat;
-    try {
-      entryStat = await lstat(absolutePath);
-    } catch (error) {
-      if (isNotFound(error)) {
-        throw new ProductError("File not found", 404);
+    return (await this.deleteFileWithSize(projectRoot, input)).response;
+  }
+
+  async deleteFileWithSize(projectRoot: string, input: string): Promise<DeletedProjectFile> {
+    return this.deleteFileWithAccounting(projectRoot, input, { record: async () => undefined });
+  }
+
+  async deleteFileWithAccounting(projectRoot: string, input: string, accounting: FileByteAccounting): Promise<DeletedProjectFile> {
+    return withProjectFileLock(projectRoot, async () => {
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
+      if (normalizedPath === "files") {
+        throw new ProductError("Cannot delete the files root");
       }
-      throw error;
-    }
-    if (!entryStat.isFile()) {
-      throw new ProductError("Path is not a regular file");
-    }
-    try {
-      await rm(absolutePath);
-    } catch (error) {
-      if (isNotFound(error)) {
-        throw new ProductError("File not found", 404);
+      let entryStat;
+      try {
+        entryStat = await lstat(absolutePath);
+      } catch (error) {
+        if (isNotFound(error)) {
+          throw new ProductError("File not found", 404);
+        }
+        throw error;
       }
-      throw error;
-    }
-    return { deleted: true };
+      if (!entryStat.isFile()) {
+        throw new ProductError("Path is not a regular file");
+      }
+      const previous = await readFile(absolutePath);
+      const mediaType = detectProjectFileMediaType(previous, normalizedPath);
+      try {
+        await rm(absolutePath);
+      } catch (error) {
+        if (isNotFound(error)) {
+          throw new ProductError("File not found", 404);
+        }
+        throw error;
+      }
+      try {
+        await accounting.record(normalizedPath, -entryStat.size);
+      } catch (error) {
+        await restoreOptionalRegularFile(absolutePath, previous);
+        throw error;
+      }
+      return { response: { deleted: true }, bytes: entryStat.size, mediaType };
+    });
   }
 
   private async ensureFilesRoot(projectRoot: string): Promise<void> {
@@ -194,6 +282,67 @@ export class FileService {
   }
 }
 
+export function detectProjectFileMediaType(bytes: Uint8Array, filename: string): string {
+  if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) || startsWith(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])) return "image/gif";
+  if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && ascii(bytes, 8, 12) === "WEBP") return "image/webp";
+  if (!isUtf8Text(bytes)) return "application/octet-stream";
+  const text = Buffer.from(bytes).toString("utf8");
+  const extension = path.posix.extname(filename).toLowerCase();
+  if (extension === ".json") {
+    try { JSON.parse(text); return "application/json"; } catch { return "text/plain"; }
+  }
+  if (extension === ".csv") return "text/csv";
+  if (extension === ".md" || extension === ".markdown") return "text/markdown";
+  return "text/plain";
+}
+
+function startsWith(bytes: Uint8Array, signature: number[]): boolean {
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function ascii(bytes: Uint8Array, start: number, end: number): string {
+  return Buffer.from(bytes.subarray(start, end)).toString("ascii");
+}
+
+function isUtf8Text(bytes: Uint8Array): boolean {
+  if (bytes.some((byte) => byte === 0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  let controls = 0;
+  for (const byte of bytes) if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) controls += 1;
+  return bytes.byteLength === 0 || controls / bytes.byteLength < 0.01;
+}
+
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+async function readOptionalRegularFile(absolutePath: string): Promise<Buffer | null> {
+  try {
+    const entry = await lstat(absolutePath);
+    if (!entry.isFile()) throw new ProductError("Path is not a regular file");
+    return readFile(absolutePath);
+  } catch (error) {
+    if (isNotFound(error)) return null;
+    throw error;
+  }
+}
+
+async function restoreOptionalRegularFile(absolutePath: string, bytes: Buffer | null): Promise<void> {
+  if (bytes === null) {
+    await rm(absolutePath, { force: true });
+    return;
+  }
+  const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.rollback`);
+  try {
+    await writeFile(temporaryPath, bytes, { flag: "wx" });
+    await rename(temporaryPath, absolutePath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }

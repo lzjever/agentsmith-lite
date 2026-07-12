@@ -11,8 +11,8 @@ AgentSmith Lite is a clean app repo, not a release wrapper around the old system
 
 The Web UI is a presentation client. It does not call model providers, Botified services, Kubernetes, databases, object storage, or filesystem APIs directly.
 
-Chat requests go from the browser to `/api/projects/{projectId}/chat`, then the Node service resolves the endpoint secret ref to a server-configured API key and allowed base URL. The endpoint base URL must match that binding before the server calls the OpenAI-compatible `/chat/completions` endpoint.
+Chat requests go from the browser to `/api/v1/projects/{projectId}/chat`, then the Node service loads the endpoint's `credentialId` binding and decrypts the project-scoped provider credential only for the server-side request. The endpoint base URL must match the credential base URL after normalization before the server calls the OpenAI-compatible `/chat/completions` endpoint. Credential plaintext is never returned to the browser, persisted in task state, or passed to Botified.
 
 The API store factory is environment controlled: `POSTGRES_APP_URL` selects the real Postgres adapter, while unset local/test runs use memory. Live sandbox mode fails fast without `POSTGRES_APP_URL`; only local dry-run/test flows may use the in-memory fallback. Substrate-only metadata such as JuiceFS state is not read by product migrations or the app store.
 
-Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus reap. Admin operator status/reap endpoints remain explicit diagnostics and manual convergence tools, not a Kubernetes watch/operator control plane.
+Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus automatic reap. Cleanup remains scoped to app-owned task resources.

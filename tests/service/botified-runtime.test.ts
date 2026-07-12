@@ -13,7 +13,7 @@ describe("botified runtime integration", () => {
         protocol: "openai_chat_completions",
         baseUrl: "https://models.example.com/v1",
         model: "gpt-compatible",
-        apiKeySecretRef: "secret/model",
+        credentialId: "cred_test",
         capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30,
         createdAt: "2026-07-04T00:00:00.000Z",
@@ -25,7 +25,8 @@ describe("botified runtime integration", () => {
         taskHomePath: "/runner/task-home",
         botifiedDataPath: "/runner/botified-data",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        modelApiKeyEnv: "MODEL_API_KEY"
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/t1/runs/r1/v1"
       }
     });
 
@@ -60,9 +61,9 @@ describe("botified runtime integration", () => {
     ].sort());
     assert.deepEqual(config.providers[0], {
       name: "model",
-      base_url: "https://models.example.com/v1",
+      base_url: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/t1/runs/r1/v1",
       model: "gpt-compatible",
-      api_key_env: "MODEL_API_KEY",
+      api_key_env: "BOTIFIED_SERVICE_KEY",
       request_timeout_secs: 30,
       priority: 10,
       capabilities: ["text", "tool_calls"],
@@ -103,13 +104,14 @@ describe("botified runtime integration", () => {
     const config = generateBotifiedConfig({
       endpoint: {
         id: "e1", projectId: "p1", name: "model", protocol: "openai_chat_completions",
-        baseUrl: "https://models.example.com/v1", model: "gpt-compatible", apiKeySecretRef: "secret/model",
+        baseUrl: "https://models.example.com/v1", model: "gpt-compatible", credentialId: "cred_test",
         capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30,
         createdAt: "2026-07-04T00:00:00.000Z", updatedAt: "2026-07-04T00:00:00.000Z"
       },
       task: {
         taskId: "t1", projectMountPath: "/workspace/project", taskHomePath: "/runner/task-home",
-        botifiedDataPath: "/runner/botified-data", serviceKeyEnv: "BOTIFIED_SERVICE_KEY", modelApiKeyEnv: "MODEL_API_KEY"
+        botifiedDataPath: "/runner/botified-data", serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY", providerBaseUrl: "http://broker/v1"
       }
     });
 
@@ -118,6 +120,10 @@ describe("botified runtime integration", () => {
       "max_concurrent_tasks", "max_detach_after_secs", "max_retained_tasks", "max_task_ask_pending_secs",
       "max_task_output_bytes", "max_timeout_secs", "task_retention_secs"
     ].sort());
+    assert.equal(config.tools.execution.default_detach_after_secs, 31 * 60);
+    assert.equal(config.tools.execution.max_detach_after_secs, 31 * 60);
+    assert.equal(config.tools.execution.default_timeout_secs, 35 * 60);
+    assert.equal(config.tools.execution.max_timeout_secs, 35 * 60);
     assert.equal(JSON.stringify(config).includes("0.0.0.0:3110"), false);
   });
 
@@ -130,7 +136,7 @@ describe("botified runtime integration", () => {
         protocol: "openai_chat_completions",
         baseUrl: "https://models.example.com/v1",
         model: "gpt-compatible",
-        apiKeySecretRef: "secret/model",
+        credentialId: "cred_test",
         capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30,
         createdAt: "2026-07-04T00:00:00.000Z",
@@ -142,7 +148,8 @@ describe("botified runtime integration", () => {
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        modelApiKeyEnv: "MODEL_API_KEY",
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerBaseUrl: "http://broker/v1",
         servicePort: 4100
       }
     });
@@ -151,11 +158,11 @@ describe("botified runtime integration", () => {
 
     assert.equal(config.service.port, 4100);
     assert.equal(serialized.includes('"port": 4100'), true);
-    assert.equal(serialized.includes('"api_key_env": "MODEL_API_KEY"'), true);
+    assert.equal(serialized.includes('"api_key_env": "BOTIFIED_SERVICE_KEY"'), true);
     assert.equal(serialized.includes("sk-real-model-key"), false);
   });
 
-  it("passes an optional model CA bundle path to the provider config without secrets or PEM", () => {
+  it("keeps provider credentials and CA material out of the Botified config", () => {
     const config = generateBotifiedConfig({
       endpoint: {
         id: "e1",
@@ -164,7 +171,7 @@ describe("botified runtime integration", () => {
         protocol: "openai_chat_completions",
         baseUrl: "https://models.example.com/v1",
         model: "gpt-compatible",
-        apiKeySecretRef: "secret/model",
+        credentialId: "cred_test",
         capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30,
         createdAt: "2026-07-04T00:00:00.000Z",
@@ -176,14 +183,14 @@ describe("botified runtime integration", () => {
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        modelApiKeyEnv: "MODEL_API_KEY",
-        modelCaBundlePath: "/etc/agentsmith-lite/model-ca/ca.crt"
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerBaseUrl: "http://broker/v1"
       }
     });
 
-    assert.equal(config.providers[0]?.ca_bundle_path, "/etc/agentsmith-lite/model-ca/ca.crt");
     const serialized = serializeBotifiedConfig(config);
-    assert.equal(serialized.includes('"ca_bundle_path": "/etc/agentsmith-lite/model-ca/ca.crt"'), true);
+    assert.equal(serialized.includes("MODEL_API_KEY"), false);
+    assert.equal(serialized.includes("models.example.com"), false);
     assert.equal(serialized.includes("sk-real-model-key"), false);
     assert.equal(serialized.includes("BEGIN CERTIFICATE"), false);
   });
@@ -197,7 +204,7 @@ describe("botified runtime integration", () => {
         protocol: "openai_chat_completions",
         baseUrl: "https://models.example.com/v1",
         model: "vision-compatible",
-        apiKeySecretRef: "secret/model",
+        credentialId: "cred_test",
         capabilities: ["text", "image"],
         requestTimeoutSecs: 30,
         createdAt: "2026-07-04T00:00:00.000Z",
@@ -209,7 +216,8 @@ describe("botified runtime integration", () => {
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        modelApiKeyEnv: "MODEL_API_KEY"
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerBaseUrl: "http://broker/v1"
       }
     });
 
