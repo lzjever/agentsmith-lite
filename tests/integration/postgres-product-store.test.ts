@@ -335,7 +335,7 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual((await store.listActiveProjectAlerts("proj_settlement")).map((alert) => alert.type).sort(), ["provider_cost_limit", "provider_tokens_limit"]);
   });
 
-  it("expires reserved settlements atomically and finalizes one pending task intent once", async () => {
+  it("expires active settlements atomically and finalizes one pending task intent once", async () => {
     const timestamp = "2026-07-04T00:00:00.000Z";
     await store.createUser({ id: "user_ledger", email: "ledger@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
     await store.createWorkspace({ id: "ws_ledger", name: "Ledger", ownerUserId: "user_ledger", createdAt: timestamp, updatedAt: timestamp });
@@ -343,8 +343,21 @@ postgresDescribe("postgres product store", () => {
     await createTestCredential(store, "proj_ledger", "cred_test", timestamp);
     await store.createEndpoint({ id: "endpoint_ledger", projectId: "proj_ledger", name: "Ledger endpoint", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "m", credentialId: "cred_test", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: timestamp, updatedAt: timestamp });
     await store.reserveProjectProviderSettlement({ id: "settlement_ledger", projectId: "proj_ledger", taskId: null, endpointId: "endpoint_ledger", actorId: "user_ledger", reservedTokens: 4096, reservedCost: 1, reservedAt: timestamp, expiresAt: "2026-07-04T00:00:01.000Z" });
-    assert.equal(await store.expireReservedProjectProviderSettlements("2026-07-04T00:00:02.000Z"), 1);
-    assert.equal((await store.findProjectResourceUsage("proj_ledger"))?.providerRequests, 0);
+    await store.reserveProjectProviderSettlement({ id: "settlement_dispatched", projectId: "proj_ledger", taskId: null, endpointId: "endpoint_ledger", actorId: "user_ledger", reservedTokens: 2048, reservedCost: 0.5, reservedAt: timestamp, expiresAt: "2026-07-04T00:00:01.000Z" });
+    await store.markProjectProviderSettlementDispatched("settlement_dispatched", timestamp);
+    await store.reserveProjectProviderSettlement({ id: "settlement_delivered", projectId: "proj_ledger", taskId: null, endpointId: "endpoint_ledger", actorId: "user_ledger", reservedTokens: 1024, reservedCost: 0.25, reservedAt: timestamp, expiresAt: "2026-07-04T00:00:01.000Z" });
+    await store.markProjectProviderSettlementDispatched("settlement_delivered", timestamp);
+    await store.markProjectProviderSettlementDelivered("settlement_delivered", timestamp);
+    await store.reserveProjectProviderSettlement({ id: "settlement_settled", projectId: "proj_ledger", taskId: null, endpointId: "endpoint_ledger", actorId: "user_ledger", reservedTokens: 512, reservedCost: 0.125, reservedAt: timestamp, expiresAt: "2026-07-04T00:00:01.000Z" });
+    await store.markProjectProviderSettlementDispatched("settlement_settled", timestamp);
+    await store.settleProjectProviderSettlement("settlement_settled", { tokens: 7, cost: 0.01 }, timestamp);
+    assert.equal(await store.expireProjectProviderSettlements("2026-07-04T00:00:02.000Z"), 3);
+    const usage = await store.findProjectResourceUsage("proj_ledger");
+    assert.equal(usage?.providerRequests, 3);
+    assert.equal(usage?.providerTokens, 7);
+    assert.ok(Math.abs((usage?.providerCost ?? 0) - 0.01) < 1e-9);
+    assert.equal(await store.settleProjectProviderSettlement("settlement_dispatched", { tokens: 1 }, timestamp), null);
+    assert.equal(await store.settleProjectProviderSettlement("settlement_delivered", { tokens: 1 }, timestamp), null);
     const task: AgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
     await store.createTaskWithActiveReservation(task);
     await Promise.all([store.requestTaskFinalization(task.id, "failed", timestamp), store.requestTaskFinalization(task.id, "completed", timestamp)]);

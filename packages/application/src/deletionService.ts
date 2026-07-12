@@ -34,10 +34,10 @@ export class DeletionService {
     const root = this.projectRoot(project);
     await withProjectFileLock(root, async () => {
       await this.tasks.stopTasksForProjectDeletion(project.id);
-      await rm(root, { recursive: true, force: true, maxRetries: 2 });
       if (!(await this.store.deleteProjectDependenciesAndProject(project.id))) {
         throw new ProductError("Project deletion is still pending", 409);
       }
+      await rm(root, { recursive: true, force: true, maxRetries: 2 });
     });
   }
 

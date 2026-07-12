@@ -129,7 +129,12 @@ describe("sandbox manifest renderer", () => {
     assert.ok(projectMount);
     assert.ok(taskHomeMount);
     assert.ok(botifiedMount);
+    assert.equal(container.workingDir, "/workspace/task/home");
     assert.deepEqual(container.env, [
+      {
+        name: "HOME",
+        value: "/workspace/task/home"
+      },
       {
         name: "BOTIFIED_SERVICE_KEY",
         valueFrom: {
@@ -165,7 +170,8 @@ describe("sandbox manifest renderer", () => {
     assert.notEqual(taskHomeMount.readOnly, true);
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
     assert.notEqual(botifiedMount.readOnly, true);
-    assert.equal(executor.env.length, 0);
+    assert.equal(executor.workingDir, "/workspace/task/home");
+    assert.deepEqual(executor.env, [{ name: "HOME", value: "/workspace/task/home" }]);
     assert.equal(executor.securityContext.runAsUser, 10002);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/project" && mount.readOnly === true), true);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/home" && mount.readOnly !== true), true);
@@ -330,6 +336,7 @@ interface PodResource extends KubernetesResource {
     securityContext: { runAsNonRoot: boolean; runAsUser: number; runAsGroup: number; fsGroup: number };
     containers: Array<{
       name: string;
+      workingDir: string;
       resources: {
         requests: { cpu: string; memory: string };
         limits: { cpu: string; memory: string };
@@ -341,6 +348,8 @@ interface PodResource extends KubernetesResource {
         capabilities: { drop: string[] };
       };
       env: Array<{
+        name: string;
+        value?: string;
         valueFrom?: {
           secretKeyRef?: {
             name?: string;

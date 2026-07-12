@@ -869,8 +869,8 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+(?:\/(?:capabilities|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||
     /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||

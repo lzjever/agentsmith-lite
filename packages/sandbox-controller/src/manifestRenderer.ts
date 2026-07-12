@@ -136,6 +136,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "botified-server",
             image: input.image,
             imagePullPolicy: "IfNotPresent",
+            workingDir: "/workspace/task/home",
             command: ["botified", "serve", "--config", "/etc/botified/botified-config.yaml"],
             ports: [{ name: "http", containerPort: input.botifiedPort }],
             readinessProbe: {
@@ -145,6 +146,10 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               }
             },
             env: [
+              {
+                name: "HOME",
+                value: "/workspace/task/home"
+              },
               {
                 name: "BOTIFIED_SERVICE_KEY",
                 valueFrom: {
@@ -201,13 +206,19 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "bash-executor",
             image: input.image,
             imagePullPolicy: "IfNotPresent",
+            workingDir: "/workspace/task/home",
             command: ["bash-executor", "--listen", "127.0.0.1:3110"],
             readinessProbe: {
               exec: {
                 command: ["bash", "-c", "</dev/tcp/127.0.0.1/3110"]
               }
             },
-            env: [],
+            env: [
+              {
+                name: "HOME",
+                value: "/workspace/task/home"
+              }
+            ],
             resources: {
               requests: {
                 cpu: input.cpuRequest,

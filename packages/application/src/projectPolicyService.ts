@@ -138,7 +138,7 @@ export class ProjectPolicyService {
   }
   async markProviderUnknown(id: string): Promise<void> { await this.store.markProjectProviderSettlementUnknown(id, nowIso()); }
   async failProvider(id: string): Promise<void> { await this.store.failProjectProviderSettlement(id, nowIso()); }
-  async expireProviderReservations(): Promise<void> { await this.store.expireReservedProjectProviderSettlements(nowIso()); await this.store.pruneProjectProviderSettlements(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString(), 100); }
+  async expireProviderReservations(): Promise<void> { await this.store.expireProjectProviderSettlements(nowIso()); await this.store.pruneProjectProviderSettlements(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString(), 100); }
   async authorizeFileBytes(projectId: string, actorId: string | null, _resourceId: string, delta: number): Promise<void> { if (delta > 0) await this.check(projectId, actorId, "file.quota", null, { projectFileBytes: delta }, "project_file_bytes_limit"); }
   async recordFileBytes(projectId: string, actorId: string | null, resourceId: string, delta: number): Promise<void> {
     const adjusted = await this.store.adjustProjectResourceUsage({

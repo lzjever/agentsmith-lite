@@ -122,17 +122,28 @@ describe("project resource policy", () => {
     const providerAudit=(await services.policies.audit(user.id,project.id)).filter(event=>event.action==="provider.request");assert.equal(providerAudit.filter(event=>event.status==="rejected").length,1);assert.ok(providerAudit.filter(event=>event.status==="accepted").length>=1);
   });
 
-  it("releases only an expired, never-dispatched provider reservation", async () => {
+  it("expires stale provider reservations with conservative request accounting", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-provider-expiry", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    const id = await services.policies.reserveProvider(project.id, user.id, "endpoint");
-    await store.expireReservedProjectProviderSettlements("9999-01-01T00:00:00.000Z");
+    const reserved = await services.policies.reserveProvider(project.id, user.id, "endpoint");
+    const dispatched = await services.policies.reserveProvider(project.id, user.id, "endpoint");
+    await services.policies.markProviderDispatched(dispatched);
+    const delivered = await services.policies.reserveProvider(project.id, user.id, "endpoint");
+    await services.policies.markProviderDispatched(delivered);
+    await services.policies.markProviderDelivered(delivered);
+    const settled = await services.policies.reserveProvider(project.id, user.id, "endpoint");
+    await services.policies.markProviderDispatched(settled);
+    await services.policies.markProviderDelivered(settled);
+    await services.policies.settleProvider(settled, { tokens: 3, cost: 0.25 });
+    await store.expireProjectProviderSettlements("9999-01-01T00:00:00.000Z");
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.equal(current.providerRequests, 0);
-    await assert.rejects(() => services.policies.markProviderDispatched(id), /Provider settlement not found/);
+    assert.deepEqual({ requests: current.providerRequests, tokens: current.providerTokens, cost: current.providerCost }, { requests: 3, tokens: 3, cost: 0.25 });
+    await assert.rejects(() => services.policies.markProviderDispatched(reserved), /Provider settlement not found/);
+    assert.equal(await store.settleProjectProviderSettlement(dispatched, { tokens: 1, cost: 1 }, "9999-01-01T00:00:01.000Z"), null);
+    assert.equal(await store.settleProjectProviderSettlement(delivered, { tokens: 1, cost: 1 }, "9999-01-01T00:00:01.000Z"), null);
   });
 
   it("settles provider usage exactly once and leaves delivered requests without usage unknown", async () => {

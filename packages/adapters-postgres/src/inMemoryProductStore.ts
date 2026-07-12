@@ -353,7 +353,7 @@ export class InMemoryProductStore implements ProductStore {
     const usage = this.usage.get(settlement.projectId); if (usage) this.usage.set(settlement.projectId, { ...usage, providerRequests: settlement.status === "reserved" ? Math.max(0, usage.providerRequests - 1) : usage.providerRequests, providerTokens: Math.max(0, usage.providerTokens - settlement.reservedTokens), providerCost: Math.max(0, usage.providerCost - settlement.reservedCost), updatedAt });
     const updated = { ...settlement, status: "failed" as const, updatedAt }; this.providerSettlements.set(id, clone(updated)); return clone(updated);
   }
-  async expireReservedProjectProviderSettlements(now: string): Promise<number> { let count = 0; for (const value of this.providerSettlements.values()) if (value.status === "reserved" && value.expiresAt <= now) { await this.failProjectProviderSettlement(value.id, now); count += 1; } return count; }
+  async expireProjectProviderSettlements(now: string): Promise<number> { let count = 0; for (const value of this.providerSettlements.values()) if (["reserved", "dispatched", "delivered"].includes(value.status) && value.expiresAt <= now) { if (value.status === "reserved") await this.failProjectProviderSettlement(value.id, now); else await this.markProjectProviderSettlementUnknown(value.id, now); count += 1; } return count; }
   async pruneProjectProviderSettlements(before: string, limit: number): Promise<number> { let count = 0; for (const [id, value] of this.providerSettlements) if (count < limit && value.updatedAt < before && ["settled", "unknown", "failed"].includes(value.status)) { this.providerSettlements.delete(id); count += 1; } return count; }
   async listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]> { return [...this.providerSettlements.values()].filter((value) => value.projectId === projectId && value.status === "settled" && value.settledAt !== null && value.settledAt >= since && (endpointId === undefined || value.endpointId === endpointId)).sort((left, right) => left.settledAt!.localeCompare(right.settledAt!)).map(clone); }
   async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlert["type"]; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
@@ -383,14 +383,15 @@ export class InMemoryProductStore implements ProductStore {
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }
   async findProjectCredential(id:string): Promise<StoredProjectCredential | null> { return clone(this.credentials.get(id) ?? null); }
   async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
-  async updateProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential | null> { if(!this.credentials.has(v.id))return null; this.credentials.set(v.id,clone(v)); return publicCredential(v); }
+  async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v)); return publicCredential(v); }
   async deleteProjectCredential(id:string): Promise<boolean> { return this.credentials.delete(id); }
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { return []; }
-  async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); if(!endpoint) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
+  async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); const credential=this.credentials.get(credentialId); if(!endpoint||endpoint.credentialId||!credential||credential.projectId!==endpoint.projectId) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
   async createProjectContextEntry(v:ProjectContextEntry){this.contexts.set(v.id,clone(v));return clone(v)} async updateProjectContextEntry(v:ProjectContextEntry,expectedVersion:number){const current=this.contexts.get(v.id);if(!current||current.version!==expectedVersion)return null;this.contexts.set(v.id,clone(v));return clone(v)} async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null){return [...this.contexts.values()].filter(v=>v.workspaceId===workspaceId&&v.projectId===projectId&&v.scope===scope&&v.ownerUserId===ownerUserId).map(clone)} async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId)return false;return this.contexts.delete(v.id)}
   async createProjectAlertRule(v:ProjectAlertRule){this.alertRules.set(v.id,clone(v));return clone(v)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId)return null;this.alertRules.set(v.id,clone(v));return clone(v)} async deleteProjectAlertRule(projectId:string,id:string){const current=this.alertRules.get(id);if(!current||current.projectId!==projectId)return false;return this.alertRules.delete(id)}
 
   async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
+    this.requireEndpointCredentialProject(endpoint);
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
   }
@@ -399,8 +400,15 @@ export class InMemoryProductStore implements ProductStore {
     if (!this.endpoints.has(endpoint.id)) {
       return null;
     }
+    this.requireEndpointCredentialProject(endpoint);
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
+  }
+
+  private requireEndpointCredentialProject(endpoint: ModelEndpoint): void {
+    if (!endpoint.credentialId) return;
+    const credential = this.credentials.get(endpoint.credentialId);
+    if (!credential || credential.projectId !== endpoint.projectId) throw new Error("Endpoint credential must belong to the same project");
   }
 
   async deleteEndpoint(id: string): Promise<DeleteEndpointResult> {

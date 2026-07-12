@@ -13,7 +13,7 @@ postgresDescribe("postgres migrations", () => {
     await client.connect();
     try {
       const expected = await readPostgresMigrations();
-      assert.equal(expected.at(-1)?.id, "044_endpoint_deletion_boundaries");
+      assert.equal(expected.at(-1)?.id, "045_project_credential_binding_correctness");
       const ledger = await client.query<{ id: string; checksum: string }>(
         "select id, checksum from agentsmith_migrations order by id"
       );
@@ -267,7 +267,7 @@ postgresDescribe("postgres migrations", () => {
     try {
       const migrations = await readPostgresMigrations();
       const endpointDeletion = migrations.findIndex((migration) => migration.id === "044_endpoint_deletion_boundaries");
-      assert.equal(endpointDeletion, migrations.length - 1);
+      assert.ok(endpointDeletion >= 0);
       const schema = `migration_endpoint_delete_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       await client.query("begin");
       await client.query(`create schema ${quoteIdentifier(schema)}`);

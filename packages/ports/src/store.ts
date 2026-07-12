@@ -243,7 +243,7 @@ export interface ProductStore {
   settleProjectProviderSettlement(id: string, usage: ProviderUsage | undefined, updatedAt: string): Promise<ProjectProviderUsageSettlement | null>;
   markProjectProviderSettlementUnknown(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null>;
   failProjectProviderSettlement(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null>;
-  expireReservedProjectProviderSettlements(now: string): Promise<number>;
+  expireProjectProviderSettlements(now: string): Promise<number>;
   pruneProjectProviderSettlements(before: string, limit: number): Promise<number>;
   listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]>;
   measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlert["type"];metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
@@ -260,7 +260,7 @@ export interface ProductStore {
   createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential>;
   findProjectCredential(id: string): Promise<StoredProjectCredential | null>;
   listProjectCredentials(projectId: string): Promise<ProjectCredential[]>;
-  updateProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential | null>;
+  updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict">;
   deleteProjectCredential(id: string): Promise<boolean>;
   listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>>;
   bindEndpointCredential(endpointId: string, credentialId: string): Promise<boolean>;
