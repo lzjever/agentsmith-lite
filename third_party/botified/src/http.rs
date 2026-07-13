@@ -17,9 +17,11 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::stream;
+use futures_util::{stream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 
 use crate::agent_loop::InputUrgency;
 use crate::attachments::{parse_user_input, AttachmentError, ParsedUserInput, PublicInputItem};
@@ -193,6 +195,7 @@ fn build_router(state: HttpState, max_upload_request_bytes: u64) -> Router {
         .route("/v1/timeline", get(timeline_handler))
         .route("/v1/llm-text-preview", get(llm_text_preview_handler))
         .route("/v1/abort", post(abort_handler));
+    router = router.route("/v1/terminal/ws", get(terminal_ws_handler));
 
     if registry_enabled {
         router = router
@@ -203,6 +206,57 @@ fn build_router(state: HttpState, max_upload_request_bytes: u64) -> Router {
     }
 
     router.with_state(state)
+}
+
+async fn terminal_ws_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    authorize(&headers, state.service_key.as_deref())?;
+    Ok(ws.on_upgrade(terminal_websocket).into_response())
+}
+
+async fn terminal_websocket(socket: WebSocket) {
+    let executor = match TcpStream::connect("127.0.0.1:3110").await {
+        Ok(stream) => stream,
+        Err(_) => {
+            let (mut sender, _) = socket.split();
+            let _ = sender.send(WsMessage::Text(json!({"op":"error","message":"Task terminal is unavailable"}).to_string())).await;
+            return;
+        }
+    };
+    let (executor_reader, mut executor_writer) = executor.into_split();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/workspace/task/home".to_owned());
+    let execute = json!({"op":"execute","command":"exec bash -il","cwd":home,"interactive_stdio":true}).to_string();
+    if executor_writer.write_all(execute.as_bytes()).await.is_err() || executor_writer.write_all(b"\n").await.is_err() {
+        return;
+    }
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    if ws_sender.send(WsMessage::Text(json!({"op":"ready"}).to_string())).await.is_err() {
+        return;
+    }
+    let output = async {
+        let mut lines = BufReader::new(executor_reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if ws_sender.send(WsMessage::Text(line)).await.is_err() { break; }
+        }
+    };
+    let input = async {
+        while let Some(Ok(message)) = ws_receiver.next().await {
+            match message {
+                WsMessage::Text(text) => {
+                    if executor_writer.write_all(text.as_bytes()).await.is_err() || executor_writer.write_all(b"\n").await.is_err() { break; }
+                }
+                WsMessage::Close(_) => {
+                    let _ = executor_writer.write_all(b"{\"op\":\"cancel\"}\n").await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    };
+    tokio::select! { _ = output => {}, _ = input => {} }
 }
 
 async fn healthz() -> Json<Value> {

@@ -289,7 +289,9 @@ function cleanupRunResources(
   cleanupReason: "phase" | "expired" | "idle_expired"
 ): SandboxReconcileAction[] {
   const actions: SandboxReconcileAction[] = [];
-  const observed = observedCoreResourcesForRun(run, observedResources);
+  const observed = observedCoreResourcesForRun(run, observedResources).filter((resource) =>
+    resource.kind === "Pod" || typeof resource.metadata.deletionTimestamp !== "string"
+  );
   if (observed.length === 0) {
     actions.push({
       type: "store_run_state",

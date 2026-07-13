@@ -5,10 +5,10 @@ import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { projectBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
 import { isSecretLikeText, redactSecretLikeText } from "../../botified-runtime/src/redaction.js";
-import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, AgentTaskStatus, CreateTaskInput, KubernetesResource, ModelEndpoint, TaskFollowUp, TaskListPage, TaskListQuery, TaskSummary, TaskTerminalReason, TaskTranscriptEntry, TaskTranscriptPage } from "../../contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, AgentTaskStatus, CreateTaskInput, KubernetesResource, ModelEndpoint, TaskFollowUp, TaskInputSnapshotEntry, TaskListPage, TaskListQuery, TaskSummary, TaskTerminalReason, TaskTranscriptEntry, TaskTranscriptPage } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT, MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
@@ -119,13 +119,24 @@ export interface TaskArtifactDownload {
   bytes: Buffer;
 }
 
+export interface TaskInputDownload {
+  input: TaskInputSnapshotEntry;
+  bytes: Buffer;
+}
+
+export interface TaskTerminalConnection {
+  baseUrl: string;
+  serviceKey: string;
+}
+
 const BOTIFIED_RUNNER_UID = 10001;
 const BOTIFIED_RUNNER_GID = 10001;
 const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
-const API_OWNED_ARTIFACT_DIRECTORY_MODE = 0o755;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
+const BOTIFIED_ARTIFACT_PATH = "/workspace/task/artifacts";
+const MAX_TASK_ARTIFACT_FILES = 128;
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
@@ -382,6 +393,49 @@ export class TaskService {
     const summary = await this.store.findTaskSummary(taskId);
     if (!summary) throw new ProductError("Task not found", 404);
     return summary;
+  }
+
+  async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
+    const task=await this.requireTaskForUser(userId,taskId,"write");
+    if(task.executionMode!=="live"||!isActiveTaskStatus(task.status))throw new ProductError("Task terminal is available while the sandbox is running",409);
+    const serviceKey=this.serviceKeyForTask(task);
+    const state=await this.readRuntimeState(task,serviceKey);
+    return{baseUrl:state.baseUrl,serviceKey};
+  }
+
+  async listTaskInputs(userId: string, taskId: string): Promise<TaskInputSnapshotEntry[]> {
+    const task = await this.requireTaskForUser(userId, taskId, "view");
+    if (task.executionMode !== "live") return [];
+    const manifest = await this.readTaskInputManifest(task);
+    return manifest.map((entry) => ({
+      path: entry.path,
+      name: path.posix.basename(entry.path),
+      bytes: entry.size,
+      sha256: entry.digest.replace(/^sha256:/, "")
+    }));
+  }
+
+  async downloadTaskInput(userId: string, taskId: string, inputPath: string): Promise<TaskInputDownload> {
+    const task = await this.requireTaskForUser(userId, taskId, "view");
+    const normalized = normalizeTaskInputPaths([inputPath])[0];
+    if (!normalized) throw new ProductError("Task input path is required", 400);
+    const manifest = await this.readTaskInputManifest(task);
+    const entry = manifest.find((candidate) => candidate.path === normalized);
+    if (!entry) throw new ProductError("Task input not found", 404);
+    const project = await this.store.findProject(task.projectId);
+    if (!project) throw new ProductError("Task project not found", 409);
+    const snapshotRoot = path.resolve(this.config.dataRoot, project.rootPath, "tasks", task.id, "inputs");
+    const filePath = path.resolve(snapshotRoot, ...entry.path.split("/"));
+    assertPathInside(snapshotRoot, filePath, "Task input path is outside the snapshot");
+    try {
+      return {
+        input: { path: entry.path, name: path.posix.basename(entry.path), bytes: entry.size, sha256: entry.digest.replace(/^sha256:/, "") },
+        bytes: await readRegularFileWithoutFollowingSymlink(filePath)
+      };
+    } catch (error) {
+      if (isNotFound(error)) throw new ProductError("Task input file not found", 404);
+      throw error;
+    }
   }
 
   async listTaskFollowUps(userId: string, taskId: string): Promise<TaskFollowUp[]> {
@@ -643,6 +697,7 @@ export class TaskService {
         else throw new ProductError("Task start delivery reconciliation is still uncertain",502);
       }
       if(delivered?.startIntentStatus==="dispatched")await this.syncTaskTimeline(delivered,{updateRunLifecycle:false,preserveTerminalStatus:true});
+      await this.projectSandboxArtifactFiles(claimed);
       if(claimed.terminalReason==="failed")await this.policies.evaluateTaskFailure(claimed.projectId,claimed.endpointId);
       if(!await this.store.completeTaskArtifactProjection({id:task.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task artifact drain fence changed",409);
     }catch(error){await this.store.failTaskArtifactProjection({id:task.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
@@ -654,17 +709,25 @@ export class TaskService {
       if(claimed.executionMode==="live"){
         await requestSandboxRunCleanup(this.store,claimed.runId,{phase:cleanupPhaseForTaskStatus(claimed.status),cleanupStatus:"cleanup_requested"});
         if(!this.config.sandboxLifecycle)throw new ProductError("Sandbox lifecycle service is not configured",500);
-        const cleanup=await this.config.sandboxLifecycle.reapSandboxRunsOnce({runId:claimed.runId,apply:true});
-        const run=await this.store.sandboxRuns.get(claimed.runId);
-        const resourcesRemain=Object.values(cleanup.observedResourceCounts).some((count)=>count>0);
-        if(cleanup.errors.length>0||resourcesRemain||(run&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"))throw new ProductError("Sandbox cleanup is still pending",409);
+        let cleanupComplete=false;
+        let cleanupError=false;
+        for(let attempt=0;attempt<30;attempt+=1){
+          const cleanup=await this.config.sandboxLifecycle.reapSandboxRunsOnce({runId:claimed.runId,apply:true});
+          cleanupError=cleanup.errors.length>0;
+          const run=await this.store.sandboxRuns.get(claimed.runId);
+          const resourcesRemain=Object.values(cleanup.observedResourceCounts).some((count)=>count>0);
+          cleanupComplete=!resourcesRemain&&(!run||run.cleanupStatus==="cleaned"||run.phase==="cleaned");
+          if(cleanupComplete)break;
+          await new Promise((resolve)=>setTimeout(resolve,500));
+        }
+        if(!cleanupComplete)throw new ProductError(cleanupError?"Sandbox cleanup failed":"Sandbox cleanup is still pending",409);
         await this.removeTransientTaskRuntime(claimed);
       }
       if(!await this.store.completeTaskCleanup({id:claimed.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task cleanup fence changed",409);
     }catch(error){await this.store.failTaskCleanup({id:claimed.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
   }
 
-  private async removeTransientTaskRuntime(task:AgentTask):Promise<void>{const project=await this.store.findProject(task.projectId);if(!project)return;const root=path.resolve(this.config.dataRoot,project.rootPath,"tasks",task.id);const dataRoot=path.resolve(this.config.dataRoot);assertPathInside(dataRoot,root,"Task runtime directory is outside the data root");for(const name of ["inputs","home","botified"])await rm(path.resolve(root,name),{recursive:true,force:true});}
+  private async removeTransientTaskRuntime(task:AgentTask):Promise<void>{const project=await this.store.findProject(task.projectId);if(!project)return;const root=path.resolve(this.config.dataRoot,project.rootPath,"tasks",task.id);const dataRoot=path.resolve(this.config.dataRoot);assertPathInside(dataRoot,root,"Task runtime directory is outside the data root");for(const name of ["home","botified"])await rm(path.resolve(root,name),{recursive:true,force:true});}
 
   private deliveryLeaseMs():number{return resolveDurationMs(this.config.deliveryLeaseMs,DEFAULT_DELIVERY_LEASE_MS);}
   private maintenanceLeaseMs():number{return resolveDurationMs(this.config.maintenanceLeaseMs,DEFAULT_MAINTENANCE_LEASE_MS);}
@@ -729,7 +792,7 @@ export class TaskService {
       projectMountPath,
       taskHomePath: path.posix.join(taskBase, "home"),
       botifiedDataPath: path.posix.join(taskBase, "botified"),
-      artifactPath: path.posix.join(taskBase, "artifacts")
+      artifactPath: BOTIFIED_ARTIFACT_PATH
     };
   }
 
@@ -784,7 +847,7 @@ export class TaskService {
     if (!task || task.runId !== run.runId) {
       return;
     }
-    if (task.cleanupStatus === "completed" || task.status === "cleaned" || task.status === "stopping") {
+    if (task.artifactProjectionStatus === "drained" || task.cleanupStatus === "completed" || task.status === "cleaned" || task.status === "stopping") {
       return;
     }
     await this.syncTaskTimeline(task, {
@@ -834,7 +897,6 @@ export class TaskService {
     if (projection.events.length > 0) {
       await this.store.appendTaskEvents(projection.events);
     }
-
     const timelineCursor = safeRuntimeCursor(timeline.nextCursor);
     const projectionCursor = safeRuntimeCursor(projection.nextCursor);
     const resetStateCursor =
@@ -1082,10 +1144,55 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
+    const sandboxPath = artifact.fileId.startsWith("sandbox:") ? artifact.fileId.slice("sandbox:".length) : null;
     const filename = `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`;
-    const filePath = path.resolve(root, filename);
+    const filePath = sandboxPath ? path.resolve(root, ...sandboxPath.split("/")) : path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
     return { root, filePath };
+  }
+
+  private async projectSandboxArtifactFiles(task: AgentTask): Promise<void> {
+    const project = await this.store.findProject(task.projectId);
+    if (!project) throw new ProductError("Task project not found", 409);
+    const dataRoot = path.resolve(this.config.dataRoot);
+    const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
+    assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
+    const existing = await this.store.listTaskArtifacts(task.id);
+    const existingFileIds = new Set(existing.map((artifact) => artifact.fileId));
+    const productStoredNames = new Set(existing.filter((artifact) => !artifact.fileId.startsWith("sandbox:")).map((artifact) => `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`));
+    const files = await listRegularArtifactFiles(root, MAX_TASK_ARTIFACT_FILES);
+    for (const relativePath of files) {
+      if (productStoredNames.has(relativePath)) continue;
+      const fileId = `sandbox:${relativePath}`;
+      if (existingFileIds.has(fileId)) continue;
+      const filePath = path.resolve(root, ...relativePath.split("/"));
+      assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
+      const bytes = await readRegularFileWithoutFollowingSymlink(filePath);
+      if (bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) throw new ProductError("Task artifact exceeds the maximum file size", 409);
+      const artifact: AgentTaskArtifact = {
+        id: newId("art"),
+        taskId: task.id,
+        fileId,
+        name: normalizeArtifactDisplayName(relativePath, "artifact"),
+        bytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        ...artifactPreview(bytes, relativePath),
+        createdAt: nowIso()
+      };
+      const persisted = await this.store.persistTaskArtifactProjection({
+        projectId: task.projectId,
+        artifact,
+        auditEvent: { id: `audit_artifact_${artifact.id}`, projectId: task.projectId, actorId: null, action: "artifact.project", status: "accepted", resourceKind: "artifact", resourceId: artifact.id, createdAt: nowIso() },
+        updatedAt: nowIso()
+      });
+      if (persisted === "limit_exceeded") {
+        await rm(filePath, { force: true });
+        await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
+        await this.policies.recordOperation(task.projectId, null, "file.quota", "rejected", artifact.id, "file_quota");
+        throw new ProductError("Project project file bytes limit reached", 409);
+      }
+      existingFileIds.add(fileId);
+    }
   }
 
   async authorizeBotifiedChatCompletion(taskId: string, runId: string, serviceKey: string): Promise<AuthorizedBotifiedChatCompletion> {
@@ -1200,17 +1307,14 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
     assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
-    const runnerWritableDirectories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified")];
-    const apiOwnedDirectories = [path.resolve(taskRoot, "artifacts")];
-    for (const directory of [...runnerWritableDirectories, ...apiOwnedDirectories]) {
+    const runnerWritableDirectories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified"), path.resolve(taskRoot, "artifacts")];
+    for (const directory of runnerWritableDirectories) {
       assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
     }
     for (const directory of runnerWritableDirectories) {
       await prepareRunnerWritableDirectory(directory);
     }
-    for (const directory of apiOwnedDirectories) {
-      await prepareApiOwnedArtifactDirectory(directory);
-    }
+    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`, { mode: 0o664 });
   }
 
   private async snapshotProjectInputs(projectRootPath: string, taskId: string, inputPaths: string[]): Promise<void> {
@@ -1241,6 +1345,32 @@ export class TaskService {
         await rm(temporaryRoot, { recursive: true, force: true });
         throw error;
       }
+    });
+  }
+
+  private async readTaskInputManifest(task: AgentTask): Promise<TaskInputManifestEntry[]> {
+    const project = await this.store.findProject(task.projectId);
+    if (!project) throw new ProductError("Task project not found", 409);
+    const dataRoot = path.resolve(this.config.dataRoot);
+    const manifestPath = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "inputs", "manifest.json");
+    assertPathInside(dataRoot, manifestPath, "Task input manifest is outside the data root");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(manifestPath, "utf8"));
+    } catch (error) {
+      if (isNotFound(error)) return [];
+      throw new ProductError("Task input manifest is unavailable", 500);
+    }
+    if (!isUnknownRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.files)) {
+      throw new ProductError("Task input manifest is invalid", 500);
+    }
+    return parsed.files.map((value) => {
+      if (!isUnknownRecord(value) || typeof value.path !== "string" || typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size < 0 || typeof value.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.digest)) {
+        throw new ProductError("Task input manifest is invalid", 500);
+      }
+      const normalized = normalizeTaskInputPaths([value.path])[0];
+      if (normalized !== value.path) throw new ProductError("Task input manifest is invalid", 500);
+      return { path: value.path, size: value.size, digest: value.digest };
     });
   }
 
@@ -1530,6 +1660,33 @@ async function readRegularFileWithoutFollowingSymlink(source: string): Promise<B
   } finally {
     await handle.close();
   }
+}
+
+async function listRegularArtifactFiles(root: string, limit: number): Promise<string[]> {
+  const files: string[] = [];
+  const pending = [""];
+  while (pending.length > 0) {
+    const relativeDirectory = pending.shift()!;
+    const directory = relativeDirectory ? path.resolve(root, ...relativeDirectory.split("/")) : root;
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (isNotFound(error)) continue;
+      throw error;
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (entry.isSymbolicLink()) continue;
+      const relativePath = relativeDirectory ? path.posix.join(relativeDirectory, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        pending.push(relativePath);
+      } else if (entry.isFile()) {
+        files.push(relativePath);
+        if (files.length > limit) throw new ProductError(`Task artifacts may contain at most ${limit} files`, 409);
+      }
+    }
+  }
+  return files;
 }
 
 function createBotifiedServiceKey(secret: string | undefined, input: BotifiedServiceKeyInput): string {
@@ -1822,11 +1979,6 @@ async function prepareRunnerWritableDirectory(directory: string): Promise<void> 
   await mkdir(directory, { recursive: true, mode: BOTIFIED_RUNNER_DIRECTORY_MODE });
   const chowned = await tryChownForRunner(directory);
   await chmod(directory, chowned ? BOTIFIED_RUNNER_DIRECTORY_MODE : BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE);
-}
-
-async function prepareApiOwnedArtifactDirectory(directory: string): Promise<void> {
-  await mkdir(directory, { recursive: true, mode: API_OWNED_ARTIFACT_DIRECTORY_MODE });
-  await chmod(directory, API_OWNED_ARTIFACT_DIRECTORY_MODE);
 }
 
 async function tryChownForRunner(directory: string): Promise<boolean> {

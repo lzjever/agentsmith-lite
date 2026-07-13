@@ -870,12 +870,12 @@ mod tests {
         let provider = Arc::new(DevelopmentMockProvider) as Arc<dyn Provider>;
         let enabled = RuntimeConfig::example().tools.enabled;
         let tools =
-            build_tools(&enabled, provider.clone()).expect("default example tools should build");
+            build_tools(&enabled, provider.clone(), "127.0.0.1:3110").expect("default example tools should build");
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].spec().name, "bash");
         assert_eq!(tools[1].spec().name, "view_image");
 
-        let tools = build_tools(&[], provider).expect("empty tool config should build");
+        let tools = build_tools(&[], provider, "127.0.0.1:3110").expect("empty tool config should build");
         assert!(tools.is_empty());
     }
 

@@ -65,6 +65,16 @@ describe("task lifecycle API routes", () => {
     }
   });
 
+  it("stores HTTP URL inputs in the fixed project files tree",async()=>{
+    const note=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"});
+    assert.match(note.path,/^files\/url-inputs\/docs\.example\.test-[a-f0-9-]+\.md$/);
+    const download=await request("GET",`/api/v1/projects/${projectId}/files/download?path=${encodeURIComponent(note.path)}`);
+    assert.equal(download.status,200);
+    assert.equal(await download.text(),"# URL input\n\nhttps://docs.example.test/guide?q=task\n");
+    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"file:///etc/passwd"})).status,400);
+    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://user:secret@example.test/"})).status,400);
+  });
+
   it("searches, filters, sorts, paginates, edits, archives, retries, duplicates, and deletes", async () => {
     const alpha = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "alpha body", title: "Alpha" }, "create-alpha");
     const beta = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "beta body", title: "Beta" }, "create-beta");

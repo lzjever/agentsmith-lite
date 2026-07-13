@@ -195,6 +195,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 subPath: `${taskSubPath}/botified`
               },
               {
+                name: "project-files",
+                mountPath: "/workspace/task/artifacts",
+                subPath: `${taskSubPath}/artifacts`
+              },
+              {
                 name: "botified-config",
                 mountPath: "/etc/botified",
                 readOnly: true
@@ -249,6 +254,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 name: "project-files",
                 mountPath: "/workspace/task/home",
                 subPath: `${taskSubPath}/home`
+              },
+              {
+                name: "project-files",
+                mountPath: "/workspace/task/artifacts",
+                subPath: `${taskSubPath}/artifacts`
               }
             ]
           }

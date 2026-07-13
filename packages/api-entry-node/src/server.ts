@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
@@ -21,6 +21,7 @@ import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import type { AuthMode } from "./runtimeConfig.js";
 import type { OidcClientAdapter } from "./oidcClient.js";
+import { WebSocket, WebSocketServer } from "ws";
 
 export interface ApiServerOptions {
   port: number;
@@ -133,6 +134,29 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
     } catch (error) {
       handleError(res, error);
     }
+  });
+  const terminalSockets=new WebSocketServer({noServer:true});
+  server.on("upgrade",(req,socket,head)=>{
+    void (async()=>{
+      try{
+        const requestUrl=new URL(req.url??"/","http://localhost");
+        const routed=routeUrlForAppBasePath(requestUrl,appBasePath);
+        const match=routed?.pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/terminal\/ws$/);
+        if(!match)throw new ProductError("Route not found",404);
+        if(options.publicBaseUrl&&req.headers.origin&&new URL(req.headers.origin).origin!==new URL(options.publicBaseUrl).origin)throw new ProductError("Terminal origin is not allowed",403);
+        const principal=await services.auth.requireSessionPrincipal(getCookie(req,"asl_session"));
+        const target=await services.tasks.openTaskTerminal(principal.user.id,decodeURIComponent(match[1]!));
+        terminalSockets.handleUpgrade(req,socket,head,(client)=>{
+          const upstreamUrl=new URL("/v1/terminal/ws",target.baseUrl.replace(/^http/,"ws"));
+          const upstream=new WebSocket(upstreamUrl,{headers:{authorization:`Bearer ${target.serviceKey}`}});
+          upstream.on("message",(data,isBinary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
+          client.on("message",(data,isBinary)=>{if(upstream.readyState===WebSocket.OPEN)upstream.send(data,{binary:isBinary});});
+          upstream.on("close",()=>client.close());
+          client.on("close",()=>upstream.close());
+          upstream.on("error",()=>{if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
+        });
+      }catch{socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");socket.destroy();}
+    })();
   });
 
   await new Promise<void>((resolve) => server.listen({ port: options.port, host: options.host }, resolve));
@@ -476,6 +500,19 @@ async function routeApi(
     }
     if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
     if (segments[4] === "files") {
+      if (segments[5] === "url-note" && method === "POST") {
+        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
+        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+        const body = await readJson(req);
+        assertOnlyKeys(body,["url"]);
+        const inputUrl = normalizeTaskInputUrl(asString(body.url));
+        const host = inputUrl.hostname.toLowerCase().replace(/[^a-z0-9.-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,80) || "link";
+        const filePath = `files/url-inputs/${host}-${randomUUID()}.md`;
+        const bytes = Buffer.from(`# URL input\n\n${inputUrl.href}\n`,"utf8");
+        const written = await services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
+        await services.policies.recordOperation(projectId,user.id,"file.upload","accepted",written.path,"file",{filePath:written.path,bytes:written.bytes,mediaType:written.mediaType});
+        return sendJson(res,200,written);
+      }
       if (!segments[5] && method === "GET") {
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
@@ -543,6 +580,8 @@ async function routeApi(
     if (!segments[4] && method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
     if (!segments[4] && method === "DELETE") return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));
     if (segments[4] === "summary" && method === "GET") return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId));
+    if (segments[4] === "inputs" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.listTaskInputs(user.id,taskId));
+    if (segments[4] === "inputs" && segments[5] === "download" && method === "GET") return sendTaskInputDownload(res,await services.tasks.downloadTaskInput(user.id,taskId,requiredSearchParam(url,"path")));
     if (segments[4] === "follow-ups") {
       if(!segments[5]&&method==="GET")return sendJson(res,200,await services.tasks.listTaskFollowUps(user.id,taskId));
       if(!segments[5]&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["prompt"]);return sendJson(res,200,await services.tasks.followUpTask(user.id,taskId,asString(body.prompt),requireIdempotencyKey(req)));}
@@ -875,8 +914,8 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/files(?:\/download)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:events|artifacts|cancel|summary|retry|duplicate|archive|transcript(?:\/stream)?|follow-ups(?:\/[^/]+)?))?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/files(?:\/(?:download|url-note))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:events|artifacts|cancel|summary|inputs(?:\/download)?|retry|duplicate|archive|transcript(?:\/stream)?|follow-ups(?:\/[^/]+)?))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1033,6 +1072,16 @@ function sendArtifactDownload(
   res.end(download.bytes);
 }
 
+function sendTaskInputDownload(res: ServerResponse, download: Awaited<ReturnType<Services["tasks"]["downloadTaskInput"]>>): void {
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(download.bytes.byteLength),
+    "content-disposition": contentDispositionFilename(download.input.name),
+    "x-content-type-options": "nosniff"
+  });
+  res.end(download.bytes);
+}
+
 function sendProjectFileDownload(
   res: ServerResponse,
   download: Awaited<ReturnType<Services["files"]["downloadFile"]>>
@@ -1127,6 +1176,15 @@ function asString(value: unknown): string {
     throw new ProductError("Expected string field");
   }
   return value;
+}
+
+function normalizeTaskInputUrl(value:string):URL{
+  const trimmed=value.trim();
+  if(!trimmed||trimmed.length>2048)throw new ProductError("URL must be between 1 and 2048 characters",400);
+  let parsed:URL;try{parsed=new URL(trimmed);}catch{throw new ProductError("Enter a valid URL",400);}
+  if(parsed.protocol!=="http:"&&parsed.protocol!=="https:")throw new ProductError("Only HTTP and HTTPS URLs can be attached",400);
+  if(parsed.username||parsed.password)throw new ProductError("URL credentials are not allowed",400);
+  return parsed;
 }
 function asStringArray(value:unknown,field:string):string[]{if(!Array.isArray(value)||value.some((item)=>typeof item!=="string"))throw new ProductError(`${field} must be an array of strings`);return value;}
 function asPositiveQueryInteger(value:string,field:string):number{const parsed=Number(value);if(!Number.isInteger(parsed)||parsed<1)throw new ProductError(`${field} must be a positive integer`);return parsed;}

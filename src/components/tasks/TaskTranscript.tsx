@@ -4,6 +4,7 @@ import { CircleAlert, Loader2, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { apiClient, type TaskTranscriptEntry } from "../../lib/api/client";
 import { Button } from "../ui/button";
+import { Markdown } from "../ui/markdown";
 import { formatTaskDate } from "./task-ui";
 
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "recovered";
@@ -84,5 +85,7 @@ function ConnectionStatus({ state }: { state: ConnectionState }) {
 
 function TranscriptMessage({ entry }: { entry: TaskTranscriptEntry }) {
   const author = entry.role === "assistant" ? "Assistant" : entry.role === "user" ? "You" : entry.role === "tool" ? "Tool" : "System";
-  return <li className={`border-l-2 px-4 py-3 ${entry.role === "assistant" ? "border-accent bg-surface-low" : entry.role === "tool" ? "border-warning/60" : "border-border"}`}><div className="flex flex-wrap items-baseline justify-between gap-2"><p className="text-sm font-medium text-foreground">{author}</p><time className="font-mono text-[10px] text-tertiary">{formatTaskDate(entry.createdAt)}</time></div><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{entry.text}</p></li>;
+  const header = <div className="flex flex-wrap items-baseline justify-between gap-2"><p className="text-sm font-medium text-foreground">{author}</p><time className="font-mono text-[10px] text-tertiary">{formatTaskDate(entry.createdAt)}</time></div>;
+  if (entry.role === "tool") return <li className="border-l-2 border-warning/60 px-4 py-3"><details><summary className="cursor-pointer list-none">{header}<p className="mt-1 text-xs text-secondary">Tool output is available</p></summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-high p-3 text-xs text-secondary">{entry.text}</pre></details></li>;
+  return <li className={`border-l-2 px-4 py-3 ${entry.role === "assistant" ? "border-accent bg-surface-low" : "border-border"}`}>{header}<div className="mt-2"><Markdown content={entry.text} /></div></li>;
 }

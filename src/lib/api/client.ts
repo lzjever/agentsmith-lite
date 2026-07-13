@@ -52,6 +52,7 @@ export interface Task {
 export type TaskEventKind = "user_input" | "turn_started" | "turn_completed" | "turn_failed" | "assistant_message" | "tool_execution" | "artifact" | "runtime_error" | "diagnostic";
 export interface TaskEvent { id: string; taskId: string; kind: TaskEventKind; cursor: string; botifiedSeq: number; botifiedType: string; sessionId: string; payload: Record<string, unknown>; createdAt: string; }
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
+export interface TaskInput { path: string; name: string; bytes: number; sha256: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
 export type ChatRole = "system" | "user" | "assistant";
 export interface ChatMessage { role: ChatRole; content: string; }
@@ -259,6 +260,7 @@ export const apiClient = {
     if (!response.ok) throw new ApiError(response.status, (await response.text()) || response.statusText);
     return response.json() as Promise<{ path: string; bytes: number }>;
   },
+  createTaskUrlInput: (projectId:string,url:string) => json<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",{url}),
   deleteFile: (projectId: string, path: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/files`, "DELETE", { path }),
   fileDownloadUrl: (projectId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}`,
   tasks: (projectId: string, query: TaskListQuery = {}) => {
@@ -277,6 +279,12 @@ export const apiClient = {
   taskEvents: (taskId: string) => request<TaskEvent[]>(`/tasks/${encodeURIComponent(taskId)}/events`),
   task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
   taskSummary: (taskId: string) => request<TaskSummary>(`/tasks/${encodeURIComponent(taskId)}/summary`),
+  taskInputs: (taskId: string) => request<TaskInput[]>(`/tasks/${encodeURIComponent(taskId)}/inputs`),
+  taskInputDownloadUrl: (taskId: string, path: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/inputs/download?path=${encodeURIComponent(path)}`,
+  taskTerminalWebSocketUrl: (taskId:string) => {
+    const protocol=window.location.protocol==="https:"?"wss:":"ws:";
+    return `${protocol}//${window.location.host}${apiBasePath}/tasks/${encodeURIComponent(taskId)}/terminal/ws`;
+  },
   taskFollowUps: (taskId: string) => request<TaskFollowUp[]>(`/tasks/${encodeURIComponent(taskId)}/follow-ups`),
   followUpTask: (taskId: string, prompt: string, idempotencyKey: string) => jsonIdempotent<TaskFollowUp>(`/tasks/${encodeURIComponent(taskId)}/follow-ups`, "POST", idempotencyKey, { prompt }),
   updateTaskFollowUp: (taskId: string, followUpId: string, prompt: string, idempotencyKey: string) => jsonIdempotent<TaskFollowUp>(`/tasks/${encodeURIComponent(taskId)}/follow-ups/${encodeURIComponent(followUpId)}`, "PATCH", idempotencyKey, { prompt }),

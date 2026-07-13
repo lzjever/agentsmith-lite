@@ -2,13 +2,12 @@
 
 import { Bot, Check, Copy, GitBranch, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type { ChatMessage, ProjectChatMessage } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog,DialogContent,DialogFooter,DialogHeader } from "../ui/dialog";
 import { Label } from "../ui/label";
+import { Markdown } from "../ui/markdown";
 import { Textarea } from "../ui/textarea";
 import { toast } from "../ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider } from "../ui/tooltip";
@@ -29,5 +28,4 @@ function Message({message,disabled,onEdit,onDelete,onBranch,onRetry}:{message:Di
   return <article className={`group mb-5 flex ${message.role==="user"?"justify-end":"justify-start"}`}><div className={`relative max-w-[min(46rem,88%)] ${message.role==="user"?"bg-surface-low p-3":"border-l-2 border-accent pl-4"}`}><div className="mb-1 flex items-center gap-1"><p className="font-mono text-[10px] uppercase tracking-[0.1em] text-tertiary">{message.role==="assistant"?"Assistant":message.role}</p><Action label="Copy message" onClick={()=>void copy()}>{copied?<Check size={15}/>:<Copy size={15}/>}</Action>{onEdit?<Action label="Edit message" disabled={disabled} onClick={onEdit}><Pencil size={15}/></Action>:null}{onBranch&&message.deliveryStatus==="completed"?<Action label="Branch from message" disabled={disabled} onClick={onBranch}><GitBranch size={15}/></Action>:null}{onDelete?<Action label="Delete message" disabled={disabled} onClick={onDelete}><Trash2 size={15}/></Action>:null}</div><Markdown content={message.content}/>{message.deliveryStatus==="failed"||message.deliveryStatus==="stopped"?<div className="mt-2 flex items-center gap-2 text-xs text-error"><span>{message.deliveryStatus==="failed"?"Provider request failed.":"Generation stopped."}</span>{onRetry?<Button size="sm" variant="quiet" disabled={disabled} onClick={onRetry}><RefreshCw size={14}/>Retry</Button>:null}</div>:null}</div></article>;
 }
 function Action({label,onClick,disabled,children}:{label:string;onClick:()=>void;disabled?:boolean;children:React.ReactNode}){return <Tooltip.Root><Tooltip.Trigger asChild><button type="button" className="grid size-7 place-items-center text-tertiary opacity-0 transition-opacity hover:bg-hover hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40" aria-label={label} onClick={onClick} disabled={disabled}>{children}</button></Tooltip.Trigger><TooltipContent>{label}</TooltipContent></Tooltip.Root>;}
-function Markdown({content}:{content:string}){return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{p:({children})=><p className="mb-3 whitespace-pre-wrap text-sm leading-6 text-foreground last:mb-0">{children}</p>,a:({children,href})=><a href={href} className="text-accent underline underline-offset-2" target="_blank" rel="noreferrer">{children}</a>,ul:({children})=><ul className="mb-3 list-disc space-y-1 pl-5 text-sm leading-6 last:mb-0">{children}</ul>,ol:({children})=><ol className="mb-3 list-decimal space-y-1 pl-5 text-sm leading-6 last:mb-0">{children}</ol>,blockquote:({children})=><blockquote className="mb-3 border-l-2 border-border pl-3 text-sm text-secondary last:mb-0">{children}</blockquote>,pre:({children})=><pre className="mb-3 overflow-x-auto border border-border bg-surface-high p-3 text-xs leading-5 text-foreground last:mb-0">{children}</pre>,code:({className,children})=><code className={className?`font-mono ${className}`:"rounded-sm bg-surface-high px-1 py-0.5 font-mono text-[0.85em]"}>{children}</code>}}>{content}</ReactMarkdown>;}
 function Empty({title,detail}:{title:string;detail:string}){return <div className="grid min-h-72 place-items-center text-center"><div><Bot className="mx-auto size-7 text-icon-default"/><h2 className="type-title mt-3 text-foreground">{title}</h2><p className="mt-1 text-sm text-secondary">{detail}</p></div></div>;}

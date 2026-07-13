@@ -16,8 +16,9 @@ const dryRunTask: Task = {
 };
 
 const originalTranscriptStream = apiClient.streamTaskTranscript;
-beforeEach(() => { apiClient.streamTaskTranscript = async () => undefined; });
-afterEach(() => { cleanup(); apiClient.streamTaskTranscript = originalTranscriptStream; });
+const originalTaskInputs = apiClient.taskInputs;
+beforeEach(() => { apiClient.streamTaskTranscript = async () => undefined; apiClient.taskInputs = async () => []; });
+afterEach(() => { cleanup(); apiClient.streamTaskTranscript = originalTranscriptStream; apiClient.taskInputs = originalTaskInputs; });
 
 describe("task detail execution mode", () => {
   it("uses the server-projected dry-run mode rather than inferring from resources or activity", async () => {

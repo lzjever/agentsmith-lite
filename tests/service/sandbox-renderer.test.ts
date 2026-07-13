@@ -124,11 +124,13 @@ describe("sandbox manifest renderer", () => {
     const projectMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/project");
     const taskHomeMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
     const botifiedMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/botified");
+    const artifactMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/artifacts");
     assert.ok(container);
     assert.ok(executor);
     assert.ok(projectMount);
     assert.ok(taskHomeMount);
     assert.ok(botifiedMount);
+    assert.ok(artifactMount);
     assert.equal(container.workingDir, "/workspace/task/home");
     assert.deepEqual(container.env, [
       {
@@ -170,14 +172,16 @@ describe("sandbox manifest renderer", () => {
     assert.notEqual(taskHomeMount.readOnly, true);
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
     assert.notEqual(botifiedMount.readOnly, true);
+    assert.equal(artifactMount.subPath, "workspaces/w1/projects/p1/tasks/t1/artifacts");
+    assert.notEqual(artifactMount.readOnly, true);
     assert.equal(executor.workingDir, "/workspace/task/home");
     assert.deepEqual(executor.env, [{ name: "HOME", value: "/workspace/task/home" }]);
     assert.equal(executor.securityContext.runAsUser, 10002);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/project" && mount.readOnly === true), true);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/home" && mount.readOnly !== true), true);
+    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/artifacts" && mount.subPath === "workspaces/w1/projects/p1/tasks/t1/artifacts" && mount.readOnly !== true), true);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/botified"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
-    assert.equal(container.volumeMounts.some((mount) => mount.subPath?.endsWith("/artifacts")), false);
     assert.ok(service, "Service should be rendered");
     assert.deepEqual(service.spec.selector, pod?.metadata.labels);
     assert.deepEqual(service.spec.ports, [{ name: "http", port: 3099, targetPort: "http" }]);

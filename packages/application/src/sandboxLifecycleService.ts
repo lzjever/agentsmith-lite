@@ -30,8 +30,8 @@ export type SandboxLifecycleKubernetesPort = SandboxKubernetesMutationPort & San
 export const DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
-const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
-const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS = 200;
+const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 5;
+const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS = 100;
 const TERMINAL_FAILURE_TRANSITION_ATTEMPTS = 2;
 const MAX_TERMINAL_FAILURE_SYNC_ATTEMPTS = 3;
 
@@ -810,7 +810,7 @@ function runtimeDirectoryTargets(run: PersistedSandboxRunState, dataRoot?: strin
   return [
     runtimeDirectoryTarget(run, "home", paths.home, "delete", "cleanup_candidate"),
     runtimeDirectoryTarget(run, "botified", paths.botified, "delete", "cleanup_candidate"),
-    runtimeDirectoryTarget(run, "inputs", paths.inputs, "delete", "cleanup_candidate"),
+    runtimeDirectoryTarget(run, "inputs", paths.inputs, "retain", "durable"),
     runtimeDirectoryTarget(run, "artifacts", paths.artifacts, "retain", "durable")
   ];
 }
@@ -852,7 +852,7 @@ function runtimeDirectoryTarget(
     path: directoryPath,
     action,
     retention,
-    reason: action === "delete" ? "runtime_cleanup_candidate" : "durable_artifacts_retained"
+    reason: action === "delete" ? "runtime_cleanup_candidate" : "durable_task_data_retained"
   };
 }
 

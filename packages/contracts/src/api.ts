@@ -417,6 +417,12 @@ export interface AgentTaskArtifact {
   previewText?: string | null;
   createdAt: ISODateString;
 }
+export interface TaskInputSnapshotEntry {
+  path: string;
+  name: string;
+  bytes: number;
+  sha256: string;
+}
 export type TaskFollowUpDeliveryStatus = "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed";
 export interface TaskFollowUp {
   id: string;

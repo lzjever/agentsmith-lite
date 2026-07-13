@@ -108,8 +108,7 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(laterRun.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task2/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified"
     ]);
   });
 
@@ -420,8 +419,7 @@ describe("sandbox lifecycle service", () => {
     assert.equal(stored?.terminalFailure?.syncStatus, "synced");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
     assert.equal(
       port.deletedRefs.some((ref) => Object.values(otherRun.resourceNames).includes(ref.name)),
@@ -460,7 +458,7 @@ describe("sandbox lifecycle service", () => {
       [
         ["home", "delete"],
         ["botified", "delete"],
-        ["inputs", "delete"],
+        ["inputs", "retain"],
         ["artifacts", "retain"]
       ]
     );
@@ -526,8 +524,7 @@ describe("sandbox lifecycle service", () => {
     ]);
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
     const saved = await store.sandboxRuns.get(run.runId);
     assert.equal(saved?.phase, "cleaned");
@@ -569,8 +566,7 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
   });
 
@@ -735,8 +731,11 @@ describe("sandbox lifecycle service", () => {
 
     assert.deepEqual(result.errors, []);
     assert.equal(result.observedResourceCounts.Service, 1);
-    assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "deleting");
-    assert.deepEqual(cleaner.removedPaths, []);
+    assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
+    assert.deepEqual(cleaner.removedPaths, [
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
+    ]);
   });
 
   it("retries Service delete HTTP 400 confirmation until a fresh observe no longer sees the target", async () => {
@@ -780,18 +779,17 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
   });
 
-  it("uses the default delete error confirmation attempts through the 30th fresh observe", async () => {
+  it("uses the bounded default delete error confirmation attempts", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(asObservedActiveRun(run)).map(withUid);
     const afterPodDeleted = resources.filter((resource) => resource.kind !== "Pod");
-    const defaultConfirmAttempts = 30;
+    const defaultConfirmAttempts = 5;
     const port = new FakeLifecyclePort(resources, {
       deleteErrorAfterDelete: (ref) =>
         ref.kind === "Service"
@@ -824,8 +822,7 @@ describe("sandbox lifecycle service", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
     assert.deepEqual(cleaner.removedPaths, [
       "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/inputs"
+      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
     ]);
   });
 

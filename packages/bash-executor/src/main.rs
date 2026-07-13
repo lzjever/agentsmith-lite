@@ -2,12 +2,12 @@ use std::{
     env,
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    process::{Command, Stdio},
     sync::{mpsc, Arc, Mutex},
     thread,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 
 const OUTPUT_CHANNEL_CAPACITY: usize = 16;
@@ -26,6 +26,10 @@ struct ControlRequest {
     op: String,
     #[serde(default)]
     data: Option<String>,
+    #[serde(default)]
+    rows: Option<u16>,
+    #[serde(default)]
+    cols: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -48,6 +52,7 @@ struct ErrorEvent<'a> {
 
 enum Control {
     Stdin(Vec<u8>),
+    Resize { rows: u16, cols: u16 },
     Cancel,
     Disconnected,
 }
@@ -103,23 +108,28 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
     let (control_tx, control_rx) = mpsc::channel();
     thread::spawn(move || read_controls(reader, control_tx));
 
-    let mut child = Command::new("bash");
-    child.arg("-lc").arg(format!("exec 2>&1\n{}", request.command)).current_dir(request.cwd)
-        .stdin(if request.interactive_stdio { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).env_clear();
-    #[cfg(unix)]
-    { use std::os::unix::process::CommandExt; child.process_group(0); }
-    for (key, value) in env::vars_os() {
-        if key == "PATH" || key == "HOME" || key == "TERM" || key == "LANG" || key == "LC_ALL" { child.env(key, value); }
-    }
-    let mut child = match child.spawn() {
-        Ok(child) => child,
-        Err(error) => { write_event(&writer, &ErrorEvent { op: "error", message: "failed to spawn bash" })?; return Err(error); }
+    let pty = native_pty_system();
+    let pair = match pty.openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }) {
+        Ok(pair) => pair,
+        Err(error) => { write_event(&writer, &ErrorEvent { op: "error", message: "failed to allocate terminal" })?; return Err(io::Error::other(error)); }
     };
-    let stdin = child.stdin.take().map(Mutex::new);
+    let mut command = CommandBuilder::new("bash");
+    command.arg("-lc");
+    command.arg(request.command);
+    command.cwd(request.cwd);
+    command.env_clear();
+    for (key, value) in env::vars_os() {
+        if key == "PATH" || key == "HOME" || key == "TERM" || key == "LANG" || key == "LC_ALL" { command.env(key, value); }
+    }
+    command.env("TERM", env::var_os("TERM").unwrap_or_else(|| "xterm-256color".into()));
+    let mut child = match pair.slave.spawn_command(command) {
+        Ok(child) => child,
+        Err(error) => { write_event(&writer, &ErrorEvent { op: "error", message: "failed to spawn bash" })?; return Err(io::Error::other(error)); }
+    };
+    drop(pair.slave);
+    let terminal_input = if request.interactive_stdio { Some(Mutex::new(pair.master.take_writer().map_err(io::Error::other)?)) } else { None };
     let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
-    if let Some(stdout) = child.stdout.take() { spawn_output_reader(stdout, output_tx.clone()); }
-    if let Some(stderr) = child.stderr.take() { spawn_output_reader(stderr, output_tx.clone()); }
+    spawn_output_reader(pair.master.try_clone_reader().map_err(io::Error::other)?, output_tx.clone());
     drop(output_tx);
 
     let mut cancel = false;
@@ -146,9 +156,10 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
         if !cancel {
             match control_rx.try_recv() {
                 Ok(Control::Stdin(bytes)) => {
-                    if let Some(stdin) = &stdin { let mut stdin = stdin.lock().map_err(|_| io::Error::other("bash stdin lock poisoned"))?; stdin.write_all(&bytes)?; stdin.flush()?; }
+                    if let Some(input) = &terminal_input { let mut input = input.lock().map_err(|_| io::Error::other("terminal input lock poisoned"))?; input.write_all(&bytes)?; input.flush()?; }
                 }
-                Ok(Control::Cancel) | Ok(Control::Disconnected) => { cancel = true; kill_child(&mut child); }
+                Ok(Control::Resize { rows, cols }) => { pair.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(io::Error::other)?; }
+                Ok(Control::Cancel) | Ok(Control::Disconnected) => { cancel = true; let _ = child.kill(); }
                 Err(mpsc::TryRecvError::Disconnected) => { cancel = true; kill_child(&mut child); }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -170,7 +181,7 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
             }
             write_event(&writer, &CompletedEvent {
                 op: "completed",
-                exit_code: if output_limit_exceeded { None } else { status.code() },
+                exit_code: if output_limit_exceeded { None } else { Some(status.exit_code() as i32) },
             })?;
             break;
         }
@@ -186,6 +197,10 @@ fn read_controls(mut reader: BufReader<TcpStream>, sender: mpsc::Sender<Control>
             Ok(0) | Err(_) => { let _ = sender.send(Control::Disconnected); return; }
             Ok(_) => match serde_json::from_str::<ControlRequest>(line.trim_end()) {
                 Ok(request) if request.op == "stdin" => match request.data.and_then(|data| BASE64.decode(data).ok()) { Some(bytes) => { let _ = sender.send(Control::Stdin(bytes)); }, None => { let _ = sender.send(Control::Cancel); } },
+                Ok(request) if request.op == "resize" => match (request.rows, request.cols) {
+                    (Some(rows), Some(cols)) if rows > 0 && cols > 0 => { let _ = sender.send(Control::Resize { rows, cols }); }
+                    _ => { let _ = sender.send(Control::Cancel); }
+                },
                 Ok(request) if request.op == "cancel" => { let _ = sender.send(Control::Cancel); }
                 _ => { let _ = sender.send(Control::Cancel); }
             }
@@ -212,14 +227,13 @@ fn write_event<T: Serialize>(writer: &Arc<Mutex<TcpStream>>, event: &T) -> io::R
     writer.flush()
 }
 
-fn kill_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    { unsafe extern "C" { fn kill(pid: i32, sig: i32) -> i32; } unsafe { kill(-(child.id() as i32), 9); } }
+fn kill_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     let _ = child.kill();
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use super::{handle_connection, handle_connection_with_output_limit, parse_listen};
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
@@ -261,6 +275,36 @@ mod tests {
             0
         );
         server.join().expect("executor server should finish");
+    }
+
+    #[test]
+    fn provides_an_interactive_pty_shell() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client should connect");
+            handle_connection(stream).expect("executor connection should succeed");
+        });
+        let mut stream = TcpStream::connect(addr).expect("client should connect");
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout should set");
+        writeln!(stream, r#"{{"op":"execute","command":"exec bash -il","cwd":".","interactive_stdio":true}}"#).expect("execute request should write");
+        writeln!(stream, r#"{{"op":"resize","rows":31,"cols":97}}"#).expect("resize request should write");
+        let input = BASE64.encode("printf PTY_READY; exit\n");
+        writeln!(stream, "{{\"op\":\"stdin\",\"data\":\"{input}\"}}").expect("stdin request should write");
+
+        let mut reader = BufReader::new(stream);
+        let mut output = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("terminal event should read");
+            let event = serde_json::from_str::<serde_json::Value>(line.trim_end()).expect("terminal event should be JSON");
+            if event["op"] == "output" {
+                output.extend(BASE64.decode(event["data"].as_str().expect("output data")).expect("output should be base64"));
+            }
+            if event["op"] == "completed" { break; }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("PTY_READY"));
+        server.join().expect("server should finish");
     }
 
     #[test]

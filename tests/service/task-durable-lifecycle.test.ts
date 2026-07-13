@@ -97,6 +97,12 @@ describe("durable task lifecycle", () => {
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "use input", inputPaths: ["files/input.txt"] }, "create-input-snapshot");
     await writeFile(source, "changed");
     assert.equal(await readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "inputs", "files", "input.txt"), "utf8"), "original");
+    const inputs=await setup.services.tasks.listTaskInputs(setup.userId,task.id);
+    assert.deepEqual(inputs.map((input)=>({path:input.path,name:input.name,bytes:input.bytes})),[{path:"files/input.txt",name:"input.txt",bytes:8}]);
+    assert.equal((await setup.services.tasks.downloadTaskInput(setup.userId,task.id,"files/input.txt")).bytes.toString("utf8"),"original");
+    const terminal=await setup.services.tasks.openTaskTerminal(setup.userId,task.id);
+    assert.equal(terminal.serviceKey,"service-key");
+    assert.match(terminal.baseUrl,/^http:\/\//);
     await assert.rejects(() => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "escape", inputPaths: ["../outside"] }, "create-invalid-input"), /must stay under files/);
   });
 
@@ -262,6 +268,35 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes, 4);
     assert.equal((await setup.store.listProjectAuditEvents(setup.projectId)).filter((event) => event.action === "artifact.project").length, 1);
     assert.equal(setup.port.resources.length, 0);
+  });
+
+  it("projects files written directly to the shared task artifact directory", async () => {
+    const setup = await createSetup(true);
+    const inputPath = path.join(setup.dataRoot, setup.projectRootPath, "files", "input.txt");
+    await mkdir(path.dirname(inputPath), { recursive: true });
+    await writeFile(inputPath, "retained input");
+    const created = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "shared-artifact", inputPaths: ["files/input.txt"] }, "create-shared-artifact");
+    await setup.services.tasks.syncActiveTasksOnce();
+    const task = await setup.store.findTask(created.id);
+    assert.ok(task);
+    assert.equal(task?.startIntentStatus, "dispatched");
+    const artifactPath = path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "artifacts", "result.txt");
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, "sandbox result");
+    setup.botified.timelineReads.push(
+      { status: "ok", events: [{ cursor: "done", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }], nextCursor: "done" },
+      { status: "ok", events: [], nextCursor: "done" }
+    );
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const completed = await setup.store.findTask(task.id);
+    const artifacts = await setup.services.tasks.listTaskArtifacts(setup.userId, task.id);
+    assert.equal(completed?.artifactProjectionStatus, "drained");
+    assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [["sandbox:result.txt", "result.txt", 14]]);
+    assert.equal((await setup.services.tasks.downloadTaskArtifact(setup.userId, task.id, artifacts[0]!.id)).bytes.toString("utf8"), "sandbox result");
+    assert.equal((await setup.services.tasks.downloadTaskInput(setup.userId, task.id, "files/input.txt")).bytes.toString("utf8"), "retained input");
+    assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes, 14);
   });
 
   it("completes terminal drained cleanup when the pod is already absent and repeated ticks are idempotent", async () => {

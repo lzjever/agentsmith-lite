@@ -81,8 +81,9 @@ BFF, compatibility layer, or second data model.
 | Endpoints | OpenAI-compatible validation, health/last check/failure category | REQUIRED_PORT | One endpoint/broker implementation. |
 | Files | List, binary upload/download/delete, safe preview, directory browsing | MERGED_SINGLE_PATH | One fixed `files/` tree. |
 | Tasks | List/query/title/edit/archive/delete; lifecycle and run recovery | REQUIRED_PORT | One durable task/run lifecycle. |
-| Tasks | Immutable all-project-files snapshot input | MERGED_SINGLE_PATH | Fixed-tree snapshot at task creation. |
+| Tasks | Immutable selected-file snapshot input | MERGED_SINGLE_PATH | Selected paths from the fixed tree are snapshotted at task creation. |
 | Task detail | Transcript, queued follow-up, traces, connection, artifacts, follow-up | REQUIRED_PORT | Persistent turns/events and lifecycle projections. |
+| Task terminal | Interactive shell in the task workspace | MERGED_SINGLE_PATH | One browser terminal through AgentSmith API to the task's bash-executor sidecar. |
 | Chat | Star, edit/delete/branch, provider recovery | REQUIRED_PORT | Persistent threads/messages, one broker. |
 | Policy/usage | Endpoint windows and current-user usage | REQUIRED_PORT | Server accounting/enforcement projections. |
 | Alerts/notifications | Rules, instance context, acknowledge/silence/recovery | REQUIRED_PORT | In-product evaluated state. |
@@ -120,9 +121,9 @@ dependencies rather than leaving placeholders.
 | LLMUP, Codex runner core, JVS, WebDAV, local/remote mounts, AFSCP, ASBCP | Outside Lite runtime. |
 | Multi-library selection, library picker, versions, templates, savepoints, restore, mount flows | Fixed `files/` tree only. |
 | Folder create/rename/move, multiselect/bulk file operations, file server pagination/search/sort | Approved files scope is list/upload/download/delete, safe preview, directory browsing. |
-| URL import and generic chat/task attachment | Only task fixed-tree snapshots are retained. |
+| Generic chat attachment | Task inputs use fixed-tree snapshots and a server-created URL note; chat has no attachment channel. |
 | Artifact picker as generic task/chat attachment | No generic attachment channel; task uses fixed-tree snapshot only. |
-| Agent Runner management, selection, binding, badges, tests, and interactive debug terminal/session/replay | Botified sandbox plus read-only summary only. |
+| Agent Runner management, selection, binding, badges, tests, terminal replay, and runner debug controls | Botified is selected server-side. The task workspace retains one interactive browser shell without exposing runner controls. |
 | Codex notices and SSE/debug transport UI | Runtime transport/debug controls are not product UI. |
 | Groups, join policies/requests, invitations, project-creator governance | Membership uses existing local OIDC identities. |
 | Personal API keys, Third-party Accounts, personal connections, generic secret bundles | Keycloak plus typed project credentials only. |
@@ -326,8 +327,11 @@ dialogs/tests.
   canonical request hash and result, and require `Idempotency-Key` for create,
   retry, duplicate, follow-up, cancel, archive, and delete. A matching replay
   returns the original response; a different hash returns 409.
-- Creation selects immutable authorized paths from project-wide fixed `files/`
-  only. No library/artifact/URL/generic attachment picker returns.
+- Creation selects immutable authorized paths from project-wide fixed `files/`.
+  Local upload and HTTP(S) URL notes first enter that same tree, then follow the
+  same snapshot path. Snapshots remain listable and downloadable with task
+  history after sandbox cleanup. No library/artifact/generic attachment picker
+  returns.
 - Dry-run reaches synchronous terminal `not_executed`, never consumes active
   reservation, and states that no sandbox/events/artifacts are expected.
 - `finalizeTaskLifecycle` is a DB transaction only: first-terminal-wins
@@ -361,6 +365,9 @@ APIs/client/detail and artifact routes/UI/tests.
 - Retain persistent transcript, streamed task output, ordinary lifecycle/
   progress/tool/artifact traces, and connecting/reconnecting/disconnected/
   recovered state. Exclude raw debug and governance explainability only.
+- Retain one PTY-backed browser shell into the active task workspace. It is
+  authorized by AgentSmith, proxied through the Botified service API, shares the
+  task PVC with the agent, and exposes no Kubernetes or runner credentials.
 - Active follow-up legal states are `pending`, `dispatching`,
   `terminal_pending`, `accepted`, `successor_created`, and `failed`.
   Pending may be edited/deleted; it transitions to dispatching only through a
@@ -372,8 +379,8 @@ APIs/client/detail and artifact routes/UI/tests.
   creates/links the successor task. If the follow-up is dispatching, it must
   instead atomically become terminal_pending while retaining its claim token; it
   must not create a successor yet.
-- The dispatcher posts and writes back only with that claim token and Botified
-  acceptance evidence. In one linearized transaction it resolves terminal_pending to
+- The dispatcher posts and writes back only with that claim token and Botified's
+  persisted delivery receipt. In one linearized transaction it resolves terminal_pending to
   accepted when the original run accepted the message, or successor_created
   when there is no acceptance and the source is terminal; it can never produce
   both. Before reclaim, query Botified by delivery key: only expired lease plus
@@ -394,7 +401,7 @@ APIs/client/detail and artifact routes/UI/tests.
 
 **Minimum verification:** transcript stream/connection, queued edit/delete,
 delivery-fence replay, dispatching-to-terminal_pending race, claim-token
-acceptance evidence, crash after remote acceptance before local receipt commit,
+receipt handling, crash after remote acceptance before local receipt commit,
 terminal successor linkage, tail-drain late artifact, preview authorization,
 stopping/failed UX, and cancel terminal reason. Use real K8s only for sandbox/
 reap boundaries.
@@ -517,8 +524,9 @@ detail allowlist, and rendered list/detail/error/empty states.
 
 Use small focused unit, contract, API, store, and rendered interaction tests.
 Use real environments only when crossing OIDC, K8s/sandbox, or provider
-boundaries. Do not generate reports, evidence, gates, rehearsals, screenshots,
-or default broad test wrappers.
+boundaries. Do not generate reports, evidence collections, gates, rehearsals,
+committed screenshots, or default broad test wrappers. Transient browser views
+used to inspect the current UI are not project artifacts.
 
 The port is complete when all 14 handoff rows have a reachable English-only Next
 route or surface, final same-origin `/api/v1` contract, server-owned
@@ -527,6 +535,7 @@ desktop/mobile and light/dark behavior, and their key dialog or drawer state.
 Notifications are separately reachable, not merely an alert-rule side effect.
 Each row has audit treatment appropriate to its operation (allowlisted event for
 audit-worthy project operations/lifecycle transitions, none by default for
-ordinary profile/context/session edits) and focused behavioral proof.
+ordinary profile/context/session edits) and a focused behavior check where the
+path has meaningful risk.
 MERGED_SINGLE_PATH must preserve the original user outcome. Only the
 explicit-exclusion table may be absent.

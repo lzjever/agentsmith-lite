@@ -1,9 +1,9 @@
 "use client";
 
-import { Archive, ArrowLeft, Copy, ExternalLink, Pencil, RefreshCw, RotateCcw, Send, Square, Trash2 } from "lucide-react";
+import { Archive, ArrowLeft, Copy, ExternalLink, Pencil, RefreshCw, RotateCcw, Send, Square, TerminalSquare, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { apiClient, type ProjectCapabilities, type Task, type TaskArtifact, type TaskEvent, type TaskFollowUp, type TaskSummary } from "../../lib/api/client";
+import { apiClient, type ProjectCapabilities, type Task, type TaskArtifact, type TaskEvent, type TaskFollowUp, type TaskInput, type TaskSummary } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -15,7 +15,9 @@ import { Label } from "../ui/label";
 import { toast } from "../ui/toast";
 import { TaskActivity } from "./TaskActivity";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
+import { TaskInputsPanel } from "./TaskInputsPanel";
 import { TaskTranscript } from "./TaskTranscript";
+import { TaskTerminalPanel } from "./TaskTerminalPanel";
 import { isActiveTask, taskStateCopy, taskStatusLabel } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
@@ -24,6 +26,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   const [task, setTask] = useState<Task>();
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
+  const [inputs, setInputs] = useState<TaskInput[]>([]);
   const [summary, setSummary] = useState<TaskSummary>();
   const [followUps, setFollowUps] = useState<TaskFollowUp[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
@@ -38,15 +41,17 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   const [editing, setEditing] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [terminalOpen,setTerminalOpen]=useState(false);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setState("loading");
     try {
-      const [found, timeline, output, projected, nextSummary, nextFollowUps] = await Promise.all([
+      const [found, timeline, output, taskInputs, projected, nextSummary, nextFollowUps] = await Promise.all([
         apiClient.task(taskId),
         apiClient.taskEvents(taskId),
         apiClient.taskArtifacts(taskId),
+        apiClient.taskInputs(taskId),
         apiClient.projectCapabilities(projectId),
         apiClient.taskSummary(taskId),
         apiClient.taskFollowUps(taskId)
@@ -54,6 +59,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
       setTask(found);
       setEvents(timeline);
       setArtifacts(output);
+      setInputs(taskInputs);
       setCapabilities(projected);
       setSummary(nextSummary);
       setFollowUps(nextFollowUps);
@@ -188,6 +194,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     {canManage && !artifactsOnly ? <Button variant="quiet" size="icon" aria-label="Edit task title" title="Edit task title" onClick={() => { setEditTitle(task.title?.trim() || task.prompt.slice(0, 160)); setEditOpen(true); }}><Pencil size={16} /></Button> : null}
     {terminal && canManage ? <><Button variant="quiet" onClick={() => void retry()}><RotateCcw size={15} />Retry</Button><Button variant="quiet" onClick={() => void retry(true)}><Copy size={15} />Duplicate</Button>{!task.archivedAt ? <Button variant="quiet" onClick={() => setArchiveOpen(true)}><Archive size={15} />Archive</Button> : null}<Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button></> : null}
     {canCancel ? <Button variant="danger" disabled={cancelling} onClick={() => void cancel()}><Square size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}
+    {task.executionMode==="live"&&isActiveTask(task.status)&&canManage&&!artifactsOnly?<Button variant="quiet" onClick={()=>setTerminalOpen((open)=>!open)}><TerminalSquare size={15}/>{terminalOpen?"Hide terminal":"Terminal"}</Button>:null}
   </>} />;
 
   return <PageLayout header={header}>
@@ -196,9 +203,24 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     {summary ? <p className="text-sm text-secondary">{summary.eventCount} events · {summary.artifactCount} artifacts</p> : null}
     <TaskStatePanel task={task} />
     {task.sourceTaskId ? <p className="text-sm text-secondary">Follow-up to <Link className="text-foreground underline" href={`${basePath}/${task.sourceTaskId}`}>{task.sourceTaskId}</Link></p> : null}
-    {canFollowUp ? <FollowUpComposer active={isActiveTask(task.status)} value={followUp} busy={followingUp} onChange={setFollowUp} onSubmit={submitFollowUp} /> : null}
-    {followUps.length > 0 ? <FollowUpList followUps={followUps} basePath={basePath} canManage={canManage} onEdit={editFollowUp} onDelete={deleteFollowUp} /> : null}
-    {task.executionMode === "dry-run" ? <DryRunTaskDetail prompt={task.prompt} /> : artifactsOnly ? <ArtifactOnly taskId={taskId} basePath={basePath} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /> : <div className="grid gap-7 xl:grid-cols-[minmax(0,1.55fr)_minmax(19rem,.75fr)]"><div className="min-w-0 space-y-8"><TaskTranscript taskId={taskId} /><section><h2 className="type-title text-foreground">Trace</h2><div className="mt-4"><TaskActivity events={events} /></div></section></div><aside className="space-y-7"><section><div className="flex items-center justify-between gap-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="mt-4"><TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /></div></section><section className="border-t border-border pt-5"><h2 className="type-title text-foreground">Task input</h2><p className="mt-2 whitespace-pre-wrap text-sm text-secondary">{task.prompt}</p></section></aside></div>}
+    {task.executionMode === "dry-run" ? <DryRunTaskDetail prompt={task.prompt} /> : artifactsOnly ? <ArtifactOnly taskId={taskId} basePath={basePath} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /> : <>
+      <div className="grid min-h-[36rem] min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_17rem]" data-testid="task-workspace">
+        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace">
+          {terminalOpen ? <TaskTerminalPanel taskId={taskId} /> : <>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5"><TaskTranscript taskId={taskId} /></div>
+            {followUps.length > 0 ? <div className="border-t border-border px-4 sm:px-5"><FollowUpList followUps={followUps} basePath={basePath} canManage={canManage} onEdit={editFollowUp} onDelete={deleteFollowUp} /></div> : null}
+            {canFollowUp ? <div className="border-t border-border bg-background px-4 py-4 sm:px-5"><FollowUpComposer active={isActiveTask(task.status)} value={followUp} busy={followingUp} onChange={setFollowUp} onSubmit={submitFollowUp} /></div> : null}
+          </>}
+        </section>
+        <aside className="min-h-0 min-w-0 border border-border bg-background xl:overflow-y-auto">
+          <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div>
+          <div className="p-3"><TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /></div>
+        </aside>
+      </div>
+      <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Inputs and original prompt</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.7fr)_minmax(0,1fr)]"><TaskInputsPanel taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} /><div><h3 className="type-caption text-tertiary">Task prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
+      <details className="border-b border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Execution details · {events.length} events</summary><div className="mt-4"><TaskActivity events={events} /></div></details>
+    </>}
+    {task.executionMode === "dry-run" && !artifactsOnly ? <>{followUps.length > 0 ? <FollowUpList followUps={followUps} basePath={basePath} canManage={canManage} onEdit={editFollowUp} onDelete={deleteFollowUp} /> : null}{canFollowUp ? <FollowUpComposer active={isActiveTask(task.status)} value={followUp} busy={followingUp} onChange={setFollowUp} onSubmit={submitFollowUp} /> : null}</> : null}
     <Dialog open={editOpen} onOpenChange={(open) => { if (!editing) { setEditOpen(open); if (!open) mutationKeys.clear("task-edit"); } }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); void saveTitle(); }}><DialogHeader title="Edit task title" description="Use a short title that is easy to scan in the task list." /><div className="px-5 py-5"><Label htmlFor="task-title">Title</Label><Input id="task-title" className="mt-2" value={editTitle} maxLength={160} onChange={(event) => setEditTitle(event.target.value)} autoFocus /></div><DialogFooter><Button type="button" variant="quiet" disabled={editing} onClick={() => setEditOpen(false)}>Cancel</Button><Button type="submit" disabled={editing || !editTitle.trim()}>{editing ? "Saving..." : "Save title"}</Button></DialogFooter></form></DialogContent></Dialog>
     <ConfirmationDialog open={archiveOpen} onOpenChange={setArchiveOpen} title="Archive task?" description="The task remains available through the archived filter, including its transcript and artifacts." confirmText="Archive task" variant="default" onConfirm={archiveTask} errorContext="Task could not be archived" />
     <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This removes the task from the product after its sandbox cleanup is complete." confirmText="Delete task" onConfirm={deleteTask} errorContext="Task could not be deleted" />
