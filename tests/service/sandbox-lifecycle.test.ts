@@ -22,6 +22,22 @@ import {
 } from "../../packages/sandbox-controller/src/reconciler.js";
 import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
 
+function taskLifecycleFor(store: ReturnType<typeof createLocalInMemoryProductStore>) {
+  const services = createApplicationServices({
+    store,
+    dataRoot: "/workspace",
+    builtinAdminPassword: "admin-password"
+  });
+  return {
+    finalizeTaskForRunCleanup(taskId: string, reason: "failed" | "expired" | "cancelled") {
+      return services.tasks.finalizeTaskForRunCleanup(taskId, reason);
+    },
+    async canCleanupTaskRuntime(_taskId: string) {
+      return true;
+    }
+  };
+}
+
 describe("sandbox lifecycle service", () => {
   it("keeps Botified resources when artifact projection fails before cleanup", async () => {
     const store = createLocalInMemoryProductStore();
@@ -30,6 +46,7 @@ describe("sandbox lifecycle service", () => {
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const projectedRuns: string[] = [];
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port,
@@ -75,6 +92,7 @@ describe("sandbox lifecycle service", () => {
     };
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port: new FakeLifecyclePort([...createdResourcesForRun(run), ...createdResourcesForRun(laterRun)]),
@@ -108,6 +126,7 @@ describe("sandbox lifecycle service", () => {
       }
     };
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port: new FakeLifecyclePort([]),
@@ -155,6 +174,7 @@ describe("sandbox lifecycle service", () => {
       return updateWithFencing(runId, token, next);
     };
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port: new FakeLifecyclePort(resources),
@@ -206,6 +226,7 @@ describe("sandbox lifecycle service", () => {
         }
       });
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot: "/workspace",
         namespace: run.namespace,
         port,
@@ -239,6 +260,7 @@ describe("sandbox lifecycle service", () => {
     pod.status = { phase: "Failed" };
     const port = new FakeLifecyclePort(resources);
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port,
@@ -279,6 +301,7 @@ describe("sandbox lifecycle service", () => {
     const operations: string[] = [];
     const port = new FakeLifecyclePort(resources, { operations });
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port,
@@ -317,6 +340,7 @@ describe("sandbox lifecycle service", () => {
     assert.ok(pod);
     pod.status = { phase: "Failed" };
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port: new FakeLifecyclePort(resources),
@@ -347,6 +371,7 @@ describe("sandbox lifecycle service", () => {
     assert.ok(pod);
     pod.status = { phase: "Failed" };
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port: new FakeLifecyclePort(resources),
@@ -376,6 +401,7 @@ describe("sandbox lifecycle service", () => {
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const port = new FakeLifecyclePort([...resources, ...createdResourcesForRun(otherRun)]);
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: run.namespace,
       port,
@@ -411,6 +437,7 @@ describe("sandbox lifecycle service", () => {
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -447,6 +474,7 @@ describe("sandbox lifecycle service", () => {
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -477,6 +505,7 @@ describe("sandbox lifecycle service", () => {
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -518,6 +547,7 @@ describe("sandbox lifecycle service", () => {
     ], { deleteErrorAfterDelete: new Error("delete returned stale HTTP 500") });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -565,6 +595,7 @@ describe("sandbox lifecycle service", () => {
         deleteErrorAfterDelete: new Error(`delete returned stale HTTP 500 after ${variant} mismatch`)
       });
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot: "/workspace",
         namespace: "agentsmith",
         port,
@@ -590,6 +621,7 @@ describe("sandbox lifecycle service", () => {
       deleteError: new Error("api down")
     });
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -612,6 +644,7 @@ describe("sandbox lifecycle service", () => {
     const transport = liveListTransport(createdResourcesForRun(asObservedActiveRun(run)));
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port: new SandboxKubernetesPort({ transport }),
@@ -653,6 +686,7 @@ describe("sandbox lifecycle service", () => {
     });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port: new SandboxKubernetesPort({ transport }),
@@ -690,6 +724,7 @@ describe("sandbox lifecycle service", () => {
     });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port: new SandboxKubernetesPort({ transport }),
@@ -726,6 +761,7 @@ describe("sandbox lifecycle service", () => {
     });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -765,6 +801,7 @@ describe("sandbox lifecycle service", () => {
     });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -808,6 +845,7 @@ describe("sandbox lifecycle service", () => {
     });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -834,6 +872,7 @@ describe("sandbox lifecycle service", () => {
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)), { keepResourcesAfterDelete: true });
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port,
@@ -860,6 +899,7 @@ describe("sandbox lifecycle service", () => {
       const store = createLocalInMemoryProductStore();
       await store.sandboxRuns.put(run);
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot,
         namespace: run.namespace,
         port: new FakeLifecyclePort([])
@@ -888,6 +928,7 @@ describe("sandbox lifecycle service", () => {
       const store = createLocalInMemoryProductStore();
       await store.sandboxRuns.put(run);
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot,
         namespace: run.namespace,
         port: new FakeLifecyclePort([])
@@ -917,6 +958,7 @@ describe("sandbox lifecycle service", () => {
       const store = createLocalInMemoryProductStore();
       await store.sandboxRuns.put(run);
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot,
         namespace: run.namespace,
         port: new FakeLifecyclePort([])
@@ -941,6 +983,7 @@ describe("sandbox lifecycle service", () => {
       const store = createLocalInMemoryProductStore();
       await store.sandboxRuns.put(run);
       const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
         dataRoot,
         namespace: run.namespace,
         port: new FakeLifecyclePort([])
@@ -965,6 +1008,7 @@ describe("sandbox lifecycle service", () => {
     await store.sandboxRuns.put(run);
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port: new FakeLifecyclePort([]),
@@ -986,6 +1030,7 @@ describe("sandbox lifecycle service", () => {
     await store.sandboxRuns.put(run);
     const cleaner = new FakeRuntimeDirectoryCleaner({ failPath: "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified" });
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       dataRoot: "/workspace",
       namespace: "agentsmith",
       port: new FakeLifecyclePort([]),
@@ -1051,15 +1096,16 @@ describe("sandbox lifecycle service", () => {
     await store.createProject({ id: run.projectId, workspaceId: run.workspaceId, name: "P", ownerUserId: "user1", rootPath: run.projectSubPath, taskConcurrencyLimit: 1, createdAt: run.createdAt, updatedAt: run.updatedAt });
     await store.createProjectResourcePolicy({ projectId: run.projectId, activeTasksLimit: 1, providerRequestsLimit: null, providerTokensLimit: null, providerCostLimit: null, projectFileBytesLimit: null, createdAt: run.createdAt, updatedAt: run.updatedAt });
     await store.upsertProjectResourceUsage({ projectId: run.projectId, activeTasks: 1, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: run.updatedAt });
-    await store.createTask(taskForRun(run, "running"));
+    await store.createTask({ ...taskForRun(run, "running"), activeReservation: true });
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
-    const service = new SandboxLifecycleService(store, { dataRoot: "/workspace", namespace: run.namespace, port, now: () => new Date("2026-07-04T00:00:00.000Z") });
+    const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store), dataRoot: "/workspace", namespace: run.namespace, port, now: () => new Date("2026-07-04T00:00:00.000Z") });
 
     await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
     await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
 
-    assert.equal((await store.findTask(run.taskId))?.status, "cleaned");
+    assert.equal((await store.findTask(run.taskId))?.status, "cancelled");
     assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks, 0);
   });
 
@@ -1075,6 +1121,7 @@ describe("sandbox lifecycle service", () => {
     });
     const port = new FakeLifecyclePort([unknown]);
     const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       namespace: "agentsmith",
       port,
       now: () => new Date("2026-07-04T00:00:00.000Z")
@@ -1093,7 +1140,8 @@ describe("sandbox lifecycle service", () => {
     const otherRun = sandboxRunFor("task2", "run2");
     await store.sandboxRuns.put(otherRun);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(otherRun)));
-    const service = new SandboxLifecycleService(store, { namespace: "agentsmith", port });
+    const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store), namespace: "agentsmith", port });
 
     const result = await service.reapSandboxRunsOnce({ runId: "missing", apply: true });
 
@@ -1123,7 +1171,8 @@ describe("sandbox lifecycle service", () => {
       ...createdResourcesForRun(asObservedActiveRun(otherRun)),
       unknown
     ]);
-    const service = new SandboxLifecycleService(store, { dataRoot: "/workspace", namespace: "agentsmith", port });
+    const service = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store), dataRoot: "/workspace", namespace: "agentsmith", port });
 
     const status = await service.getSandboxStatus({ runId: run.runId });
     assert.equal(status.observedResourceCounts.Pod, 1);
@@ -1158,7 +1207,8 @@ describe("sandbox lifecycle service", () => {
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     await store.sandboxRuns.put(run);
     const fencePort = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)), { deleteResult: "fence_mismatch" });
-    const fenceService = new SandboxLifecycleService(store, { namespace: "agentsmith", port: fencePort });
+    const fenceService = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store), namespace: "agentsmith", port: fencePort });
 
     const fenceResult = await fenceService.reapSandboxRunsOnce({ apply: true });
 
@@ -1167,6 +1217,7 @@ describe("sandbox lifecycle service", () => {
 
     const throwingPort = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)), { deleteError: new Error("api down") });
     const throwingService = new SandboxLifecycleService(store, {
+      taskLifecycle: taskLifecycleFor(store),
       namespace: "agentsmith",
       port: throwingPort,
       deleteResourceErrorConfirmAttempts: 2,

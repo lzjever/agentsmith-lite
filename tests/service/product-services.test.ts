@@ -227,12 +227,13 @@ describe("product services", () => {
     assert.equal((await store.findUserById(first.user.id))?.id, first.user.id);
   });
 
-  it("accepts only OpenAI-compatible endpoint configuration and never calls providers while saving", async () => {
+  it("accepts only OpenAI-compatible endpoint configuration and validates before saving", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({
       store,
       dataRoot: "/agentsmith-lite",
-      builtinAdminPassword: "admin-password"
+      builtinAdminPassword: "admin-password",
+      providerClient: healthyProvider
     });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
@@ -304,7 +305,8 @@ describe("product services", () => {
     const services = createApplicationServices({
       store,
       dataRoot: "/agentsmith-lite",
-      builtinAdminPassword: "admin-password"
+      builtinAdminPassword: "admin-password",
+      providerClient: healthyProvider
     });
     const member = await services.auth.loginExternalPrincipal({
       issuer: "https://keycloak.example.test/realms/agentsmith",
@@ -333,3 +335,8 @@ function oidcUserId(issuer: string, subject: string): string {
   const digest = createHash("sha256").update(`${issuer}\0${subject}`).digest("hex").slice(0, 32);
   return `user_oidc_${digest}`;
 }
+
+const healthyProvider = {
+  async validateEndpoint() { return { status: "healthy" as const }; },
+  async completeChat() { throw new Error("not used"); }
+};

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createApiServer as createRawApiServer, type ApiServerOptions, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 import {
   type BotifiedAbortResult,
   type BotifiedDeliveryMessageInput,
@@ -17,6 +17,13 @@ import {
 } from "../../packages/ports/src/botified.js";
 
 const validProductionSessionSecret = "production-session-secret-32-chars";
+const createApiServer = (options: ApiServerOptions) => createRawApiServer({
+  ...options,
+  providerClient: {
+    async validateEndpoint() { return { status: "healthy" as const }; },
+    async completeChat() { throw new Error("not used"); }
+  }
+});
 
 describe("task events API", () => {
   let api: RunningApiServer | undefined;
@@ -100,7 +107,7 @@ describe("task events API", () => {
 
     const download = await auth.request("GET", `/api/v1/tasks/${task.id}/artifacts/${artifacts[0].id}/download`);
     assert.equal(download.status, 200);
-    assert.equal(download.headers.get("content-type"), "application/octet-stream");
+    assert.equal(download.headers.get("content-type"), "text/plain");
     assert.equal(download.headers.get("content-length"), String(artifactBytes.byteLength));
     assert.equal(download.headers.get("x-content-type-options"), "nosniff");
     assert.equal(

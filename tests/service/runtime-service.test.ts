@@ -322,6 +322,10 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
     builtinAdminPassword: "test-admin-password",
     sessionSecret: "test-session-secret-at-least-32-chars",
     botifiedClient: botified,
+    providerClient: {
+      async validateEndpoint() { return { status: "healthy" as const }; },
+      async completeChat() { throw new Error("not used"); }
+    },
     botifiedServiceKeyFactory: () => "test-service-key",
     liveSandbox: {
       port: livePort,

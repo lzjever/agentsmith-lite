@@ -28,15 +28,15 @@ test.afterEach(() => cleanup());
 test("projects use the shared searchable data table and retain pagination", () => {
   const projects = Array.from({ length: 21 }, (_, index) => ({
     id: `project-${index + 1}`,
-    name: index === 20 ? "Needle" : `Project ${index + 1}`,
+    name: index === 20 ? "Z Needle" : `Project ${String(index + 1).padStart(2, "0")}`,
     taskConcurrencyLimit: 1,
     createdAt: "2026-01-01T00:00:00.000Z"
   }));
   render(<ProjectsTable workspaceId="workspace-1" projects={projects} />);
   assert.equal(screen.getAllByTestId("projects-table__row").length, 20);
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
-  assert.equal(screen.getByTestId("projects-table__row").textContent?.includes("Needle"), true);
-  fireEvent.change(screen.getByRole("textbox", { name: "Search projects" }), { target: { value: "Needle" } });
+  assert.equal(screen.getByTestId("projects-table__row").textContent?.includes("Z Needle"), true);
+  fireEvent.change(screen.getByRole("textbox", { name: "Search projects" }), { target: { value: "Z Needle" } });
   assert.equal(screen.getAllByTestId("projects-table__row").length, 1);
 });
 

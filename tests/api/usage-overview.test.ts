@@ -9,7 +9,16 @@ import { createApiServer } from "../../packages/api-entry-node/src/server.js";
 test("usage overview returns project limits and server-filtered settled endpoint trends", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-usage-api-"));
   const store = createLocalInMemoryProductStore();
-  const api = await createApiServer({ port: 0, dataRoot, builtinAdminPassword: "admin-password", store });
+  const api = await createApiServer({
+    port: 0,
+    dataRoot,
+    builtinAdminPassword: "admin-password",
+    store,
+    providerClient: {
+      async validateEndpoint() { return { status: "healthy" as const }; },
+      async completeChat() { throw new Error("not used"); }
+    }
+  });
   try {
     await post(api.baseUrl, "/api/v1/auth/bootstrap", { password: "admin-password" });
     const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });

@@ -197,7 +197,7 @@ describe("ChatService", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
-    const endpoint = await store.createEndpoint({ id: "endp_missing_credential", projectId: project.id, ...endpointInput(), createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    const endpoint = await store.createEndpoint({ id: "endp_missing_credential", projectId: project.id, ...endpointInput(), credentialId: "", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
 
     await assert.rejects(
       () => sendThreadMessage(services, user.id, project.id, endpoint.id, "hello"),
@@ -298,7 +298,7 @@ function assertCredentialEndpointThreadSetup(audit: Array<{ action: string; stat
   assert.deepEqual(audit.map((event) => [event.action, event.status, event.detail]), [
     ["credential.create", "accepted", { credentialVersion: 1 }],
     ["provider.request", "accepted", {}],
-    ["endpoint.create", "accepted", { healthStatus: "healthy" }],
+    ["endpoint.create", "accepted", { endpointId: audit.find((event) => event.action === "endpoint.create")?.detail && (audit.find((event) => event.action === "endpoint.create")!.detail as { endpointId: string }).endpointId, healthStatus: "healthy" }],
     ["chat.thread.create", "accepted", {}]
   ]);
 }

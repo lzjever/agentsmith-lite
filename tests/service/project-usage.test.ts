@@ -46,6 +46,6 @@ describe("project usage overview", () => {
   });
 });
 
-function endpoint(id: string, projectId: string, name: string): ModelEndpoint { const now = new Date().toISOString(); return { id, projectId, name, protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "model", credentialId: "credential", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: now, updatedAt: now }; }
+function endpoint(id: string, projectId: string, name: string): ModelEndpoint { const now = new Date().toISOString(); return { id, projectId, name, protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "model", credentialId: "", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: now, updatedAt: now }; }
 async function settle(store: ReturnType<typeof createLocalInMemoryProductStore>, id: string, projectId: string, endpointId: string, time: string, usage: { tokens: number; cost: number }): Promise<void> { await store.reserveProjectProviderSettlement({ id, projectId, taskId: null, endpointId, reservedTokens: 0, reservedCost: 0, reservedAt: time, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() }); await store.markProjectProviderSettlementDispatched(id, time); await store.markProjectProviderSettlementDelivered(id, time); await store.settleProjectProviderSettlement(id, usage, time); }
 function userRecord(id: string, email: string): StoredUser { const now = new Date().toISOString(); return { id, email, emailVerified: true, passwordHash: "hash", createdAt: now, updatedAt: now }; }

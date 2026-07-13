@@ -25,7 +25,7 @@ describe("project alert history API", () => {
       const alert = await store.upsertActiveProjectAlert({ id: "alert_event", projectId: project.id, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
       const acknowledged = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alerts/${alert.id}/acknowledge`, {}, ownerCookie, ownerCsrf);
       assert.ok(acknowledged.acknowledgedAt);
-      const silencedUntil = "2026-07-13T00:00:00.000Z";
+      const silencedUntil = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
       const silenced = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alerts/${alert.id}/silence`, { silencedUntil }, ownerCookie, ownerCsrf);
       assert.equal(silenced.silencedUntil, silencedUntil);
       const rule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "task_failure" }, ownerCookie, ownerCsrf);
@@ -48,7 +48,7 @@ describe("project alert history API", () => {
       assert.equal(dismissed.status, "dismissed");
       const audit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit`, { headers: { cookie: ownerCookie } });
       assert.equal(audit.status, 200);
-      const auditPage=await audit.json() as {items:Array<{action:string;status:string;resourceKind:string;resourceId:string}>;nextCursor:string|null};assert.deepEqual(auditPage.items.filter(event=>event.status==="accepted"&&["alert.dismiss","alert.resolve"].includes(event.action)).map(event=>[event.action,event.resourceId]),[["alert.dismiss",dismissable.id],["alert.resolve",alert.id]]);assert.equal(auditPage.nextCursor,null);
+      const auditPage=await audit.json() as {items:Array<{action:string;status:string;resourceKind:string;resourceId:string}>;nextCursor:string|null};assert.deepEqual(auditPage.items.filter(event=>event.status==="accepted"&&["alert.dismiss","alert.resolve"].includes(event.action)).map(event=>[event.action,event.resourceId]).sort((left,right)=>left[0]!.localeCompare(right[0]!)),[["alert.dismiss",dismissable.id],["alert.resolve",alert.id]]);assert.equal(auditPage.nextCursor,null);
       const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: ownerCookie } });
       assert.equal((await history.json() as Array<{ status: string }>)[0]?.status, "resolved");
     } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }

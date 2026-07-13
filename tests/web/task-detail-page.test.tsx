@@ -110,9 +110,10 @@ describe("task detail execution mode", () => {
     apiClient.taskArtifacts = async () => [];
     apiClient.projectCapabilities = async () => taskCreatorCapabilities;
     apiClient.taskSummary = async () => ({ taskId: terminal.id, eventCount: 0, artifactCount: 0, updatedAt: terminal.updatedAt });
-    apiClient.taskFollowUps = async () => [{ id: "follow_pending", taskId: terminal.id, prompt: "Original prompt", deliveryStatus: "pending", createdAt: terminal.updatedAt }];
+    let followUps = [{ id: "follow_pending", taskId: terminal.id, prompt: "Original prompt", deliveryStatus: "pending" as const, createdAt: terminal.updatedAt }];
+    apiClient.taskFollowUps = async () => followUps;
     apiClient.updateTaskFollowUp = async (_taskId, _followUpId, prompt, key) => { keys.push(key); editAttempts += 1; if (editAttempts === 1) throw new Error("Temporary edit failure"); return { id: "follow_pending", taskId: terminal.id, prompt, deliveryStatus: "pending", createdAt: terminal.updatedAt }; };
-    apiClient.deleteTaskFollowUp = async (_taskId, followUpId, key) => { keys.push(key); return { deleted: true, followUpId }; };
+    apiClient.deleteTaskFollowUp = async (_taskId, followUpId, key) => { keys.push(key); followUps = []; return { deleted: true, followUpId }; };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={terminal.id} />);
       fireEvent.click(await screen.findByRole("button", { name: "Edit queued follow-up" }));
@@ -123,7 +124,7 @@ describe("task detail execution mode", () => {
       await screen.findByText("Updated prompt");
       fireEvent.click(screen.getByRole("button", { name: "Delete queued follow-up" }));
       fireEvent.click(await screen.findByRole("button", { name: "Delete follow-up" }));
-      await waitFor(() => assert.equal(screen.queryByText("Updated prompt"), null));
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Delete queued follow-up" }), null));
       assert.equal(keys.length, 3);
       assert.ok(keys.every((key) => key.startsWith("web-follow-up-")));
       assert.equal(keys[0], keys[1], "an explicit retry of the same request must reuse its idempotency key");
