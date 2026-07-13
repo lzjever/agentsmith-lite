@@ -3,7 +3,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type TaskListPage, type TaskListQuery, type TaskSummary } from "../../lib/api/client";
+import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery, type TaskSummary } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -23,6 +23,8 @@ export function TasksPage({ workspaceId, projectId }: { workspaceId: string; pro
   const [page, setPage] = useState<TaskListPage>(emptyPage);
   const [summaries, setSummaries] = useState<TaskSummary[]>([]);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([]);
+  const [projectFilesLoading, setProjectFilesLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [query, setQuery] = useState<TaskListQuery>(initialQuery);
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
@@ -61,6 +63,23 @@ export function TasksPage({ workspaceId, projectId }: { workspaceId: string; pro
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
+    if (!dialogOpen) return;
+    let active = true;
+    setProjectFiles([]);
+    setProjectFilesLoading(true);
+    void apiClient.files(projectId).then((files) => {
+      if (active) setProjectFiles(files.entries);
+    }).catch(() => {
+      if (active) {
+        setProjectFiles([]);
+        toast.error("Project files could not be loaded.");
+      }
+    }).finally(() => {
+      if (active) setProjectFilesLoading(false);
+    });
+    return () => { active = false; };
+  }, [dialogOpen, projectId]);
+  useEffect(() => {
     if (!page.items.some((task) => ["queued", "starting", "running", "stopping"].includes(task.status))) return;
     const timer = window.setInterval(() => void load(true), 5_000);
     return () => window.clearInterval(timer);
@@ -78,13 +97,13 @@ export function TasksPage({ workspaceId, projectId }: { workspaceId: string; pro
     setPageIndex((value) => value + 1);
   }
 
-  async function createTask(input: { title: string; prompt: string; endpointId: string }) {
+  async function createTask(input: { title: string; prompt: string; endpointId: string; inputPaths: string[] }) {
     setCreating(true);
     setError("");
     const identity = JSON.stringify(input);
     try {
       const title = input.title.trim();
-      const task = await apiClient.createTask(projectId, { prompt: input.prompt, endpointId: input.endpointId, ...(title ? { title } : {}) }, mutationKeys.key("task-create", identity));
+      const task = await apiClient.createTask(projectId, { prompt: input.prompt, endpointId: input.endpointId, ...(title ? { title } : {}), ...(input.inputPaths.length ? { inputPaths: input.inputPaths } : {}) }, mutationKeys.key("task-create", identity));
       mutationKeys.complete("task-create", identity);
       toast.success("Task created");
       router.push(`${basePath}/${task.id}`);
@@ -104,7 +123,7 @@ export function TasksPage({ workspaceId, projectId }: { workspaceId: string; pro
     {state === "loading" ? <PageState>Loading tasks...</PageState> : null}
     {state === "error" ? <PageState><Button onClick={() => void load()}>Try again</Button></PageState> : null}
     {state === "ready" ? <><TaskList page={page} summaries={summaries} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{!canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && compatibleEndpoints.length === 0 ? <p className="mt-4 text-sm text-secondary">Add an endpoint with text and tool-call support before creating a task.</p> : null}</> : null}
-    <TaskCreateDialog endpoints={compatibleEndpoints} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    <TaskCreateDialog endpoints={compatibleEndpoints} projectFiles={projectFiles} projectFilesLoading={projectFilesLoading} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 

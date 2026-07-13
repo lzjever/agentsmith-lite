@@ -1,6 +1,6 @@
 "use client";
 
-import type { ProfileResponse, ProjectAuditAction, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint } from "../../../packages/contracts/src/api.js";
+import type { ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 
@@ -110,7 +110,7 @@ export interface ProjectAlert { id: string; projectId: string; type: "active_tas
 export type ProjectAlertType = ProjectAlert["type"];
 export interface ProjectAlertRule { id: string; projectId: string;name?:string; alertType: ProjectAlertType;metric?:string;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string}; enabled: boolean; createdAt: string; updatedAt: string; }
 export interface UserNotification { id: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditEvent["resourceKind"] | null; resourceId: string | null; linkPath: string | null; readAt: string | null; createdAt: string; }
-export interface ProjectAuditEvent { id: string; projectId: string; actorId: string | null; actorDisplayName: string | null; actorEmail: string | null; action: ProjectAuditAction; status: "accepted" | "rejected"; resourceKind: "project" | "endpoint" | "member" | "task" | "artifact" | "provider" | "file_quota" | "sandbox" | "alert"; resourceId: string | null;detail?:Record<string,string|number>; createdAt: string; }
+export interface ProjectAuditEvent { id: string; projectId: string; actorId: string | null; actorDisplayName: string | null; actorEmail: string | null; action: ProjectAuditAction; status: "accepted" | "rejected"; resourceKind: ProjectAuditResourceKind; resourceId: string | null;detail?:Record<string,string|number>; createdAt: string; }
 export interface ProjectPolicyInput {
   activeTasksLimit?: number | null;
   providerRequestsLimit?: number | null;
@@ -122,8 +122,6 @@ export interface ProjectPolicyInput {
 
 const apiBasePath = process.env.NEXT_PUBLIC_API_BASE_PATH || "/api/v1";
 let csrfToken: string | undefined;
-const projectAuditActions = new Set<ProjectAuditAction>(["policy.update", "endpoint.create", "endpoint.update", "endpoint.delete", "membership.add", "membership.change", "membership.remove", "provider.request","chat.thread.create","chat.thread.update","chat.thread.delete","chat.message.send","chat.message.retry","chat.message.stop","chat.message.edit","chat.message.delete","chat.message.branch", "task.create", "task.cancel", "task.completed", "task.failed", "task.expired", "task.cleaned", "artifact.project", "sandbox.failed", "file.quota", "alert.resolve", "alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"]);
-
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = init.method?.toUpperCase() || "GET";
   const headers = new Headers(init.headers);
@@ -275,7 +273,7 @@ export const apiClient = {
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
   taskSummaries: (projectId: string) => request<TaskSummary[]>(`/projects/${encodeURIComponent(projectId)}/tasks/summaries`),
-  createTask: (projectId: string, input: { prompt: string; endpointId: string; title?: string }, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
+  createTask: (projectId: string, input: { prompt: string; endpointId: string; title?: string; inputPaths?: string[] }, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
   taskEvents: (taskId: string) => request<TaskEvent[]>(`/tasks/${encodeURIComponent(taskId)}/events`),
   task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
   taskSummary: (taskId: string) => request<TaskSummary>(`/tasks/${encodeURIComponent(taskId)}/summary`),
@@ -352,7 +350,7 @@ function isTaskTranscriptEntry(value: unknown): value is TaskTranscriptEntry {
 }
 
 function isProjectAuditEvent(value: unknown): value is ProjectAuditEvent {
-  return Boolean(value && typeof value === "object" && "action" in value && typeof value.action === "string" && projectAuditActions.has(value.action as ProjectAuditAction));
+  return Boolean(value && typeof value === "object" && "action" in value && typeof value.action === "string" && value.action.length > 0 && "resourceKind" in value && typeof value.resourceKind === "string" && value.resourceKind.length > 0);
 }
 
 async function readChatStream(response:Response,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!response.ok||!response.body)throw new ApiError(response.status,await response.text());const reader=response.body.getReader();const decoder=new TextDecoder();let buffer="";let done:ProjectChatSendResponse|undefined;while(true){const{done:ended,value}=await reader.read();if(ended)break;buffer+=decoder.decode(value,{stream:true});const frames=buffer.split("\n\n");buffer=frames.pop()??"";for(const frame of frames){const type=/event: (.+)/.exec(frame)?.[1];const data=/data: (.+)/.exec(frame)?.[1];if(!data)continue;const value=JSON.parse(data);if(type==="delta")onDelta(value.delta);else if(type==="done")done=value;else if(type==="error")throw new ApiError(502,value.error);}}if(!done)throw new ApiError(502,"Chat stream ended without a final message");return done;}

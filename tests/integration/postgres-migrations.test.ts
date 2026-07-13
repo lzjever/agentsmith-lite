@@ -13,7 +13,7 @@ postgresDescribe("postgres migrations", () => {
     await client.connect();
     try {
       const expected = await readPostgresMigrations();
-      assert.equal(expected.at(-1)?.id, "045_project_credential_binding_correctness");
+      assert.equal(expected.at(-1)?.id, "046_chat_message_thread_sequence");
       const ledger = await client.query<{ id: string; checksum: string }>(
         "select id, checksum from agentsmith_migrations order by id"
       );
@@ -67,6 +67,22 @@ postgresDescribe("postgres migrations", () => {
       );
       assert.equal(
         eventUniqueConstraints.rows.some((row) => /botified_seq/i.test(row.definition)),
+        false
+      );
+
+      const chatMessageUniqueConstraints = await client.query<{ definition: string }>(`
+        select pg_get_constraintdef(c.oid) as definition
+        from pg_constraint c
+        join pg_class t on t.oid = c.conrelid
+        where t.relname = 'project_chat_messages'
+          and c.contype = 'u'
+      `);
+      assert.equal(
+        chatMessageUniqueConstraints.rows.some((row) => /UNIQUE \(thread_id, sequence\)/i.test(row.definition)),
+        true
+      );
+      assert.equal(
+        chatMessageUniqueConstraints.rows.some((row) => /UNIQUE \(sequence\)/i.test(row.definition)),
         false
       );
 

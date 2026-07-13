@@ -35,14 +35,17 @@ describe("task list controls", () => {
   it("keeps a create failure in the dialog so the prompt can be corrected", async () => {
     const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
     let attempts = 0;
-    render(<TaskCreateDialog endpoints={[endpoint]} open saving={false} onClose={() => undefined} onCreate={async () => { attempts += 1; throw new Error("Endpoint is unavailable"); }} />);
+    let submitted: { inputPaths: string[] } | undefined;
+    render(<TaskCreateDialog endpoints={[endpoint]} projectFiles={[{ name: "brief.md", path: "files/brief.md", type: "file", size: 12, mediaType: "text/markdown", updatedAt: "x" }]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async (input) => { attempts += 1; submitted = input; throw new Error("Endpoint is unavailable"); }} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Generate notes" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /brief.md/ }));
     fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
 
     const alert = await screen.findByRole("alert");
     assert.match(alert.textContent ?? "", /Endpoint is unavailable/);
     assert.equal(attempts, 1);
+    assert.deepEqual(submitted?.inputPaths, ["files/brief.md"]);
     assert.equal((screen.getByRole("textbox", { name: "Task prompt" }) as HTMLTextAreaElement).value, "Generate notes");
   });
 });
