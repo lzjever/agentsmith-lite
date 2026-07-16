@@ -76,6 +76,16 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setMobileDetailsOpen(true);
   }
 
+  function revokeWriteAccess(error: unknown) {
+    if (!(error instanceof ApiError) || error.status !== 403) return false;
+    setCapabilities((current) => current ? { ...current, canWriteFiles: false } : current);
+    setUploadFailure(undefined);
+    setReplaceTarget(undefined);
+    setDeleteTarget(undefined);
+    setMessage("File write permission changed. Files are now read-only.");
+    return true;
+  }
+
   async function upload(file: File, overwrite = false, uploadPath = path) {
     setUploading(true);
     setUploadFailure(undefined);
@@ -97,6 +107,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       if (overwrite) setReplaceTarget(undefined);
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
+      if (revokeWriteAccess(error)) return;
       if (!overwrite && error instanceof ApiError && error.status === 409) {
         setReplaceTarget({ file, path: uploadPath });
       } else if (overwrite) {
@@ -128,6 +139,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       setEntries((current) => current.filter((entry) => entry.path !== deleteTarget.path));
       toast.success("File deleted");
     } catch (error) {
+      if (revokeWriteAccess(error)) return;
       throw new Error(errorMessage(error, "File could not be deleted."));
     } finally {
       setDeleting(false);

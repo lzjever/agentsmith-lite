@@ -73,6 +73,24 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("fails closed when file write permission is revoked", async () => {
+    const original = snapshotClient();
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.uploadFile = async () => { throw new ApiError(403, "Forbidden"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
+      await screen.findByText("File write permission changed. Files are now read-only.");
+      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
+      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
+      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
+      assert.ok(screen.getAllByRole("link", { name: "Download" }).length > 0);
+    } finally { restoreClient(original); }
+  });
+
   it("retries the same failed file", async () => {
     const original = snapshotClient();
     let attempts = 0;
