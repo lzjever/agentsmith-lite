@@ -1,6 +1,6 @@
 "use client";
 import { RefreshCw, Save, SlidersHorizontal } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   apiClient,
@@ -34,6 +34,7 @@ const endpointMetrics = [
   { value: "providerCost", label: "Cost", step: "any" },
 ] as const;
 export function ResourcePolicyPage({ projectId }: { projectId: string }) {
+  const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [caps, setCaps] = useState<ProjectCapabilities>();
@@ -47,6 +48,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   const [error, setError] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setError("");
     setCaps(undefined);
@@ -58,6 +60,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
       apiClient.projectCapabilities(projectId),
       apiClient.endpoints(projectId),
     ]);
+    if (request !== loadRequest.current) return;
     if (policyResult.status === "rejected") {
       setError(
         policyResult.reason instanceof Error ? policyResult.reason.message : "Policy could not be loaded.",
@@ -90,6 +93,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
     event.preventDefault();
     if (!draft || draft.activeTasksLimit === null) return;
     const input: ProjectPolicyInput = { ...draft, activeTasksLimit: draft.activeTasksLimit };
+    loadRequest.current += 1;
     setSaving(true);
     setError("");
     try {

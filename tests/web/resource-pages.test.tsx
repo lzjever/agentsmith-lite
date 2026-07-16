@@ -20,6 +20,24 @@ const endpoint: Endpoint = { id: "endpoint_1", projectId, name: "Primary", proto
 afterEach(() => cleanup());
 
 describe("project resource pages", () => {
+  it("keeps the newest resource policy refresh", async () => {
+    const original = snapshotClient();
+    const resolvers: Array<(value: ProjectResourcePolicy) => void> = [];
+    apiClient.policy = async () => new Promise((resolve) => resolvers.push(resolve));
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      await waitFor(() => assert.equal(resolvers.length, 1));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh policy" }));
+      await waitFor(() => assert.equal(resolvers.length, 2));
+      await act(async () => resolvers[1]!({ ...policy, activeTasksLimit: 7 }));
+      assert.equal((await screen.findByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "7");
+      await act(async () => resolvers[0]!(policy));
+      assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "7");
+    } finally { restoreClient(original); }
+  });
+
   it("uses projected policy capability from the first ready render and sends the complete policy update", async () => {
     const original = snapshotClient();
     const updates: ProjectPolicyInput[] = [];
