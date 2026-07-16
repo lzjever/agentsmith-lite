@@ -28,8 +28,8 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
   const [selected, setSelected] = useState<ProjectFile>();
   const [deleteTarget, setDeleteTarget] = useState<ProjectFile>();
   const [uploading, setUploading] = useState(false);
-  const [uploadFailure, setUploadFailure] = useState<{ file: File; message: string }>();
-  const [replaceTarget, setReplaceTarget] = useState<File>();
+  const [uploadFailure, setUploadFailure] = useState<{ file: File; path: string; message: string }>();
+  const [replaceTarget, setReplaceTarget] = useState<{ file: File; path: string }>();
   const [deleting, setDeleting] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [query,setQuery]=useState(""); const [preview,setPreview]=useState<{kind:"text"|"image";value:string;name:string}|null>(null); const [dropReady,setDropReady]=useState(false);
@@ -76,12 +76,12 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setMobileDetailsOpen(true);
   }
 
-  async function upload(file: File, overwrite = false) {
+  async function upload(file: File, overwrite = false, uploadPath = path) {
     setUploading(true);
     setUploadFailure(undefined);
     setMessage("");
     try {
-      const written = await apiClient.uploadFile(projectId, childFilePath(path, file.name), file, { overwrite });
+      const written = await apiClient.uploadFile(projectId, childFilePath(uploadPath, file.name), file, { overwrite });
       const entry: ProjectFile = {
         name: written.path.slice(written.path.lastIndexOf("/") + 1),
         path: written.path,
@@ -90,17 +90,19 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
         mediaType: written.mediaType,
         updatedAt: written.updatedAt
       };
-      setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
-      setSelected((current) => current?.path === written.path ? entry : current);
+      if (currentPath.current === uploadPath) {
+        setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
+        setSelected((current) => current?.path === written.path ? entry : current);
+      }
       if (overwrite) setReplaceTarget(undefined);
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
       if (!overwrite && error instanceof ApiError && error.status === 409) {
-        setReplaceTarget(file);
+        setReplaceTarget({ file, path: uploadPath });
       } else if (overwrite) {
         throw new Error(errorMessage(error, "File could not be replaced."));
       } else {
-        setUploadFailure({ file, message: errorMessage(error, "File could not be uploaded.") });
+        setUploadFailure({ file, path: uploadPath, message: errorMessage(error, "File could not be uploaded.") });
       }
     } finally {
       setUploading(false);
@@ -146,7 +148,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
         <nav className="flex min-h-12 items-center gap-1 overflow-x-auto border-b border-subtle px-3" aria-label="File path"><ol className="flex min-w-max items-center gap-1 text-sm text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-tertiary" aria-hidden="true" /> : null}<button type="button" className="rounded-sm px-1.5 py-1 hover:bg-surface-low hover:text-foreground" onClick={() => navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav>
         <div className="flex gap-2 border-b border-subtle p-3"><Label className="relative flex-1"><span className="sr-only">Filter files</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary"/><Input value={query} onChange={event=>setQuery(event.target.value)} className="pl-9 pr-8" placeholder="Filter files"/>{query?<Button className="absolute right-1 top-0.5" size="icon" variant="quiet" aria-label="Clear file filter" onClick={()=>setQuery("")}><X size={14}/></Button>:null}</Label></div>
         {message ? <div className="mx-3 mt-3 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{message}</span><Button variant="quiet" size="icon" aria-label="Dismiss error" onClick={() => setMessage("")}><X size={15} /></Button></div> : null}
-        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.message}</span><div className="flex shrink-0 gap-1"><Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file)} disabled={uploading}>Retry upload</Button><Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={uploading}><RefreshCw size={15} /></Button></div></div> : null}
+        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.message}</span><div className="flex shrink-0 gap-1"><Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path)} disabled={uploading}>Retry upload</Button><Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={uploading}><RefreshCw size={15} /></Button></div></div> : null}
         {display === "loading" ? <FileBrowserLoading /> : null}
         {display === "error" ? <FileBrowserError onRetry={load} /> : null}
         {display === "empty" ? <FileBrowserEmpty nested={path !== PROJECT_FILES_ROOT} /> : null}
@@ -158,7 +160,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     <div className="lg:hidden">{selected ? <Button variant="quiet" className="w-full justify-between" aria-expanded={mobileDetailsOpen} onClick={() => setMobileDetailsOpen((open) => !open)}><span>File details</span><ChevronRight className={mobileDetailsOpen ? "rotate-90 transition-transform" : "transition-transform"} size={16} /></Button> : null}{showFileDetails(selected, true, mobileDetailsOpen) ? <div className="mt-2 rounded-md border border-subtle bg-surface p-4"><FileDetails entry={selected} projectId={projectId} canWrite={canWrite} onDelete={setDeleteTarget} onPreview={openPreview} /></div> : null}</div>
     {preview?<div className="mt-4 rounded-md border border-subtle bg-surface p-4"><div className="mb-3 flex justify-between"><strong>{preview.name}</strong><Button variant="quiet" size="icon" aria-label="Close preview" onClick={()=>{if(preview.kind==="image")URL.revokeObjectURL(preview.value);setPreview(null);}}><X size={15}/></Button></div>{preview.kind==="image"?<img className="max-h-96 max-w-full" src={preview.value} alt={preview.name}/>:<pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{preview.value}</pre>}</div>:null}
     <DeleteFileDialog entry={deleteTarget} deleting={deleting} onCancel={() => { if (!deleting) setDeleteTarget(undefined); }} onConfirm={removeSelectedFile} />
-    <ConfirmationDialog open={Boolean(replaceTarget)} onOpenChange={(open) => !open && !uploading && setReplaceTarget(undefined)} title={`Replace ${replaceTarget?.name ?? "file"}?`} description="A file with this name already exists in this folder. This will permanently replace its contents." confirmText="Replace file" variant="default" confirmDisabled={uploading} onConfirm={() => replaceTarget ? upload(replaceTarget, true) : undefined} errorContext="File could not be replaced" />
+    <ConfirmationDialog open={Boolean(replaceTarget)} onOpenChange={(open) => !open && !uploading && setReplaceTarget(undefined)} title={`Replace ${replaceTarget?.file.name ?? "file"}?`} description="A file with this name already exists in this folder. This will permanently replace its contents." confirmText="Replace file" variant="default" confirmDisabled={uploading} onConfirm={() => replaceTarget ? upload(replaceTarget.file, true, replaceTarget.path) : undefined} errorContext="File could not be replaced" />
   </PageLayout>;
 }
 

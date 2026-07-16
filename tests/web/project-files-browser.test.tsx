@@ -36,6 +36,27 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("does not insert an upload response into a different folder", async () => {
+    const original = snapshotClient();
+    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [folder] : [] });
+    apiClient.uploadFile = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { path: file.path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("reports");
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "brief.txt")] } });
+      fireEvent.click(screen.getByRole("button", { name: "reports" }));
+      await screen.findByRole("heading", { name: "This folder is empty" });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+      assert.equal(screen.queryByText("brief.txt"), null);
+      assert.ok(screen.getByRole("heading", { name: "This folder is empty" }));
+    } finally { restoreClient(original); }
+  });
+
   it("shows a failed upload inline with refresh", async () => {
     const original = snapshotClient();
     apiClient.projectCapabilities = async () => writable;
