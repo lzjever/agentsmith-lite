@@ -61,6 +61,24 @@ describe("retained chat and overview behavior", () => {
     render(<ChatMessageList empty={false} sending={false} messages={[message,completed]} onEdit={(item,content)=>edits.push([item.id,content])} onDelete={(item)=>deleted.push(item.id)} onBranch={(item)=>branched.push(item.id)} onRetry={(item)=>retried.push(item.id)}/>);assert.ok(screen.getByText("Provider request failed."));fireEvent.click(screen.getByRole("button",{name:"Retry"}));assert.deepEqual(retried,["message_1"]);fireEvent.click(screen.getByRole("button",{name:"Branch from message"}));assert.deepEqual(branched,["message_2"]);fireEvent.click(screen.getByRole("button",{name:"Edit message"}));await screen.findByRole("dialog",{name:"Edit message"});fireEvent.change(screen.getByRole("textbox",{name:"Message text"}),{target:{value:"Revised"}});fireEvent.click(screen.getByRole("button",{name:"Save message"}));assert.deepEqual(edits,[["message_1","Revised"]]);fireEvent.click(screen.getAllByRole("button",{name:"Delete message"})[0]!);const dialog=await screen.findByRole("alertdialog",{name:"Delete message"});fireEvent.click(within(dialog).getByRole("button",{name:"Delete message"}));await waitFor(()=>assert.deepEqual(deleted,["message_1"]));
   });
 
+  it("keeps chat deletion confirmations open when the server rejects them", async () => {
+    const thread = render(<ChatThreadRail threads={threads} endpoints={[endpoint]} selectedThreadId="chat_1" disabled={false} onNewThread={() => undefined} onSelect={() => undefined} onRename={() => undefined} onPin={() => undefined} onStar={() => undefined} onDelete={async () => { throw new Error("Thread is busy"); }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete conversation" }));
+    let dialog = await screen.findByRole("alertdialog", { name: "Delete conversation" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete conversation" }));
+    assert.match((await within(dialog).findByRole("alert")).textContent ?? "", /Conversation could not be deleted: Thread is busy/);
+    assert.ok(screen.getByRole("alertdialog", { name: "Delete conversation" }));
+    thread.unmount();
+
+    const message = { id: "message_1", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Delete me", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    render(<ChatMessageList empty={false} sending={false} messages={[message]} onDelete={async () => { throw new Error("Message changed"); }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete message" }));
+    dialog = await screen.findByRole("alertdialog", { name: "Delete message" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete message" }));
+    assert.match((await within(dialog).findByRole("alert")).textContent ?? "", /Message could not be deleted: Message changed/);
+    assert.ok(screen.getByRole("alertdialog", { name: "Delete message" }));
+  });
+
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {
     const original = apiClient.projectOverview;
     apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });

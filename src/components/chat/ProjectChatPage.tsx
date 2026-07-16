@@ -225,7 +225,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setEndpointId(next.endpointId ?? "");
     } catch (reason) {
       if (!active.current) return;
-      failAction(reason);
+      throw new Error(message(reason));
     }
   }
 
@@ -291,7 +291,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       toast.success("Message deleted");
     } catch (reason) {
       if (!active.current) return;
-      failAction(reason);
+      throw new Error(message(reason));
     }
   }
 
@@ -364,7 +364,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     onRename={(id, title) => void updateThread(id, { title })}
     onPin={(id, pinned) => void updateThread(id, { pinned })}
     onStar={(id, starred) => void updateThread(id, { starred })}
-    onDelete={(id) => void removeThread(id)}
+    onDelete={removeThread}
     disabled={!canSend || sending}
   />;
 
@@ -395,7 +395,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           disabled={!canSend || !historyReady}
           onReload={() => void loadMessages(threadId)}
           onEdit={(target, content) => void editMessage(target, content)}
-          onDelete={(target) => void deleteMessage(target)}
+          onDelete={deleteMessage}
           onBranch={(target) => void branchMessage(target)}
           onRetry={(target) => void retryMessage(target)}
         />
