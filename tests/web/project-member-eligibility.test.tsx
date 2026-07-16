@@ -30,17 +30,18 @@ describe("project member eligibility", () => {
     apiClient.changeMember = async () => { changes++; return new Promise(() => undefined); };
     try {
       render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
-      const firstRole = (await screen.findAllByRole("combobox", { name: `Role for ${first.userId}` }))[0]!;
+      const firstRole = (await screen.findAllByRole("combobox", { name: "Role for First member" }))[0]!;
       fireEvent.click(firstRole);
       fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
       await waitFor(() => assert.equal(changes, 1));
       assert.equal(screen.queryByRole("dialog", { name: "Member details" }), null);
-      for (const control of screen.getAllByRole("combobox", { name: `Role for ${first.userId}` })) {
+      for (const control of screen.getAllByRole("combobox", { name: "Role for First member" })) {
         assert.equal((control as HTMLButtonElement).disabled, true);
       }
-      for (const control of screen.getAllByRole("combobox", { name: `Role for ${second.userId}` })) {
+      for (const control of screen.getAllByRole("combobox", { name: "Role for Second member" })) {
         assert.equal((control as HTMLButtonElement).disabled, true);
       }
+      assert.equal(screen.getAllByRole("button", { name: "Remove First member" }).length, 2);
     } finally { restoreClient(original); }
   });
 
@@ -55,7 +56,7 @@ describe("project member eligibility", () => {
     apiClient.changeMember = async () => new Promise((resolve) => { finishChange = resolve; });
     try {
       const view = render(<MembersPage workspaceId="workspace_1" projectId="project_1" />);
-      const roleControl = (await screen.findAllByRole("combobox", { name: "Role for member_a" }))[0]!;
+      const roleControl = (await screen.findAllByRole("combobox", { name: "Role for Project A member" }))[0]!;
       fireEvent.click(roleControl);
       fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
       await waitFor(() => assert.ok(finishChange));
