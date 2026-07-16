@@ -70,7 +70,14 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
   const canRestore=isOwner&&archived;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
   async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);setData({...data,project});toast.success(archived?"Project restored.":"Project archived.");}catch(reason){toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{setLifecycleBusy(false)}}
-  async function transferOwner(){await apiClient.transferProjectOwner(projectId,ownerTarget);toast.success("Project ownership transferred.");await load();}
+  async function transferOwner(){
+    if(!data)return;
+    await apiClient.transferProjectOwner(projectId,ownerTarget);
+    setData({...data,project:{...data.project,ownerUserId:ownerTarget}});
+    setOwnerOpen(false);
+    setOwnerTarget("");
+    toast.success("Project ownership transferred.");
+  }
   async function deleteProject() {
     setDeleteError(null);
     setDeleteBusy(true);

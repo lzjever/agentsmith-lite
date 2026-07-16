@@ -6,7 +6,7 @@ import React, { useState } from "react";
 import { apiClient, type EndpointInput, type ProjectCredential, type ProjectSettings, type WorkspaceSettings } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { EndpointDialog } = await import("../../src/components/endpoints/EndpointDialog.js");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
 const { WorkspaceSettingsPage } = await import("../../src/components/settings/WorkspaceSettingsPage.js");
@@ -39,7 +39,8 @@ describe("business shared controls", () => {
   it("transfers project ownership from the shared owner Select", async () => {
     const original = snapshotClient();
     const transfers: string[] = [];
-    apiClient.projectSettings = async () => projectSettings;
+    let settingsReads = 0;
+    apiClient.projectSettings = async () => { settingsReads++; return projectSettings; };
     apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
     apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }, { projectId: "project_1", userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp }];
     apiClient.transferProjectOwner = async (_projectId, userId) => { transfers.push(userId); return { transferred: true }; };
@@ -50,15 +51,19 @@ describe("business shared controls", () => {
       fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
       const actions = screen.getAllByRole("button", { name: "Transfer ownership" });
       fireEvent.click(actions[0]!);
-      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
-      await waitFor(() => assert.deepEqual(transfers, ["member_1"]));
+      const confirm = (await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!;
+      await act(async () => { fireEvent.click(confirm); await Promise.resolve(); });
+      assert.deepEqual(transfers, ["member_1"]);
+      assert.equal(settingsReads, 1);
+      assert.equal(screen.queryByRole("combobox", { name: "New project owner" }), null);
     } finally { restoreClient(original); }
   });
 
   it("transfers workspace ownership from the shared owner Select", async () => {
     const original = snapshotClient();
     const transfers: string[] = [];
-    apiClient.workspaceSettings = async () => workspaceSettings;
+    let settingsReads = 0;
+    apiClient.workspaceSettings = async () => { settingsReads++; return workspaceSettings; };
     apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
     apiClient.workspaceMembers = async () => [{ workspaceId: "workspace_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }, { workspaceId: "workspace_1", userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp }];
     apiClient.transferWorkspaceOwner = async (_workspaceId, userId) => { transfers.push(userId); return { transferred: true }; };
@@ -68,8 +73,11 @@ describe("business shared controls", () => {
       fireEvent.click(owner);
       fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
       fireEvent.click(screen.getAllByRole("button", { name: "Transfer ownership" })[0]!);
-      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
-      await waitFor(() => assert.deepEqual(transfers, ["member_1"]));
+      const confirm = (await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!;
+      await act(async () => { fireEvent.click(confirm); await Promise.resolve(); });
+      assert.deepEqual(transfers, ["member_1"]);
+      assert.equal(settingsReads, 1);
+      assert.equal(screen.queryByRole("combobox", { name: "New workspace owner" }), null);
     } finally { restoreClient(original); }
   });
 

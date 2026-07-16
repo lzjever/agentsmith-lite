@@ -68,7 +68,14 @@ export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) 
   const canRestore=isOwner&&archived;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
   async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const workspace=archived?await apiClient.unarchiveWorkspace(workspaceId):await apiClient.archiveWorkspace(workspaceId);setData({...data,workspace});toast.success(archived?"Workspace restored.":"Workspace archived.");}catch(reason){toast.error(settingsErrorMessage(reason,"Workspace lifecycle could not be updated."));}finally{setLifecycleBusy(false)}}
-  async function transferOwner(){await apiClient.transferWorkspaceOwner(workspaceId,ownerTarget);toast.success("Workspace ownership transferred.");await load();}
+  async function transferOwner(){
+    if(!data)return;
+    await apiClient.transferWorkspaceOwner(workspaceId,ownerTarget);
+    setData({...data,workspace:{...data.workspace,ownerUserId:ownerTarget}});
+    setOwnerOpen(false);
+    setOwnerTarget("");
+    toast.success("Workspace ownership transferred.");
+  }
   async function deleteWorkspace() {
     setDeleteError(null);
     setDeleting(true);
