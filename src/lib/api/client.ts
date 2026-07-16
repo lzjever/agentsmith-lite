@@ -13,9 +13,20 @@ export class ApiError extends Error {
 
 export const SESSION_EXPIRED_EVENT = "agentsmith:session-expired";
 export const DIRECTORY_CHANGED_EVENT = "agentsmith:directory-changed";
+export const NOTIFICATIONS_CHANGED_EVENT = "agentsmith:notifications-changed";
+
+export type NotificationChangeSource = "bell" | "page";
 
 export function notifyDirectoryChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(DIRECTORY_CHANGED_EVENT));
+}
+
+export function notifyNotificationsChanged(source: NotificationChangeSource): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(NOTIFICATIONS_CHANGED_EVENT, { detail: { source } }));
+}
+
+export function notificationChangeSource(event: Event): NotificationChangeSource | undefined {
+  return event instanceof CustomEvent ? event.detail?.source : undefined;
 }
 
 export interface CurrentUser { id: string; email: string; displayName?: string; pictureUrl?: string; }

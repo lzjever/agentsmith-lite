@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { apiClient, type UserNotification } from "../../lib/api/client";
+import { apiClient, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { DropdownContent, DropdownMenu } from "../ui/dropdown-menu";
 
@@ -35,11 +35,16 @@ export function NotificationBell({ returnTo }: { returnTo?: string }) {
     void apiClient.notifications(true).then((listed) => {
       if (mounted.current && revision === loadRevision.current) setItems(listed);
     }).catch(() => undefined);
+    const changed = (event: Event) => {
+      if (notificationChangeSource(event) !== "bell") void load();
+    };
+    window.addEventListener(NOTIFICATIONS_CHANGED_EVENT, changed);
     return () => {
       mounted.current = false;
       if (revision === loadRevision.current) loadRevision.current += 1;
+      window.removeEventListener(NOTIFICATIONS_CHANGED_EVENT, changed);
     };
-  }, []);
+  }, [load]);
   function onOpenChange(nextOpen: boolean) { setOpen(nextOpen); if (nextOpen) void load(); }
   const unread = items.filter((item) => !item.readAt);
   async function markAllRead() {
@@ -53,6 +58,7 @@ export function NotificationBell({ returnTo }: { returnTo?: string }) {
       const saved = await apiClient.markAllNotificationsRead();
       if (!mounted.current) return;
       setItems(saved);
+      notifyNotificationsChanged("bell");
     } catch {
       if (mounted.current) setError("Notifications could not be marked as read. Try again.");
     } finally {
@@ -71,6 +77,7 @@ export function NotificationBell({ returnTo }: { returnTo?: string }) {
           const saved = await apiClient.markNotificationRead(item.id);
           if (!mounted.current) return false;
           setItems((current) => current.map((value) => value.id === saved.id ? saved : value));
+          notifyNotificationsChanged("bell");
         } catch {
           if (mounted.current) setError("Notification could not be marked as read.");
           return false;

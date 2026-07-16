@@ -60,6 +60,20 @@ describe("personal and resource UI", () => {
     } finally { apiClient.notifications = original.notifications; apiClient.markNotificationRead = original.markNotificationRead; }
   });
 
+  it("broadcasts successful notification mutations to the global shell", async () => {
+    const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
+    let changes = 0;
+    const changed = () => { changes += 1; };
+    apiClient.notifications = async () => [notification];
+    apiClient.markNotificationRead = async () => ({ ...notification, readAt: "2026-07-12T00:01:00.000Z" });
+    window.addEventListener("agentsmith:notifications-changed", changed);
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Mark notification read" }));
+      await waitFor(() => assert.equal(changes, 1));
+    } finally { window.removeEventListener("agentsmith:notifications-changed", changed); Object.assign(apiClient, original); }
+  });
+
   it("marks a linked notification read before navigating to its resource", async () => {
     const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
     const pushed: string[] = [];
@@ -102,6 +116,21 @@ describe("personal and resource UI", () => {
       await screen.findByText("Validation project: task completed.");
       assert.ok(screen.getByText("Task finished"));
       assert.equal(screen.getByRole("link", { name: "View all notifications" }).getAttribute("href"), "/notifications?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    } finally { apiClient.notifications = original; }
+  });
+
+  it("reloads the global bell after an external notification mutation", async () => {
+    const original = apiClient.notifications;
+    let reads = 0;
+    apiClient.notifications = async () => { reads += 1; return []; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell /></AppRouterContext.Provider>);
+      await waitFor(() => assert.equal(reads, 1));
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("agentsmith:notifications-changed", { detail: { source: "page" } }));
+        await Promise.resolve();
+      });
+      await waitFor(() => assert.equal(reads, 2));
     } finally { apiClient.notifications = original; }
   });
 

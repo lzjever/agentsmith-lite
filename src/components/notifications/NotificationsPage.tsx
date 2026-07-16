@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Bell, Check, RotateCcw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { apiClient, type UserNotification } from "../../lib/api/client";
+import { apiClient, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -34,7 +34,14 @@ export function NotificationsPage() {
       mounted.current = false;
     };
   }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const changed = (event: Event) => {
+      if (notificationChangeSource(event) !== "page") void load();
+    };
+    window.addEventListener(NOTIFICATIONS_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(NOTIFICATIONS_CHANGED_EVENT, changed);
+  }, [load]);
   function setBusy(id: string, busy: boolean) {
     setBusyIds((current) => {
       const next = new Set(current);
@@ -51,6 +58,7 @@ export function NotificationsPage() {
       const saved = await apiClient.markNotificationRead(id);
       if (!mounted.current) return false;
       setItems((current) => current.map((item) => item.id === id ? saved : item));
+      notifyNotificationsChanged("page");
       return true;
     } catch {
       if (mounted.current) setMutationError({ id, action: "read", message: "Notification could not be marked as read." });
@@ -67,6 +75,7 @@ export function NotificationsPage() {
       await apiClient.dismissNotification(id);
       if (!mounted.current) return;
       setItems((current) => current.filter((item) => item.id !== id));
+      notifyNotificationsChanged("page");
     } catch {
       if (mounted.current) setMutationError({ id, action: "dismiss", message: "Notification could not be dismissed." });
     } finally {
