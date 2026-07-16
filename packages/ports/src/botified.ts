@@ -90,6 +90,7 @@ export interface BotifiedLlmTextPreviewOptions {
   providerRequestId?: string;
   cycleId?: string;
   inputId?: string;
+  signal?: AbortSignal;
 }
 
 interface BotifiedLlmTextPreviewFrameBase {
@@ -398,7 +399,8 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
   ): AsyncIterable<BotifiedLlmTextPreviewFrame> {
     const response = await this.#fetchImpl(buildUrl(baseUrl, llmTextPreviewPath(options)), {
       method: "GET",
-      headers: authHeaders(serviceKey)
+      headers: authHeaders(serviceKey),
+      ...(options.signal ? { signal:options.signal } : {})
     });
     if (!response.ok) {
       throw this.httpError(response, await readJsonBody(response));

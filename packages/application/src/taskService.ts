@@ -1052,7 +1052,7 @@ export class TaskService {
     };
   }
 
-  async *streamTaskAssistantPreviews(userId: string, taskId: string): AsyncIterable<TaskAssistantPreviewUpdate> {
+  async *streamTaskAssistantPreviews(userId: string, taskId: string, signal?: AbortSignal): AsyncIterable<TaskAssistantPreviewUpdate> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
     if (task.executionMode !== "live" || task.terminalReason || !this.botified.streamLlmTextPreview) return;
     const serviceKey = this.serviceKeyForTask(task);
@@ -1060,7 +1060,7 @@ export class TaskService {
     const redaction = await this.interactionRedaction(task, serviceKey);
     const bodies = new Map<string, string>();
     const omitted = new Set<string>();
-    for await (const frame of this.botified.streamLlmTextPreview(runtime.baseUrl, serviceKey)) {
+    for await (const frame of this.botified.streamLlmTextPreview(runtime.baseUrl, serviceKey, signal ? { signal } : {})) {
       if (frame.type === "text_delta") {
         if (omitted.has(frame.providerRequestId)) continue;
         const body = `${bodies.get(frame.providerRequestId) ?? ""}${frame.delta}`;

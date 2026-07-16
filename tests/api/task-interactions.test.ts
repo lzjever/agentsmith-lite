@@ -13,6 +13,7 @@ import {
   type BotifiedDeliveryReceipt,
   type BotifiedPostMessageResult,
   type BotifiedRuntimeHttpClient,
+  type BotifiedLlmTextPreviewOptions,
   type BotifiedTimelineReadResult,
   type BotifiedUploadFileInput,
   type BotifiedUploadFileResult
@@ -414,14 +415,14 @@ describe("task interactions API", () => {
     await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
     const endpointDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(endpointDisabled.items.length,initial.items.length);
-    assert.deepEqual(endpointDisabled.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,cancelTask:true,openTerminal:false,deleteTask:false});
+    assert.deepEqual(endpointDisabled.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,cancelTask:true,openTerminal:false,editTask:true,retryTask:false,duplicateTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
     const owner = (await store.listProjectMemberships(task.projectId)).find((membership)=>membership.role==="owner"); assert.ok(owner);
     await store.updateProjectMembership({...owner,role:"viewer",updatedAt:new Date(Date.parse(owner.updatedAt)+1_000).toISOString()});
     const viewer = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(viewer.items.length,initial.items.length);
-    assert.deepEqual(viewer.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,cancelTask:false,openTerminal:false,deleteTask:false});
+    assert.deepEqual(viewer.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,cancelTask:false,openTerminal:false,editTask:false,retryTask:false,duplicateTask:false,archiveTask:false,deleteTask:false});
 
     await store.updateProjectMembership(owner);
     await store.deleteProjectCredential(endpoint.credentialId);
@@ -486,6 +487,30 @@ describe("task interactions API", () => {
 
     assert.match(stream, /event: connection\ndata: \{"connectionState":"disconnected","runtimeReachability":"reachable","historyStatus":"complete","lastSyncedAt":"[^"]+","message":"Live assistant preview is unavailable\."/);
     assert.doesNotMatch(stream, /api-service-key|Botified service key/);
+  });
+
+  it("aborts an active Botified preview when the interaction stream client disconnects", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    botified.previewWaitForAbort = true;
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:()=>"api-service-key", store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"preview disconnect", endpointId:auth.endpointId });
+    const task = await store.findTask(created.id as string); assert.ok(task);
+    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
+    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:"http://botified.internal" });
+
+    const response = await auth.request("GET", `/api/v1/tasks/${task.id}/interactions/stream`);
+    assert.equal(response.status, 200);
+    const reader = response.body?.getReader(); assert.ok(reader);
+    await reader.read();
+    await reader.cancel();
+    for (let attempt = 0; attempt < 20 && !botified.previewSignal?.aborted; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    assert.equal(botified.previewSignal?.aborted, true);
+    assert.equal((await auth.request("GET", `/api/v1/tasks/${task.id}/interactions`)).status, 200);
   });
 
   it("fails fast when live sandbox mode has no persistent product store", async () => {
@@ -690,6 +715,8 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   abortError: unknown;
   abortWait: Promise<void> | undefined;
   previewFailure: unknown;
+  previewSignal: AbortSignal | undefined;
+  previewWaitForAbort = false;
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
 
@@ -755,7 +782,15 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
 
   async stopBackgroundTask(_baseUrl:string,_serviceKey:string,taskId:string){this.stopCalls.push(taskId);return{taskId,state:"cancelling" as const};}
 
-  async *streamLlmTextPreview() {
+  async *streamLlmTextPreview(_baseUrl:string,_serviceKey:string,options:BotifiedLlmTextPreviewOptions={}) {
+    this.previewSignal = options.signal;
     if (this.previewFailure) throw this.previewFailure;
+    if (this.previewWaitForAbort) {
+      await new Promise<void>((_resolve, reject) => {
+        const terminated = () => reject(new TypeError("terminated"));
+        if (options.signal?.aborted) terminated();
+        else options.signal?.addEventListener("abort", terminated, { once:true });
+      });
+    }
   }
 }

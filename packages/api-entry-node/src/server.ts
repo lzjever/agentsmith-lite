@@ -1130,8 +1130,10 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
     runState(value,force);
     connection(value,connectionState,message,force);
   };
-  const previewIterator=services.tasks.streamTaskAssistantPreviews(userId,taskId)[Symbol.asyncIterator]();
-  let previewNext:ReturnType<typeof previewIterator.next>|null=previewIterator.next();
+  const previewController=new AbortController();
+  const previewIterator=services.tasks.streamTaskAssistantPreviews(userId,taskId,previewController.signal)[Symbol.asyncIterator]();
+  const nextPreview=()=>previewIterator.next().catch(()=>null);
+  let previewNext:ReturnType<typeof nextPreview>|null=nextPreview();
   let previewUnavailable=false;
   transientState(page.state,"connected",page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null,true);
   const deadline=Date.now()+30_000;
@@ -1160,7 +1162,7 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
           const update=preview.result.value;
           if(update.type==="upsert")event("assistant_preview",{interactionId:update.interactionId,body:update.body,occurredAt:update.occurredAt});
           else event("assistant_preview_clear",{interactionId:update.interactionId});
-          previewNext=previewIterator.next();
+          previewNext=nextPreview();
         }
       }
       if(closed)break;
@@ -1169,7 +1171,8 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
     }
     if(!closed){event("reconnect",{});res.end();}
   }finally{
-    void previewIterator.return?.();
+    previewController.abort();
+    try{await previewIterator.return?.();}catch{}
   }
 }
 
