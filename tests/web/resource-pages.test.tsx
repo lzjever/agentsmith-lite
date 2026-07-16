@@ -66,7 +66,21 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("blocks policy saves when endpoints fail and refreshes every controlled field after recovery", async () => {
+  it("keeps policy readable but read-only when permissions cannot be loaded", async () => {
+    const original = snapshotClient();
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
+    apiClient.endpoints = async () => [];
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      await screen.findByText("Read-only policy");
+      assert.match(screen.getByRole("alert").textContent ?? "", /read-only until refreshed/i);
+      assert.equal(screen.queryByRole("heading", { name: "Resource policy unavailable" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Save policy" }), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("saves project limits when endpoints fail and refreshes endpoint fields after recovery", async () => {
     const original = snapshotClient();
     const initial = { ...policy, endpointWindows: [{ endpointId: endpoint.id, metric: "providerRequests" as const, limit: 4, windowSeconds: 3600 }] };
     const refreshed = { ...initial, activeTasksLimit: 7, endpointWindows: [{ endpointId: endpoint.id, metric: "providerRequests" as const, limit: 9, windowSeconds: 86400 }], updatedAt: "2026-07-12T00:00:00.000Z" };
@@ -87,9 +101,12 @@ describe("project resource pages", () => {
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
       await screen.findByText(/Endpoint windows could not be loaded/);
-      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), true);
+      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), false);
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Active tasks" }), { target: { value: "6" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
-      assert.equal(updates.length, 0);
+      await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal(updates[0]?.activeTasksLimit, 6);
+      assert.deepEqual(updates[0]?.endpointWindows, initial.endpointWindows);
 
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
       await waitFor(() => assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "7"));
@@ -97,8 +114,8 @@ describe("project resource pages", () => {
       assert.equal((screen.getByRole("combobox", { name: "Primary Requests window" }) as HTMLSelectElement).value, "86400");
       assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), false);
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
-      await waitFor(() => assert.equal(updates.length, 1));
-      assert.deepEqual(updates[0]?.endpointWindows, refreshed.endpointWindows);
+      await waitFor(() => assert.equal(updates.length, 2));
+      assert.deepEqual(updates[1]?.endpointWindows, refreshed.endpointWindows);
     } finally { restoreClient(original); }
   });
 
@@ -114,6 +131,22 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Refresh alerts" }));
       await screen.findByRole("heading", { name: "No alert instances" });
       assert.equal(attempts, 2);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps alert instances readable but disables actions when permissions cannot be loaded", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
+    apiClient.alertRules = async () => [];
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      await screen.findByText("Task failure");
+      assert.match(screen.getByRole("alert").textContent ?? "", /read-only until refreshed/i);
+      assert.equal(screen.queryByRole("heading", { name: "Alerts unavailable" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Resolve alert" }), null);
+      assert.ok(screen.getByRole("tab", { name: "Rules" }));
     } finally { restoreClient(original); }
   });
 

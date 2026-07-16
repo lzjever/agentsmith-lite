@@ -55,6 +55,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
+  const [capabilitiesError, setCapabilitiesError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [dismiss, setDismiss] = useState<ProjectAlert | null>(null);
   const [retry, setRetry] = useState<{
@@ -65,20 +66,26 @@ export function AlertsPage({ projectId }: { projectId: string }) {
   const load = useCallback(async () => {
     setState("loading");
     setError("");
-    try {
-      const [listed, caps] = await Promise.all([
-        apiClient.alerts(projectId),
-        apiClient.projectCapabilities(projectId),
-      ]);
-      setAlerts(listed);
-      setCapabilities(caps);
-      setState("ready");
-    } catch (cause) {
+    setCapabilities(undefined);
+    setCapabilitiesError("");
+    const [alertsResult, capabilitiesResult] = await Promise.allSettled([
+      apiClient.alerts(projectId),
+      apiClient.projectCapabilities(projectId),
+    ]);
+    if (alertsResult.status === "rejected") {
       setError(
-        cause instanceof Error ? cause.message : "Alerts could not be loaded.",
+        alertsResult.reason instanceof Error ? alertsResult.reason.message : "Alerts could not be loaded.",
       );
       setState("error");
+      return;
     }
+    setAlerts(alertsResult.value);
+    if (capabilitiesResult.status === "fulfilled") {
+      setCapabilities(capabilitiesResult.value);
+    } else {
+      setCapabilitiesError("Alert permissions could not be loaded. Alerts are read-only until refreshed.");
+    }
+    setState("ready");
   }, [projectId]);
   useEffect(() => {
     void load();
@@ -196,6 +203,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
           />
         </PageState>
       ) : null}
+      {state === "ready" && capabilitiesError ? <p className="mb-3 border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</p> : null}
       {state === "ready" && error ? <p className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}
       {state === "ready" ? (
         <Tabs defaultValue="instances">

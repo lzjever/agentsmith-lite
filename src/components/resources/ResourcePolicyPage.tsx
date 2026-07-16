@@ -45,41 +45,42 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [capabilitiesError, setCapabilitiesError] = useState("");
   const load = useCallback(async () => {
     setState("loading");
     setError("");
+    setCaps(undefined);
+    setCapabilitiesError("");
     setEndpointState("loading");
     setEndpointError("");
-    try {
-      const [p, c, endpointResult] = await Promise.all([
-        apiClient.policy(projectId),
-        apiClient.projectCapabilities(projectId),
-        apiClient
-          .endpoints(projectId)
-          .then((value) => ({ ok: true as const, value }))
-          .catch((cause: unknown) => ({ ok: false as const, cause })),
-      ]);
-      setPolicy(p);
-      setDraft(policyDraft(p));
-      setCaps(c);
-      if (endpointResult.ok) {
-        setEndpoints(endpointResult.value);
-        setEndpointState("ready");
-      } else {
-        setEndpointError(
-          endpointResult.cause instanceof Error
-            ? endpointResult.cause.message
-            : "Endpoints could not be loaded.",
-        );
-        setEndpointState("error");
-      }
-      setState("ready");
-    } catch (cause) {
+    const [policyResult, capabilitiesResult, endpointResult] = await Promise.allSettled([
+      apiClient.policy(projectId),
+      apiClient.projectCapabilities(projectId),
+      apiClient.endpoints(projectId),
+    ]);
+    if (policyResult.status === "rejected") {
       setError(
-        cause instanceof Error ? cause.message : "Policy could not be loaded.",
+        policyResult.reason instanceof Error ? policyResult.reason.message : "Policy could not be loaded.",
       );
       setState("error");
+      return;
     }
+    setPolicy(policyResult.value);
+    setDraft(policyDraft(policyResult.value));
+    if (capabilitiesResult.status === "fulfilled") {
+      setCaps(capabilitiesResult.value);
+    } else {
+      setCapabilitiesError("Policy permissions could not be loaded. The policy is read-only until refreshed.");
+    }
+    if (endpointResult.status === "fulfilled") {
+      setEndpoints(endpointResult.value);
+      setEndpointState("ready");
+    } else {
+      setEndpoints([]);
+      setEndpointError(endpointResult.reason instanceof Error ? endpointResult.reason.message : "Endpoints could not be loaded.");
+      setEndpointState("error");
+    }
+    setState("ready");
   }, [projectId]);
   useEffect(() => {
     void load();
@@ -87,7 +88,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   const canManage = caps?.canManagePolicy === true;
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft || draft.activeTasksLimit === null || endpointState !== "ready") return;
+    if (!draft || draft.activeTasksLimit === null) return;
     const input: ProjectPolicyInput = { ...draft, activeTasksLimit: draft.activeTasksLimit };
     setSaving(true);
     setError("");
@@ -143,6 +144,11 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
       ) : null}
       {state === "ready" && policy && draft ? (
         <form onSubmit={save} className="space-y-7">
+          {capabilitiesError ? (
+            <p role="alert" className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+              {capabilitiesError}
+            </p>
+          ) : null}
           {!canManage ? (
             <p className="flex items-center gap-2 text-sm text-secondary">
               <SlidersHorizontal size={16} />
@@ -300,7 +306,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
             <div className="flex justify-end">
               <Button
                 type="submit"
-                disabled={saving || endpointState !== "ready"}
+                disabled={saving}
               >
                 <Save size={16} />
                 {saving ? "Saving..." : "Save policy"}
