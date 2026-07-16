@@ -142,6 +142,11 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
       navigate(`${basePath}/${task.id}`);
     } catch (reason) {
       const detail = message(reason);
+      if (reason instanceof ApiError && reason.status === 403) {
+        setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
+        setDialogOpen(false);
+        mutationKeys.clear("task-create");
+      }
       setError(detail);
       toast.error(detail);
       throw new Error(detail);
