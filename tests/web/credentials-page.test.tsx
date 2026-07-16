@@ -30,6 +30,11 @@ describe("CredentialsPage",()=>{
     apiClient.credentials=async()=>{attempts+=1;if(attempts===1)throw new ApiError(503,"Credential service unavailable");return [credential];};apiClient.projectCapabilities=async()=>manager;
     try{render(<CredentialsPage projectId="project_1"/>);await screen.findByText("Credential service unavailable");fireEvent.click(screen.getByRole("button",{name:"Try again"}));await screen.findByText("DeepSeek");assert.equal(attempts,2);}finally{apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}
   });
+  it("keeps credential metadata readable but disables mutations when permissions fail",async()=>{
+    const original={credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};
+    apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>{throw new ApiError(503,"Permissions unavailable");};
+    try{render(<CredentialsPage projectId="project_1"/>);await screen.findByText("DeepSeek");assert.match(screen.getByRole("alert").textContent??"",/read-only until refreshed/i);assert.equal(screen.queryByRole("button",{name:/New credential/}),null);assert.equal(screen.queryByRole("button",{name:/Rotate/}),null);assert.ok(screen.getByText("fingerprint"));}finally{apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}
+  });
 });
 
 const credential={id:"credential_1",projectId:"project_1",name:"DeepSeek",type:"api_key" as const,baseUrl:"https://api.example.test/v1",fingerprint:"fingerprint",version:1,createdAt:"2026-01-01T00:00:00.000Z",lastRotatedAt:null,updatedAt:"2026-01-01T00:00:00.000Z"};
