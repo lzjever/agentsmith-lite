@@ -22,6 +22,11 @@ type WorkspaceMode = "conversation" | "terminal" | "artifacts";
 type LoadState = "loading" | "ready" | "error";
 
 export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly = false }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly?: boolean }) {
+  return <TaskDetail key={`${workspaceId}:${projectId}:${taskId}:${artifactsOnly ? "artifacts" : "task"}`} workspaceId={workspaceId} projectId={projectId} taskId={taskId} artifactsOnly={artifactsOnly} />;
+}
+
+function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly: boolean }) {
+  const mounted = useRef(true);
   const mutationKeys = useTaskMutationKeys();
   const [task, setTask] = useState<Task>();
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
@@ -57,12 +62,12 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     setTaskError("");
     try {
       const detail = await apiClient.taskDetail(taskId);
-      if (version !== taskLoadVersion.current) return;
+      if (!mounted.current || version !== taskLoadVersion.current) return;
       setTask(detail.task);
       applyCapabilities(detail.capabilities);
       setTaskState("ready");
     } catch (reason) {
-      if (version !== taskLoadVersion.current) return;
+      if (!mounted.current || version !== taskLoadVersion.current) return;
       setTaskError(message(reason));
       if (!quiet) setTaskState("error");
     }
@@ -75,15 +80,15 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     if (!quiet) setArtifactsState("loading");
     try {
       const loaded = await apiClient.taskArtifacts(taskId);
-      if (version !== artifactsLoadVersion.current) return;
+      if (!mounted.current || version !== artifactsLoadVersion.current) return;
       setArtifacts(loaded);
       setArtifactsState("ready");
     } catch (reason) {
-      if (version !== artifactsLoadVersion.current) return;
+      if (!mounted.current || version !== artifactsLoadVersion.current) return;
       setArtifactsError(message(reason));
       setArtifactsState("error");
     } finally {
-      if (version === artifactsLoadVersion.current) setRefreshingArtifacts(false);
+      if (mounted.current && version === artifactsLoadVersion.current) setRefreshingArtifacts(false);
     }
   }, [taskId]);
 
@@ -93,16 +98,22 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     setInputsState("loading");
     try {
       const loaded = await apiClient.taskInputs(taskId);
-      if (version !== inputsLoadVersion.current) return;
+      if (!mounted.current || version !== inputsLoadVersion.current) return;
       setInputs(loaded);
       setInputsState("ready");
     } catch (reason) {
-      if (version !== inputsLoadVersion.current) return;
+      if (!mounted.current || version !== inputsLoadVersion.current) return;
       setInputsError(message(reason));
       setInputsState("error");
     }
   }, [taskId]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => {
     void loadTask();
   }, [loadTask]);
@@ -140,9 +151,11 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     try {
       await apiClient.cancelTask(taskId, mutationKeys.key("task-cancel", taskId));
       mutationKeys.complete("task-cancel", taskId);
+      if (!mounted.current) return;
       refresh();
       toast.success("Task cancellation requested");
     } catch (reason) {
+      if (!mounted.current) return;
       if (reason instanceof ApiError && reason.status === 403) {
         setCapabilities((current) => current ? { ...current, cancelTask: false } : current);
         setCancelOpen(false);
@@ -150,7 +163,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
       }
       throw reason;
     } finally {
-      setCancelling(false);
+      if (mounted.current) setCancelling(false);
     }
   }
   async function deleteTask() {
@@ -158,8 +171,10 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     try {
       await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
       mutationKeys.complete("task-delete", taskId);
+      if (!mounted.current) return;
       window.location.assign(basePath);
     } catch (reason) {
+      if (!mounted.current) return;
       if (reason instanceof ApiError && reason.status === 403) {
         setCapabilities((current) => current ? { ...current, deleteTask: false } : current);
         setDeleteOpen(false);

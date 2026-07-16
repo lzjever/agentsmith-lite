@@ -201,6 +201,34 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("does not refresh an old task after cancellation finishes on another task", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, cancelTask: apiClient.cancelTask };
+    const secondTask: Task = { ...task, id: "task_second", title: "Second task", runId: "run_2" };
+    let finishCancel: (() => void) | undefined;
+    apiClient.taskDetail = async (requestedTaskId) => ({ task: requestedTaskId === task.id ? task : secondTask, capabilities: available });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => snapshot(available);
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    apiClient.cancelTask = async () => new Promise((resolve) => { finishCancel = () => resolve({ accepted: true }); });
+    try {
+      const view = render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel task" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Cancel task" }).at(-1)!);
+      await waitFor(() => assert.ok(finishCancel));
+
+      view.rerender(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={secondTask.id} />);
+      await screen.findByRole("heading", { name: "Second task" });
+      await act(async () => finishCancel!());
+      assert.ok(screen.getByRole("heading", { name: "Second task" }));
+      assert.ok(screen.getByText(`Active · ${secondTask.id}`));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the terminal result visible while explaining delayed artifact recovery", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const delayed: Task = { ...task, status:"completed", terminalReason:"completed", artifactProjectionStatus:"failed", artifactProjectionError:"Artifact storage is temporarily unavailable", cleanupStatus:"pending" };
