@@ -121,11 +121,15 @@ export class ProjectPolicyService {
       return reserved.id;
     }
     const usage = await this.usage(projectId);
-    const limits = providerReservationLimits(policy, usage, reservation);
+    const projectLimits = providerReservationLimits(policy, usage, reservation);
+    const endpointLimits = await this.endpointReservationLimits(policy, projectId, actorId, endpointId, reservation, reservedAt);
+    const limits = [...projectLimits, ...endpointLimits].filter((limit, index, values) => values.indexOf(limit) === index);
     const alertTypes: ProjectAlertType[] = limits.length ? limits : ["provider_requests_limit"];
     await Promise.all(alertTypes.map((limit) => this.openAlert(projectId, limit, endpointId)));
     await this.auditEvent(projectId, actorId, "provider.request", "rejected", endpointId);
-    throw new ProductError(`Project ${(limits[0] ?? "provider_requests_limit").replaceAll("_", " ")} reached`, 409);
+    const reason = projectLimits[0] ?? endpointLimits[0] ?? "provider_requests_limit";
+    const scope = projectLimits.length ? "Project" : endpointLimits.length ? "Endpoint rolling" : "Project";
+    throw new ProductError(`${scope} ${reason.replaceAll("_", " ")} reached`, 409);
   }
   async markProviderDispatched(id: string): Promise<void> { if (!await this.store.markProjectProviderSettlementDispatched(id, nowIso())) throw new ProductError("Provider settlement not found", 409); }
   async markProviderDelivered(id: string): Promise<void> { if (!await this.store.markProjectProviderSettlementDelivered(id, nowIso())) throw new ProductError("Provider settlement not found", 409); }
@@ -163,6 +167,24 @@ export class ProjectPolicyService {
   async refreshFileAlerts(projectId: string): Promise<void> { await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit"); }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
+  private async endpointReservationLimits(policy: ProjectResourcePolicy, projectId: string, actorId: string | null, endpointId: string | null, reservation: Readonly<{ tokens: number; cost: number }>, measuredAt: string): Promise<Limit[]> {
+    if (endpointId === null) return [];
+    const limits: Limit[] = [];
+    for (const window of policy.endpointWindows ?? []) {
+      if (window.endpointId !== endpointId) continue;
+      const measured = await this.store.measureProjectProviderWindow({
+        projectId,
+        endpointId,
+        actorId,
+        metric: window.metric,
+        since: new Date(Date.parse(measuredAt) - window.windowSeconds * 1000).toISOString(),
+      });
+      const requested = window.metric === "providerRequests" ? 1 : window.metric === "providerTokens" ? reservation.tokens : reservation.cost;
+      if (measured.current + requested <= window.limit) continue;
+      limits.push(window.metric === "providerRequests" ? "provider_requests_limit" : window.metric === "providerTokens" ? "provider_tokens_limit" : "provider_cost_limit");
+    }
+    return limits;
+  }
   private async check(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string | null, delta: Partial<ProjectResourceUsage>, limit: Limit) {
     const [policy, usage] = await Promise.all([this.requirePolicy(projectId), this.usage(projectId)]);
     const key = limit === "active_tasks_limit" ? "activeTasks" : limit === "provider_requests_limit" ? "providerRequests" : limit === "provider_tokens_limit" ? "providerTokens" : limit === "provider_cost_limit" ? "providerCost" : "projectFileBytes";

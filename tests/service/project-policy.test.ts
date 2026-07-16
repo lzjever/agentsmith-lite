@@ -248,6 +248,28 @@ describe("project resource policy", () => {
     await services.policies.reserveProvider(project.id,teammate.user.id,endpoint.id);
   });
 
+  it("reports the endpoint rolling metric that rejected a provider reservation", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-endpoint-window-rejection", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+    await store.createEndpoint(endpoint);
+    await services.policies.updatePolicy(user.id, project.id, {
+      endpointWindows: [{ endpointId: endpoint.id, metric: "providerTokens", limit: 4095, windowSeconds: 3600 }]
+    });
+
+    await assert.rejects(
+      () => services.policies.reserveProvider(project.id, user.id, endpoint.id),
+      /endpoint rolling provider tokens limit reached/i
+    );
+    assert.deepEqual(
+      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.status === "active").map((alert) => [alert.type, alert.endpointId]),
+      [["provider_tokens_limit", endpoint.id]]
+    );
+  });
+
   it("patches nullable limits without replacing concurrent policy fields", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-patch", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
