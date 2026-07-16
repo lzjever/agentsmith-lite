@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { MembersPage } = await import("../../src/components/members/MembersPage.js");
 
 const projectId = "project_1";
@@ -41,6 +41,30 @@ describe("project member eligibility", () => {
       for (const control of screen.getAllByRole("combobox", { name: `Role for ${second.userId}` })) {
         assert.equal((control as HTMLButtonElement).disabled, true);
       }
+    } finally { restoreClient(original); }
+  });
+
+  it("does not apply a role change after switching projects", async () => {
+    const original = snapshotClient();
+    const first: ProjectMember = { ...owner, userId: "member_a", role: "member", displayName: "Project A member", email: "a@example.test" };
+    const second: ProjectMember = { ...owner, projectId: "project_2", userId: "member_b", role: "viewer", displayName: "Project B member", email: "b@example.test" };
+    let finishChange: ((value: ProjectMember) => void) | undefined;
+    apiClient.members = async (requestedProjectId) => requestedProjectId === "project_1" ? [first] : [second];
+    apiClient.workspaceMembers = async () => [];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.changeMember = async () => new Promise((resolve) => { finishChange = resolve; });
+    try {
+      const view = render(<MembersPage workspaceId="workspace_1" projectId="project_1" />);
+      const roleControl = (await screen.findAllByRole("combobox", { name: "Role for member_a" }))[0]!;
+      fireEvent.click(roleControl);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      await waitFor(() => assert.ok(finishChange));
+
+      view.rerender(<MembersPage workspaceId="workspace_2" projectId="project_2" />);
+      assert.ok((await screen.findAllByText("Project B member")).length > 0);
+      await act(async () => finishChange!({ ...first, role: "admin" }));
+      assert.ok(screen.getAllByText("Project B member").length > 0);
+      assert.equal(screen.queryAllByText("Project A member").length, 0);
     } finally { restoreClient(original); }
   });
 

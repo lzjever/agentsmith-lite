@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -19,6 +19,14 @@ import { memberIdentityLabel, memberMatchesQuery, removeMemberById } from "./mem
 import { MembersTable } from "./MembersTable";
 
 export function MembersPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  return <ProjectMembersPage key={`${workspaceId}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
+}
+
+function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  const mounted = useRef(true);
+  const loadRequest = useRef(0);
+  const memberRequest = useRef(0);
+  const candidateRequest = useRef(0);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
@@ -38,20 +46,28 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const [roleError, setRoleError] = useState<{ userId: string; message: string }>();
 
   const loadCandidates = useCallback(async () => {
+    const request = ++candidateRequest.current;
     setCandidateState("loading");
     try {
-      setWorkspaceMembers(await apiClient.workspaceMembers(workspaceId));
+      const listed = await apiClient.workspaceMembers(workspaceId);
+      if (!mounted.current || request !== candidateRequest.current) return;
+      setWorkspaceMembers(listed);
       setCandidateState("ready");
     } catch {
+      if (!mounted.current || request !== candidateRequest.current) return;
       setCandidateState("error");
     }
   }, [workspaceId]);
 
   const refreshMembers = useCallback(async () => {
-    setMembers(await apiClient.members(projectId));
+    const request = ++memberRequest.current;
+    const listed = await apiClient.members(projectId);
+    if (!mounted.current || request !== memberRequest.current) return;
+    setMembers(listed);
   }, [projectId]);
 
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setError("");
     setCapabilities(undefined);
@@ -62,6 +78,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
       refreshMembers(),
       apiClient.projectCapabilities(projectId),
     ]);
+    if (!mounted.current || request !== loadRequest.current) return;
     if (membersResult.status === "rejected") {
       setError(message(membersResult.reason));
       setState("error");
@@ -78,6 +95,12 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setState("ready");
   }, [loadCandidates, projectId, refreshMembers]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
   const canManage = capabilities?.canManageMembers === true;
@@ -111,16 +134,18 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setInviteError("");
     try {
       const added = await apiClient.addMember(projectId, candidateUserId, role);
+      if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), { ...added, displayName: candidate.displayName, email: candidate.email }]);
       setInviteOpen(false);
       setCandidateUserId("");
       setRole("member");
       toast.success("Member added");
     } catch (reason) {
+      if (!mounted.current) return;
       setInviteError(denied(reason));
       await Promise.allSettled([refreshMembers(), loadCandidates()]);
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
@@ -130,12 +155,14 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setRoleError(undefined);
     try {
       const updated = await apiClient.changeMember(projectId, member.userId, nextRole);
+      if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === updated.userId ? { ...item, ...updated } : item));
       toast.success("Member role updated");
     } catch (reason) {
+      if (!mounted.current) return;
       setRoleError({ userId: member.userId, message: denied(reason) });
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
@@ -144,14 +171,16 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setBusyUserId(removing.userId);
     try {
       await apiClient.removeMember(projectId, removing.userId);
+      if (!mounted.current) return;
       setMembers((items) => removeMemberById(items, removing.userId));
       setRemoving(undefined);
       toast.success("Member removed");
       void loadCandidates();
     } catch (reason) {
+      if (!mounted.current) return;
       throw new Error(denied(reason));
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
