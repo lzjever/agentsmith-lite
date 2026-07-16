@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatThread } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { ChatMessageList } = await import("../../src/components/chat/ChatMessageList.js");
 const { ChatThreadRail } = await import("../../src/components/chat/ChatThreadRail.js");
 const { ProjectOverviewPage } = await import("../../src/components/projects/ProjectOverviewPage.js");
@@ -119,6 +119,40 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("keeps the newest endpoints, access, and conversations after overlapping refreshes", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    const latestEndpoint = { ...endpoint, id: "endpoint_latest", name: "Latest endpoint" };
+    const latestThread = { ...threads[0]!, id: "chat_latest", endpointId: latestEndpoint.id, title: "Latest conversation" };
+    const staleThread = { ...threads[0]!, id: "chat_stale", title: "Stale conversation" };
+    let endpointReads = 0; let capabilityReads = 0; let threadReads = 0;
+    let resolveOldEndpoints!: (value: Endpoint[]) => void;
+    let resolveOldCapabilities!: (value: ProjectCapabilities) => void;
+    let resolveOldThreads!: (value: ProjectChatThread[]) => void;
+    apiClient.endpoints = async () => ++endpointReads === 1 ? new Promise((resolve) => { resolveOldEndpoints = resolve; }) : [latestEndpoint];
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? new Promise((resolve) => { resolveOldCapabilities = resolve; }) : readOnly;
+    apiClient.chatThreads = async () => ++threadReads === 1 ? new Promise((resolve) => { resolveOldThreads = resolve; }) : [latestThread];
+    apiClient.chatMessages = async (_projectId, id) => [{ id: `message_${id}`, threadId: id, role: "assistant", content: `Message for ${id}`, createdAt: endpoint.createdAt }];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await waitFor(() => assert.deepEqual([endpointReads, capabilityReads, threadReads], [1, 1, 1]));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh chat" }));
+      await screen.findByText("Message for chat_latest");
+      assert.ok(screen.getByText("Your project access is read-only."));
+      await act(async () => {
+        resolveOldEndpoints([endpoint]);
+        resolveOldCapabilities({ ...readOnly, canSendChat: true });
+        resolveOldThreads([staleThread]);
+        await Promise.resolve();
+      });
+      assert.equal(screen.queryAllByText("Stale conversation").length, 0);
+      assert.ok(screen.getByRole("button", { name: "Latest conversation" }));
+      assert.ok(screen.getByText("Message for chat_latest"));
+      assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, true);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the persisted user message after stopping an active stream", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     let aborted = false;
@@ -135,6 +169,7 @@ describe("retained chat and overview behavior", () => {
     try {
       render(<ProjectChatPage projectId="project_1" />);
       const message = await screen.findByRole("textbox", { name: "Message" });
+      await waitFor(() => assert.equal((message as HTMLTextAreaElement).disabled, false));
       fireEvent.change(message, { target: { value: "hello" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await screen.findByText("partial answer");

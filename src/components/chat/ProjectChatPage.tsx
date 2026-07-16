@@ -35,45 +35,58 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   const [threadSheetOpen, setThreadSheetOpen] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  const endpointLoadVersion = useRef(0);
+  const capabilitiesLoadVersion = useRef(0);
+  const threadLoadVersion = useRef(0);
   const messageLoadVersion = useRef(0);
   const loadedThreadId = useRef("");
 
   const loadEndpoints = useCallback(async () => {
+    const version = ++endpointLoadVersion.current;
     setEndpointsStatus("loading");
     try {
       const available = await apiClient.endpoints(projectId);
+      if (version !== endpointLoadVersion.current) return;
       setEndpoints(available);
       const compatible = available.filter(isChatCompatibleEndpoint);
       setEndpointId((current) => compatible.some((endpoint) => endpoint.id === current) ? current : (compatible[0]?.id ?? ""));
       setEndpointsError("");
       setEndpointsStatus("ready");
     } catch (reason) {
+      if (version !== endpointLoadVersion.current) return;
       setEndpointsError(message(reason));
       setEndpointsStatus("error");
     }
   }, [projectId]);
 
   const loadCapabilities = useCallback(async () => {
+    const version = ++capabilitiesLoadVersion.current;
     setCapabilitiesStatus("loading");
     try {
-      setCapabilities(await apiClient.projectCapabilities(projectId));
+      const projected = await apiClient.projectCapabilities(projectId);
+      if (version !== capabilitiesLoadVersion.current) return;
+      setCapabilities(projected);
       setCapabilitiesError("");
       setCapabilitiesStatus("ready");
     } catch (reason) {
+      if (version !== capabilitiesLoadVersion.current) return;
       setCapabilitiesError(message(reason));
       setCapabilitiesStatus("error");
     }
   }, [projectId]);
 
   const loadThreads = useCallback(async () => {
+    const version = ++threadLoadVersion.current;
     setThreadsStatus("loading");
     try {
       const savedThreads = await apiClient.chatThreads(projectId);
+      if (version !== threadLoadVersion.current) return;
       setThreads(savedThreads);
       setThreadId((current) => savedThreads.some((thread) => thread.id === current) ? current : (savedThreads[0]?.id ?? ""));
       setThreadsError("");
       setThreadsStatus("ready");
     } catch (reason) {
+      if (version !== threadLoadVersion.current) return;
       setThreadsError(message(reason));
       setThreadsStatus("error");
     }
