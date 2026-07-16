@@ -19,6 +19,31 @@ const candidate: WorkspaceMember = { workspaceId, userId: "candidate_1", role: "
 afterEach(() => cleanup());
 
 describe("project member eligibility", () => {
+  it("serializes project membership mutations", async () => {
+    const original = snapshotClient();
+    const first: ProjectMember = { ...owner, userId: "member_1", role: "member", displayName: "First member", email: "first@example.test" };
+    const second: ProjectMember = { ...owner, userId: "member_2", role: "viewer", displayName: "Second member", email: "second@example.test" };
+    let changes = 0;
+    apiClient.members = async () => [owner, first, second];
+    apiClient.workspaceMembers = async () => [workspaceOwner];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.changeMember = async () => { changes++; return new Promise(() => undefined); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      const firstRole = (await screen.findAllByRole("combobox", { name: `Role for ${first.userId}` }))[0]!;
+      fireEvent.click(firstRole);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      await waitFor(() => assert.equal(changes, 1));
+      assert.equal(screen.queryByRole("dialog", { name: "Member details" }), null);
+      for (const control of screen.getAllByRole("combobox", { name: `Role for ${first.userId}` })) {
+        assert.equal((control as HTMLButtonElement).disabled, true);
+      }
+      for (const control of screen.getAllByRole("combobox", { name: `Role for ${second.userId}` })) {
+        assert.equal((control as HTMLButtonElement).disabled, true);
+      }
+    } finally { restoreClient(original); }
+  });
+
   it("adds a selected workspace member by stable user ID", async () => {
     const original = snapshotClient();
     let projectMembers = [owner];
@@ -89,8 +114,8 @@ describe("project member eligibility", () => {
   });
 });
 
-function snapshotClient() { return { members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, projectCapabilities: apiClient.projectCapabilities, addMember: apiClient.addMember }; }
-function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.members = original.members; apiClient.workspaceMembers = original.workspaceMembers; apiClient.projectCapabilities = original.projectCapabilities; apiClient.addMember = original.addMember; }
+function snapshotClient() { return { members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, projectCapabilities: apiClient.projectCapabilities, addMember: apiClient.addMember, changeMember: apiClient.changeMember }; }
+function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, self: dom.window, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });

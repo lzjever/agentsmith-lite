@@ -83,7 +83,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const canManage = capabilities?.canManageMembers === true;
   const memberIds = useMemo(() => new Set(members.map((member) => member.userId)), [members]);
   const eligible = useMemo(() => workspaceMembers.filter((member) => !memberIds.has(member.userId)), [memberIds, workspaceMembers]);
-  const canAdd = canManage && candidateState === "ready" && eligible.length > 0;
+  const canAdd = canManage && busyUserId === undefined && candidateState === "ready" && eligible.length > 0;
   const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
 
   function denied(reason: unknown) {
@@ -120,7 +120,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   }
 
   async function changeRole(member: ProjectMember, nextRole: Exclude<MemberRole, "owner">) {
-    if (!canManage) return;
+    if (!canManage || busyUserId !== undefined) return;
     setBusyUserId(member.userId);
     setRoleError(undefined);
     try {
@@ -135,7 +135,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   }
 
   async function removeMember() {
-    if (!removing || !canManage) return;
+    if (!removing || !canManage || busyUserId !== undefined) return;
     setBusyUserId(removing.userId);
     try {
       await apiClient.removeMember(projectId, removing.userId);
@@ -163,7 +163,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
       {filtered.length === 0 ? <PageState state="empty"><div className="space-y-2"><h2 className="type-title">No members match these filters</h2><Button variant="quiet" onClick={() => { setQuery(""); setRoleFilter("all"); }}>Clear filters</Button></div></PageState> : <MembersTable members={filtered} canManage={canManage} busyUserId={busyUserId} roleError={roleError} onDismissRoleError={() => setRoleError(undefined)} onChangeRole={(member, nextRole) => void changeRole(member, nextRole)} onRemove={setRemoving} onView={setSelected} />}
     </section> : null}
     <Dialog open={inviteOpen} onOpenChange={(open) => { if (busyUserId !== "new") setInviteOpen(open); if (!open) setInviteError(""); }}><DialogContent><form onSubmit={addMember}><DialogHeader title="Add member" description="Choose someone who already belongs to this workspace." />{inviteError ? <div className="mx-5 mt-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{inviteError}</span><Button variant="quiet" size="icon" aria-label="Dismiss member error" onClick={() => setInviteError("")}><X size={15} /></Button></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Workspace member<Select value={candidateUserId} onValueChange={setCandidateUserId} disabled={busyUserId === "new"}><SelectTrigger aria-label="Workspace member"><SelectValue placeholder="Select a workspace member" /></SelectTrigger><SelectContent>{eligible.map((member) => <SelectItem value={member.userId} key={member.userId}>{workspaceMemberLabel(member)}</SelectItem>)}</SelectContent></Select></label><label className="grid gap-2 text-sm text-primary">Role<Select value={role} onValueChange={(value) => setRole(value as Exclude<MemberRole, "owner">)} disabled={busyUserId === "new"}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select></label></div><DialogFooter><Button type="button" variant="quiet" onClick={() => setInviteOpen(false)} disabled={busyUserId === "new"}>Cancel</Button><Button type="submit" disabled={!canAdd || !candidateUserId || busyUserId === "new"}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></form></DialogContent></Dialog>
-    <ConfirmationDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(undefined)} title="Remove member" description={removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : ""} confirmText={busyUserId === removing?.userId ? "Removing" : "Remove member"} confirmDisabled={!canManage || busyUserId === removing?.userId} onConfirm={removeMember} errorContext="Member could not be removed" />
+    <ConfirmationDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(undefined)} title="Remove member" description={removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : ""} confirmText={busyUserId === removing?.userId ? "Removing" : "Remove member"} confirmDisabled={!canManage || busyUserId !== undefined} onConfirm={removeMember} errorContext="Member could not be removed" />
     <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)}><DialogContent>{selected ? <><DialogHeader title="Member details" description="Project membership identity." /><dl className="grid gap-4 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]"><dt className="text-secondary">Name</dt><dd className="break-all text-foreground">{memberIdentityLabel(selected)}</dd><dt className="text-secondary">Email</dt><dd className="break-all text-foreground">{selected.email}</dd><dt className="text-secondary">Role</dt><dd className="text-foreground">{selected.role}</dd><dt className="text-secondary">Joined</dt><dd className="text-foreground">{new Date(selected.createdAt).toLocaleString("en-US")}</dd><dt className="text-secondary">Updated</dt><dd className="text-foreground">{new Date(selected.updatedAt).toLocaleString("en-US")}</dd></dl></> : null}</DialogContent></Dialog>
   </PageLayout>;
 }
