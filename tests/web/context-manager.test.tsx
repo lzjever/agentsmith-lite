@@ -68,6 +68,25 @@ describe("context manager", () => {
       await waitFor(() => assert.ok(loads >= 2));
     } finally { apiClient.contexts = original.contexts; apiClient.saveContext = original.saveContext; }
   });
+
+  it("keeps a successful context save when a later list read would fail", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = { id: "ctx_1", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    let reads = 0;
+    apiClient.contexts = async () => { reads += 1; if (reads > 1) throw new ApiError(503, "Context list unavailable."); return { items: [entry], canWrite: true }; };
+    apiClient.saveContext = async () => ({ ...entry, content: "after", version: 2, updatedAt: "2026-07-11T00:01:00.000Z" });
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const content = await screen.findByRole("textbox", { name: "Content" });
+      fireEvent.change(content, { target: { value: "after" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.equal((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled, false));
+      assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "after");
+      assert.equal(reads, 1);
+      assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
+      assert.equal(screen.queryByText("Context list unavailable."), null);
+    } finally { Object.assign(apiClient, original); }
+  });
 });
 
 function installDom(): void {
