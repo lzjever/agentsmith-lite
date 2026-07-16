@@ -36,25 +36,34 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [formError, setFormError] = useState("");
   const discoveryRevision = useRef(0);
+  const endpointsLoadRevision = useRef(0);
+  const credentialsLoadRevision = useRef(0);
+  const capabilitiesLoadRevision = useRef(0);
 
   const loadDependencies = useCallback(() => {
+    const credentialsRevision = ++credentialsLoadRevision.current;
     setCredentialsState("loading");
     setCredentialsError("");
     void apiClient.credentials(projectId).then((listed) => {
+      if (credentialsRevision !== credentialsLoadRevision.current) return;
       setCredentials(listed);
       setCredentialsState("ready");
     }).catch((reason) => {
+      if (credentialsRevision !== credentialsLoadRevision.current) return;
       setCredentials([]);
       setCredentialsError(message(reason));
       setCredentialsState("error");
     });
 
+    const capabilitiesRevision = ++capabilitiesLoadRevision.current;
     setCapabilitiesState("loading");
     setCapabilitiesError("");
     void apiClient.projectCapabilities(projectId).then((projected) => {
+      if (capabilitiesRevision !== capabilitiesLoadRevision.current) return;
       setCapabilities(projected);
       setCapabilitiesState("ready");
     }).catch((reason) => {
+      if (capabilitiesRevision !== capabilitiesLoadRevision.current) return;
       setCapabilities(undefined);
       setCapabilitiesError(message(reason));
       setCapabilitiesState("error");
@@ -62,12 +71,16 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const load = useCallback(async () => {
+    const revision = ++endpointsLoadRevision.current;
     setState("loading");
     setError("");
     try {
-      setEndpoints(await apiClient.endpoints(projectId));
+      const listed = await apiClient.endpoints(projectId);
+      if (revision !== endpointsLoadRevision.current) return;
+      setEndpoints(listed);
       setState("ready");
     } catch (reason) {
+      if (revision !== endpointsLoadRevision.current) return;
       setError(message(reason));
       setState("error");
     }
