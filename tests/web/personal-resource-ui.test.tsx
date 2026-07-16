@@ -134,6 +134,28 @@ describe("personal and resource UI", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("does not let an older menu load undo mark all read", async () => {
+    const original = { notifications: apiClient.notifications, markAllNotificationsRead: apiClient.markAllNotificationsRead };
+    let initialLoaded = false;
+    let finishMenuLoad: ((value: UserNotification[]) => void) | undefined;
+    apiClient.notifications = async (unreadOnly) => {
+      if (unreadOnly) { initialLoaded = true; return [notification]; }
+      return new Promise((resolve) => { finishMenuLoad = resolve; });
+    };
+    apiClient.markAllNotificationsRead = async () => [{ ...notification, readAt: "2026-07-12T00:01:00.000Z" }];
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell /></AppRouterContext.Provider>);
+      await waitFor(() => assert.equal(initialLoaded, true));
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
+      await waitFor(() => assert.ok(finishMenuLoad));
+      fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Mark all read" }), null));
+
+      await act(async () => finishMenuLoad!([notification]));
+      assert.equal(screen.queryByRole("button", { name: "Mark all read" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a project return path and explains notification load failures", async () => {
     const original = apiClient.notifications;
     apiClient.notifications = async () => { throw new Error("offline"); };
