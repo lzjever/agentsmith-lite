@@ -1,5 +1,6 @@
-import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
+import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, ProjectListProjection, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
+import { ProductError } from "../../domain/src/errors.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService, type ProjectPermission } from "./authorizationService.js";
@@ -41,13 +42,24 @@ export class WorkspaceService {
   }
 
   async listWorkspaces(userId: string): Promise<WorkspaceWithProjects[]> {
-    const workspaces = await this.store.listWorkspacesForUser(userId);
-    const projects = await this.store.listProjectsForUser(userId);
+    const [workspaces, projects, pins] = await Promise.all([
+      this.store.listWorkspacesForUser(userId),
+      this.store.listProjectsForUser(userId),
+      this.store.listProjectPinsForUser(userId)
+    ]);
+    const pinnedAtByProject = new Map(pins.map((pin) => [pin.projectId, pin.pinnedAt]));
     return Promise.all(workspaces.map(async (workspace) => ({
       ...workspace,
-      projects: projects.filter((project) => project.workspaceId === workspace.id),
+      projects: projects.filter((project) => project.workspaceId === workspace.id).map((project) => ({ ...project, pinnedAt: pinnedAtByProject.get(project.id) ?? null })),
       capabilities: await this.authorization.workspaceCapabilities(userId, workspace)
     })));
+  }
+
+  async setProjectPinned(userId: string, projectId: string, pinned: boolean): Promise<ProjectListProjection> {
+    const project = await this.authorization.requireProject(userId, projectId, "view");
+    const pinnedAt = pinned ? nowIso() : null;
+    if (!await this.store.setProjectPin(userId, projectId, pinnedAt)) throw new ProductError("Project membership changed while updating the pin", 409);
+    return { ...project, pinnedAt };
   }
 
   async requireProjectForUser(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {

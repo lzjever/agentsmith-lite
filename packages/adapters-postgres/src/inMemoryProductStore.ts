@@ -92,6 +92,7 @@ export class InMemoryProductStore implements ProductStore {
   private readonly workspaces = new Map<string, Workspace>();
   private readonly projects = new Map<string, Project>();
   private readonly memberships = new Map<string, ProjectMembership>();
+  private readonly projectPins = new Map<string, { projectId: string; userId: string; pinnedAt: string }>();
   private readonly workspaceMemberships = new Map<string, WorkspaceMembership>();
   private readonly policies = new Map<string, ProjectResourcePolicy>();
   private readonly usage = new Map<string, ProjectResourceUsage>();
@@ -213,7 +214,7 @@ export class InMemoryProductStore implements ProductStore {
     if(!membership)return "not_found" as const;
     const ownsProject=[...this.projects.values()].some((project)=>project.workspaceId===workspaceId&&(project.ownerUserId===userId||this.memberships.get(membershipKey(project.id,userId))?.role==="owner"));
     if(membership.role==="owner"||ownsProject)return "owner" as const;
-    for(const [projectMembershipKey,projectMembership] of this.memberships){const project=this.projects.get(projectMembership.projectId);if(project?.workspaceId===workspaceId&&projectMembership.userId===userId)this.memberships.delete(projectMembershipKey);}
+    for(const [projectMembershipKey,projectMembership] of this.memberships){const project=this.projects.get(projectMembership.projectId);if(project?.workspaceId===workspaceId&&projectMembership.userId===userId){this.memberships.delete(projectMembershipKey);this.projectPins.delete(projectMembershipKey);}}
     this.workspaceMemberships.delete(key);
     return "revoked" as const;
   }
@@ -254,6 +255,9 @@ export class InMemoryProductStore implements ProductStore {
     return [...this.projects.values()].filter((project) => project.workspaceId === workspaceId).map(clone);
   }
 
+  async listProjectPinsForUser(userId: string) { return [...this.projectPins.values()].filter((pin) => pin.userId === userId).map((pin) => clone({ projectId:pin.projectId,pinnedAt:pin.pinnedAt })); }
+  async setProjectPin(userId:string,projectId:string,pinnedAt:string|null){const key=membershipKey(projectId,userId);if(!this.memberships.has(key))return false;if(pinnedAt)this.projectPins.set(key,{projectId,userId,pinnedAt});else this.projectPins.delete(key);return true}
+
   async findProject(id: string): Promise<Project | null> {
     return clone(this.projects.get(id) ?? null);
   }
@@ -261,7 +265,7 @@ export class InMemoryProductStore implements ProductStore {
   async beginProjectDeletion(id:string,updatedAt:string){const value=this.projects.get(id);if(!value)return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string){const project=this.projects.get(projectId),target=this.memberships.get(membershipKey(projectId,toUserId));if(!project||project.ownerUserId!==fromUserId||fromUserId===toUserId||!target||project.lifecycleStatus!==undefined&&project.lifecycleStatus!=="active")return null;const from=this.memberships.get(membershipKey(projectId,fromUserId));if(!from)return null;this.memberships.set(membershipKey(projectId,fromUserId),clone({...from,role:"admin",updatedAt}));this.memberships.set(membershipKey(projectId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...project,ownerUserId:toUserId,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
-  async deleteProjectDependenciesAndProject(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id&&isActiveTaskStatus(task.status)))return false; for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);} this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId))); this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId))); this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId))); this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id)); for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key); for(const [key,value] of this.memberships)if(value.projectId===id)this.memberships.delete(key); for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key); for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key); for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key); this.policies.delete(id);this.usage.delete(id);return this.projects.delete(id)}
+  async deleteProjectDependenciesAndProject(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id&&isActiveTaskStatus(task.status)))return false; for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);} this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId))); this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId))); this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId))); this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id)); for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key); for(const [key,value] of this.memberships)if(value.projectId===id){this.memberships.delete(key);this.projectPins.delete(key)} for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key); for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key); for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key); this.policies.delete(id);this.usage.delete(id);return this.projects.delete(id)}
 
   async listProjectsForUser(userId: string): Promise<Project[]> {
     return [...this.projects.values()]
@@ -303,7 +307,7 @@ export class InMemoryProductStore implements ProductStore {
   }
 
   async deleteProjectMembership(projectId: string, userId: string): Promise<boolean> {
-    return this.memberships.delete(membershipKey(projectId, userId));
+    const key=membershipKey(projectId,userId);this.projectPins.delete(key);return this.memberships.delete(key);
   }
 
   private workspaceMembershipView(membership: WorkspaceMembership): WorkspaceMembershipView { const user = this.users.get(membership.userId); return { ...clone(membership), displayName: this.profiles.get(membership.userId)?.displayName ?? null, email: user?.email ?? membership.userId }; }

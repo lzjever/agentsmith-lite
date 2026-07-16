@@ -275,6 +275,9 @@ export class PostgresProductStore implements ProductStore {
     return rows.map(mapProject);
   }
 
+  async listProjectPinsForUser(userId:string){return this.queryRows<{project_id:string;pinned_at:unknown}>("select project_id,pinned_at from user_project_pins where user_id=$1 order by pinned_at desc,project_id",[userId]).then((rows)=>rows.map((row)=>({projectId:row.project_id,pinnedAt:toIso(row.pinned_at)})))}
+  async setProjectPin(userId:string,projectId:string,pinnedAt:string|null){return transaction(this.pool,async(client)=>{const membership=await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2 for share",[projectId,userId]);if(!membership.rowCount)return false;if(pinnedAt)await client.query("insert into user_project_pins (project_id,user_id,pinned_at) values ($1,$2,$3) on conflict (project_id,user_id) do update set pinned_at=excluded.pinned_at",[projectId,userId,pinnedAt]);else await client.query("delete from user_project_pins where project_id=$1 and user_id=$2",[projectId,userId]);return true})}
+
   async findProject(id: string): Promise<Project | null> {
     const rows = await this.queryRows<ProjectRow>("select * from projects where id = $1", [id]);
     return rows[0] ? mapProject(rows[0]) : null;

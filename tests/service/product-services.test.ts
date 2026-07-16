@@ -24,11 +24,24 @@ describe("product services", () => {
 
     const workspace = await services.workspaces.createWorkspace(session.user.id, { name: "Ops" });
     const project = await services.workspaces.createProject(session.user.id, workspace.id, { name: "Sandbox" });
+    const pinned = await services.workspaces.setProjectPinned(session.user.id, project.id, true);
     const listed = await services.workspaces.listWorkspaces(session.user.id);
 
+    assert.ok(pinned.pinnedAt);
     assert.equal(listed.length, 1);
     assert.equal(listed[0]?.projects[0]?.id, project.id);
+    assert.equal(listed[0]?.projects[0]?.pinnedAt, pinned.pinnedAt);
     assert.equal(listed[0]?.projects[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
+    const member = await services.auth.loginExternalPrincipal({ issuer:"https://idp.test",subject:"pin-member",email:"pin-member@example.test",emailVerified:true });
+    const membershipAt = new Date().toISOString();
+    await store.upsertWorkspaceMembership({ workspaceId:workspace.id,userId:member.user.id,role:"member",createdAt:membershipAt,updatedAt:membershipAt });
+    await store.upsertProjectMembership({ projectId:project.id,userId:member.user.id,role:"member",createdAt:membershipAt,updatedAt:membershipAt });
+    assert.ok((await services.workspaces.setProjectPinned(member.user.id, project.id, true)).pinnedAt);
+    assert.equal((await services.workspaces.setProjectPinned(session.user.id, project.id, false)).pinnedAt, null);
+    assert.equal((await services.workspaces.listWorkspaces(session.user.id))[0]?.projects[0]?.pinnedAt, null);
+    assert.ok((await services.workspaces.listWorkspaces(member.user.id))[0]?.projects[0]?.pinnedAt);
+    await store.deleteProjectMembership(project.id, member.user.id);
+    assert.deepEqual(await store.listProjectPinsForUser(member.user.id), []);
   });
 
   it("revokes built-in admin sessions on logout", async () => {

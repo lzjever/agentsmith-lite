@@ -16,7 +16,7 @@ export type Profile = ProfileResponse;
 export interface SettingsCapabilities { canManageSettings: boolean; }
 export interface WorkspaceSettings { workspace: Workspace; capabilities: SettingsCapabilities; }
 export interface ProjectSettings { project: Project; capabilities: SettingsCapabilities; }
-export interface Project { id: string; workspaceId: string; name: string; ownerUserId?: string; lifecycleStatus?: "active" | "archived" | "deleting"; taskConcurrencyLimit: number; createdAt: string; updatedAt: string; }
+export interface Project { id: string; workspaceId: string; name: string; ownerUserId?: string; lifecycleStatus?: "active" | "archived" | "deleting"; pinnedAt?: string | null; taskConcurrencyLimit: number; createdAt: string; updatedAt: string; }
 export interface Workspace { id: string; name: string; ownerUserId?: string; owner?: { displayName: string | null; email: string }; memberRole?: WorkspaceMemberRole; lifecycleStatus?: "active" | "archived" | "deleting"; projects: Project[]; capabilities: { canCreateProject: boolean; canManageMembers: boolean }; createdAt: string; updatedAt: string; }
 export type MemberRole = "owner" | "admin" | "member" | "viewer";
 export interface ProjectMember { projectId: string; userId: string; role: MemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
@@ -174,6 +174,7 @@ export const apiClient = {
   unarchiveWorkspace: (workspaceId:string) => jsonIdempotent<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}/settings/unarchive`,"POST",newIdempotencyKey("workspace-unarchive")),
   createProject: (workspaceId: string, input: { name: string; taskConcurrencyLimit?: number }) =>
     json<Project>(`/workspaces/${encodeURIComponent(workspaceId)}/projects`, "POST", input),
+  setProjectPinned: (projectId:string,pinned:boolean) => json<Project>(`/projects/${encodeURIComponent(projectId)}/pin`,"PUT",{pinned}),
   workspaceMembers: (workspaceId: string) => request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
   addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", { email, role }),
   changeWorkspaceMember: (workspaceId: string, userId: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "PATCH", { userId, role }),

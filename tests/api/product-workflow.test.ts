@@ -47,6 +47,11 @@ describe("api product workflow", () => {
 
     const workspace = await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf);
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
+    const pinnedProject = await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: true }, cookie, csrf);
+    assert.ok(pinnedProject.pinnedAt);
+    const pinnedWorkspace = (await requestJson("GET", "/api/v1/workspaces", undefined, cookie))[0];
+    assert.equal(pinnedWorkspace.projects.find((item: { id: string }) => item.id === project.id)?.pinnedAt, pinnedProject.pinnedAt);
+    assert.equal((await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: false }, cookie, csrf)).pinnedAt, null);
     const credential = await postJson(`/api/v1/projects/${project.id}/credentials`, { name: "OpenAI-compatible credential", baseUrl: "https://models.example.com/v1", secret: "sk-from-api-workflow" }, cookie, csrf);
     const endpoint = await postJson(`/api/v1/projects/${project.id}/endpoints`, {
       name: "OpenAI-compatible endpoint",

@@ -213,8 +213,12 @@ export interface WorkspaceListProjection extends Workspace {
   memberRole: WorkspaceMembershipRole;
 }
 
+export interface ProjectListProjection extends Project {
+  pinnedAt: ISODateString | null;
+}
+
 export interface WorkspaceWithProjects extends WorkspaceListProjection {
-  projects: Project[];
+  projects: ProjectListProjection[];
   capabilities: WorkspaceCapabilities;
 }
 

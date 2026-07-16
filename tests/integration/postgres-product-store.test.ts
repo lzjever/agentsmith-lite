@@ -71,6 +71,21 @@ postgresDescribe("postgres product store", () => {
     assert.equal(await store.findProjectMembership("proj_membership_two","user_membership_target"),null);
   });
 
+  it("keeps project pins user-scoped and removes them with membership", async () => {
+    const timestamp="2026-07-15T00:00:00.000Z";
+    await store.createUser({id:"user_pin_owner",email:"pin-owner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+    await store.createUser({id:"user_pin_member",email:"pin-member@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+    await store.createWorkspace({id:"ws_pin",name:"Pins",ownerUserId:"user_pin_owner",createdAt:timestamp,updatedAt:timestamp});
+    await store.createProject({id:"proj_pin",workspaceId:"ws_pin",name:"Pins",ownerUserId:"user_pin_owner",rootPath:"workspaces/ws_pin/projects/proj_pin",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+    await store.upsertProjectMembership({projectId:"proj_pin",userId:"user_pin_member",role:"member",createdAt:timestamp,updatedAt:timestamp});
+
+    assert.equal(await store.setProjectPin("user_pin_member","proj_pin",timestamp),true);
+    assert.deepEqual(await store.listProjectPinsForUser("user_pin_owner"),[]);
+    assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[{projectId:"proj_pin",pinnedAt:timestamp}]);
+    await store.deleteProjectMembership("proj_pin","user_pin_member");
+    assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[]);
+  });
+
   it("removes project-scoped audit events with a physically deleted project", async () => {
     const timestamp = "2026-07-15T00:00:00.000Z";
     await store.createUser({ id:"user_project_delete",email:"project-delete@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });

@@ -424,6 +424,9 @@ async function routeApi(
       const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),()=>services.deletion.deleteProject(user.id,projectId));
       return sendJson(res, 200, result);
     }
+    if (segments[4] === "pin" && method === "PUT") {
+      const body=await readJson(req);assertOnlyKeys(body,["pinned"]);return sendJson(res,200,await services.workspaces.setProjectPinned(user.id,projectId,asBoolean(body.pinned,"pinned")));
+    }
     if (segments[4] === "capabilities" && method === "GET") {
       return sendJson(res, 200, await services.workspaces.projectCapabilities(user.id, projectId));
     }
@@ -935,7 +938,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     "/api/v1/context"
   ].includes(pathname) ||
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+(?:\/(?:capabilities|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||

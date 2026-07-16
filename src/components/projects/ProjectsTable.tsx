@@ -18,12 +18,12 @@ const columns = createColumnHelper<Project>();
 export function ProjectsTable({
   workspaceId,
   projects,
-  pinnedProjectIds = new Set<string>(),
+  pinBusyId,
   onTogglePin,
 }: {
   workspaceId: string;
   projects: Project[];
-  pinnedProjectIds?: Set<string>;
+  pinBusyId?: string | null;
   onTogglePin?: (projectId: string) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -36,11 +36,11 @@ export function ProjectsTable({
         )
         .sort(
           (left, right) =>
-            Number(pinnedProjectIds.has(right.id)) -
-              Number(pinnedProjectIds.has(left.id)) ||
+            Number(Boolean(right.pinnedAt)) -
+              Number(Boolean(left.pinnedAt)) ||
             left.name.localeCompare(right.name),
         ),
-    [projects, query, pinnedProjectIds],
+    [projects, query],
   );
   const pageSize = 20;
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -87,7 +87,8 @@ export function ProjectsTable({
               cell: ({ row }) => (
                 <ButtonPin
                   project={row.original}
-                  pinned={pinnedProjectIds.has(row.original.id)}
+                  pinned={Boolean(row.original.pinnedAt)}
+                  busy={pinBusyId === row.original.id}
                   onTogglePin={onTogglePin}
                 />
               ),
@@ -135,7 +136,8 @@ export function ProjectsTable({
             workspaceId={workspaceId}
             project={project}
             key={project.id}
-            pinned={pinnedProjectIds.has(project.id)}
+            pinned={Boolean(project.pinnedAt)}
+            busy={pinBusyId === project.id}
             {...(onTogglePin ? { onTogglePin } : {})}
           />
         ))}
@@ -160,11 +162,13 @@ export function ProjectCard({
   workspaceId,
   project,
   pinned = false,
+  busy = false,
   onTogglePin,
 }: {
   workspaceId: string;
   project: Project;
   pinned?: boolean;
+  busy?: boolean;
   onTogglePin?: (projectId: string) => void;
 }) {
   return (
@@ -196,6 +200,7 @@ export function ProjectCard({
         <ButtonPin
           project={project}
           pinned={pinned}
+          busy={busy}
           onTogglePin={onTogglePin}
         />
       ) : null}
@@ -210,10 +215,12 @@ function ProjectLifecycleStatus({ project }: { project: Project }) {
 function ButtonPin({
   project,
   pinned,
+  busy,
   onTogglePin,
 }: {
   project: Project;
   pinned: boolean;
+  busy: boolean;
   onTogglePin: (projectId: string) => void;
 }) {
   return (
@@ -222,6 +229,8 @@ function ButtonPin({
       className="grid size-8 shrink-0 place-items-center text-secondary hover:text-foreground"
       aria-label={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
       title={pinned ? "Unpin project" : "Pin project"}
+      disabled={busy}
+      aria-busy={busy}
       onClick={() => onTogglePin(project.id)}
     >
       {pinned ? <PinOff size={16} /> : <Pin size={16} />}

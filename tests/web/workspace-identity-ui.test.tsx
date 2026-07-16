@@ -52,17 +52,37 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
-  it("persists a project pin locally for the current workspace", async () => {
-    const original = apiClient.workspaces;
-    const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
+  it("persists a project pin through the product API", async () => {
+    const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
+    const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", pinnedAt: null, taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
+    const mutations: Array<[string, boolean]> = [];
     apiClient.workspaces = async () => [{ ...workspace, projects: [project] }];
+    apiClient.setProjectPinned = async (projectId, pinned) => { mutations.push([projectId, pinned]); return { ...project, pinnedAt: pinned ? timestamp : null }; };
     try {
       render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
       const pin = (await screen.findAllByRole("button", { name: "Pin Pinned project" }))[0]!;
       fireEvent.click(pin);
-      assert.equal(window.localStorage.getItem(`agentsmith:projects:pinned:${workspace.id}`), JSON.stringify([project.id]));
+      await waitFor(() => assert.deepEqual(mutations, [[project.id, true]]));
       assert.ok((await screen.findAllByRole("button", { name: "Unpin Pinned project" })).length > 0);
-    } finally { apiClient.workspaces = original; }
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("keeps the current project order when a pin fails and retries in place", async () => {
+    const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
+    const project = { id:"project_retry",workspaceId:workspace.id,name:"Retry project",pinnedAt:null,taskConcurrencyLimit:2,createdAt:timestamp,updatedAt:timestamp };
+    let attempts=0;
+    apiClient.workspaces=async()=>[{...workspace,projects:[project]}];
+    apiClient.setProjectPinned=async()=>{attempts+=1;if(attempts===1)throw new ApiError(503,"Pin service unavailable.");return{...project,pinnedAt:timestamp}};
+    try{
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id}/></AppRouterContext.Provider>);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Pin Retry project"}))[0]!);
+      const alert=await screen.findByRole("alert");
+      assert.ok(alert.textContent?.includes("Pin service unavailable."));
+      assert.ok(screen.getAllByRole("button",{name:"Pin Retry project"}).length>0);
+      fireEvent.click(within(alert).getByRole("button",{name:"Retry"}));
+      await waitFor(()=>assert.equal(attempts,2));
+      assert.ok((await screen.findAllByRole("button",{name:"Unpin Retry project"})).length>0);
+    }finally{Object.assign(apiClient,original)}
   });
 
   it("enters a project immediately after creating it", async () => {

@@ -22,7 +22,8 @@ export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: strin
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const [pinnedProjectIds, setPinnedProjectIds] = useState<Set<string>>(new Set());
+  const [pinBusyId, setPinBusyId] = useState<string | null>(null);
+  const [pinError, setPinError] = useState<{ projectId:string;pinned:boolean;message:string } | null>(null);
 
   async function load() {
     setState("loading");
@@ -39,25 +40,20 @@ export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: strin
   }
 
   useEffect(() => { void load(); }, [workspaceId]);
-  useEffect(() => {
-    try {
-      const stored = JSON.parse(window.localStorage.getItem(`agentsmith:projects:pinned:${workspaceId}`) ?? "[]") as unknown;
-      setPinnedProjectIds(new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : []));
-    } catch { setPinnedProjectIds(new Set()); }
-  }, [workspaceId]);
   function created(project: Project) {
     setWorkspace((current) => current ? { ...current, projects: [...current.projects, project] } : current);
     setCreateOpen(false);
     router.push(`/workspaces/${workspaceId}/projects/${project.id}/overview`);
   }
-  function togglePin(projectId: string) { setPinnedProjectIds((current) => { const next = new Set(current); next.has(projectId) ? next.delete(projectId) : next.add(projectId); window.localStorage.setItem(`agentsmith:projects:pinned:${workspaceId}`, JSON.stringify([...next])); return next; }); }
+  async function togglePin(projectId:string,desired?:boolean){const project=workspace?.projects.find((item)=>item.id===projectId);if(!project||pinBusyId)return;const pinned=desired??!project.pinnedAt;setPinBusyId(projectId);setPinError(null);try{const saved=await apiClient.setProjectPinned(projectId,pinned);setWorkspace((current)=>current?{...current,projects:current.projects.map((item)=>item.id===projectId?{...item,pinnedAt:saved.pinnedAt??null}:item)}:current)}catch(reason){setPinError({projectId,pinned,message:reason instanceof Error?reason.message:"Project pin could not be updated."})}finally{setPinBusyId(null)}}
 
   const canCreateProject = workspace?.capabilities.canCreateProject === true;
   return <PageLayout header={<PageHeader title={workspace?.name ?? "Projects"} subtitle={workspace ? `Owner: ${workspace.owner?.displayName || workspace.owner?.email || "Workspace owner"} · Your access: ${roleLabel(workspace.memberRole)}` : "Projects keep endpoints, members, files, and tasks together."} actions={canCreateProject ? <Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New project</Button> : undefined} />}>
     {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
     {state === "error" ? <WorkspaceProjectsError message={error} onRetry={load} /> : null}
+    {state === "ready" && pinError ? <div className="mb-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">{pinError.message}</span><Button variant="quiet" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}>Retry</Button></div> : null}
     {state === "ready" && workspace?.projects.length === 0 ? <ProjectsEmpty canCreateProject={canCreateProject} onCreate={() => setCreateOpen(true)} /> : null}
-    {state === "ready" && workspace && workspace.projects.length > 0 ? <ProjectsTable workspaceId={workspace.id} projects={workspace.projects} pinnedProjectIds={pinnedProjectIds} onTogglePin={togglePin} /> : null}
+    {state === "ready" && workspace && workspace.projects.length > 0 ? <ProjectsTable workspaceId={workspace.id} projects={workspace.projects} pinBusyId={pinBusyId} onTogglePin={(projectId)=>void togglePin(projectId)} /> : null}
     {canCreateProject ? <CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} /> : null}
   </PageLayout>;
 }

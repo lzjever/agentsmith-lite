@@ -358,6 +358,8 @@ export interface ProductStore {
 
   createProject(project: Project): Promise<Project>;
   listProjectsForWorkspace(workspaceId: string): Promise<Project[]>;
+  listProjectPinsForUser(userId: string): Promise<Array<{ projectId: string; pinnedAt: string }>>;
+  setProjectPin(userId: string, projectId: string, pinnedAt: string | null): Promise<boolean>;
   findProject(id: string): Promise<Project | null>;
   updateProject(project: Project): Promise<Project | null>;
   beginProjectDeletion(id: string, updatedAt: string): Promise<Project | null>;
