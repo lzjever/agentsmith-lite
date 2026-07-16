@@ -57,6 +57,17 @@ describe("task interaction list", () => {
     assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
   });
 
+  it("keeps background work stoppable when the request fails", async () => {
+    const running = { ...itemFor("background_task", 1), executionStatus:"running", canStop:true } as TaskInteractionItem;
+    let attempts = 0;
+    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} basePath="/tasks" onStopWork={async () => { attempts += 1; throw new Error("Work could not be stopped."); }} />);
+    fireEvent.click(screen.getByRole("button", { name:"Stop work" }));
+    assert.ok(await screen.findByRole("alert"));
+    assert.ok(screen.getByText("Work could not be stopped."));
+    assert.equal((screen.getByRole("button", { name:"Stop work" }) as HTMLButtonElement).disabled, false);
+    assert.equal(attempts, 1);
+  });
+
   it("does not offer a download for a failed file projection", () => {
     const failed = { ...itemFor("file", 1), status: "failed", body: "Artifact projection failed" } as TaskInteractionItem;
     render(<TaskInteractionList taskId="task_1" items={[failed]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);

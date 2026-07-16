@@ -60,11 +60,21 @@ function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind:
 }
 
 function WorkItem({ item, icon, onStopWork }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode; onStopWork: (interactionId: string) => Promise<void> }) {
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState("");
   const status = item.executionStatus;
   const canStop = (item.kind === "tool" || item.kind === "background_task") && item.canStop;
   const summary = workSummary(item);
   const details = workDetails(item);
-  return <li><article className="border-l-2 border-warning/60 px-4 py-3"><div className="flex min-w-0 flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2 text-foreground">{icon}<div className="min-w-0"><p className="truncate text-sm font-medium">{workTitle(item)}</p><p className="mt-0.5 text-xs text-secondary">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</p></div></div>{canStop ? <Button variant="quiet" size="sm" onClick={() => void onStopWork(item.id)}><Square size={14} />Stop work</Button> : null}</div><ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <p className={`mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-secondary ${item.kind === "tool" ? "font-mono" : ""}`}>{summary}</p> : null}{details ? <details className="mt-3"><summary className="cursor-pointer text-sm text-secondary">Execution details</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-high p-3 font-mono text-xs leading-5 text-secondary">{details}</pre></details> : null}</article></li>;
+  async function stop() {
+    if (!canStop || stopping) return;
+    setStopping(true);
+    setStopError("");
+    try { await onStopWork(item.id); }
+    catch (reason) { setStopError(reason instanceof Error ? reason.message : "Work could not be stopped."); }
+    finally { setStopping(false); }
+  }
+  return <li><article className="border-l-2 border-warning/60 px-4 py-3"><div className="flex min-w-0 flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2 text-foreground">{icon}<div className="min-w-0"><p className="truncate text-sm font-medium">{workTitle(item)}</p><p className="mt-0.5 text-xs text-secondary">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</p></div></div>{canStop ? <Button variant="quiet" size="sm" disabled={stopping} onClick={() => void stop()}><Square size={14} />{stopping ? "Stopping work..." : "Stop work"}</Button> : null}</div>{canStop && stopError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{stopError}</p> : null}<ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <p className={`mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-secondary ${item.kind === "tool" ? "font-mono" : ""}`}>{summary}</p> : null}{details ? <details className="mt-3"><summary className="cursor-pointer text-sm text-secondary">Execution details</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-high p-3 font-mono text-xs leading-5 text-secondary">{details}</pre></details> : null}</article></li>;
 }
 
 function NoticeItem({ item, label }: { item: Extract<TaskInteractionItem, { kind: "task_question" | "task_notice" }>; label: string }) {

@@ -80,6 +80,25 @@ describe("TaskConversationWorkspace", () => {
       Object.assign(apiClient, original);
     }
   });
+
+  it("reports a failed turn stop and leaves it retryable", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, abortTaskTurn: apiClient.abortTaskTurn };
+    apiClient.getTaskInteractions = async () => ({ ...snapshot, capabilities:{ ...capabilities, abortTurn:true }, runState:"running" });
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
+    };
+    apiClient.abortTaskTurn = async () => { throw new Error("Current turn could not be stopped."); };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name:"Stop current turn" }));
+      assert.ok(await screen.findByRole("alert"));
+      assert.ok(screen.getByText("Current turn could not be stopped."));
+      assert.equal((screen.getByRole("button", { name:"Stop current turn" }) as HTMLButtonElement).disabled, false);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
 });
 
 const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, deleteTask: false };
