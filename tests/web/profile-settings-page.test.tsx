@@ -25,7 +25,7 @@ describe("profile and settings pages", () => {
     apiClient.updateProjectSettings = async (_id, input) => { updates.push(input); return settings; };
     apiClient.currentIdentity = async () => ({ user: profile.user });
     try {
-      const view = render(<ProfilePage />);
+      const view = render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
       await screen.findByText("owner@example.test");
       assert.equal(screen.getByAltText("Profile avatar").getAttribute("src"), "https://idp.test/owner.png");
       assert.ok(screen.getByRole("heading", { name: "Identity" }));
@@ -80,7 +80,7 @@ describe("profile and settings pages", () => {
     apiClient.profile = async () => profile;
     apiClient.updateProfile = async () => new Promise((resolve) => { finishSave = resolve; });
     try {
-      render(<ProfilePage />);
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
       const displayName = await screen.findByRole("textbox", { name: "Display name" }) as HTMLInputElement;
       fireEvent.change(displayName, { target: { value: "  Canonical owner  " } });
       fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
@@ -119,9 +119,29 @@ describe("profile and settings pages", () => {
     apiClient.profile = async () => profile;
     window.history.replaceState({}, "", "/profile?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
     try {
-      render(<ProfilePage />);
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
       const back = await screen.findByRole("link", { name: "Back to project" });
       assert.equal(back.getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+    } finally { apiClient.profile = original; }
+  });
+
+  it("confirms before leaving with unsaved profile changes", async () => {
+    const original = apiClient.profile;
+    const pushed: string[] = [];
+    apiClient.profile = async () => profile;
+    window.history.replaceState({}, "", "/profile?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><ProfilePage /></AppRouterContext.Provider>);
+      fireEvent.change(await screen.findByRole("textbox", { name: "Display name" }), { target: { value: "Unsaved owner" } });
+      fireEvent.click(screen.getByRole("link", { name: "Back to project" }));
+      await screen.findByRole("alertdialog", { name: "Discard unsaved profile changes?" });
+      assert.deepEqual(pushed, []);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      assert.equal((screen.getByRole("textbox", { name: "Display name" }) as HTMLInputElement).value, "Unsaved owner");
+
+      fireEvent.click(screen.getByRole("link", { name: "Back to project" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+      await waitFor(() => assert.deepEqual(pushed, ["/workspaces/workspace_1/projects/project_1/tasks"]));
     } finally { apiClient.profile = original; }
   });
 
@@ -160,5 +180,5 @@ describe("profile and settings pages", () => {
   });
 });
 
-function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
+function router(pushed: string[] = []) { return { back() {}, forward() {}, refresh() {}, push(path: string) { pushed.push(path); }, replace() {}, prefetch() {} }; }
 function installDom() { const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" }); Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, Element: dom.window.Element, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true }); Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator }); Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent }); if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } }); }
