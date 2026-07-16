@@ -219,6 +219,17 @@ describe("personal and resource UI", () => {
       assert.ok(screen.getByRole("button", { name: "Try again" }));
     } finally { apiClient.notifications = original; }
   });
+
+  it("keeps a project return path behind the application base path", async () => {
+    const original = apiClient.notifications;
+    apiClient.notifications = async () => [];
+    window.history.replaceState({}, "", "/app/notifications?returnTo=%2Fapp%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
+      await screen.findByRole("heading", { name: "No notifications" });
+      assert.equal(screen.getByRole("link", { name: "Back to project" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+    } finally { apiClient.notifications = original; }
+  });
 });
 
 function installDom() {

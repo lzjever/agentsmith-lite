@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import { apiClient, type Profile } from "../../lib/api/client";
+import { workspaceReturnPath } from "../../lib/navigation/return-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -86,10 +87,6 @@ function sameDraft(left: ProfileDraft, right: ProfileDraft): boolean { return Ob
 function profileGreeting(profile: Profile): string { return greetings.includes(profile.preferences.greetingPreference as typeof greetings[number]) ? profile.preferences.greetingPreference! : "friendly"; }
 function profileReturnPath(): string {
   const value = new URLSearchParams(window.location.search).get("returnTo");
-  if (!value || value.includes("\\")) return "/";
-  const profilePath = "/profile";
-  const appBasePath = window.location.pathname.endsWith(profilePath) ? window.location.pathname.slice(0, -profilePath.length) : "";
-  const route = appBasePath && value.startsWith(`${appBasePath}/`) ? value.slice(appBasePath.length) : value;
-  return route.startsWith("/workspaces/") ? route : "/";
+  return workspaceReturnPath(value, window.location.pathname, "/profile");
 }
 function returnLabel(path: string): string { return path.includes("/projects/") ? "Back to project" : path.startsWith("/workspaces/") ? "Back to workspace" : "Back to workspaces"; }
