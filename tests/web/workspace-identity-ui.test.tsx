@@ -127,6 +127,29 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("does not apply a member role change after switching workspaces", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
+    const secondWorkspace = { ...workspace, id: "workspace_2", name: "Second workspace", memberRole: "admin" as const, capabilities: { canCreateProject: true, canManageMembers: true } };
+    const firstMember: WorkspaceMember = { ...owner, userId: "member_a", role: "member", displayName: "Workspace A member", email: "a@example.test" };
+    const secondMember: WorkspaceMember = { ...owner, workspaceId: secondWorkspace.id, userId: "member_b", role: "viewer", displayName: "Workspace B member", email: "b@example.test" };
+    let finishChange: ((value: WorkspaceMember) => void) | undefined;
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }, secondWorkspace];
+    apiClient.workspaceMembers = async (requestedWorkspaceId) => requestedWorkspaceId === workspace.id ? [firstMember] : [secondMember];
+    apiClient.changeWorkspaceMember = async () => new Promise((resolve) => { finishChange = resolve; });
+    try {
+      const view = render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("combobox", { name: "Role for Workspace A member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      await waitFor(() => assert.ok(finishChange));
+
+      view.rerender(<WorkspaceMembersPage workspaceId={secondWorkspace.id} />);
+      await screen.findByText("Workspace B member");
+      await act(async () => finishChange!({ ...firstMember, role: "admin" }));
+      assert.ok(screen.getByText("Workspace B member"));
+      assert.equal(screen.queryByText("Workspace A member"), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("persists a project pin through the product API", async () => {
     const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
     const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", pinnedAt: null, taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };

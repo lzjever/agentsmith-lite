@@ -1,7 +1,7 @@
 "use client";
 
 import { Plus, Search, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -17,6 +17,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 type MutationError = { message: string; retry?: () => void };
 
 export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
+  return <WorkspaceMembers key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
+  const mounted = useRef(true);
+  const loadRequest = useRef(0);
+  const refreshRequest = useRef(0);
+  const workspaceRequest = useRef(0);
   const [workspace, setWorkspace] = useState<Workspace>();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -30,28 +38,40 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   const [memberToRemove, setMemberToRemove] = useState<WorkspaceMember>();
 
   const refreshWorkspace = useCallback(async () => {
+    const request = ++workspaceRequest.current;
     const workspaces = await apiClient.workspaces();
     const found = workspaces.find((item) => item.id === workspaceId);
     if (!found) throw new ApiError(404, "Workspace not found.");
+    if (!mounted.current || request !== workspaceRequest.current) return;
     setWorkspace(found);
   }, [workspaceId]);
 
   const refresh = useCallback(async () => {
+    const request = ++refreshRequest.current;
     const [, listed] = await Promise.all([refreshWorkspace(), apiClient.workspaceMembers(workspaceId)]);
+    if (!mounted.current || request !== refreshRequest.current) return;
     setMembers(listed);
     setState("ready");
   }, [refreshWorkspace, workspaceId]);
 
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setMutationError(undefined);
     try {
       await refresh();
     } catch {
+      if (!mounted.current || request !== loadRequest.current) return;
       setState("error");
     }
   }, [refresh]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
   const canManage = workspace?.capabilities.canManageMembers === true;
@@ -65,6 +85,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     } catch {
       // Preserve the original mutation error while the page remains usable.
     }
+    if (!mounted.current) return;
     if (accessDenied) {
       setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
       setOpen(false);
@@ -79,15 +100,17 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setMutationError(undefined);
     try {
       const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role);
+      if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
       setOpen(false);
       setEmail("");
       setRole("member");
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
+      if (!mounted.current) return;
       await recoverMutation(reason, () => void add());
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
@@ -97,12 +120,14 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setMutationError(undefined);
     try {
       const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next);
+      if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === changed.userId ? changed : item));
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
+      if (!mounted.current) return;
       await recoverMutation(reason, () => void change(member, next));
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
@@ -112,13 +137,15 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setMutationError(undefined);
     try {
       await apiClient.removeWorkspaceMember(workspaceId, member.userId);
+      if (!mounted.current) return;
       setMembers((current) => current.filter((item) => item.userId !== member.userId));
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
+      if (!mounted.current) return;
       await recoverMutation(reason, () => void remove(member));
       throw reason;
     } finally {
-      setBusyUserId(undefined);
+      if (mounted.current) setBusyUserId(undefined);
     }
   }
 
