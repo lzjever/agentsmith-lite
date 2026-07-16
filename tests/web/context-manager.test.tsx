@@ -134,6 +134,50 @@ describe("context manager", () => {
       assert.equal(screen.queryByText("Context list unavailable."), null);
     } finally { Object.assign(apiClient, original); }
   });
+
+  it("does not apply a completed save after switching workspaces", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = (workspaceId: string, content: string) => ({ id: `ctx_${workspaceId}`, workspaceId, projectId: null, ownerUserId: null, scope: "workspace_shared" as const, contextKey: "shared.rules", content, contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" });
+    let finishSave: ((value: ReturnType<typeof entry>) => void) | undefined;
+    apiClient.contexts = async (input) => ({ items: [entry(input.workspaceId, input.workspaceId === "workspace_1" ? "Workspace A" : "Workspace B")], canWrite: true });
+    apiClient.saveContext = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      const view = render(<ContextManager workspaceId="workspace_1" />);
+      const content = await screen.findByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      fireEvent.change(content, { target: { value: "Changed A" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.ok(finishSave));
+
+      view.rerender(<ContextManager workspaceId="workspace_2" />);
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "Workspace B"));
+      await act(async () => finishSave!(entry("workspace_1", "Changed A")));
+      assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "Workspace B");
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("protects unsaved edits before changing entries or scopes", async () => {
+    const original = { contexts: apiClient.contexts };
+    const makeEntry = (id: string, scope: "workspace_shared" | "workspace_personal", content: string) => ({ id, workspaceId: "workspace_1", projectId: null, ownerUserId: null, scope, contextKey: id, content, contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" });
+    apiClient.contexts = async (input) => ({ items: input.scope === "workspace_shared" ? [makeEntry("first", "workspace_shared", "First"), makeEntry("second", "workspace_shared", "Second")] : [makeEntry("personal", "workspace_personal", "Personal")], canWrite: true });
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const content = await screen.findByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      fireEvent.change(content, { target: { value: "Unsaved" } });
+      fireEvent.click(screen.getByRole("button", { name: "second text" }));
+      await screen.findByRole("alertdialog", { name: "Discard unsaved context changes?" });
+      assert.equal(content.value, "Unsaved");
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      assert.equal(content.value, "Unsaved");
+
+      fireEvent.click(screen.getByRole("button", { name: "second text" }));
+      fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+      await waitFor(() => assert.equal(content.value, "Second"));
+      fireEvent.change(content, { target: { value: "Another unsaved edit" } });
+      fireEvent.click(screen.getByRole("tab", { name: "My workspace" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "Personal"));
+    } finally { Object.assign(apiClient, original); }
+  });
 });
 
 function installDom(): void {
