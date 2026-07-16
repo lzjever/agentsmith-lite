@@ -2,15 +2,42 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type Task } from "../../src/lib/api/client.js";
+import { apiClient, type Endpoint, type ProjectCapabilities, type Task } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { TasksPageContent } = await import("../../src/components/tasks/TasksPage.js");
 
 afterEach(() => cleanup());
 
 describe("tasks page loading", () => {
+  it("keeps the newest endpoint and permission refresh for task creation", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
+    let endpointReads = 0; let capabilityReads = 0;
+    let resolveOldEndpoints!: (value: Endpoint[]) => void;
+    let resolveOldCapabilities!: (value: ProjectCapabilities) => void;
+    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.endpoints = async () => ++endpointReads === 1 ? new Promise((resolve) => { resolveOldEndpoints = resolve; }) : [];
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? new Promise((resolve) => { resolveOldCapabilities = resolve; }) : readOnly;
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      await waitFor(() => assert.deepEqual([endpointReads, capabilityReads], [1, 1]));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh tasks" }));
+      await screen.findByText("Your project access is read-only.");
+      await act(async () => {
+        resolveOldEndpoints([eligible]);
+        resolveOldCapabilities({ ...readOnly, canCreateTasks: true });
+        await Promise.resolve();
+      });
+      assert.equal(screen.queryByRole("button", { name: "Create task" }), null);
+      assert.ok(screen.getByText("Your project access is read-only."));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the task list readable when create-form dependencies fail", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
     apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });

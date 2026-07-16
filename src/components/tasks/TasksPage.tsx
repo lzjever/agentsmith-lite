@@ -42,27 +42,35 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
   const [dialogOpen, setDialogOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const loadVersion = useRef(0);
+  const endpointsLoadVersion = useRef(0);
+  const capabilitiesLoadVersion = useRef(0);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
   const cursor = cursors[pageIndex];
 
   const loadCreateDependencies = useCallback(() => {
+    const endpointsVersion = ++endpointsLoadVersion.current;
     setEndpointsState("loading");
     setEndpointsError("");
     void apiClient.endpoints(projectId).then((available) => {
+      if (endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints(available);
       setEndpointsState("ready");
     }).catch((reason) => {
+      if (endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints([]);
       setEndpointsError(message(reason));
       setEndpointsState("error");
     });
 
+    const capabilitiesVersion = ++capabilitiesLoadVersion.current;
     setCapabilitiesState("loading");
     setCapabilitiesError("");
     void apiClient.projectCapabilities(projectId).then((projected) => {
+      if (capabilitiesVersion !== capabilitiesLoadVersion.current) return;
       setCapabilities(projected);
       setCapabilitiesState("ready");
     }).catch((reason) => {
+      if (capabilitiesVersion !== capabilitiesLoadVersion.current) return;
       setCapabilities(undefined);
       setCapabilitiesError(message(reason));
       setCapabilitiesState("error");
