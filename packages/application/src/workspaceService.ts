@@ -1,4 +1,4 @@
-import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, ProjectListProjection, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
+import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, ProjectListProjection, ProjectOverviewAction, ProjectOverviewProjection, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
@@ -68,6 +68,36 @@ export class WorkspaceService {
 
   async projectCapabilities(userId: string, projectId: string): Promise<ProjectCapabilities> {
     return this.authorization.projectCapabilities(userId, projectId);
+  }
+
+  async projectOverview(userId: string, projectId: string): Promise<ProjectOverviewProjection> {
+    const project = await this.authorization.requireProject(userId, projectId, "view");
+    const [capabilities, memberships, endpoints] = await Promise.all([
+      this.authorization.projectCapabilities(userId, projectId),
+      this.store.listProjectMemberships(projectId),
+      this.store.listEndpointsForProject(projectId)
+    ]);
+    const membership = memberships.find((candidate) => candidate.userId === userId);
+    if (!membership) throw new ProductError("Project membership changed while loading the overview", 409);
+
+    const chatReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text")).length;
+    const taskReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls")).length;
+    const recommendedActions: ProjectOverviewAction[] = [];
+    if (capabilities.canSendChat && chatReadyEndpointCount > 0) recommendedActions.push("start_chat");
+    if (capabilities.canCreateTasks && taskReadyEndpointCount > 0) recommendedActions.push("create_task");
+    if (capabilities.canManageEndpoints && taskReadyEndpointCount === 0) recommendedActions.push("configure_endpoint");
+    if (capabilities.canManageMembers) recommendedActions.push("add_collaborator");
+
+    const owner = memberships.find((candidate) => candidate.role === "owner");
+    return {
+      project,
+      capabilities,
+      owner: owner ? { displayName: owner.displayName, email: owner.email } : null,
+      memberRole: membership.role,
+      chatReadyEndpointCount,
+      taskReadyEndpointCount,
+      recommendedActions
+    };
   }
 
   async requireWorkspaceForUser(userId: string, workspaceId: string, permission: import("./authorizationService.js").WorkspacePermission = "view"): Promise<Workspace> { return this.authorization.requireWorkspace(userId, workspaceId, permission); }

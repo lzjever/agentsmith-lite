@@ -23,6 +23,8 @@ export interface ProjectMember { projectId: string; userId: string; role: Member
 export type WorkspaceMemberRole = "owner" | "admin" | "member" | "viewer";
 export interface WorkspaceMember { workspaceId: string; userId: string; role: WorkspaceMemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
 export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; canCancelTasks: boolean; canSendChat: boolean; }
+export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
+export interface ProjectOverview { project: Project; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; chatReadyEndpointCount: number; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
 export type EndpointCapability = "text" | "image" | "tool_calls";
 export type Endpoint = PublicModelEndpoint;
 export interface EndpointModelDiscovery { models: string[]; health: { status: "healthy" | "unavailable" | "unknown"; checkedAt: string | null; errorCategory: "auth" | "network" | "upstream" | "timeout" | "rate_limit" | "unknown" | null }; }
@@ -181,6 +183,7 @@ export const apiClient = {
   removeWorkspaceMember: (workspaceId: string, userId: string) => json<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "DELETE", { userId }),
   transferWorkspaceOwner:(workspaceId:string,userId:string)=>jsonIdempotent<{transferred:true}>(`/workspaces/${encodeURIComponent(workspaceId)}/members/transfer-owner`,"POST",newIdempotencyKey("workspace-owner-transfer"),{userId}),
   projectCapabilities: (projectId: string) => request<ProjectCapabilities>(`/projects/${encodeURIComponent(projectId)}/capabilities`),
+  projectOverview: (projectId: string) => request<ProjectOverview>(`/projects/${encodeURIComponent(projectId)}/overview`),
   projectSettings: (projectId: string) => request<ProjectSettings>(`/projects/${encodeURIComponent(projectId)}/settings`),
   updateProjectSettings: (projectId: string, input: { name?: string }) => jsonIdempotent<ProjectSettings>(`/projects/${encodeURIComponent(projectId)}/settings`, "PATCH", newIdempotencyKey("project-settings"), input),
   archiveProject:(projectId:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/archive`,"POST",newIdempotencyKey("project-archive")),

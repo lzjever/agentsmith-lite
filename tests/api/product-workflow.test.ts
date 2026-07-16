@@ -47,6 +47,8 @@ describe("api product workflow", () => {
 
     const workspace = await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf);
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
+    const emptyOverview = await requestJson("GET", `/api/v1/projects/${project.id}/overview`, undefined, cookie);
+    assert.deepEqual(emptyOverview.recommendedActions, ["configure_endpoint", "add_collaborator"]);
     const pinnedProject = await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: true }, cookie, csrf);
     assert.ok(pinnedProject.pinnedAt);
     const pinnedWorkspace = (await requestJson("GET", "/api/v1/workspaces", undefined, cookie))[0];
@@ -65,6 +67,9 @@ describe("api product workflow", () => {
     assertNoApiKeySecretRef(endpoint);
     assert.equal(endpoint.hasCredentialRef, true);
     assert.equal(endpoint.credentialId, credential.id);
+    const readyOverview = await requestJson("GET", `/api/v1/projects/${project.id}/overview`, undefined, cookie);
+    assert.deepEqual(readyOverview.recommendedActions, ["start_chat", "create_task", "add_collaborator"]);
+    assert.equal(readyOverview.taskReadyEndpointCount, 1);
 
     const endpoints = await requestJson("GET", `/api/v1/projects/${project.id}/endpoints`, undefined, cookie);
     assertNoApiKeySecretRef(endpoints);

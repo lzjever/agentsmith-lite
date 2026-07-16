@@ -430,6 +430,9 @@ async function routeApi(
     if (segments[4] === "capabilities" && method === "GET") {
       return sendJson(res, 200, await services.workspaces.projectCapabilities(user.id, projectId));
     }
+    if (segments[4] === "overview" && method === "GET") {
+      return sendJson(res, 200, await services.workspaces.projectOverview(user.id, projectId));
+    }
     if (segments[4] === "settings") {
       if (method === "GET") return sendJson(res, 200, await services.settings.project(user.id, projectId));
       if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,body);await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
@@ -938,7 +941,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     "/api/v1/context"
   ].includes(pathname) ||
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|overview|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||

@@ -62,11 +62,8 @@ describe("retained chat and overview behavior", () => {
   });
 
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {
-    const original = { projectCapabilities: apiClient.projectCapabilities, projectSettings: apiClient.projectSettings, members: apiClient.members, currentIdentity: apiClient.currentIdentity };
-    apiClient.projectCapabilities = async () => readOnly;
-    apiClient.projectSettings = async () => ({ project: { id: "project_1", workspaceId: "workspace_1", name: "Project", lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: { canManageSettings: false } });
-    apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Project Owner", email: "owner@example.test", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, { projectId: "project_1", userId: "viewer_1", role: "viewer", displayName: "Viewer", email: "viewer@example.test", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
-    apiClient.currentIdentity = async () => ({ user: { id: "viewer_1", email: "viewer@example.test" } });
+    const original = apiClient.projectOverview;
+    apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByText("This project is available for viewing.");
@@ -81,38 +78,27 @@ describe("retained chat and overview behavior", () => {
       assert.ok(screen.getByRole("link", { name: "Resource policy" }));
       assert.ok(screen.getByRole("link", { name: "Tasks" }));
     } finally {
-      apiClient.projectCapabilities = original.projectCapabilities;
-      apiClient.projectSettings = original.projectSettings;
-      apiClient.members = original.members;
-      apiClient.currentIdentity = original.currentIdentity;
+      apiClient.projectOverview = original;
     }
   });
 
-  it("keeps the overview readable and retries a failed lifecycle request locally", async () => {
-    const original = { projectCapabilities: apiClient.projectCapabilities, projectSettings: apiClient.projectSettings, members: apiClient.members, currentIdentity: apiClient.currentIdentity };
-    apiClient.projectCapabilities = async () => readOnly;
-    apiClient.members = async () => [];
-    apiClient.currentIdentity = async () => ({ user: { id: "viewer_1", email: "viewer@example.test" } });
-    let settingsReads = 0;
-    apiClient.projectSettings = async () => {
-      if (settingsReads++ === 0) throw new ApiError(503, "Project lifecycle is temporarily unavailable.");
-      return { project: { id: "project_1", workspaceId: "workspace_1", name: "Project", lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: { canManageSettings: false } };
+  it("loads one coherent overview projection and retries it as a whole", async () => {
+    const original = apiClient.projectOverview;
+    let reads = 0;
+    apiClient.projectOverview = async () => {
+      if (reads++ === 0) throw new ApiError(503, "Project overview is temporarily unavailable.");
+      return {project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:{...readOnly,canManageEndpoints:true,canManageMembers:true,canCreateTasks:true,canSendChat:true},owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"owner",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:["start_chat","create_task","add_collaborator"]};
     };
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
-      await screen.findByText("This project is available for viewing.");
-      await screen.findByText("Project lifecycle unavailable");
-      assert.ok(screen.getByText("Project status: Unknown."));
-      assert.ok(screen.getByText("Status: Unknown · You can view this project, but you cannot make changes."));
-      assert.equal(screen.queryByText("Project status: Active."), null);
-      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByText("Project overview unavailable");
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
       await screen.findByText("Project status: Active.");
-      assert.equal(settingsReads, 2);
+      assert.equal(reads, 2);
+      assert.ok(screen.getByRole("link",{name:"Open Start a chat"}));
+      assert.equal(screen.queryByRole("link",{name:/Configure an endpoint/}),null);
     } finally {
-      apiClient.projectCapabilities = original.projectCapabilities;
-      apiClient.projectSettings = original.projectSettings;
-      apiClient.members = original.members;
-      apiClient.currentIdentity = original.currentIdentity;
+      apiClient.projectOverview = original;
     }
   });
 
