@@ -125,16 +125,33 @@ describe("alert rule editing", () => {
       restoreClient(original);
     }
   });
+
+  it("reports whether a rule would trigger instead of claiming every test matched", async () => {
+    const original = snapshotClient();
+    const successes: string[] = [];
+    apiClient.alertRules = async () => [existing];
+    apiClient.testAlertRule = async () => ({ matched: false, metric: "failure_count", value: 1, threshold: 2, evaluatedAt: "2026-07-12T00:00:00.000Z" });
+    toast.success = (message) => { successes.push(message); };
+    try {
+      render(<AlertRulesPanel projectId={projectId} canManage />);
+      await screen.findByText("Task failure");
+      fireEvent.click(screen.getByRole("button", { name: "Test alert rule" }));
+      await waitFor(() => assert.deepEqual(successes, ["Rule would not trigger: failure count is 1, threshold 2."]));
+    } finally {
+      restoreClient(original);
+    }
+  });
 });
 
 function snapshotClient() {
-  return { alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule, success: toast.success, error: toast.error };
+  return { alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule, testAlertRule: apiClient.testAlertRule, success: toast.success, error: toast.error };
 }
 
 function restoreClient(original: ReturnType<typeof snapshotClient>) {
   apiClient.alertRules = original.alertRules;
   apiClient.createAlertRule = original.createAlertRule;
   apiClient.updateAlertRule = original.updateAlertRule;
+  apiClient.testAlertRule = original.testAlertRule;
   toast.success = original.success;
   toast.error = original.error;
 }

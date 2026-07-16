@@ -673,6 +673,7 @@ export interface ProjectResourceUsageAdjustment {
 
 export interface ProjectProviderUsageSettlement {
   usage: ProjectResourceUsage;
+  endpointId: string | null;
   exceededLimits: Array<Extract<ProjectAlert["type"], "provider_tokens_limit" | "provider_cost_limit">>;
 }
 

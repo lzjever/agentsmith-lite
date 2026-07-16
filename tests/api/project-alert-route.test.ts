@@ -34,6 +34,7 @@ describe("project alert history API", () => {
 
       const denied = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: `asl_session=${viewerSession}` } });
       assert.equal(denied.status, 403);
+      await json(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/members`, { email: "alert-viewer@example.test", role: "viewer" }, ownerCookie, ownerCsrf);
       await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/members`, { email: "alert-viewer@example.test", role: "viewer" }, ownerCookie, ownerCsrf);
       const visible = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: `asl_session=${viewerSession}` } });
       assert.equal(visible.status, 200);

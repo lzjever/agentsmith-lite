@@ -5,7 +5,7 @@ import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
-import { recordProjectFailure, recoverProjectAlerts } from "./projectPolicyService.js";
+import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 import { CredentialService } from "./credentialService.js";
 import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
 

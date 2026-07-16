@@ -423,13 +423,13 @@ export class PostgresProductStore implements ProductStore {
       if (settlement.status === "settled") {
         const rows = await client.query<ProjectProviderSettlementRow>(`select u.*, (p.provider_tokens_limit is not null and u.provider_tokens > p.provider_tokens_limit) as provider_tokens_exceeded, (p.provider_cost_limit is not null and u.provider_cost > p.provider_cost_limit) as provider_cost_exceeded from project_resource_usage u join project_resource_policies p on p.project_id=u.project_id where u.project_id=$1`, [settlement.project_id]);
         const row = rows.rows[0];
-        return row ? { usage: mapUsage(row), exceededLimits: [...(row.provider_tokens_exceeded ? ["provider_tokens_limit" as const] : []), ...(row.provider_cost_exceeded ? ["provider_cost_limit" as const] : [])] } : null;
+        return row ? { usage: mapUsage(row), endpointId: settlement.endpoint_id, exceededLimits: [...(row.provider_tokens_exceeded ? ["provider_tokens_limit" as const] : []), ...(row.provider_cost_exceeded ? ["provider_cost_limit" as const] : [])] } : null;
       }
       if (!usage || (settlement.status !== "dispatched" && settlement.status !== "delivered" && settlement.status !== "unknown")) return null;
       const rows = await client.query<ProjectProviderSettlementRow>(`update project_resource_usage u set provider_tokens=greatest(0,u.provider_tokens+$2-$4),provider_cost=greatest(0,u.provider_cost+$3-$5),updated_at=$6 from project_resource_policies p where u.project_id=$1 and p.project_id=u.project_id returning u.*, (p.provider_tokens_limit is not null and u.provider_tokens > p.provider_tokens_limit) as provider_tokens_exceeded, (p.provider_cost_limit is not null and u.provider_cost > p.provider_cost_limit) as provider_cost_exceeded`, [settlement.project_id,usage.tokens ?? 0,usage.cost ?? 0,Number(settlement.reserved_tokens),Number(settlement.reserved_cost),updatedAt]);
       if (!rows.rows[0]) return null;
       await client.query(`update project_provider_settlements set status='settled',settled_at=$2,provider_tokens=$3,provider_cost=$4,updated_at=$2 where id=$1`, [id,updatedAt,usage?.tokens ?? null,usage?.cost ?? null]);
-      const row=rows.rows[0]; return { usage: mapUsage(row), exceededLimits: [...(row.provider_tokens_exceeded ? ["provider_tokens_limit" as const] : []), ...(row.provider_cost_exceeded ? ["provider_cost_limit" as const] : [])] };
+      const row=rows.rows[0]; return { usage: mapUsage(row), endpointId: settlement.endpoint_id, exceededLimits: [...(row.provider_tokens_exceeded ? ["provider_tokens_limit" as const] : []), ...(row.provider_cost_exceeded ? ["provider_cost_limit" as const] : [])] };
     });
   }
   async markProjectProviderSettlementUnknown(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> {

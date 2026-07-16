@@ -81,7 +81,7 @@ export function AlertRulesPanel({ projectId, canManage }: { projectId: string; c
       setBusyRuleId(null);
     }
   }
-  async function test(rule: ProjectAlertRule) { setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); toast.success(`Test matched ${result.metric}: ${result.value}.`); } catch { toast.error("Alert rule test could not be completed."); } finally { setBusyRuleId(null); } }
+  async function test(rule: ProjectAlertRule) { setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch { toast.error("Alert rule test could not be completed."); } finally { setBusyRuleId(null); } }
 
   async function remove() {
     if (!removing) return;

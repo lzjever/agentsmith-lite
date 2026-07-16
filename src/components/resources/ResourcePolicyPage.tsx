@@ -113,7 +113,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
       header={
         <PageHeader
           title="Resource policy"
-          subtitle="Project gauges and endpoint rolling windows enforced by the API."
+          subtitle="Project-wide gauges and lifetime provider budgets, with per-user endpoint rolling windows."
           actions={
             <Button
               variant="quiet"
@@ -196,7 +196,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
           <section>
             <h2 className="type-title">Endpoint windows</h2>
             <p className="mt-1 text-sm text-secondary">
-              Each value is measured over its selected rolling window.
+              Each limit applies independently to every user over the selected rolling window.
             </p>
             {endpointState === "error" ? (
               <div

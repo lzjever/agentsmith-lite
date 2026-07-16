@@ -1,9 +1,9 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditEvent, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
-import { matchesAlertRule, measureAlertRule } from "./alertRuleService.js";
+import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
 type Limit = ProjectAlertType;
 const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: nowIso() });
@@ -94,7 +94,7 @@ export class ProjectPolicyService {
     await this.auditEvent(projectId, userId, "policy.update", "accepted", projectId);
     return result;
   }
-  async reserveTask(projectId: string, actorId: string, taskId: string): Promise<void> { await this.change(projectId, actorId, "task.create", taskId, { activeTasks: 1 }, "active_tasks_limit"); }
+  async reserveTask(projectId: string, actorId: string, taskId: string): Promise<void> { await this.change(projectId, actorId, "task.create", taskId, { activeTasks: 1 }, "active_tasks_limit"); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); }
   async recordTaskReservationRejected(projectId: string, actorId: string, taskId: string): Promise<void> {
     await this.openAlert(projectId, "active_tasks_limit");
     await this.auditEvent(projectId, actorId, "task.create", "rejected", taskId);
@@ -103,7 +103,7 @@ export class ProjectPolicyService {
     await this.auditEvent(projectId, actorId, action, status, resourceId, resourceKind, detail);
   }
   async raiseAlert(projectId: string, type: ProjectAlertType): Promise<void> { await this.openAlert(projectId, type); }
-  async evaluateTaskFailure(projectId:string,endpointId:string):Promise<void>{await evaluateProjectAlert(this.store,projectId,"task_failure",{endpointId});}
+  async evaluateTaskFailure(projectId:string,endpointId:string):Promise<void>{await emitProjectAlert(this.store,projectId,"task_failure",{endpointId});}
   async recordProviderFailure(projectId:string,actorId:string|null,endpointId:string|null,errorCategory:EndpointHealthErrorCategory):Promise<void>{
     const timestamp=nowIso();
     await recordProjectFailure(this.store,"provider_failure",{
@@ -111,7 +111,7 @@ export class ProjectPolicyService {
       detail:{...(endpointId?{endpointId}:{}),errorCategory},createdAt:timestamp
     },endpointId?{endpointId}:{});
   }
-  async releaseTask(projectId: string, taskId: string): Promise<void> { await this.change(projectId, null, "task.cleaned", taskId, { activeTasks: -1 }, undefined);await recoverProjectAlerts(this.store,projectId,"active_tasks_limit"); }
+  async releaseTask(projectId: string, taskId: string): Promise<void> { await this.change(projectId, null, "task.cleaned", taskId, { activeTasks: -1 }, undefined); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); await recoverProjectAlerts(this.store,projectId,"active_tasks_limit"); }
   async reserveProvider(projectId: string, actorId: string | null, endpointId: string | null, taskId: string | null = null, reservation: Readonly<{ tokens: number; cost: number }> = providerReservationBudget): Promise<string> {
     const reservedAt = nowIso();
     const policy = await this.requirePolicy(projectId);
@@ -123,7 +123,7 @@ export class ProjectPolicyService {
     const usage = await this.usage(projectId);
     const limits = providerReservationLimits(policy, usage, reservation);
     const alertTypes: ProjectAlertType[] = limits.length ? limits : ["provider_requests_limit"];
-    await Promise.all(alertTypes.map((limit) => this.openAlert(projectId, limit)));
+    await Promise.all(alertTypes.map((limit) => this.openAlert(projectId, limit, endpointId)));
     await this.auditEvent(projectId, actorId, "provider.request", "rejected", endpointId);
     throw new ProductError(`Project ${(limits[0] ?? "provider_requests_limit").replaceAll("_", " ")} reached`, 409);
   }
@@ -132,10 +132,13 @@ export class ProjectPolicyService {
   async settleProvider(id: string, providerUsage?: ProviderUsage): Promise<void> {
     const settled = await this.store.settleProjectProviderSettlement(id, providerUsage, nowIso());
     if (!settled) throw new ProductError("Project policy usage not found", 409);
-    const limits: Array<Extract<Limit, "provider_tokens_limit" | "provider_cost_limit">> = ["provider_tokens_limit", "provider_cost_limit"];
-    await Promise.all(limits.map((limit) => settled.exceededLimits.includes(limit)
-      ? this.openAlert(settled.usage.projectId, limit)
-      : recoverProjectAlerts(this.store, settled.usage.projectId, limit)));
+    const types = ["provider_requests_limit", "provider_tokens_limit", "provider_cost_limit"] as const;
+    for (const type of types) {
+      await evaluateProjectAlertRules(this.store, settled.usage.projectId, type, settled.endpointId ? { endpointId: settled.endpointId } : {});
+      if (type === "provider_requests_limit") continue;
+      if (settled.exceededLimits.includes(type)) await this.openAlert(settled.usage.projectId, type, settled.endpointId);
+      else await recoverProjectAlerts(this.store, settled.usage.projectId, type);
+    }
   }
   async markProviderUnknown(id: string): Promise<void> { await this.store.markProjectProviderSettlementUnknown(id, nowIso()); }
   async failProvider(id: string): Promise<void> { await this.store.failProjectProviderSettlement(id, nowIso()); }
@@ -148,7 +151,7 @@ export class ProjectPolicyService {
       ...(delta > 0 ? { limit: "project_file_bytes_limit" as const } : {}),
       updatedAt: nowIso()
     });
-    if (adjusted) {if(delta<0)await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit");return;}
+    if (adjusted) { await evaluateProjectAlertRules(this.store, projectId, "project_file_bytes_limit"); if(delta<0)await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit");return;}
     if (delta > 0) {
       await this.requirePolicy(projectId);
       await this.openAlert(projectId, "project_file_bytes_limit");
@@ -183,50 +186,10 @@ export class ProjectPolicyService {
     }
     await this.auditEvent(projectId, actorId, action, "accepted", resourceId);
   }
-  private async openAlert(projectId: string, type: Limit) { await emitProjectAlert(this.store, projectId, type); }
+  private async openAlert(projectId: string, type: Limit, endpointId?: string | null) { await emitProjectAlert(this.store, projectId, type, endpointId ? { endpointId } : {}); }
   private async auditEvent(projectId: string, actorId: string | null, action: ProjectAuditAction, status: "accepted" | "rejected", resourceId: string | null, resourceKind = auditResourceKind(action), detail?: import("../../contracts/src/api.js").ProjectAuditSafeDetail) { await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind, resourceId, ...(detail ? { detail: safeAuditDetail(detail) } : {}), createdAt: nowIso() }); }
 }
 
-type AlertEvaluationContext={endpointId?:string};
-type FailureAlertType=Extract<ProjectAlertType,"endpoint_failure"|"provider_failure"|"sandbox_failure">;
-
-export async function recordProjectFailure(store:ProductStore,type:FailureAlertType,event:ProjectAuditEvent,context:AlertEvaluationContext={}):Promise<void>{
-  await store.appendProjectAuditEvent({...event,detail:safeAuditDetail(event.detail)});
-  await evaluateProjectAlert(store,event.projectId,type,context);
-}
-export async function emitProjectAlert(store: ProductStore, projectId: string, type: ProjectAlertType, context: AlertEvaluationContext = {}): Promise<void> {
-  await evaluateProjectAlert(store,projectId,type,context);
-}
-async function evaluateProjectAlert(store: ProductStore, projectId: string, type: ProjectAlertType, context: AlertEvaluationContext = {}): Promise<void> {
-  const timestamp = nowIso();
-  const [rules, members, project] = await Promise.all([store.listProjectAlertRules(projectId), store.listProjectMemberships(projectId), store.findProject(projectId)]);
-  const configured=rules.filter(rule=>rule.enabled&&rule.alertType===type&&(rule.scope?.kind!=="endpoint"||rule.scope.endpointId===context.endpointId));
-  await recoverProjectAlerts(store,projectId,type,context.endpointId,true);
-  if(!configured.length){if(type==="task_failure")return;if(isFailureAlertType(type)&&await store.measureProjectAlertRule({projectId,alertType:type,metric:"failure_count",windowSeconds:3600,endpointId:context.endpointId??null,now:timestamp})<1)return;await store.upsertActiveProjectAlert({id:newId("alert"),projectId,type,status:"active",deliveryStatus:"not_configured",ruleId:null,metric:null,metricValue:null,threshold:null,endpointId:context.endpointId??null,acknowledgedAt:null,acknowledgedBy:null,silencedUntil:null,createdAt:timestamp,updatedAt:timestamp,resolvedAt:null,dismissedAt:null});return}
-  const active=await store.listActiveProjectAlerts(projectId);
-  for(const rule of configured){const value=await measureAlertRule(store,rule,timestamp);if(!matchesAlertRule(rule,value)){const current=active.find(alert=>alert.ruleId===rule.id&&(alert.endpointId??null)===(rule.scope?.kind==="endpoint"?rule.scope.endpointId:null));if(current)await resolveAlert(store,current,timestamp);continue}const alert=await store.upsertActiveProjectAlert({id:newId("alert"),projectId,type,status:"active",deliveryStatus:"pending",ruleId:rule.id,metric:rule.metric??null,metricValue:value,threshold:rule.threshold??null,endpointId:rule.scope?.kind==="endpoint"?rule.scope.endpointId:null,acknowledgedAt:null,acknowledgedBy:null,silencedUntil:null,createdAt:timestamp,updatedAt:timestamp,resolvedAt:null,dismissedAt:null});if(alert.deliveryStatus!=="pending"||(alert.silencedUntil!==null&&alert.silencedUntil!==undefined&&alert.silencedUntil>timestamp))continue;
-    const title = `Project alert: ${alertLabel(type)}`;
-    const body = project ? `${project.name}: ${alertLabel(type)}.` : `A project reported ${alertLabel(type)}.`;
-    const linkPath = project ? `/workspaces/${project.workspaceId}/projects/${project.id}/alerts?alertId=${encodeURIComponent(alert.id)}` : null;
-    const deliveries = await Promise.allSettled(members.filter((member) => member.role === "owner" || member.role === "admin").map((member) => store.createUserNotification({ id: newId("notice"), userId: member.userId, type: "project_alert", title, body, projectId, resourceKind: "alert", resourceId: alert.id, linkPath, readAt: null, createdAt: timestamp }, `project-alert:${alert.id}:${member.userId}`)));
-    await store.updateProjectAlertDeliveryStatus(projectId, alert.id, deliveries.length > 0 && deliveries.some((delivery) => delivery.status === "fulfilled") ? "delivered" : "failed", timestamp);
-  }
-}
-export async function recoverProjectAlerts(store:ProductStore,projectId:string,type:ProjectAlertType,endpointId?:string,configuredOnly=false):Promise<void>{
-  const timestamp=nowIso();
-  const rules=new Map((await store.listProjectAlertRules(projectId)).map((rule)=>[rule.id,rule]));
-  for(const alert of await store.listActiveProjectAlerts(projectId)){
-    if(alert.type!==type||(endpointId!==undefined&&alert.endpointId!==null&&alert.endpointId!==endpointId))continue;
-    const rule=alert.ruleId?rules.get(alert.ruleId):undefined;
-    if(configuredOnly&&!rule)continue;
-    if(rule&&rule.enabled&&matchesAlertRule(rule,await measureAlertRule(store,rule,timestamp)))continue;
-    await resolveAlert(store,alert,timestamp);
-  }
-}
-async function resolveAlert(store:ProductStore,alert:ProjectAlert,timestamp:string){const resolved=await store.transitionProjectAlert(alert.projectId,alert.id,"resolved",timestamp);if(resolved)await store.appendProjectAuditEvent({id:newId("audit"),projectId:alert.projectId,actorId:null,action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:alert.id,detail:{alertId:alert.id},createdAt:timestamp})}
-
-function alertLabel(type: ProjectAlertType): string { return type.replaceAll("_", " "); }
-function isFailureAlertType(type:ProjectAlertType):type is FailureAlertType{return type==="endpoint_failure"||type==="provider_failure"||type==="sandbox_failure"}
 function usageLimits(policy: ProjectResourcePolicy, usage: ProjectResourceUsage, projectCreatedAt: string): ProjectUsageLimit[] {
   return [
     usageLimit("activeTasks", usage.activeTasks, policy.activeTasksLimit, projectCreatedAt),

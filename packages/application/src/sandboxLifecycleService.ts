@@ -19,7 +19,7 @@ import {
   type SandboxRunState
 } from "../../sandbox-controller/src/reconciler.js";
 import { SANDBOX_LABEL_KEYS } from "../../sandbox-controller/src/labels.js";
-import { recordProjectFailure } from "./projectPolicyService.js";
+import { recordProjectFailure } from "./projectAlertEvaluator.js";
 
 export interface SandboxKubernetesInventoryPort {
   listManagedResources(namespace: string): Promise<KubernetesResource[]>;

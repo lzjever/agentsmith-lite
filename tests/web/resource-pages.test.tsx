@@ -41,6 +41,8 @@ describe("project resource pages", () => {
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
       const activeTasks = await screen.findByRole("spinbutton", { name: "Active tasks" });
+      assert.ok(screen.getByText("Project-wide gauges and lifetime provider budgets, with per-user endpoint rolling windows."));
+      assert.ok(screen.getByText("Each limit applies independently to every user over the selected rolling window."));
       fireEvent.change(activeTasks, { target: { value: "5" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 1));
