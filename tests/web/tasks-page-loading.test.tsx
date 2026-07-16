@@ -11,6 +11,63 @@ const { TasksPageContent } = await import("../../src/components/tasks/TasksPage.
 afterEach(() => cleanup());
 
 describe("tasks page loading", () => {
+  it("starts from the first task page after switching projects", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const calls: Array<{ projectId: string; cursor?: string }> = [];
+    const secondProjectTask = { ...task, id: "task_2", projectId: "project_2", prompt: "Project two task" };
+    const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
+    apiClient.tasks = async (projectId, query) => {
+      calls.push({ projectId, ...(query.cursor ? { cursor: query.cursor } : {}) });
+      if (projectId === "project_2") return { items: [secondProjectTask], total: 1, nextCursor: null };
+      return { items: [task], total: 2, nextCursor: query.cursor ? null : "project_1_cursor" };
+    };
+    apiClient.endpoints = async () => [];
+    apiClient.projectCapabilities = async () => readOnly;
+    try {
+      const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Next task page" }));
+      await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1" && call.cursor === "project_1_cursor")));
+
+      view.rerender(<TasksPageContent workspaceId="workspace_1" projectId="project_2" navigate={() => undefined} />);
+      await screen.findByRole("link", { name: /Project two task/ });
+      const projectTwoCall = calls.find((call) => call.projectId === "project_2");
+      assert.equal(projectTwoCall?.cursor, undefined);
+      assert.equal(screen.getByRole("link", { name: /Project two task/ }).getAttribute("href"), "/workspaces/workspace_1/projects/project_2/tasks/task_2");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("does not navigate to a task created for a project the user has left", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+    const readOnly = { ...manager, canCreateTasks: false, canWriteFiles: false };
+    const navigations: string[] = [];
+    let finishCreate!: (value: Task) => void;
+    let createStarted = false;
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async (projectId) => projectId === "project_1" ? [eligible] : [];
+    apiClient.projectCapabilities = async (projectId) => projectId === "project_1" ? manager : readOnly;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.createTask = async () => { createStarted = true; return new Promise((resolve) => { finishCreate = resolve; }); };
+    try {
+      const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={(path) => navigations.push(path)} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Run in project one" } });
+      fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
+      await waitFor(() => assert.equal(createStarted, true));
+
+      view.rerender(<TasksPageContent workspaceId="workspace_1" projectId="project_2" navigate={(path) => navigations.push(path)} />);
+      await screen.findByText("Your project access is read-only.");
+      await act(async () => finishCreate(task));
+      assert.deepEqual(navigations, []);
+      assert.equal(screen.queryByRole("form", { name: "Create task" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("closes task creation when the server revokes create access", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };

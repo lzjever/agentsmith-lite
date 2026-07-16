@@ -23,8 +23,15 @@ export function TasksPage({ workspaceId, projectId }: { workspaceId: string; pro
   return <TasksPageContent workspaceId={workspaceId} projectId={projectId} navigate={(path) => router.push(path)} />;
 }
 
-export function TasksPageContent({ workspaceId, projectId, navigate }: { workspaceId: string; projectId: string; navigate: (path: string) => void }) {
+type TasksPageContentProps = { workspaceId: string; projectId: string; navigate: (path: string) => void };
+
+export function TasksPageContent(props: TasksPageContentProps) {
+  return <ProjectTasksPageContent key={`${props.workspaceId}:${props.projectId}`} {...props} />;
+}
+
+function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPageContentProps) {
   const mutationKeys = useTaskMutationKeys();
+  const active = useRef(true);
   const [page, setPage] = useState<TaskListPage>(emptyPage);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([]);
@@ -47,16 +54,18 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
   const cursor = cursors[pageIndex];
 
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+
   const loadCreateDependencies = useCallback(() => {
     const endpointsVersion = ++endpointsLoadVersion.current;
     setEndpointsState("loading");
     setEndpointsError("");
     void apiClient.endpoints(projectId).then((available) => {
-      if (endpointsVersion !== endpointsLoadVersion.current) return;
+      if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints(available);
       setEndpointsState("ready");
     }).catch((reason) => {
-      if (endpointsVersion !== endpointsLoadVersion.current) return;
+      if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints([]);
       setEndpointsError(message(reason));
       setEndpointsState("error");
@@ -66,11 +75,11 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
     setCapabilitiesState("loading");
     setCapabilitiesError("");
     void apiClient.projectCapabilities(projectId).then((projected) => {
-      if (capabilitiesVersion !== capabilitiesLoadVersion.current) return;
+      if (!active.current || capabilitiesVersion !== capabilitiesLoadVersion.current) return;
       setCapabilities(projected);
       setCapabilitiesState("ready");
     }).catch((reason) => {
-      if (capabilitiesVersion !== capabilitiesLoadVersion.current) return;
+      if (!active.current || capabilitiesVersion !== capabilitiesLoadVersion.current) return;
       setCapabilities(undefined);
       setCapabilitiesError(message(reason));
       setCapabilitiesState("error");
@@ -82,12 +91,12 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
     if (!quiet) setState("loading");
     try {
       const listed = await apiClient.tasks(projectId, { ...query, ...(cursor ? { cursor } : {}) });
-      if (version !== loadVersion.current) return;
+      if (!active.current || version !== loadVersion.current) return;
       setPage(listed);
       setError("");
       setState("ready");
     } catch (reason) {
-      if (version !== loadVersion.current) return;
+      if (!active.current || version !== loadVersion.current) return;
       setError(message(reason));
       setState("error");
     }
@@ -137,10 +146,12 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
     try {
       const title = input.title.trim();
       const task = await apiClient.createTask(projectId, { prompt: input.prompt, endpointId: input.endpointId, ...(title ? { title } : {}), ...(input.inputPaths.length ? { inputPaths: input.inputPaths } : {}) }, mutationKeys.key("task-create", identity));
+      if (!active.current) return;
       mutationKeys.complete("task-create", identity);
       toast.success("Task created");
       navigate(`${basePath}/${task.id}`);
     } catch (reason) {
+      if (!active.current) return;
       const detail = message(reason);
       if (reason instanceof ApiError && reason.status === 403) {
         setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
@@ -150,7 +161,7 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
       setError(detail);
       toast.error(detail);
       throw new Error(detail);
-    } finally { setCreating(false); }
+    } finally { if (active.current) setCreating(false); }
   }
 
   const compatibleEndpoints = taskCompatibleEndpoints(endpoints);
