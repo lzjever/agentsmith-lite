@@ -68,7 +68,7 @@ describe("alert rule evaluation", () => {
   });
 
   it("evaluates a new rule immediately and resolves its old instance when the type changes", async () => {
-    const { services, owner, project } = await setup("rule-change");
+    const { store, services, owner, project } = await setup("rule-change");
     await services.policies.reserveTask(project.id, owner.id, "task_1");
     const rule = await services.alertRules.create(owner.id, project.id, {
       name: "Current task",
@@ -88,6 +88,16 @@ describe("alert rule evaluation", () => {
     assert.equal(alerts.find((alert) => alert.id === oldAlert.id)?.status, "resolved");
     const replacement = alerts.find((alert) => alert.ruleId === rule.id && alert.type === "project_file_bytes_limit" && alert.status === "active");
     assert.ok(replacement);
+
+    const deleteRule = store.deleteProjectAlertRule.bind(store);
+    store.deleteProjectAlertRule = async (projectId, ruleId) => {
+      assert.equal(
+        (await store.listProjectAlerts(projectId)).find((alert) => alert.id === replacement.id)?.status,
+        "resolved",
+        "active alert must be resolved before its rule is deleted",
+      );
+      return deleteRule(projectId, ruleId);
+    };
 
     await services.alertRules.remove(owner.id, project.id, rule.id);
     assert.equal(
