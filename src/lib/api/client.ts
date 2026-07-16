@@ -126,13 +126,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set("x-csrf-token", csrfToken || "");
     headers.set("content-type", "application/json");
   }
-  const response = await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" });
+  const response = observeSession(await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" }));
+  if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+  return response.json() as Promise<T>;
+}
+
+function observeSession(response: Response): Response {
   if (response.status === 401) {
     csrfToken = undefined;
     if (typeof window !== "undefined") window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
   }
-  if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
-  return response.json() as Promise<T>;
+  return response;
 }
 
 async function errorMessage(response: Response): Promise<string> {
@@ -225,10 +229,10 @@ export const apiClient = {
   editChatMessage:(projectId:string,threadId:string,messageId:string,input:{content:string;expectedVersion:number})=>json<ProjectChatMessage>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,"PATCH",input),
   deleteChatMessage:(projectId:string,threadId:string,messageId:string,expectedVersion:number)=>json<{deleted:true}>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,"DELETE",{expectedVersion}),
   branchChatMessage:(projectId:string,threadId:string,messageId:string,expectedVersion:number)=>json<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/branch`,"POST",{expectedVersion}),
-  async retryChatMessage(projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!csrfToken)await apiClient.currentIdentity();const response=await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/retry`,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrfToken??""},body:JSON.stringify({expectedVersion}),...(signal?{signal}:{})});return readChatStream(response,onDelta);},
+  async retryChatMessage(projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!csrfToken)await apiClient.currentIdentity();const response=observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/retry`,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrfToken??""},body:JSON.stringify({expectedVersion}),...(signal?{signal}:{})}));return readChatStream(response,onDelta);},
   async sendChatMessage(projectId: string, threadId: string, content: string, afterMessageId:string|null,signal: AbortSignal | undefined, onDelta: (delta: string) => void): Promise<ProjectChatSendResponse> {
     if (!csrfToken) await apiClient.currentIdentity();
-    const response = await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages`, { method:"POST", credentials:"same-origin", headers:{"content-type":"application/json","x-csrf-token":csrfToken??""}, body:JSON.stringify({content,afterMessageId}), ...(signal ? { signal } : {}) });
+    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages`, { method:"POST", credentials:"same-origin", headers:{"content-type":"application/json","x-csrf-token":csrfToken??""}, body:JSON.stringify({content,afterMessageId}), ...(signal ? { signal } : {}) }));
     return readChatStream(response,onDelta);
   },
   contexts: (input: { workspaceId: string; scope: ContextScope; projectId?: string }) => {
@@ -261,15 +265,20 @@ export const apiClient = {
   async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {
     if (!csrfToken) await apiClient.currentIdentity();
     const params = new URLSearchParams({ path, ...(options.overwrite ? { overwrite: "true" } : {}) });
-    const response = await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
+    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
       method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream" }, body: file
-    });
+    }));
     if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
   },
   createTaskUrlInput: (projectId:string,url:string) => json<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",{url}),
   deleteFile: (projectId: string, path: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/files`, "DELETE", { path }),
   fileDownloadUrl: (projectId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}`,
+  async downloadProjectFile(projectId: string, path: string, signal?: AbortSignal): Promise<Blob> {
+    const response = observeSession(await fetch(apiClient.fileDownloadUrl(projectId, path), { credentials:"same-origin", ...(signal ? { signal } : {}) }));
+    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+    return response.blob();
+  },
   tasks: (projectId: string, query: TaskListQuery = {}) => {
     const params = new URLSearchParams();
     if (query.search) params.set("search", query.search);
@@ -292,11 +301,11 @@ export const apiClient = {
   },
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
   async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
-    const response = await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
+    const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
       credentials: "same-origin",
       headers: { accept: "text/event-stream", ...(cursor ? { "last-event-id": cursor } : {}) },
       signal
-    });
+    }));
     if (!response.ok || !response.body) throw new ApiError(response.status, await errorMessage(response));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -341,7 +350,7 @@ export const apiClient = {
   cancelTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/cancel`, "POST", idempotencyKey, {}),
   artifactDownloadUrl: (taskId: string, artifactId: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
   async downloadTaskArtifact(taskId: string, artifactId: string, signal?: AbortSignal): Promise<Blob> {
-    const response = await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`, { credentials: "same-origin", ...(signal ? { signal } : {}) });
+    const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`, { credentials: "same-origin", ...(signal ? { signal } : {}) }));
     if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.blob();
   }
