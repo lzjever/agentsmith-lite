@@ -53,7 +53,7 @@ describe("ChatService", () => {
     ]);
   });
 
-  it("persists the user message and releases the reserved request when a streamed chat is aborted", async () => {
+  it("persists the user message and keeps conservative usage when a streamed chat is aborted", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({
       store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password",
@@ -75,7 +75,7 @@ describe("ChatService", () => {
     await assert.rejects(pending, /Aborted/);
     assert.deepEqual((await services.chat.listMessages(user.id, project.id, thread.id)).map((message) => [message.role, message.content]), [["user", content]]);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.deepEqual(providerUsage(current), { requests: 2, tokens: 0, cost: 0 });
+    assert.deepEqual(providerUsage(current), { requests: 2, tokens: 4096, cost: 1 });
     const audit = (await store.listProjectAuditEvents(project.id)).slice(setupAudit.length);
     assert.deepEqual(audit.map((event) => [event.action, event.status]), [["chat.message.send", "accepted"], ["provider.request", "accepted"], ["provider.request", "rejected"], ["chat.message.stop", "accepted"]]);
     assert.equal(JSON.stringify(audit).includes(content), false);
@@ -152,7 +152,7 @@ describe("ChatService", () => {
     const restarted=createApplicationServices({store,dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password",providerClient:fakeClient(providerCalls)});const recovered=await restarted.chat.listMessages(user.id,project.id,thread.id);assert.deepEqual(recovered.map((item)=>[item.role,item.content]),[["user","hello"],["assistant","fake response"]]);assert.equal((await restarted.chat.listMessages(user.id,project.id,thread.id)).length,2);assert.equal(providerCalls.length,1);await assert.rejects(()=>restarted.chat.retryMessage(user.id,project.id,thread.id,recovered[0]!.id,recovered[0]!.version,undefined,()=>undefined),/Only a failed or stopped user message/);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
     assert.equal(unknownSettlements.length, 1);
-    assert.deepEqual(providerUsage(current), { requests: 2, tokens: 0, cost: 0 });
+    assert.deepEqual(providerUsage(current), { requests: 2, tokens: 4096, cost: 1 });
   });
 
   it("allows a verified non-admin project owner to use a pre-existing credential-bound endpoint", async () => {

@@ -140,10 +140,14 @@ describe("project resource policy", () => {
     await services.policies.settleProvider(settled, { tokens: 3, cost: 0.25 });
     await store.expireProjectProviderSettlements("9999-01-01T00:00:00.000Z");
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.deepEqual({ requests: current.providerRequests, tokens: current.providerTokens, cost: current.providerCost }, { requests: 3, tokens: 3, cost: 0.25 });
+    assert.deepEqual({ requests: current.providerRequests, tokens: current.providerTokens, cost: current.providerCost }, { requests: 3, tokens: 8195, cost: 2.25 });
     await assert.rejects(() => services.policies.markProviderDispatched(reserved), /Provider settlement not found/);
-    assert.equal(await store.settleProjectProviderSettlement(dispatched, { tokens: 1, cost: 1 }, "9999-01-01T00:00:01.000Z"), null);
-    assert.equal(await store.settleProjectProviderSettlement(delivered, { tokens: 1, cost: 1 }, "9999-01-01T00:00:01.000Z"), null);
+    await services.policies.markProviderDelivered(dispatched);
+    await services.policies.settleProvider(dispatched, { tokens: 1, cost: 1 });
+    await services.policies.markProviderDelivered(delivered);
+    await services.policies.settleProvider(delivered, { tokens: 2, cost: 0.5 });
+    const afterLateSettlement = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    assert.deepEqual({ requests: afterLateSettlement.providerRequests, tokens: afterLateSettlement.providerTokens, cost: afterLateSettlement.providerCost }, { requests: 3, tokens: 6, cost: 1.75 });
   });
 
   it("settles provider usage exactly once and leaves delivered requests without usage unknown", async () => {
@@ -166,9 +170,52 @@ describe("project resource policy", () => {
     const afterUnknown = (await services.policies.getUsageOverview(user.id, project.id)).usage;
     assert.deepEqual(
       { requests: afterUnknown.providerRequests, tokens: afterUnknown.providerTokens, cost: afterUnknown.providerCost },
-      { requests: 2, tokens: 3, cost: 1 }
+      { requests: 2, tokens: 4099, cost: 2 }
     );
-    assert.equal(await store.settleProjectProviderSettlement(unknown, { tokens: 1 }, new Date().toISOString()), null);
+    assert.ok(await store.settleProjectProviderSettlement(unknown, { tokens: 1 }, new Date().toISOString()));
+    const afterLateUsage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    assert.deepEqual({ requests: afterLateUsage.providerRequests, tokens: afterLateUsage.providerTokens, cost: afterLateUsage.providerCost }, { requests: 2, tokens: 4, cost: 1 });
+  });
+
+  it("keeps conservative usage when a dispatched provider request fails ambiguously", async () => {
+    const services = createApplicationServices({
+      store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-provider-unknown", builtinAdminPassword: "admin-password",
+      providerClient: { async completeChat() { throw new Error("connection lost after dispatch"); } }
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+
+    await assert.rejects(() => services.providerBroker.completeChat({ endpoint, settlementEndpointId: null, apiKey: "secret", actorId: user.id }, [{ role: "user", content: "hello" }]), /provider request failed/i);
+
+    const usage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    assert.deepEqual({ requests: usage.providerRequests, tokens: usage.providerTokens, cost: usage.providerCost }, { requests: 1, tokens: 4096, cost: 1 });
+  });
+
+  it("returns and settles a successful provider response that arrives after reservation expiry", async () => {
+    const store = createInMemoryProductStore();
+    let releaseResponse!: () => void;
+    let markStarted!: () => void;
+    const responseGate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const services = createApplicationServices({
+      store, dataRoot: "/tmp/agentsmith-provider-late-success", builtinAdminPassword: "admin-password",
+      providerClient: { async completeChat(endpoint) { markStarted(); await responseGate; return { message:{ role:"assistant" as const, content:"late success" }, endpointSnapshot:endpoint, usage:{ tokens:2, cost:0.5 } }; } }
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+
+    const pending = services.providerBroker.completeChat({ endpoint, settlementEndpointId:null, apiKey:"secret", actorId:user.id }, [{ role:"user", content:"hello" }]);
+    await started;
+    await store.expireProjectProviderSettlements("9999-01-01T00:00:00.000Z");
+    releaseResponse();
+
+    assert.equal((await pending).message.content, "late success");
+    const usage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    assert.deepEqual({ requests:usage.providerRequests, tokens:usage.providerTokens, cost:usage.providerCost }, { requests:1, tokens:2, cost:0.5 });
   });
 
   it("patches nullable limits without replacing concurrent policy fields", async () => {
@@ -224,4 +271,9 @@ describe("project resource policy", () => {
 async function sendThreadMessage(services: ReturnType<typeof createApplicationServices>, userId: string, projectId: string, endpointId: string, content: string) {
   const thread = await services.chat.createThread(userId, projectId, endpointId);
   return services.chat.sendMessage(userId, projectId, thread.id, content);
+}
+
+function endpointRecord(projectId: string): ModelEndpoint {
+  const timestamp = new Date().toISOString();
+  return { id:"endpoint-unknown", projectId, name:"Endpoint", protocol:"openai_chat_completions", baseUrl:"https://models.example.test/v1", model:"model", credentialId:"", capabilities:["text"], requestTimeoutSecs:30, createdAt:timestamp, updatedAt:timestamp };
 }

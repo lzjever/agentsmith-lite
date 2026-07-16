@@ -143,6 +143,7 @@ export interface AuthorizedBotifiedChatCompletion {
   endpoint: ModelEndpoint;
   apiKey: string;
   projectId: string;
+  actorId: string | null;
 }
 
 
@@ -303,7 +304,7 @@ export class TaskService {
       requireTaskEndpointCapabilities(endpoint);
       if (this.config.liveSandbox) await this.requireNamespaceSandboxCapacity();
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
-      const create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext });
+      const create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext, createdByUserId:userId });
       let persisted: PersistedAgentTask | null = null;
       try {
         persisted = await this.store.createTaskAtomically(create);
@@ -332,6 +333,7 @@ export class TaskService {
     inputPaths: string[];
     sourceTaskId: string | null;
     agentContext: string;
+    createdByUserId: string | null;
   }): Promise<AtomicTaskCreateInput> {
     const timestamp = nowIso();
     const runId = newId("run");
@@ -369,6 +371,7 @@ export class TaskService {
       status: live ? "starting" : "completed",
       runId,
       sourceTaskId: input.sourceTaskId,
+      createdByUserId: input.createdByUserId,
       executionMode: live ? "live" : "dry-run",
       sandbox,
       activeReservation: live,
@@ -557,6 +560,7 @@ export class TaskService {
       const message: PersistedTaskMessage = {
         id,
         taskId: task.id,
+        actorId: userId,
         content: text,
         targetTaskId: null,
         deliveryKey: deliveryKeyForMessage(id, task.runId),
@@ -886,7 +890,7 @@ export class TaskService {
     const project = await this.store.findProject(source.projectId);
     if (!project) throw new ProductError("Task project not found", 409);
     const endpoint = await this.endpoints.requireEndpointForProject(source.projectId, source.endpointId);
-    return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"" });
+    return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"", createdByUserId:message.actorId??source.createdByUserId??null });
   }
 
   private async cleanupUnusedTaskCreate(create:AtomicTaskCreateInput):Promise<void>{if(create.task.executionMode!=="live")return;const project=await this.store.findProject(create.task.projectId);if(project)await this.bestEffortRemoveTaskInputs(project.rootPath,create.task.id);}
@@ -1674,7 +1678,7 @@ export class TaskService {
     if (endpointBaseUrl !== credentialBaseUrl) {
       throw new ProductError("Endpoint baseUrl does not match the configured credential binding");
     }
-    return { endpoint, apiKey: credential.apiKey, projectId: task.projectId };
+    return { endpoint, apiKey: credential.apiKey, projectId: task.projectId, actorId:task.createdByUserId??null };
   }
 
   private buildLiveSandboxRun(input: {

@@ -705,7 +705,7 @@ async function forwardBotifiedChatCompletion(
   const authorized = await services.tasks.authorizeBotifiedChatCompletion(route.taskId, route.runId, serviceKey);
   const request = await readBotifiedChatCompletionRequest(req, authorized.endpoint.model);
   await services.providerBroker.forwardChatCompletion(
-    { endpoint: authorized.endpoint, settlementEndpointId: authorized.endpoint.id, apiKey: authorized.apiKey, actorId: null, taskId: route.taskId },
+    { endpoint: authorized.endpoint, settlementEndpointId: authorized.endpoint.id, apiKey: authorized.apiKey, actorId: authorized.actorId, taskId: route.taskId },
     request,
     brokerRequestHeaders(req),
     async (response) => {

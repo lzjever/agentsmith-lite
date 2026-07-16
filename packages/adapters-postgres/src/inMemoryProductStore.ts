@@ -339,18 +339,18 @@ export class InMemoryProductStore implements ProductStore {
     const policy = this.policies.get(input.projectId);
     const usage = this.usage.get(input.projectId);
     if (!policy || !usage || providerReservationExceedsPolicy(policy, usage, input)) return null;
-    if (input.endpointId !== null) for(const window of policy.endpointWindows??[]){if(window.endpointId!==input.endpointId)continue;const cutoff=Date.parse(input.reservedAt)-window.windowSeconds*1000;const current=[...this.providerSettlements.values()].filter(value=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&value.status!=="failed"&&Date.parse(value.reservedAt)>=cutoff).reduce((sum,value)=>sum+(window.metric==="providerRequests"?1:window.metric==="providerTokens"?(value.status==="settled"?(value.usage?.tokens??0):value.status==="unknown"?0:value.reservedTokens):(value.status==="settled"?(value.usage?.cost??0):value.status==="unknown"?0:value.reservedCost)),0);const proposed=current+(window.metric==="providerRequests"?1:window.metric==="providerTokens"?input.reservedTokens:input.reservedCost);if(proposed>window.limit)return null;}
+    if (input.endpointId !== null) for(const window of policy.endpointWindows??[]){if(window.endpointId!==input.endpointId)continue;const cutoff=Date.parse(input.reservedAt)-window.windowSeconds*1000;const current=[...this.providerSettlements.values()].filter(value=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&value.status!=="failed"&&Date.parse(value.reservedAt)>=cutoff).reduce((sum,value)=>sum+(window.metric==="providerRequests"?1:window.metric==="providerTokens"?(value.status==="settled"?(value.usage?.tokens??0):value.reservedTokens):(value.status==="settled"?(value.usage?.cost??0):value.reservedCost)),0);const proposed=current+(window.metric==="providerRequests"?1:window.metric==="providerTokens"?input.reservedTokens:input.reservedCost);if(proposed>window.limit)return null;}
     if (this.providerSettlements.has(input.id)) throw new Error("Provider settlement already exists");
     this.usage.set(input.projectId, clone({ ...usage, providerRequests: usage.providerRequests + 1, providerTokens: usage.providerTokens + input.reservedTokens, providerCost: usage.providerCost + input.reservedCost, updatedAt: input.reservedAt }));
     const settlement: ProjectProviderSettlement = { ...input, status: "reserved", dispatchedAt: null, deliveredAt: null, settledAt: null, updatedAt: input.reservedAt };
     this.providerSettlements.set(input.id, clone(settlement)); return clone(settlement);
   }
   async markProjectProviderSettlementDispatched(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> { return this.transitionSettlement(id, ["reserved"], "dispatched", updatedAt, "dispatchedAt"); }
-  async markProjectProviderSettlementDelivered(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> { return this.transitionSettlement(id, ["dispatched"], "delivered", updatedAt, "deliveredAt"); }
+  async markProjectProviderSettlementDelivered(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> { return this.transitionSettlement(id, ["dispatched","unknown"], "delivered", updatedAt, "deliveredAt"); }
   async settleProjectProviderSettlement(id: string, usage: ProviderUsage | undefined, updatedAt: string): Promise<ProjectProviderUsageSettlement | null> {
     const settlement = this.providerSettlements.get(id); if (!settlement) return null;
     if (settlement.status === "settled") return this.settlementResult(settlement);
-    if ((settlement.status !== "dispatched" && settlement.status !== "delivered") || !usage) return null;
+    if (!usage || (settlement.status !== "dispatched" && settlement.status !== "delivered" && settlement.status !== "unknown")) return null;
     const policy = this.policies.get(settlement.projectId);
     const current = this.usage.get(settlement.projectId);
     if (!policy || !current) return null;
@@ -367,15 +367,14 @@ export class InMemoryProductStore implements ProductStore {
   async markProjectProviderSettlementUnknown(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> {
     const settlement = this.providerSettlements.get(id);
     if (!settlement || (settlement.status !== "dispatched" && settlement.status !== "delivered")) return null;
-    const usage = this.usage.get(settlement.projectId);
-    if (usage) this.usage.set(settlement.projectId, clone({ ...usage, providerTokens: Math.max(0, usage.providerTokens - settlement.reservedTokens), providerCost: Math.max(0, usage.providerCost - settlement.reservedCost), updatedAt }));
     const updated = { ...settlement, status: "unknown" as const, updatedAt };
     this.providerSettlements.set(id, clone(updated));
     return clone(updated);
   }
   async failProjectProviderSettlement(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> {
     const settlement = this.providerSettlements.get(id); if (!settlement || settlement.status === "settled" || settlement.status === "failed") return settlement ? clone(settlement) : null;
-    const usage = this.usage.get(settlement.projectId); if (usage) this.usage.set(settlement.projectId, { ...usage, providerRequests: settlement.status === "reserved" ? Math.max(0, usage.providerRequests - 1) : usage.providerRequests, providerTokens: Math.max(0, usage.providerTokens - settlement.reservedTokens), providerCost: Math.max(0, usage.providerCost - settlement.reservedCost), updatedAt });
+    if (settlement.status !== "reserved") return this.markProjectProviderSettlementUnknown(id, updatedAt);
+    const usage = this.usage.get(settlement.projectId); if (usage) this.usage.set(settlement.projectId, { ...usage, providerRequests: Math.max(0, usage.providerRequests - 1), providerTokens: Math.max(0, usage.providerTokens - settlement.reservedTokens), providerCost: Math.max(0, usage.providerCost - settlement.reservedCost), updatedAt });
     const updated = { ...settlement, status: "failed" as const, updatedAt }; this.providerSettlements.set(id, clone(updated)); return clone(updated);
   }
   async expireProjectProviderSettlements(now: string): Promise<number> { let count = 0; for (const value of this.providerSettlements.values()) if (["reserved", "dispatched", "delivered"].includes(value.status) && value.expiresAt <= now) { if (value.status === "reserved") await this.failProjectProviderSettlement(value.id, now); else await this.markProjectProviderSettlementUnknown(value.id, now); count += 1; } return count; }

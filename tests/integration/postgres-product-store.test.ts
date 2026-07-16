@@ -412,10 +412,13 @@ postgresDescribe("postgres product store", () => {
     assert.equal(await store.expireProjectProviderSettlements("2026-07-04T00:00:02.000Z"), 3);
     const usage = await store.findProjectResourceUsage("proj_ledger");
     assert.equal(usage?.providerRequests, 3);
-    assert.equal(usage?.providerTokens, 7);
-    assert.ok(Math.abs((usage?.providerCost ?? 0) - 0.01) < 1e-9);
-    assert.equal(await store.settleProjectProviderSettlement("settlement_dispatched", { tokens: 1 }, timestamp), null);
-    assert.equal(await store.settleProjectProviderSettlement("settlement_delivered", { tokens: 1 }, timestamp), null);
+    assert.equal(usage?.providerTokens, 3079);
+    assert.ok(Math.abs((usage?.providerCost ?? 0) - 0.76) < 1e-9);
+    assert.ok(await store.settleProjectProviderSettlement("settlement_dispatched", { tokens: 1 }, timestamp));
+    assert.ok(await store.settleProjectProviderSettlement("settlement_delivered", { tokens: 1 }, timestamp));
+    const lateUsage = await store.findProjectResourceUsage("proj_ledger");
+    assert.equal(lateUsage?.providerTokens, 9);
+    assert.ok(Math.abs((lateUsage?.providerCost ?? 0) - 0.01) < 1e-9);
     const task: AgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
     await store.createTaskWithActiveReservation(task);
     await Promise.all([store.requestTaskFinalization(task.id, "failed", timestamp), store.requestTaskFinalization(task.id, "completed", timestamp)]);
@@ -561,7 +564,8 @@ postgresDescribe("postgres product store", () => {
     await store.upsertProjectMembership(membership);
     await createTestCredential(store, project.id, endpoint.credentialId, endpoint.createdAt);
     await store.createEndpoint(endpoint);
-    await store.createTask(task);
+    await store.createTask({ ...task, createdByUserId:user.id });
+    await store.createTaskMessage({ id:"message_pg", taskId:task.id, actorId:user.id, content:"continue", deliveryStatus:"pending", createdAt:task.createdAt, updatedAt:task.updatedAt });
     assert.equal(
       (await store.updateTaskStatusIfStarting(task.id, "running", "2026-07-04T00:07:00.000Z"))?.status,
       "running"
@@ -581,6 +585,8 @@ postgresDescribe("postgres product store", () => {
     const storedTask = await store.findTask(task.id);
     assert.equal(storedTask?.status, "running");
     assert.equal(storedTask?.executionMode, "live");
+    assert.equal(storedTask?.createdByUserId, user.id);
+    assert.equal((await store.findTaskMessage("message_pg"))?.actorId, user.id);
     assert.deepEqual((await store.listTaskInteractionChanges(task.id,0,10)).map((change)=>[change.changeSeq,change.interaction.revision]), [[1,1],[2,2]]);
     assert.deepEqual((await store.readTaskInteractionSnapshot(task.id,null,10))?.items, [completedInteraction]);
     assert.equal((await store.readTaskInteractionSnapshot(task.id,null,10))?.sourceCursor, "timeline:2");

@@ -78,6 +78,29 @@ describe("durable task lifecycle", () => {
     assert.equal(setup.botified.posts.length, 0);
   });
 
+  it("attributes task provider usage to the task creator", async () => {
+    const setup = await createSetup(true);
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "attribute usage" }, "create-attributed-task");
+
+    assert.equal((await setup.store.findTask(task.id))?.createdByUserId, setup.userId);
+    assert.equal((await setup.services.tasks.authorizeBotifiedChatCompletion(task.id, task.runId, "service-key")).actorId, setup.userId);
+  });
+
+  it("attributes a terminal successor to the member who sent its message", async () => {
+    const setup = await createSetup(false);
+    const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "finished source" }, "create-terminal-source");
+    const member = await setup.services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "successor-member", email: "successor-member@example.test", emailVerified: true });
+    const timestamp = new Date().toISOString();
+    await setup.store.upsertProjectMembership({ projectId: setup.projectId, userId: member.user.id, role: "member", createdAt: timestamp, updatedAt: timestamp });
+
+    const receipt = await setup.services.tasks.sendTaskMessage(member.user.id, source.id, "continue as member", "member-successor");
+    const message = await setup.store.findTaskMessage(receipt.messageId);
+    const successor = await setup.store.findTask(receipt.targetTaskId);
+
+    assert.equal(message?.actorId, member.user.id);
+    assert.equal(successor?.createdByUserId, member.user.id);
+  });
+
   it("rejects an endpoint missing task capabilities before task persistence", async () => {
     const setup = await createSetup(false);
     const endpoint = await setup.services.endpoints.createEndpoint(setup.userId, setup.projectId, { name: "Text only", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "model", credentialId: setup.credentialId, capabilities: ["text"], requestTimeoutSecs: 30 });

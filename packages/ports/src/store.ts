@@ -42,6 +42,7 @@ export interface PersistedDeliveryReceipt {
 }
 
 export interface PersistedAgentTask extends AgentTask {
+  createdByUserId?: string | null;
   agentContext?: string;
   startDeliveryKey?: string | null;
   startRequestHash?: string | null;
@@ -73,6 +74,7 @@ export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "te
 export interface PersistedTaskMessage {
   id: string;
   taskId: string;
+  actorId?: string | null;
   content: string;
   targetTaskId?: string | null;
   deliveryKey?: string | null;
