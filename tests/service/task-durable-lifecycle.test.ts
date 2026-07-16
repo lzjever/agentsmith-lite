@@ -154,6 +154,29 @@ describe("durable task lifecycle", () => {
     await assert.rejects(() => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "escape", inputPaths: ["../outside"] }, "create-invalid-input"), /must stay under files/);
   });
 
+  it("copies retained source inputs when retrying or duplicating a task", async () => {
+    const setup = await createSetup(true);
+    const sourcePath = path.join(setup.dataRoot, setup.projectRootPath, "files", "retained.txt");
+    await mkdir(path.dirname(sourcePath), { recursive: true });
+    await writeFile(sourcePath, "retained original");
+    const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, {
+      endpointId: setup.endpointId,
+      prompt: "use retained input",
+      inputPaths: ["files/retained.txt"]
+    }, "create-retained-source");
+    await setup.services.tasks.cancelTask(setup.userId, source.id, "cancel-retained-source");
+    await rm(sourcePath);
+
+    const retried = await setup.services.tasks.retryTask(setup.userId, source.id, "retry-retained-source");
+    const duplicated = await setup.services.tasks.duplicateTask(setup.userId, source.id, "duplicate-retained-source");
+
+    for (const derived of [retried, duplicated]) {
+      const input = await setup.services.tasks.downloadTaskInput(setup.userId, derived.id, "files/retained.txt");
+      assert.equal(input.bytes.toString("utf8"), "retained original");
+      assert.equal(derived.sourceTaskId, source.id);
+    }
+  });
+
   it("snapshots effective context into the Botified task workspace", async () => {
     const setup = await createSetup(true);
     await setup.services.contexts.upsert(setup.userId, { workspaceId: setup.workspaceId, projectId: setup.projectId, scope: "project_personal", contextKey: "task.style", content: "Use terse task updates.", contentType: "text" });

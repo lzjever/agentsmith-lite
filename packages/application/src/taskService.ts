@@ -404,7 +404,11 @@ export class TaskService {
     if (!live) return { task, reserveActive: false };
     const serviceKey = this.serviceKeyForTask(task);
     requireBotifiedServiceKey(serviceKey);
-    await this.snapshotProjectInputs(input.project.rootPath, input.id, input.inputPaths);
+    if (input.sourceTaskId) {
+      await this.snapshotRetainedTaskInputs(input.project.id, input.project.rootPath, input.id, input.sourceTaskId);
+    } else {
+      await this.snapshotProjectInputs(input.project.rootPath, input.id, input.inputPaths);
+    }
     const runtimeState: Record<string, unknown> = {
       botifiedBaseUrl: this.botifiedBaseUrlForTask(input.id, botifiedPort)
     };
@@ -1865,7 +1869,56 @@ export class TaskService {
     });
   }
 
-  private async readTaskInputManifest(task: PersistedAgentTask): Promise<TaskInputManifestEntry[]> {
+  private async snapshotRetainedTaskInputs(projectId: string, projectRootPath: string, taskId: string, sourceTaskId: string): Promise<void> {
+    const sourceTask = await this.store.findTask(sourceTaskId);
+    if (!sourceTask || sourceTask.deletedAt || sourceTask.projectId !== projectId) {
+      throw new ProductError("Source task not found", 404);
+    }
+    const entries = await this.readTaskInputManifest(sourceTask, true);
+    const dataRoot = path.resolve(this.config.dataRoot);
+    const paths = new FilePathValidationService();
+    const projectRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, projectRootPath);
+    const sourceRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, path.posix.join(projectRootPath, "tasks", sourceTaskId, "inputs"));
+    const taskRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, path.posix.join(projectRootPath, "tasks", taskId));
+    const snapshotRoot = path.resolve(taskRoot, "inputs");
+    const temporaryRoot = path.resolve(taskRoot, `inputs-${taskId}.tmp`);
+    assertPathInside(dataRoot, sourceRoot, "Source task input snapshot is outside the data root");
+    assertPathInside(dataRoot, snapshotRoot, "Task input snapshot is outside the data root");
+    assertPathInside(dataRoot, temporaryRoot, "Task input snapshot is outside the data root");
+
+    await withProjectFileLock(projectRoot, async () => {
+      await rm(temporaryRoot, { recursive: true, force: true });
+      await mkdir(path.join(temporaryRoot, "files"), { recursive: true });
+      try {
+        for (const entry of entries) {
+          const source = path.resolve(sourceRoot, ...entry.path.split("/"));
+          const destination = path.resolve(temporaryRoot, ...entry.path.split("/"));
+          assertPathInside(sourceRoot, source, "Source task input is outside its snapshot");
+          assertPathInside(temporaryRoot, destination, "Task input snapshot is outside the task directory");
+          let bytes: Buffer;
+          try {
+            bytes = await readRegularFileWithoutFollowingSymlink(source, "Source task input");
+          } catch (error) {
+            if (isNotFound(error)) throw new ProductError("Source task input snapshot is unavailable", 409);
+            throw error;
+          }
+          const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+          if (bytes.byteLength !== entry.size || digest !== entry.digest) {
+            throw new ProductError("Source task input snapshot is invalid", 409);
+          }
+          await mkdir(path.dirname(destination), { recursive: true });
+          await writeFile(destination, bytes);
+        }
+        await writeFile(path.join(temporaryRoot, "manifest.json"), JSON.stringify({ version: 1, files: entries }) + "\n");
+        await rename(temporaryRoot, snapshotRoot);
+      } catch (error) {
+        await rm(temporaryRoot, { recursive: true, force: true });
+        throw error;
+      }
+    });
+  }
+
+  private async readTaskInputManifest(task: PersistedAgentTask, required = false): Promise<TaskInputManifestEntry[]> {
     const project = await this.store.findProject(task.projectId);
     if (!project) throw new ProductError("Task project not found", 409);
     const dataRoot = path.resolve(this.config.dataRoot);
@@ -1875,7 +1928,10 @@ export class TaskService {
     try {
       parsed = JSON.parse(await readFile(manifestPath, "utf8"));
     } catch (error) {
-      if (isNotFound(error)) return [];
+      if (isNotFound(error)) {
+        if (required) throw new ProductError("Source task input snapshot is unavailable", 409);
+        return [];
+      }
       throw new ProductError("Task input manifest is unavailable", 500);
     }
     if (!isUnknownRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.files)) {
