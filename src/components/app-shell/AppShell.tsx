@@ -3,7 +3,7 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, oidcStartUrlForReturnTo, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
@@ -20,6 +20,9 @@ type ShellState = "loading" | "ready" | "login" | "error";
 type DirectoryState = "loading" | "ready" | "error";
 
 export function AppShell({ children, workspaceId, projectId }: ShellProps) {
+  const mounted = useRef(true);
+  const identityRequest = useRef(0);
+  const directoryRequest = useRef(0);
   const pathname = usePathname();
   const router = useRouter();
   const routeParams = useParams<{ project?: string | string[] }>();
@@ -32,27 +35,40 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   const routedProjectId = Array.isArray(routeParams.project) ? routeParams.project[0] : routeParams.project;
 
   async function loadIdentity() {
+    const request = ++identityRequest.current;
     setStatus("loading");
     try {
       const identity = await apiClient.currentIdentity();
+      if (!mounted.current || request !== identityRequest.current) return;
       setUser(identity.user);
       setStatus("ready");
     } catch (error) {
+      if (!mounted.current || request !== identityRequest.current) return;
       setStatus(error instanceof ApiError && error.status === 401 ? "login" : "error");
     }
   }
 
   async function loadDirectory() {
+    const request = ++directoryRequest.current;
     setDirectoryState("loading");
     try {
-      setWorkspaces(await apiClient.workspaces());
+      const listed = await apiClient.workspaces();
+      if (!mounted.current || request !== directoryRequest.current) return;
+      setWorkspaces(listed);
       setDirectoryState("ready");
     } catch {
+      if (!mounted.current || request !== directoryRequest.current) return;
       setWorkspaces([]);
       setDirectoryState("error");
     }
   }
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => {
     void loadIdentity();
     setCollapsed(window.localStorage.getItem("agentsmith-sidebar-collapsed") === "1");

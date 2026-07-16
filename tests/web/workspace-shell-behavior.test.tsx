@@ -124,6 +124,27 @@ describe("workspace and shell interactions", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("does not let an old directory response replace the current workspace", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    const second = { ...workspace, id: "ws_2", name: "Current workspace", projects: [] };
+    let finishFirst: ((value: Workspace[]) => void) | undefined;
+    let reads = 0;
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => ++reads === 1 ? new Promise((resolve) => { finishFirst = resolve; }) : [second];
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<p>First content</p>, "/workspaces/ws_1", { workspace: "ws_1" }, "ws_1");
+      await waitFor(() => assert.ok(finishFirst));
+      view.rerender(shell(<p>Current content</p>, "/workspaces/ws_2", { workspace: "ws_2" }, "ws_2"));
+      await waitFor(() => assert.ok(document.body.textContent?.includes("Current content")));
+      assert.ok(document.body.textContent?.includes("Current workspace"));
+
+      await act(async () => finishFirst!([workspace]));
+      assert.ok(document.body.textContent?.includes("Current workspace"));
+      assert.equal(document.body.textContent?.includes("Workspace unavailable"), false);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
     const tasks = view.getByRole("link", { name: "Tasks" });
@@ -139,7 +160,11 @@ function ProjectDialogHarness() {
 }
 
 function renderShell(children: React.ReactNode, pathname: string, params: Record<string, string>, workspaceId?: string) {
-  return render(<AppRouterContext.Provider value={router()}><PathnameContext.Provider value={pathname}><PathParamsContext.Provider value={params}><AppShell {...(workspaceId ? { workspaceId } : {})}>{children}</AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider>);
+  return render(shell(children, pathname, params, workspaceId));
+}
+
+function shell(children: React.ReactNode, pathname: string, params: Record<string, string>, workspaceId?: string) {
+  return <AppRouterContext.Provider value={router()}><PathnameContext.Provider value={pathname}><PathParamsContext.Provider value={params}><AppShell {...(workspaceId ? { workspaceId } : {})}>{children}</AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider>;
 }
 
 function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
