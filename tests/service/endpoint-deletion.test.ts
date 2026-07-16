@@ -36,6 +36,8 @@ describe("endpoint deletion", () => {
     await store.markProjectProviderSettlementDispatched("settlement_endpoint_history", timestamp);
     await store.markProjectProviderSettlementDelivered("settlement_endpoint_history", timestamp);
     await store.settleProjectProviderSettlement("settlement_endpoint_history", { tokens: 7, cost: 0.01 }, timestamp);
+    await store.upsertActiveProjectAlert({ id: "alert_endpoint_history_generic", projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: null, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
+    await store.upsertActiveProjectAlert({ id: "alert_endpoint_history_scoped", projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: endpoint.id, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
 
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
 
@@ -43,6 +45,12 @@ describe("endpoint deletion", () => {
     assert.equal((await services.chat.listThreads(userId, projectId)).find((item) => item.id === thread.id)?.endpointId, null);
     assert.deepEqual((await services.chat.listMessages(userId, projectId, thread.id)).map((message) => message.content), ["Retain this message"]);
     assert.equal((await store.listSettledProjectProviderSettlements(projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_history")?.endpointId, null);
+    const alerts = await store.listProjectAlerts(projectId);
+    assert.equal(alerts.find((alert) => alert.id === "alert_endpoint_history_generic")?.status, "active");
+    assert.deepEqual(
+      alerts.filter((alert) => alert.id === "alert_endpoint_history_scoped").map((alert) => [alert.status, alert.endpointId, Boolean(alert.resolvedAt)]),
+      [["resolved", null, true]]
+    );
     await assert.rejects(
       () => services.chat.sendMessage(userId, projectId, thread.id, "Cannot continue"),
       (error: unknown) => isConflict(error, "Chat thread endpoint has been deleted")

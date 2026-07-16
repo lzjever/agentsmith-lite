@@ -463,8 +463,13 @@ export class InMemoryProductStore implements ProductStore {
     for (const [ruleId, rule] of this.alertRules) {
       if (rule.scope?.kind === "endpoint" && rule.scope.endpointId === id) this.alertRules.delete(ruleId);
     }
+    const resolvedAt = new Date().toISOString();
     for (const [alertId, alert] of this.alerts) {
-      if (alert.endpointId === id) this.alerts.set(alertId, clone({ ...alert, endpointId: null }));
+      if (alert.endpointId === id) this.alerts.set(alertId, clone({
+        ...alert,
+        endpointId: null,
+        ...(alert.status === "active" ? { status: "resolved" as const, resolvedAt, updatedAt: resolvedAt } : {})
+      }));
     }
     this.endpoints.delete(id);
     return "deleted";

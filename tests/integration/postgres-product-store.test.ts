@@ -213,11 +213,19 @@ postgresDescribe("postgres product store", () => {
     await store.createEndpoint(deletedEndpoint);
     const retainedThread = await store.createProjectChatThread({ id: "thread_endpoint_delete_history", projectId: deletedEndpoint.projectId, endpointId: deletedEndpoint.id, title: "Retained history", createdAt: timestamp, updatedAt: timestamp });
     await settleProvider(store, "settlement_endpoint_delete_history", deletedEndpoint.projectId, deletedEndpoint.id, timestamp);
+    await store.upsertActiveProjectAlert({ id: "alert_endpoint_delete_generic", projectId: deletedEndpoint.projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: null, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
+    await store.upsertActiveProjectAlert({ id: "alert_endpoint_delete_scoped", projectId: deletedEndpoint.projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: deletedEndpoint.id, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
 
     assert.equal(await store.deleteEndpoint(deletedEndpoint.id), "deleted");
     assert.equal(await store.findEndpoint(deletedEndpoint.id), null);
     assert.equal((await store.findProjectChatThread(retainedThread.id))?.endpointId, null);
     assert.equal((await store.listSettledProjectProviderSettlements(deletedEndpoint.projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_delete_history")?.endpointId, null);
+    const endpointAlerts = await store.listProjectAlerts(deletedEndpoint.projectId);
+    assert.equal(endpointAlerts.find((alert) => alert.id === "alert_endpoint_delete_generic")?.status, "active");
+    assert.deepEqual(
+      endpointAlerts.filter((alert) => alert.id === "alert_endpoint_delete_scoped").map((alert) => [alert.status, alert.endpointId, Boolean(alert.resolvedAt)]),
+      [["resolved", null, true]]
+    );
     assert.equal(await store.deleteEndpoint("endpoint_delete_missing"), "not_found");
   });
 

@@ -556,6 +556,10 @@ export class PostgresProductStore implements ProductStore {
       );
       if (task.rowCount) return "referenced_by_tasks";
 
+      await client.query(
+        "update project_alerts set status = 'resolved', resolved_at = coalesce(resolved_at, clock_timestamp()), updated_at = clock_timestamp() where endpoint_id = $1 and status = 'active'",
+        [id]
+      );
       await client.query("update project_chat_threads set endpoint_id = null where endpoint_id = $1", [id]);
       await client.query("update project_provider_settlements set endpoint_id = null where endpoint_id = $1", [id]);
       const deleted = await client.query("delete from model_endpoints where id = $1", [id]);
