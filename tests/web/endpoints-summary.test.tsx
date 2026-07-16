@@ -6,6 +6,59 @@ import { apiClient, type Endpoint, type ProjectCapabilities } from "../../src/li
 installDom(); const {cleanup,fireEvent,render,screen,waitFor}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
 const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText(/1 endpoint configured · 1 configured/);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
+describe("endpoint dependencies", () => {
+  it("guides managers to credentials instead of opening a dead create form", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities };
+    apiClient.endpoints = async () => [];
+    apiClient.credentials = async () => [];
+    apiClient.projectCapabilities = async () => manager;
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "Create a credential first" });
+      const link = screen.getByRole("link", { name: "Project credentials" });
+      assert.equal(link.getAttribute("href"), "credentials");
+      assert.equal(screen.queryByRole("button", { name: "Create endpoint" }), null);
+      assert.equal(screen.queryByRole("dialog", { name: "Create endpoint" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("keeps the endpoint list readable when credentials fail and only disables configuration", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.credentials = async () => { throw new ApiError(503, "Credentials unavailable"); };
+    apiClient.projectCapabilities = async () => manager;
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      await screen.findByText(/Creating and editing endpoints is disabled/);
+      assert.ok(screen.getAllByText("DeepSeek").length > 0);
+      await waitFor(() => assert.ok(screen.getAllByRole("button", { name: "Edit DeepSeek" }).length > 0));
+      for (const button of screen.getAllByRole("button", { name: "Edit DeepSeek" })) assert.equal((button as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getAllByRole("button", { name: "Check health for DeepSeek" })[0] as HTMLButtonElement).disabled, false);
+      assert.equal((screen.getAllByRole("button", { name: "Delete DeepSeek" })[0] as HTMLButtonElement).disabled, false);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("keeps the endpoint list readable but hides mutations when permissions fail", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.credentials = async () => [credential];
+    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      await screen.findByText(/Endpoint management is disabled/);
+      assert.ok(screen.getAllByText("DeepSeek").length > 0);
+      assert.equal(screen.queryByRole("button", { name: "Edit DeepSeek" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Check health for DeepSeek" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Delete DeepSeek" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+});
 describe("endpoint management", () => it("edits and discovers models with the credential binding projected by the API", async () => {
   const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels, updateEndpoint: apiClient.updateEndpoint, recheckEndpoint: apiClient.recheckEndpoint };
   let checks = 0;

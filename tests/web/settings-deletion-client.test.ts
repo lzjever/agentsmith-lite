@@ -25,4 +25,14 @@ describe("settings deletion API client", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("extracts the message from structured API errors", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ error: { code: "runtime_unavailable", message: "Runtime is temporarily unavailable.", retryable: true } }, { status: 503 });
+    try {
+      await assert.rejects(apiClient.projectSettings("project_1"), (error: unknown) => error instanceof ApiError && error.status === 503 && error.message === "Runtime is temporarily unavailable.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -87,19 +87,24 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 **交付：**
 
 - 从原 Files 页面恢复固定 JuiceFS `files/` 库的 list、二进制 upload、download、delete 体验；服务端执行项目授权和路径规范化。移除多文件库、savepoint、template、version、restore 与挂载入口，而不是另做新 Files 控制台。
-- task/run 创建、输入 snapshot、Botified sandbox、事件投影、artifact list/download、artifact text/metadata preview、cancel、TTL/reap，以及 app-owned labels/UID 围栏。
-- 恢复 task follow-up：完成、失败、取消或过期后的任务可回到 list/detail；detail 提供 status、run、事件、只读 sandbox summary、artifact preview/download 和可用的 retry/follow-up action。所有 follow-up 仍由服务端 task lifecycle 决定。
+- task/run 创建、输入 snapshot、Botified sandbox、typed interaction 投影、artifact list/download、artifact text/metadata preview、cancel、TTL/reap，以及 app-owned labels/UID 围栏。
+- 完成、失败、取消或过期后的任务保留在 list/detail；detail 提供 status、run、Conversation、只读 sandbox summary、artifact preview/download 和服务端决定的 retry 或 successor action。
 
-**定向验证：** 在本地单节点 K8s 上传项目文件、由 sandbox 从 snapshot 读取并写出 artifact、查看授权 preview、通过 API 下载；完成后从 task detail 发起 follow-up，并确认取消和 TTL/reap 后只回收对应 app-owned 资源。
+**定向验证：** 在本地单节点 K8s 上传项目文件、由 sandbox 从 snapshot 读取并写出 artifact、查看授权 preview、通过 API 下载；完成后从 task detail 发起服务端决定的 retry 或 successor，并确认取消和 TTL/reap 后只回收对应 app-owned 资源。
 
 ### 阶段 4：Task Detail 与 Chat
 
 **交付：**
 
-- 从原 Task List、Task Detail、Conversation 和 Artifacts 页面恢复状态、events、task summary、artifact preview/download 和只读 sandbox 信息，全部来自经授权产品 API。
+- 从原 Task List、Task Detail、Conversation 和 Artifacts 页面恢复状态、typed interactions、task summary、artifact preview/download 和只读 sandbox 信息，全部来自经授权产品 API。
+- Task Conversation 的最终产品和架构边界以 `docs/task-interaction-product-improvement-plan.md`
+  为准：Botified NDJSON 只存在于服务端 transport；AgentSmith Server 生成唯一 typed Interaction
+  read model、message disposition、run state 和 capabilities；Web 不解析 timeline、不合并 lifecycle、
+  不推断 action。Conversation 不提供 transcript、公开 raw events、独立 follow-up UI、Codex parser、
+  adapter 或双 contract。
 - 从原项目 chat 页面恢复 thread create、rename、delete、search、message stream、stop、Markdown render 和 composer 体验，继续调用阶段 2 的直接 Chat Completions broker；不引入浏览器直连 provider、Anthropic/universal proxy 或额外模型路径。
 
-**定向验证：** 在本地单节点 K8s 查看运行任务的后续 events/artifacts、summary 和 preview，下载授权 artifact，并完成 thread rename/delete/search、stream/stop 和 Markdown chat；viewer/member 权限按 API 返回的边界生效。
+**定向验证：** 在本地单节点 K8s 查看运行任务的 Conversation updates、artifacts、summary 和 preview，下载授权 artifact，并完成 thread rename/delete/search、stream/stop 和 Markdown chat；viewer/member 权限按 API 返回的边界生效。
 
 ### 阶段 5：Policy、Usage、Alerts 与 Light Audit
 

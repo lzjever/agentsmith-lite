@@ -1,7 +1,8 @@
 import type {
   AgentTask,
   AgentTaskArtifact,
-  AgentTaskEvent,
+  TaskHistoryStatus,
+  TaskInteractionItem,
   ProjectChatMessage,
   ProjectChatThread,
   AgentTaskStatus,
@@ -26,13 +27,148 @@ import type {
   WorkspaceListProjection,
   WorkspaceMembership,
   WorkspaceMembershipView,
-  TaskFollowUp,
   TaskSummary,
   TaskTerminalReason,
-  TaskDeliveryReceipt,
   TaskListArchivedFilter,
   TaskListSort
 } from "../../contracts/src/api.js";
+
+export interface PersistedDeliveryReceipt {
+  accepted: boolean;
+  deliveryKey: string;
+  requestHash: string;
+  messageId?: string;
+  cursor?: string;
+}
+
+export interface PersistedAgentTask extends AgentTask {
+  startDeliveryKey?: string | null;
+  startRequestHash?: string | null;
+  startClaimToken?: string | null;
+  startReceipt?: PersistedDeliveryReceipt | null;
+  startTimelineCursor?: string | null;
+  startClaimedAt?: string | null;
+  startLeaseExpiresAt?: string | null;
+  startAttemptCount?: number;
+  startNextRetryAt?: string | null;
+  artifactProjectionClaimToken?: string | null;
+  artifactProjectionLeaseExpiresAt?: string | null;
+  artifactProjectionAttemptCount?: number;
+  artifactProjectionNextRetryAt?: string | null;
+  cleanupClaimToken?: string | null;
+  cleanupLeaseExpiresAt?: string | null;
+  cleanupAttemptCount?: number;
+  cleanupNextRetryAt?: string | null;
+  finalizationIntentStatus?: Extract<AgentTaskStatus, "completed" | "failed" | "expired" | "cleaned"> | null;
+  finalizationIntentAt?: string | null;
+}
+
+export interface PersistedTaskArtifact extends AgentTaskArtifact {
+  fileId: string;
+}
+
+export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed";
+
+export interface PersistedTaskMessage {
+  id: string;
+  taskId: string;
+  content: string;
+  targetTaskId?: string | null;
+  deliveryKey?: string | null;
+  requestHash?: string | null;
+  claimToken?: string | null;
+  receipt?: PersistedDeliveryReceipt | null;
+  timelineCursor?: string | null;
+  deliveryStatus?: PersistedTaskMessageDeliveryStatus;
+  claimedAt?: string | null;
+  leaseExpiresAt?: string | null;
+  attemptCount?: number;
+  nextRetryAt?: string | null;
+  safeError?: string | null;
+  createdAt: string;
+  updatedAt?: string;
+  deletedAt?: string | null;
+}
+
+export type TaskInteractionSourceKind = "botified" | "product";
+
+export interface TaskInteractionCorrelation {
+  toolCallId?: string | null;
+  workTaskId?: string | null;
+  callbackId?: string | null;
+}
+
+export interface TaskInteractionChangeInput {
+  sourceKind: TaskInteractionSourceKind;
+  sourceId: string;
+  sourceRevision: number;
+  interaction: TaskInteractionItem;
+  correlation?: TaskInteractionCorrelation;
+}
+
+export interface PersistedTaskInteractionChange extends TaskInteractionChangeInput {
+  changeSeq: number;
+}
+
+export interface TaskInteractionSyncMutation {
+  expectedSourceCursor?: string | null;
+  sourceCursor: string | null;
+  historyStatus: TaskHistoryStatus;
+  lastSyncedAt: string;
+}
+
+export interface TaskInteractionActiveLifecycleMutation {
+  kind: "active";
+  expectedStatus: Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping">;
+  status: Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping">;
+  updatedAt: string;
+}
+
+export interface TaskInteractionTerminalLifecycleMutation {
+  kind: "terminal";
+  terminalReason: TaskTerminalReason;
+  updatedAt: string;
+  auditEvent: ProjectAuditEvent;
+  successors: TaskLifecycleSuccessor[];
+  terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
+}
+
+export type TaskInteractionLifecycleMutation =
+  | TaskInteractionActiveLifecycleMutation
+  | TaskInteractionTerminalLifecycleMutation;
+
+export interface PersistTaskInteractionMutationInput {
+  taskId: string;
+  changes: TaskInteractionChangeInput[];
+  artifactProjections?: PersistTaskArtifactProjectionInput[];
+  lifecycle?: TaskInteractionLifecycleMutation;
+  sourceSync?: TaskInteractionSyncMutation;
+}
+
+export interface PersistTaskInteractionMutationResult {
+  changes: PersistedTaskInteractionChange[];
+  latestChangeSeq: number;
+  sourceCursor: string | null;
+  historyStatus: TaskHistoryStatus;
+  lastSyncedAt: string | null;
+}
+
+export interface TaskInteractionPageAnchor {
+  position: number;
+  interactionId: string;
+}
+
+export interface TaskInteractionStoreSnapshot {
+  items: TaskInteractionItem[];
+  queuedMessages: PersistedTaskMessage[];
+  suppressedInteractionIds: string[];
+  nextPageAnchor: TaskInteractionPageAnchor | null;
+  hasMoreBefore: boolean;
+  latestChangeSeq: number;
+  sourceCursor: string | null;
+  historyStatus: TaskHistoryStatus;
+  lastSyncedAt: string | null;
+}
 
 export type JsonDocumentCollection =
   | "project_settings"
@@ -286,64 +422,66 @@ export interface ProductStore {
   editProjectChatMessageAndTruncate(threadId: string, messageId: string, expectedVersion: number, content: string, updatedAt: string): Promise<ProjectChatMessage | null>;
   deleteProjectChatMessageAndFollowing(threadId: string, messageId: string, expectedVersion: number): Promise<boolean>;
 
-  createTask(task: AgentTask): Promise<AgentTask>;
-  createTaskAtomically(input: AtomicTaskCreateInput): Promise<AgentTask | null>;
-  createTaskWithActiveReservation(task: AgentTask): Promise<AgentTask | null>;
-  createTaskWithActiveReservationAndFollowUp(task: AgentTask, followUp: TaskFollowUp): Promise<AgentTask | null>;
-  updateTask(task: AgentTask): Promise<AgentTask>;
-  updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<AgentTask | null>;
-  updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<AgentTask | null>;
-  listActiveTasks(): Promise<AgentTask[]>;
-  listTasksForProject(projectId: string): Promise<AgentTask[]>;
+  createTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
+  createTaskAtomically(input: AtomicTaskCreateInput): Promise<PersistedAgentTask | null>;
+  createTaskWithActiveReservation(task: PersistedAgentTask): Promise<PersistedAgentTask | null>;
+  createTaskWithActiveReservationAndMessage(task: PersistedAgentTask, message: PersistedTaskMessage): Promise<PersistedAgentTask | null>;
+  updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
+  updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
+  updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
+  listActiveTasks(): Promise<PersistedAgentTask[]>;
+  listTasksForProject(projectId: string): Promise<PersistedAgentTask[]>;
   queryTasksForProject(projectId: string, query: TaskStoreListQuery): Promise<TaskStoreListPage>;
-  findTask(id: string): Promise<AgentTask | null>;
-  updateTaskTitle(taskId: string, title: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<AgentTask | null>;
-  archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<AgentTask | null>;
-  softDeleteTask(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<AgentTask | null>;
-  listTaskStartIntentsDue(now: string, limit: number): Promise<AgentTask[]>;
-  claimTaskStart(input: TaskDeliveryClaimInput): Promise<AgentTask | null>;
-  reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<AgentTask | null>;
-  recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<AgentTask | null>;
-  deferTaskStart(input: TaskDeliveryDeferInput): Promise<AgentTask | null>;
-  failTaskStart(input: TaskDeliveryFailureInput): Promise<AgentTask | null>;
+  findTask(id: string): Promise<PersistedAgentTask | null>;
+  updateTaskTitle(taskId: string, title: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
+  archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
+  softDeleteTask(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
+  listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]>;
+  claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null>;
+  reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<PersistedAgentTask | null>;
+  recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<PersistedAgentTask | null>;
+  deferTaskStart(input: TaskDeliveryDeferInput): Promise<PersistedAgentTask | null>;
+  failTaskStart(input: TaskDeliveryFailureInput): Promise<PersistedAgentTask | null>;
   finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null>;
-  listTasksForArtifactProjection(now: string, limit: number): Promise<AgentTask[]>;
-  claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<AgentTask | null>;
-  completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<AgentTask | null>;
-  failTaskArtifactProjection(input: TaskStageFailureInput): Promise<AgentTask | null>;
-  listTasksForCleanup(now: string, limit: number): Promise<AgentTask[]>;
-  claimTaskCleanup(input: TaskStageClaimInput): Promise<AgentTask | null>;
-  completeTaskCleanup(input: TaskStageCompleteInput): Promise<AgentTask | null>;
-  failTaskCleanup(input: TaskStageFailureInput): Promise<AgentTask | null>;
+  listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]>;
+  claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<PersistedAgentTask | null>;
+  completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null>;
+  failTaskArtifactProjection(input: TaskStageFailureInput): Promise<PersistedAgentTask | null>;
+  listTasksForCleanup(now: string, limit: number): Promise<PersistedAgentTask[]>;
+  claimTaskCleanup(input: TaskStageClaimInput): Promise<PersistedAgentTask | null>;
+  completeTaskCleanup(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null>;
+  failTaskCleanup(input: TaskStageFailureInput): Promise<PersistedAgentTask | null>;
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
   completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean>;
   completeTaskIdempotencyForResource(resourceId: string, responseStatus: number, responseBody: unknown, updatedAt: string): Promise<number>;
-  appendTaskEvents(events: AgentTaskEvent[]): Promise<void>;
-  listTaskEvents(taskId: string): Promise<AgentTaskEvent[]>;
-  listTaskEventsAfter(taskId: string, afterCursor: string | null, limit: number): Promise<{ items: AgentTaskEvent[]; nextCursor: string | null }>;
-  appendTaskArtifacts(artifacts: AgentTaskArtifact[]): Promise<void>;
+  persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult>;
+  readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null>;
+  listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]>;
+  findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null>;
+  findTaskInteractionByCorrelation(taskId: string, correlation: TaskInteractionCorrelation): Promise<TaskInteractionItem | null>;
+  appendTaskArtifacts(artifacts: PersistedTaskArtifact[]): Promise<void>;
   persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing" | "limit_exceeded">;
-  listTaskArtifacts(taskId: string): Promise<AgentTaskArtifact[]>;
-  createTaskFollowUp(followUp: TaskFollowUp): Promise<TaskFollowUp>;
-  createPendingTaskFollowUp(followUp: TaskFollowUp): Promise<TaskFollowUp | null>;
-  listTaskFollowUps(taskId: string): Promise<TaskFollowUp[]>;
-  findTaskFollowUp(id: string): Promise<TaskFollowUp | null>;
-  updatePendingTaskFollowUp(id: string, prompt: string, requestHash: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<TaskFollowUp | null>;
-  deletePendingTaskFollowUp(id: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<TaskFollowUp | null>;
-  listTaskFollowUpsDue(now: string, limit: number): Promise<TaskFollowUp[]>;
-  claimTaskFollowUp(input: TaskDeliveryClaimInput): Promise<TaskFollowUp | null>;
-  reclaimTaskFollowUp(input: TaskDeliveryReclaimInput): Promise<TaskFollowUp | null>;
-  recordTaskFollowUpReceipt(input: TaskFollowUpReceiptInput): Promise<TaskFollowUp | null>;
-  deferTaskFollowUp(input: TaskDeliveryDeferInput): Promise<TaskFollowUp | null>;
-  failTaskFollowUp(input: TaskDeliveryFailureInput): Promise<TaskFollowUp | null>;
-  createTerminalTaskFollowUp(input: CreateTerminalTaskFollowUpInput): Promise<TaskFollowUp | null>;
-  resolveTerminalPendingFollowUp(input: ResolveTerminalPendingFollowUpInput): Promise<TaskFollowUp | null>;
+  listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]>;
+  createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage>;
+  createPendingTaskMessage(message: PersistedTaskMessage, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
+  listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]>;
+  findTaskMessage(id: string): Promise<PersistedTaskMessage | null>;
+  updatePendingTaskMessage(id: string, content: string, requestHash: string, updatedAt: string, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
+  deletePendingTaskMessage(id: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedTaskMessage | null>;
+  listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]>;
+  claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null>;
+  reclaimTaskMessage(input: TaskDeliveryReclaimInput): Promise<PersistedTaskMessage | null>;
+  recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null>;
+  deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null>;
+  failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
+  createTerminalTaskMessage(input: CreateTerminalTaskMessageInput): Promise<PersistedTaskMessage | null>;
+  resolveTerminalPendingMessage(input: ResolveTerminalPendingMessageInput): Promise<PersistedTaskMessage | null>;
   findTaskSummary(taskId: string): Promise<TaskSummary | null>;
   listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]>;
 }
 
 export interface AtomicTaskCreateInput {
-  task: AgentTask;
+  task: PersistedAgentTask;
   reserveActive: boolean;
   runtimeState?: Record<string, unknown>;
   sandboxRun?: PersistedSandboxRunState;
@@ -351,7 +489,7 @@ export interface AtomicTaskCreateInput {
 
 export interface PersistTaskArtifactProjectionInput {
   projectId: string;
-  artifact: AgentTaskArtifact;
+  artifact: PersistedTaskArtifact;
   auditEvent: ProjectAuditEvent;
   updatedAt: string;
 }
@@ -367,7 +505,7 @@ export interface TaskStoreListQuery {
 }
 
 export interface TaskStoreListPage {
-  items: AgentTask[];
+  items: PersistedAgentTask[];
   total: number;
 }
 
@@ -382,8 +520,6 @@ export interface TaskDeliveryReclaimInput extends TaskDeliveryClaimInput {
   expectedClaimToken: string;
 }
 
-export type PersistedDeliveryReceipt = TaskDeliveryReceipt;
-
 export interface TaskStartReceiptInput {
   id: string;
   claimToken: string;
@@ -392,7 +528,7 @@ export interface TaskStartReceiptInput {
   updatedAt: string;
 }
 
-export type TaskFollowUpReceiptInput = TaskStartReceiptInput;
+export type TaskMessageReceiptInput = TaskStartReceiptInput;
 
 export interface TaskDeliveryDeferInput {
   id: string;
@@ -411,8 +547,16 @@ export interface TaskDeliveryFailureInput {
 }
 
 export interface TaskLifecycleSuccessor {
-  followUpId: string;
+  messageId: string;
   create: AtomicTaskCreateInput;
+  messageSuccessInteractionChange?: TaskInteractionChangeInput;
+  messageFailureInteractionChange?: TaskInteractionChangeInput;
+  successorInteractionChange?: TaskInteractionChangeInput;
+}
+
+export interface TaskLifecycleTerminalPendingChange {
+  messageId: string;
+  interactionChange: TaskInteractionChangeInput;
 }
 
 export interface FinalizeTaskLifecycleInput {
@@ -421,13 +565,14 @@ export interface FinalizeTaskLifecycleInput {
   updatedAt: string;
   auditEvent: ProjectAuditEvent;
   successors: TaskLifecycleSuccessor[];
+  terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
 }
 
 export interface FinalizeTaskLifecycleResult {
-  task: AgentTask;
+  task: PersistedAgentTask;
   applied: boolean;
   successorTaskIds: string[];
-  missingPendingFollowUpIds: string[];
+  missingPendingMessageIds: string[];
 }
 
 export interface TaskStageClaimInput {
@@ -448,7 +593,7 @@ export interface TaskStageFailureInput extends TaskStageCompleteInput {
   nextRetryAt: string;
 }
 
-export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "follow-up" | "follow-up-edit" | "follow-up-delete" | "cancel" | "edit" | "archive" | "delete" | "workspace.settings.update" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.settings.update" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;
@@ -479,16 +624,20 @@ export interface CompleteTaskIdempotencyInput extends TaskIdempotencyScope {
   updatedAt: string;
 }
 
-export interface CreateTerminalTaskFollowUpInput {
-  followUp: TaskFollowUp;
+export interface CreateTerminalTaskMessageInput {
+  message: PersistedTaskMessage;
   successor: AtomicTaskCreateInput;
+  messageInteractionChange?: TaskInteractionChangeInput;
+  successorInteractionChange?: TaskInteractionChangeInput;
 }
 
-export interface ResolveTerminalPendingFollowUpInput {
-  followUpId: string;
+export interface ResolveTerminalPendingMessageInput {
+  messageId: string;
   expectedClaimToken: string;
   successor: AtomicTaskCreateInput;
   updatedAt: string;
+  messageInteractionChange?: TaskInteractionChangeInput;
+  successorInteractionChange?: TaskInteractionChangeInput;
 }
 
 export interface ReserveProjectProviderSettlementInput {

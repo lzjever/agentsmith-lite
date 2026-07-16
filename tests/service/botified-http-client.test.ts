@@ -11,6 +11,12 @@ type FetchCall = {
   init: RequestInit;
 };
 
+async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
+  const values: T[] = [];
+  for await (const item of items) values.push(item);
+  return values;
+}
+
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
     ...init,
@@ -107,7 +113,7 @@ describe("Botified HTTP client", () => {
     });
   });
 
-  it("turns stale timeline cursors into a structured reset result from the tail page", async () => {
+  it("reads typed history pages and returns an explicit gap for an expired cursor", async () => {
     const urls: string[] = [];
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       urls.push(String(input));
@@ -133,32 +139,92 @@ describe("Botified HTTP client", () => {
         );
       }
 
-      assert.equal(String(input), "http://botified.local/v1/timeline?tail=1");
-      return new Response("{\"seq\":9,\"cursor\":\"timeline:main:9\"}\n", {
+      assert.equal(String(input), "http://botified.local/v1/timeline?tail=50");
+      return new Response("{\"seq\":8,\"cursor\":\"timeline:main:8\"}\n{\"seq\":9,\"cursor\":\"timeline:main:9\"}\n", {
         status: 200,
         headers: {
           "content-type": "application/x-ndjson",
-          "x-botified-history-boundary": "none",
+          "x-botified-history-boundary": "expired",
           "x-botified-next-cursor": "timeline:main:9",
-          "x-botified-page-start-cursor": "timeline:main:9",
-          "x-botified-page-end-cursor": "timeline:main:9"
+          "x-botified-page-start-cursor": "timeline:main:8",
+          "x-botified-page-end-cursor": "timeline:main:9",
+          "x-botified-has-more-before": "true"
         }
       });
     });
 
     assert.deepEqual(await client.readTimeline("http://botified.local", "service-secret", "timeline:main:stale"), {
-      status: "reset",
+      status: "gap",
       reason: "stale_cursor",
       historyBoundary: "expired",
-      events: [{ seq: 9, cursor: "timeline:main:9" }],
+      events: []
+    });
+    assert.deepEqual(await client.readTimeline("http://botified.local", "service-secret", undefined, {
+      direction: "history",
+      limit: 50
+    }), {
+      status: "ok",
+      events: [
+        { seq: 8, cursor: "timeline:main:8" },
+        { seq: 9, cursor: "timeline:main:9" }
+      ],
       nextCursor: "timeline:main:9",
-      pageStartCursor: "timeline:main:9",
-      pageEndCursor: "timeline:main:9"
+      pageStartCursor: "timeline:main:8",
+      pageEndCursor: "timeline:main:9",
+      hasMoreBefore: true,
+      historyBoundary: "expired"
     });
     assert.deepEqual(urls, [
       "http://botified.local/v1/timeline?cursor=timeline%3Amain%3Astale&limit=200",
-      "http://botified.local/v1/timeline?tail=1"
+      "http://botified.local/v1/timeline?tail=50"
     ]);
+  });
+
+  it("streams typed LLM previews and stops background work through separate service calls", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
+      assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
+      if (String(input) === "http://botified.local/v1/llm-text-preview?provider_request_id=request_1&cycle_id=cycle_1&input_id=input_1") {
+        assert.equal(init.method, "GET");
+        return new Response([
+          "event: started\n",
+          "data: {\"type\":\"started\",\"time\":\"unix:1\",\"provider_request_id\":\"request_1\",\"turn_id\":\"turn_1\",\"cycle_id\":\"cycle_1\",\"provider_call_index\":0,\"input_ids\":[\"input_1\"]}\n\n",
+          "event: text_delta\n",
+          "data: {\"type\":\"text_delta\",\"time\":\"unix:2\",\"provider_request_id\":\"request_1\",\"provider_call_index\":0,\"input_ids\":[\"input_1\"],\"delta\":\"hello\"}\n\n"
+        ].join(""), { headers: { "content-type": "text/event-stream" } });
+      }
+
+      assert.equal(String(input), "http://botified.local/v1/background-tasks/work%2F1/stop");
+      assert.equal(init.method, "POST");
+      return jsonResponse({ ok: true, task_id: "work/1", state: "cancelling" });
+    });
+
+    assert.deepEqual(await collect(client.streamLlmTextPreview("http://botified.local", "service-secret", {
+      providerRequestId: "request_1",
+      cycleId: "cycle_1",
+      inputId: "input_1"
+    })), [
+      {
+        type: "started",
+        time: "unix:1",
+        providerRequestId: "request_1",
+        turnId: "turn_1",
+        cycleId: "cycle_1",
+        providerCallIndex: 0,
+        inputIds: ["input_1"]
+      },
+      {
+        type: "text_delta",
+        time: "unix:2",
+        providerRequestId: "request_1",
+        providerCallIndex: 0,
+        inputIds: ["input_1"],
+        delta: "hello"
+      }
+    ]);
+    assert.deepEqual(await client.stopBackgroundTask("http://botified.local", "service-secret", "work/1"), {
+      taskId: "work/1",
+      state: "cancelling"
+    });
   });
 
   it("uploads files and aborts with bearer auth", async () => {

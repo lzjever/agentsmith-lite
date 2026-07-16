@@ -10,7 +10,7 @@ const { MembersPage } = await import("../../src/components/members/MembersPage.j
 const { NotificationsPage } = await import("../../src/components/notifications/NotificationsPage.js");
 const { NotificationBell } = await import("../../src/components/notifications/NotificationBell.js");
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
 const members: ProjectMember[] = [{ projectId: "project_1", userId: "viewer_1", role: "viewer", displayName: "Viewer Person", email: "viewer@example.test", createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z" }, { projectId: "project_1", userId: "admin_1", role: "admin", displayName: null, email: "admin@example.test", createdAt: "2026-07-10T00:00:00.000Z", updatedAt: "2026-07-10T00:00:00.000Z" }];
@@ -58,10 +58,24 @@ describe("personal and resource UI", () => {
     const original = apiClient.notifications;
     apiClient.notifications = async () => [notification];
     try {
-      render(<NotificationBell />);
+      render(<NotificationBell returnTo="/workspaces/workspace_1/projects/project_1/tasks" />);
       fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
       await screen.findByText("Validation project: task completed.");
       assert.ok(screen.getByText("Task finished"));
+      assert.equal(screen.getByRole("link", { name: "View all notifications" }).getAttribute("href"), "/notifications?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    } finally { apiClient.notifications = original; }
+  });
+
+  it("keeps a project return path and explains notification load failures", async () => {
+    const original = apiClient.notifications;
+    apiClient.notifications = async () => { throw new Error("offline"); };
+    window.history.replaceState({}, "", "/notifications?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    try {
+      render(<NotificationsPage />);
+      const alert = await screen.findByRole("alert");
+      assert.ok(alert.textContent?.includes("Notifications could not be loaded."));
+      assert.equal(screen.getByRole("link", { name: "Back to project" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+      assert.ok(screen.getByRole("button", { name: "Try again" }));
     } finally { apiClient.notifications = original; }
   });
 });

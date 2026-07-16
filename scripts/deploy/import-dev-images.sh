@@ -107,6 +107,14 @@ images=(
   "agentsmith-lite/botified-runner:${tag}"
 )
 
+temporary_archive=
+cleanup() {
+  if [ -n "$temporary_archive" ]; then
+    rm -f -- "$temporary_archive"
+  fi
+}
+trap cleanup EXIT
+
 for image in "${images[@]}"; do
   if ! "$docker_bin" image inspect "$image" >/dev/null; then
     echo "local Docker image is required: $image" >&2
@@ -115,10 +123,36 @@ for image in "${images[@]}"; do
 done
 
 for image in "${images[@]}"; do
-  if ! "$docker_bin" image save "$image" | "$k3s_bin" ctr -n k8s.io images import -; then
+  normalized_image="docker.io/$image"
+  if ! temporary_archive="$(mktemp "${TMPDIR:-/tmp}/agentsmith-lite-image.XXXXXX")"; then
+    echo "failed to create temporary archive for local Docker image: $image" >&2
+    exit 1
+  fi
+  if ! "$docker_bin" image save -o "$temporary_archive" "$image"; then
+    echo "failed to export local Docker image: $image" >&2
+    exit 1
+  fi
+  if ! "$k3s_bin" ctr -n k8s.io images import --all-platforms "$temporary_archive"; then
     echo "failed to import local Docker image into k3s containerd: $image" >&2
     exit 1
   fi
+  if ! "$k3s_bin" ctr -n k8s.io images inspect "$normalized_image" >/dev/null 2>&1; then
+    echo "k3s containerd image is missing after import: $normalized_image" >&2
+    exit 1
+  fi
+  if ! image_labels="$("$k3s_bin" ctr -n k8s.io images label "$normalized_image" io.cri-containerd.pinned=pinned)"; then
+    echo "failed to pin local image in k3s containerd: $normalized_image" >&2
+    exit 1
+  fi
+  case ",$image_labels," in
+    *,io.cri-containerd.pinned=pinned,*) ;;
+    *)
+      echo "k3s containerd image is not pinned after import: $normalized_image" >&2
+      exit 1
+      ;;
+  esac
+  rm -f -- "$temporary_archive"
+  temporary_archive=
 done
 
 kubectl_args=(--kubeconfig "$kubeconfig" --context "$kube_context" --namespace "$namespace")

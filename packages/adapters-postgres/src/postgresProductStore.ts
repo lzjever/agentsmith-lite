@@ -1,8 +1,7 @@
 import { createRequire } from "node:module";
 import type {
   AgentTask,
-  AgentTaskArtifact,
-  AgentTaskEvent,
+  TaskInteractionItem,
   ProjectChatMessage,
   ProjectChatThread,
   AuthSession,
@@ -20,7 +19,7 @@ import type {
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
-  Workspace, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskFollowUp, TaskSummary
+  Workspace, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import type {
@@ -41,7 +40,7 @@ import type {
   TaskDeliveryClaimInput,
   TaskDeliveryReclaimInput,
   TaskStartReceiptInput,
-  TaskFollowUpReceiptInput,
+  TaskMessageReceiptInput,
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
   FinalizeTaskLifecycleInput,
@@ -52,10 +51,20 @@ import type {
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
-  CreateTerminalTaskFollowUpInput,
-  ResolveTerminalPendingFollowUpInput,
+  CreateTerminalTaskMessageInput,
+  ResolveTerminalPendingMessageInput,
   PersistTaskArtifactProjectionInput,
-  DeleteEndpointResult
+  DeleteEndpointResult,
+  PersistedAgentTask,
+  PersistedTaskArtifact,
+  PersistedTaskMessage,
+  PersistTaskInteractionMutationInput,
+  PersistTaskInteractionMutationResult,
+  PersistedTaskInteractionChange,
+  TaskInteractionChangeInput,
+  TaskInteractionCorrelation,
+  TaskInteractionPageAnchor,
+  TaskInteractionStoreSnapshot
 } from "../../ports/src/store.js";
 import type { Pool as PgPool, PoolClient } from "pg";
 import { prepareSandboxRunDocument, sandboxRunFromDocument } from "./sandboxRunDocuments.js";
@@ -273,7 +282,7 @@ export class PostgresProductStore implements ProductStore {
   async beginProjectDeletion(id:string,updatedAt:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status='deleting',updated_at=$2 where id=$1 returning *",[id,updatedAt]);return rows[0]?mapProject(rows[0]):null}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status=$2,updated_at=$3 where id=$1 and lifecycle_status <> 'deleting' returning *",[id,status,updatedAt]);return rows[0]?mapProject(rows[0]):null}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string):Promise<Project|null>{return transaction(this.pool,async(client)=>{if(fromUserId===toUserId)return null;const target=await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2 for update",[projectId,toUserId]);if(!target.rowCount)return null;const project=await client.query<ProjectRow>("update projects set owner_user_id=$3,updated_at=$4 where id=$1 and owner_user_id=$2 and lifecycle_status='active' returning *",[projectId,fromUserId,toUserId,updatedAt]);if(!project.rows[0])return null;await client.query("update project_memberships set role='admin',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,fromUserId,updatedAt]);await client.query("update project_memberships set role='owner',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,toUserId,updatedAt]);return mapProject(project.rows[0])})}
-  async deleteProjectDependenciesAndProject(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const project=await client.query<ProjectRow>("select * from projects where id=$1 and lifecycle_status='deleting' for update",[id]);if(!project.rows[0])return false;const active=await client.query("select 1 from agent_tasks where project_id=$1 and status in ('queued','starting','running','stopping') limit 1",[id]);if(active.rowCount)return false;const taskIds=(await client.query<{id:string;run_id:string}>("select id,run_id from agent_tasks where project_id=$1",[id])).rows;for(const task of taskIds){await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)",[task.id,task.run_id])}await client.query("delete from task_follow_ups where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_task_events where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_task_artifacts where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_tasks where project_id=$1",[id]);await client.query("delete from project_chat_messages where thread_id in (select id from project_chat_threads where project_id=$1)",[id]);await client.query("delete from project_chat_threads where project_id=$1",[id]);await client.query("delete from project_provider_settlements where project_id=$1",[id]);await client.query("delete from project_alerts where project_id=$1",[id]);await client.query("delete from project_alert_rules where project_id=$1",[id]);await client.query("delete from project_context_entries where project_id=$1",[id]);await client.query("delete from project_memberships where project_id=$1",[id]);await client.query("delete from project_resource_usage where project_id=$1",[id]);await client.query("delete from project_resource_policies where project_id=$1",[id]);await client.query("delete from model_endpoints where project_id=$1",[id]);await client.query("delete from project_credentials where project_id=$1",[id]);return (await client.query("delete from projects where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
+  async deleteProjectDependenciesAndProject(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const project=await client.query<ProjectRow>("select * from projects where id=$1 and lifecycle_status='deleting' for update",[id]);if(!project.rows[0])return false;const active=await client.query("select 1 from agent_tasks where project_id=$1 and status in ('queued','starting','running','stopping') limit 1",[id]);if(active.rowCount)return false;const taskIds=(await client.query<{id:string;run_id:string}>("select id,run_id from agent_tasks where project_id=$1",[id])).rows;for(const task of taskIds){await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)",[task.id,task.run_id])}await client.query("delete from task_messages where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_task_artifacts where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_tasks where project_id=$1",[id]);await client.query("delete from project_chat_messages where thread_id in (select id from project_chat_threads where project_id=$1)",[id]);await client.query("delete from project_chat_threads where project_id=$1",[id]);await client.query("delete from project_provider_settlements where project_id=$1",[id]);await client.query("delete from project_alerts where project_id=$1",[id]);await client.query("delete from project_alert_rules where project_id=$1",[id]);await client.query("delete from project_context_entries where project_id=$1",[id]);await client.query("delete from project_memberships where project_id=$1",[id]);await client.query("delete from project_resource_usage where project_id=$1",[id]);await client.query("delete from project_resource_policies where project_id=$1",[id]);await client.query("delete from model_endpoints where project_id=$1",[id]);await client.query("delete from project_credentials where project_id=$1",[id]);return (await client.query("delete from projects where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
   async createProjectContextEntry(v: ProjectContextEntry): Promise<ProjectContextEntry> { const rows=await this.queryRows<ContextRow>(`insert into project_context_entries (id,workspace_id,project_id,owner_user_id,scope,context_key,content,name,user_id,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$6,$4,$8,$9,$10) returning *`,[v.id,v.workspaceId,v.projectId,v.ownerUserId,v.scope,v.contextKey,v.content,v.version,v.createdAt,v.updatedAt]); return mapContext(rows[0]!); }
   async updateProjectContextEntry(v: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null> { const rows=await this.queryRows<ContextRow>(`update project_context_entries set context_key=$2,content=$3,version=$4,updated_at=$5 where id=$1 and version=$6 and workspace_id=$7 and project_id is not distinct from $8 and scope=$9 and owner_user_id is not distinct from $10 returning *`,[v.id,v.contextKey,v.content,v.version,v.updatedAt,expectedVersion,v.workspaceId,v.projectId,v.scope,v.ownerUserId]); return rows[0]?mapContext(rows[0]):null; }
   async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null): Promise<ProjectContextEntry[]> { const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 order by context_key',[workspaceId,projectId,scope,ownerUserId]);return rows.map(mapContext); }
@@ -566,11 +575,11 @@ export class PostgresProductStore implements ProductStore {
   async editProjectChatMessageAndTruncate(threadId:string,messageId:string,expectedVersion:number,content:string,updatedAt:string):Promise<ProjectChatMessage|null>{return transaction(this.pool,async(client)=>{const target=await client.query<ProjectChatMessageRow>("select * from project_chat_messages where id=$1 and thread_id=$2 for update",[messageId,threadId]);const row=target.rows[0];if(!row||row.version!==expectedVersion)return null;await client.query("delete from project_chat_messages where thread_id=$1 and sequence>$2",[threadId,row.sequence]);const updated=await client.query<ProjectChatMessageRow>("update project_chat_messages set content=$2,version=version+1,updated_at=$3 where id=$1 returning *",[messageId,content,updatedAt]);return mapChatMessage(updated.rows[0]!);});}
   async deleteProjectChatMessageAndFollowing(threadId:string,messageId:string,expectedVersion:number):Promise<boolean>{return transaction(this.pool,async(client)=>{const target=await client.query<ProjectChatMessageRow>("select * from project_chat_messages where id=$1 and thread_id=$2 for update",[messageId,threadId]);const row=target.rows[0];if(!row||row.version!==expectedVersion)return false;await client.query("delete from project_chat_messages where thread_id=$1 and sequence >= $2",[threadId,row.sequence]);return true;});}
 
-  async createTask(task: AgentTask): Promise<AgentTask> {
+  async createTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
     return transaction(this.pool, async (client) => mapTask(await insertTaskWithClient(client, task, false)));
   }
 
-  async createTaskAtomically(input: AtomicTaskCreateInput): Promise<AgentTask | null> {
+  async createTaskAtomically(input: AtomicTaskCreateInput): Promise<PersistedAgentTask | null> {
     return transaction(this.pool, async (client) => {
       if (input.reserveActive && !await reserveActiveTaskWithClient(client, input.task.projectId, input.task.updatedAt)) return null;
       const row = await insertTaskWithClient(client, input.task, input.reserveActive);
@@ -580,20 +589,20 @@ export class PostgresProductStore implements ProductStore {
     });
   }
 
-  async createTaskWithActiveReservation(task: AgentTask): Promise<AgentTask | null> {
+  async createTaskWithActiveReservation(task: PersistedAgentTask): Promise<PersistedAgentTask | null> {
     return this.createTaskAtomically({ task, reserveActive: true });
   }
 
-  async createTaskWithActiveReservationAndFollowUp(task: AgentTask, followUp: TaskFollowUp): Promise<AgentTask | null> {
+  async createTaskWithActiveReservationAndMessage(task: PersistedAgentTask, message: PersistedTaskMessage): Promise<PersistedAgentTask | null> {
     return transaction(this.pool, async (client) => {
       if (!await reserveActiveTaskWithClient(client, task.projectId, task.updatedAt)) return null;
       const row = await insertTaskWithClient(client, task, true);
-      await insertTaskFollowUpWithClient(client, followUp);
+      await insertPersistedTaskMessageWithClient(client, message);
       return mapTask(row);
     });
   }
 
-  async updateTask(task: AgentTask): Promise<AgentTask> {
+  async updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
     await this.pool.query(
       `update agent_tasks
        set workspace_id = $2,
@@ -640,7 +649,7 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(task);
   }
 
-  async updateTaskStatusIfStarting(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
+  async updateTaskStatusIfStarting(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(
       `update agent_tasks
           set status = $2,
@@ -653,7 +662,7 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async updateTaskStatusIfNonterminal(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
+  async updateTaskStatusIfNonterminal(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(
       `update agent_tasks
           set status = $2,
@@ -665,12 +674,12 @@ export class PostgresProductStore implements ProductStore {
     );
     return rows[0] ? mapTask(rows[0]) : null;
   }
-  async requestTaskFinalization(taskId: string, status: Extract<AgentTask["status"], "completed" | "failed" | "expired" | "cleaned">, intendedAt: string): Promise<AgentTask | null> {
+  async requestTaskFinalization(taskId: string, status: Extract<AgentTask["status"], "completed" | "failed" | "expired" | "cleaned">, intendedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set finalization_intent_status=coalesce(finalization_intent_status,$2),finalization_intent_at=coalesce(finalization_intent_at,$3),updated_at=$3 where id=$1 and status in ('queued','starting','running','stopping') returning *`, [taskId,status,intendedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async finalizeTaskAndReleaseActiveReservation(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<AgentTask | null> {
+  async finalizeTaskAndReleaseActiveReservation(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<PersistedAgentTask | null> {
     return transaction(this.pool, async (client) => {
       const current = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and status in ('queued', 'starting', 'running', 'stopping') for update", [taskId]);
       if (!current.rows[0]) return null;
@@ -684,9 +693,9 @@ export class PostgresProductStore implements ProductStore {
       return mapTask(task.rows[0]);
     });
   }
-  async listTasksWithFinalizationIntent(limit: number): Promise<AgentTask[]> { const rows=await this.queryRows<AgentTaskRow>(`select * from agent_tasks where finalization_intent_status is not null and status in ('queued','starting','running','stopping') order by finalization_intent_at,id limit $1`,[limit]); return rows.map(mapTask); }
+  async listTasksWithFinalizationIntent(limit: number): Promise<PersistedAgentTask[]> { const rows=await this.queryRows<AgentTaskRow>(`select * from agent_tasks where finalization_intent_status is not null and status in ('queued','starting','running','stopping') order by finalization_intent_at,id limit $1`,[limit]); return rows.map(mapTask); }
 
-  async listActiveTasks(): Promise<AgentTask[]> {
+  async listActiveTasks(): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(
       `select * from agent_tasks
        where status in ('queued', 'starting', 'running', 'stopping')
@@ -695,7 +704,7 @@ export class PostgresProductStore implements ProductStore {
     return rows.map(mapTask);
   }
 
-  async listTasksForProject(projectId: string): Promise<AgentTask[]> {
+  async listTasksForProject(projectId: string): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(
       `select * from agent_tasks where project_id = $1 order by created_at, id`,
       [projectId]
@@ -724,106 +733,73 @@ export class PostgresProductStore implements ProductStore {
     return { items: rows.map(mapTask), total: Number(count[0]?.count ?? 0) };
   }
 
-  async findTask(id: string): Promise<AgentTask | null> {
+  async findTask(id: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>("select * from agent_tasks where id = $1", [id]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async updateTaskTitle(taskId: string, title: string, updatedAt: string): Promise<AgentTask | null> {
+  async updateTaskTitle(taskId: string, title: string, updatedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>("update agent_tasks set title=$2,updated_at=$3 where id=$1 and deleted_at is null returning *", [taskId, title, updatedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async archiveTask(taskId: string, archivedAt: string): Promise<AgentTask | null> {
+  async archiveTask(taskId: string, archivedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>("update agent_tasks set archived_at=$2,updated_at=$2 where id=$1 and deleted_at is null and terminal_reason is not null returning *", [taskId, archivedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async softDeleteTask(taskId: string, deletedAt: string): Promise<AgentTask | null> {
+  async softDeleteTask(taskId: string, deletedAt: string): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>("update agent_tasks set deleted_at=$2,updated_at=$2 where id=$1 and deleted_at is null and terminal_reason is not null returning *", [taskId, deletedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async listTaskStartIntentsDue(now: string, limit: number): Promise<AgentTask[]> {
+  async listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where deleted_at is null and terminal_reason is null and ((start_intent_status='pending' and (start_next_retry_at is null or start_next_retry_at <= $1)) or (start_intent_status='dispatching' and start_lease_expires_at <= $1 and (start_next_retry_at is null or start_next_retry_at <= $1))) order by created_at,id limit $2`, [now, limit]);
     return rows.map(mapTask);
   }
 
-  async claimTaskStart(input: TaskDeliveryClaimInput): Promise<AgentTask | null> {
+  async claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set start_intent_status='dispatching',start_claim_token=$2,start_claimed_at=$3,start_lease_expires_at=$4,start_attempt_count=start_attempt_count+1,start_safe_error=null,updated_at=$3 where id=$1 and start_intent_status='pending' and start_claim_token is null and (start_next_retry_at is null or start_next_retry_at <= $3) and terminal_reason is null returning *`, [input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<AgentTask | null> {
+  async reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set start_claim_token=$3,start_claimed_at=$4,start_lease_expires_at=$5,start_attempt_count=start_attempt_count+1,start_safe_error=null,updated_at=$4 where id=$1 and start_intent_status='dispatching' and start_claim_token=$2 and start_lease_expires_at <= $4 and (start_next_retry_at is null or start_next_retry_at <= $4) and terminal_reason is null returning *`, [input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<AgentTask | null> {
+  async recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set status=case when terminal_reason is null then 'running' else status end,start_intent_status='dispatched',start_receipt=$3::jsonb,start_timeline_cursor=$4,start_lease_expires_at=null,start_next_retry_at=null,start_safe_error=null,updated_at=$5 where id=$1 and start_intent_status='dispatching' and start_claim_token=$2 and start_delivery_key=$6 and start_request_hash=$7 and $8::boolean returning *`, [input.id,input.claimToken,JSON.stringify(input.receipt),input.timelineCursor,input.updatedAt,input.receipt.deliveryKey,input.receipt.requestHash,input.receipt.accepted]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async deferTaskStart(input: TaskDeliveryDeferInput): Promise<AgentTask | null> {
+  async deferTaskStart(input: TaskDeliveryDeferInput): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set start_intent_status=case when $3 then 'pending' else 'dispatching' end,start_claim_token=case when $3 then null else start_claim_token end,start_claimed_at=case when $3 then null else start_claimed_at end,start_lease_expires_at=case when $3 then null else start_lease_expires_at end,start_safe_error=$4,start_next_retry_at=$5,updated_at=$6 where id=$1 and start_intent_status='dispatching' and start_claim_token=$2 returning *`, [input.id,input.claimToken,input.releaseClaim === true,input.safeError,input.nextRetryAt,input.updatedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async failTaskStart(input: TaskDeliveryFailureInput): Promise<AgentTask | null> {
+  async failTaskStart(input: TaskDeliveryFailureInput): Promise<PersistedAgentTask | null> {
     const rows = await this.queryRows<AgentTaskRow>(`update agent_tasks set start_intent_status='failed',start_safe_error=$3,start_lease_expires_at=null,updated_at=$4 where id=$1 and start_intent_status='dispatching' and start_claim_token=$2 returning *`, [input.id,input.claimToken,input.safeError,input.updatedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
   async finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
-    return transaction(this.pool, async (client) => {
-      const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [input.taskId]);
-      const current = locked.rows[0];
-      if (!current) return null;
-      if (current.terminal_reason) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingFollowUpIds: [] };
-      const followUps = await client.query<TaskFollowUpRow>("select * from task_follow_ups where task_id=$1 and deleted_at is null and delivery_status in ('pending','dispatching','terminal_pending') order by created_at,id for update", [input.taskId]);
-      const candidates = new Map(input.successors.map((candidate) => [candidate.followUpId, candidate]));
-      const missingPendingFollowUpIds = followUps.rows.filter((row) => row.delivery_status === "pending" && !candidates.has(row.id)).map((row) => row.id);
-      if (missingPendingFollowUpIds.length > 0) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingFollowUpIds };
-      if (current.active_reservation) await releaseActiveTaskWithClient(client, current.project_id, input.updatedAt);
-      const successorTaskIds: string[] = [];
-      for (const followUp of followUps.rows) {
-        if (followUp.delivery_status === "dispatching") {
-          await client.query("update task_follow_ups set delivery_status='terminal_pending',updated_at=$2 where id=$1", [followUp.id,input.updatedAt]);
-          continue;
-        }
-        if (followUp.delivery_status !== "pending") continue;
-        const candidate = candidates.get(followUp.id)!;
-        if (candidate.create.reserveActive && !await reserveActiveTaskWithClient(client, candidate.create.task.projectId, input.updatedAt)) {
-          await client.query("update task_follow_ups set delivery_status='failed',safe_error='Project active tasks limit reached',updated_at=$2 where id=$1", [followUp.id,input.updatedAt]);
-          continue;
-        }
-        const successor = await insertTaskWithClient(client, candidate.create.task, candidate.create.reserveActive);
-        if (candidate.create.runtimeState) await putJsonDocumentWithClient(client,"sandbox_runtime_state",candidate.create.task.id,candidate.create.runtimeState);
-        if (candidate.create.sandboxRun) await putJsonDocumentWithClient(client,"sandbox_run_state",candidate.create.sandboxRun.runId,prepareSandboxRunDocument(candidate.create.sandboxRun));
-        await client.query("update task_follow_ups set follow_up_task_id=$2,delivery_status='successor_created',safe_error=null,updated_at=$3 where id=$1", [followUp.id,successor.id,input.updatedAt]);
-        successorTaskIds.push(successor.id);
-      }
-      const terminal = await client.query<AgentTaskRow>(`update agent_tasks set status=$2,terminal_reason=$3,terminalized_at=$4::timestamptz,active_reservation=false,finalization_intent_status=null,finalization_intent_at=null,artifact_projection_status=case when execution_mode='live' then 'draining' else 'drained' end,artifact_projection_error=null,cleanup_status=case when execution_mode='live' then 'pending' else 'completed' end,cleanup_error=null,cleanup_completed_at=case when execution_mode='live' then null else $4::timestamptz end,updated_at=$4::timestamptz where id=$1 and terminal_reason is null returning *`, [input.taskId,statusForTerminalReason(input.terminalReason),input.terminalReason,input.updatedAt]);
-      const row = terminal.rows[0];
-      if (!row) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingFollowUpIds: [] };
-      await insertAuditEventWithClient(client,input.auditEvent);
-      return { task: mapTask(row), applied: true, successorTaskIds, missingPendingFollowUpIds: [] };
-    });
+    return transaction(this.pool, (client) => finalizeTaskLifecycleWithClient(client, input));
   }
 
-  async listTasksForArtifactProjection(now: string, limit: number): Promise<AgentTask[]> {
+  async listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where terminal_reason is not null and artifact_projection_status in ('draining','failed') and (artifact_projection_next_retry_at is null or artifact_projection_next_retry_at <= $1) and (artifact_projection_lease_expires_at is null or artifact_projection_lease_expires_at <= $1) order by terminalized_at,id limit $2`, [now,limit]);
     return rows.map(mapTask);
   }
-  async claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<AgentTask | null> { return this.claimTaskStage("artifact",input); }
-  async completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<AgentTask | null> { return this.completeTaskStage("artifact",input); }
-  async failTaskArtifactProjection(input: TaskStageFailureInput): Promise<AgentTask | null> { return this.failTaskStage("artifact",input); }
-  async listTasksForCleanup(now: string, limit: number): Promise<AgentTask[]> {
+  async claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("artifact",input); }
+  async completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> { return this.completeTaskStage("artifact",input); }
+  async failTaskArtifactProjection(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("artifact",input); }
+  async listTasksForCleanup(now: string, limit: number): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where terminal_reason is not null and artifact_projection_status='drained' and cleanup_status in ('pending','running','failed') and (cleanup_next_retry_at is null or cleanup_next_retry_at <= $1) and (cleanup_lease_expires_at is null or cleanup_lease_expires_at <= $1) order by terminalized_at,id limit $2`, [now,limit]);
     return rows.map(mapTask);
   }
-  async claimTaskCleanup(input: TaskStageClaimInput): Promise<AgentTask | null> { return this.claimTaskStage("cleanup",input); }
-  async completeTaskCleanup(input: TaskStageCompleteInput): Promise<AgentTask | null> {
+  async claimTaskCleanup(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("cleanup",input); }
+  async completeTaskCleanup(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> {
     return transaction(this.pool, async (client) => {
       const rows = await completeTaskStageWithClient(client,"cleanup",input);
       if (!rows[0]) return null;
@@ -831,7 +807,7 @@ export class PostgresProductStore implements ProductStore {
       return mapTask(rows[0]);
     });
   }
-  async failTaskCleanup(input: TaskStageFailureInput): Promise<AgentTask | null> { return this.failTaskStage("cleanup",input); }
+  async failTaskCleanup(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("cleanup",input); }
 
   async beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult> {
     return transaction(this.pool, async (client) => {
@@ -853,44 +829,65 @@ export class PostgresProductStore implements ProductStore {
   }
   async completeTaskIdempotencyForResource(resourceId:string,responseStatus:number,responseBody:unknown,updatedAt:string):Promise<number>{const result=await this.pool.query("update task_idempotency_records set status='completed',response_status=$2,response_body=$3::jsonb,updated_at=$4 where resource_id=$1 and status='in_progress'",[resourceId,responseStatus,JSON.stringify(responseBody),updatedAt]);return result.rowCount??0;}
 
-  async appendTaskEvents(events: AgentTaskEvent[]): Promise<void> {
-    for (const event of events) {
-      await this.pool.query(
-        `insert into agent_task_events (
-           id, task_id, kind, cursor, botified_seq, botified_type, session_id, payload, created_at
-         )
-         values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
-         on conflict (task_id, cursor) do nothing`,
-        [
-          event.id,
-          event.taskId,
-          event.kind,
-          event.cursor,
-          event.botifiedSeq,
-          event.botifiedType,
-          event.sessionId,
-          JSON.stringify(event.payload),
-          event.createdAt
-        ]
-      );
-    }
+  async persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult> {
+    return transaction(this.pool, async (client) => {
+      const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [input.taskId]);
+      const task = locked.rows[0];
+      if (!task) throw new Error("Task not found");
+      if (input.sourceSync && input.sourceSync.expectedSourceCursor !== undefined && input.sourceSync.expectedSourceCursor !== task.interaction_source_cursor) throw new Error("Task interaction source cursor conflict");
+      for (const projection of input.artifactProjections ?? []) {
+        if (projection.artifact.taskId !== input.taskId || projection.projectId !== task.project_id) throw new Error("Task interaction artifact mismatch");
+        const outcome = await persistTaskArtifactProjectionWithClient(client,projection);
+        if (outcome === "limit_exceeded") throw new Error("Project file bytes limit reached");
+      }
+      const { inserted } = await persistTaskInteractionChangesWithClient(client,input.taskId,input.changes);
+      if (input.lifecycle?.kind === "active") {
+        const lifecycle = await client.query("update agent_tasks set status=$3,updated_at=$4 where id=$1 and status=$2 and terminal_reason is null", [input.taskId,input.lifecycle.expectedStatus,input.lifecycle.status,input.lifecycle.updatedAt]);
+        if (lifecycle.rowCount !== 1) throw new Error("Task interaction lifecycle conflict");
+      }
+      if (input.lifecycle?.kind === "terminal") {
+        const finalized = await finalizeTaskLifecycleWithClient(client, { taskId: input.taskId, ...input.lifecycle });
+        if (!finalized || finalized.missingPendingMessageIds.length > 0) throw new Error("Task interaction lifecycle conflict");
+      }
+      if (input.sourceSync) await client.query("update agent_tasks set interaction_source_cursor=$2,interaction_history_status=$3,interaction_last_synced_at=$4 where id=$1", [input.taskId,input.sourceSync.sourceCursor,input.sourceSync.historyStatus,input.sourceSync.lastSyncedAt]);
+      const nextSeq=Number((await client.query<{maximum:string}>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1",[input.taskId])).rows[0]?.maximum??0);
+      const sync = input.sourceSync ? { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt } : { sourceCursor: task.interaction_source_cursor, historyStatus: task.interaction_history_status, lastSyncedAt: task.interaction_last_synced_at ? toIso(task.interaction_last_synced_at) : null };
+      return { changes: inserted, latestChangeSeq: nextSeq, ...sync };
+    });
   }
 
-  async listTaskEvents(taskId: string): Promise<AgentTaskEvent[]> {
-    const rows = await this.queryRows<AgentTaskEventRow>(
-      `select * from agent_task_events where task_id = $1 order by botified_seq, created_at, id`,
-      [taskId]
-    );
-    return rows.map(mapTaskEvent);
+  async readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null> {
+    return transaction(this.pool, async (client) => {
+      const task = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1", [taskId]);
+      const row = task.rows[0];
+      if (!row) return null;
+      const maximum = Number((await client.query<{ maximum: string }>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1", [taskId])).rows[0]?.maximum ?? 0);
+      const interactionRows = await client.query<TaskInteractionChangeRow>(`with latest as (select distinct on (interaction_id) * from task_interaction_changes where task_id=$1 and change_seq <= $2 order by interaction_id,revision desc,change_seq desc) select * from latest where ($3::bigint is null or position < $3 or (position=$3 and interaction_id < $4)) order by position desc,interaction_id desc limit $5`, [taskId,maximum,before?.position??null,before?.interactionId??null,Math.max(1,limit)+1]);
+      const hasMoreBefore = interactionRows.rows.length > Math.max(1,limit);
+      const pageRows = interactionRows.rows.slice(0,Math.max(1,limit)).reverse();
+      const messages = await client.query<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null and delivery_status in ('pending','dispatching','terminal_pending','failed') order by created_at,id", [taskId]);
+      const suppressed = await client.query<{interaction_id:string}>(`select distinct c.interaction_id from task_messages m join task_interaction_changes c on c.task_id=m.task_id and c.source_kind='product' and c.source_id='message:'||m.id where m.task_id=$1 and (m.deleted_at is not null or m.delivery_status in ('pending','dispatching','terminal_pending','failed'))`,[taskId]);
+      return { items: pageRows.map((change) => mapTaskInteractionChange(change).interaction), queuedMessages: messages.rows.map(mapPersistedTaskMessage), suppressedInteractionIds:suppressed.rows.map((value)=>value.interaction_id), nextPageAnchor: hasMoreBefore && pageRows[0] ? { position: Number(pageRows[0].position), interactionId: pageRows[0].interaction_id } : null, hasMoreBefore, latestChangeSeq: maximum, sourceCursor: row.interaction_source_cursor, historyStatus: row.interaction_history_status, lastSyncedAt: row.interaction_last_synced_at ? toIso(row.interaction_last_synced_at) : null };
+    }, "repeatable read");
   }
 
-  async listTaskEventsAfter(taskId: string, afterCursor: string | null, limit: number): Promise<{ items: AgentTaskEvent[]; nextCursor: string | null }> {
-    const rows = await this.queryRows<AgentTaskEventRow>(`select e.* from agent_task_events e left join agent_task_events anchor on anchor.task_id=$1 and anchor.cursor=$2 where e.task_id=$1 and ($2::text is null or anchor.id is null or (e.botified_seq,e.created_at,e.id)>(anchor.botified_seq,anchor.created_at,anchor.id)) order by e.botified_seq,e.created_at,e.id limit $3`, [taskId,afterCursor,limit+1]);
-    const page = rows.slice(0,limit);
-    return { items: page.map(mapTaskEvent), nextCursor: page.at(-1)?.cursor ?? afterCursor };
+  async listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]> {
+    const rows = await this.queryRows<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and change_seq>$2 order by change_seq limit $3", [taskId,afterChangeSeq,Math.max(1,limit)]);
+    return rows.map(mapTaskInteractionChange);
   }
 
-  async appendTaskArtifacts(artifacts: AgentTaskArtifact[]): Promise<void> {
+  async findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null> {
+    const rows=await this.queryRows<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and interaction_id=$2 order by revision desc,change_seq desc limit 1",[taskId,interactionId]);
+    return rows[0]?mapTaskInteractionChange(rows[0]):null;
+  }
+
+  async findTaskInteractionByCorrelation(taskId: string, correlation: TaskInteractionCorrelation): Promise<TaskInteractionItem | null> {
+    if (!correlation.toolCallId && !correlation.workTaskId && !correlation.callbackId) return null;
+    const rows = await this.queryRows<TaskInteractionChangeRow>(`with matched as (select interaction_id from task_interaction_changes where task_id=$1 and (($2::text is not null and tool_call_id=$2) or ($3::text is not null and work_task_id=$3) or ($4::text is not null and callback_id=$4)) order by change_seq desc limit 1) select c.* from task_interaction_changes c join matched m using (interaction_id) where c.task_id=$1 order by c.revision desc,c.change_seq desc limit 1`, [taskId,correlation.toolCallId??null,correlation.workTaskId??null,correlation.callbackId??null]);
+    return rows[0] ? mapTaskInteractionChange(rows[0]).interaction : null;
+  }
+
+  async appendTaskArtifacts(artifacts: PersistedTaskArtifact[]): Promise<void> {
     for (const artifact of artifacts) {
       await this.pool.query(
         `insert into agent_task_artifacts (id, task_id, file_id, name, bytes, sha256, media_type, preview_text, created_at)
@@ -915,32 +912,11 @@ export class PostgresProductStore implements ProductStore {
     return transaction(this.pool, async (client) => {
       const task = await client.query<{ project_id: string }>("select project_id from agent_tasks where id=$1 for update", [input.artifact.taskId]);
       if (task.rows[0]?.project_id !== input.projectId) throw new Error("Task artifact project mismatch");
-      const existing = await client.query("select id from agent_task_artifacts where task_id=$1 and file_id=$2", [input.artifact.taskId,input.artifact.fileId]);
-      if (existing.rowCount) {
-        await insertAuditEventWithClient(client,input.auditEvent);
-        return "existing";
-      }
-      const usage = await client.query(
-        `update project_resource_usage u
-         set project_file_bytes=u.project_file_bytes+$2,updated_at=$3
-         from project_resource_policies p
-         where u.project_id=$1 and p.project_id=u.project_id
-           and (p.project_file_bytes_limit is null or u.project_file_bytes+$2 <= p.project_file_bytes_limit)
-         returning u.project_id`,
-        [input.projectId,input.artifact.bytes,input.updatedAt]
-      );
-      if (!usage.rowCount) return "limit_exceeded";
-      await client.query(
-        `insert into agent_task_artifacts (id,task_id,file_id,name,bytes,sha256,media_type,preview_text,created_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [input.artifact.id,input.artifact.taskId,input.artifact.fileId,input.artifact.name,input.artifact.bytes,input.artifact.sha256??null,input.artifact.mediaType??null,input.artifact.previewText??null,input.artifact.createdAt]
-      );
-      await insertAuditEventWithClient(client,input.auditEvent);
-      return "created";
+      return persistTaskArtifactProjectionWithClient(client,input);
     });
   }
 
-  async listTaskArtifacts(taskId: string): Promise<AgentTaskArtifact[]> {
+  async listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]> {
     const rows = await this.queryRows<AgentTaskArtifactRow>(
       `select * from agent_task_artifacts where task_id = $1 order by created_at, id`,
       [taskId]
@@ -948,26 +924,26 @@ export class PostgresProductStore implements ProductStore {
     return rows.map(mapTaskArtifact);
   }
 
-  async createTaskFollowUp(followUp: TaskFollowUp): Promise<TaskFollowUp> { return transaction(this.pool, async (client) => mapTaskFollowUp(await insertTaskFollowUpWithClient(client,followUp))); }
-  async createPendingTaskFollowUp(followUp:TaskFollowUp):Promise<TaskFollowUp|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[followUp.taskId]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;return mapTaskFollowUp(await insertTaskFollowUpWithClient(client,followUp));});}
-  async listTaskFollowUps(taskId: string): Promise<TaskFollowUp[]> { const rows=await this.queryRows<TaskFollowUpRow>("select * from task_follow_ups where task_id=$1 and deleted_at is null order by created_at,id",[taskId]); return rows.map(mapTaskFollowUp); }
-  async findTaskFollowUp(id: string): Promise<TaskFollowUp | null> { const rows=await this.queryRows<TaskFollowUpRow>("select * from task_follow_ups where id=$1",[id]);return rows[0]?mapTaskFollowUp(rows[0]):null; }
-  async updatePendingTaskFollowUp(id:string,prompt:string,requestHash:string,updatedAt:string):Promise<TaskFollowUp|null>{const rows=await this.queryRows<TaskFollowUpRow>("update task_follow_ups set prompt=$2,request_hash=$3,updated_at=$4 where id=$1 and delivery_status='pending' and deleted_at is null returning *",[id,prompt,requestHash,updatedAt]);return rows[0]?mapTaskFollowUp(rows[0]):null;}
-  async deletePendingTaskFollowUp(id:string,deletedAt:string):Promise<TaskFollowUp|null>{const rows=await this.queryRows<TaskFollowUpRow>("update task_follow_ups set deleted_at=$2,updated_at=$2 where id=$1 and delivery_status='pending' and deleted_at is null returning *",[id,deletedAt]);return rows[0]?mapTaskFollowUp(rows[0]):null;}
-  async listTaskFollowUpsDue(now:string,limit:number):Promise<TaskFollowUp[]>{const rows=await this.queryRows<TaskFollowUpRow>(`select * from task_follow_ups where deleted_at is null and ((delivery_status='pending' and (next_retry_at is null or next_retry_at <= $1)) or (delivery_status in ('dispatching','terminal_pending') and lease_expires_at <= $1 and (next_retry_at is null or next_retry_at <= $1))) order by created_at,id limit $2`,[now,limit]);return rows.map(mapTaskFollowUp);}
-  async claimTaskFollowUp(input:TaskDeliveryClaimInput):Promise<TaskFollowUp|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_follow_ups where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskFollowUpRow>(`update task_follow_ups set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,attempt_count=attempt_count+1,safe_error=null,updated_at=$3 where id=$1 and delivery_status='pending' and claim_token is null and deleted_at is null and (next_retry_at is null or next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapTaskFollowUp(rows.rows[0]):null;});}
-  async reclaimTaskFollowUp(input:TaskDeliveryReclaimInput):Promise<TaskFollowUp|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_follow_ups where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskFollowUpRow>(`update task_follow_ups set claim_token=$3,claimed_at=$4,lease_expires_at=$5,attempt_count=attempt_count+1,safe_error=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and lease_expires_at <= $4 and (next_retry_at is null or next_retry_at <= $4) and deleted_at is null returning *`,[input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapTaskFollowUp(rows.rows[0]):null;});}
-  async recordTaskFollowUpReceipt(input:TaskFollowUpReceiptInput):Promise<TaskFollowUp|null>{const rows=await this.queryRows<TaskFollowUpRow>(`update task_follow_ups set receipt=$3::jsonb,timeline_cursor=$4,delivery_status='accepted',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$5 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$2 and delivery_key=$6 and request_hash=$7 and $8::boolean and deleted_at is null returning *`,[input.id,input.claimToken,JSON.stringify(input.receipt),input.timelineCursor,input.updatedAt,input.receipt.deliveryKey,input.receipt.requestHash,input.receipt.accepted]);return rows[0]?mapTaskFollowUp(rows[0]):null;}
-  async deferTaskFollowUp(input:TaskDeliveryDeferInput):Promise<TaskFollowUp|null>{const rows=await this.queryRows<TaskFollowUpRow>(`update task_follow_ups set delivery_status=case when $3 then 'pending' else delivery_status end,claim_token=case when $3 then null else claim_token end,claimed_at=case when $3 then null else claimed_at end,lease_expires_at=case when $3 then null else lease_expires_at end,safe_error=$4,next_retry_at=$5,updated_at=$6 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.releaseClaim===true,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapTaskFollowUp(rows[0]):null;}
-  async failTaskFollowUp(input:TaskDeliveryFailureInput):Promise<TaskFollowUp|null>{const rows=await this.queryRows<TaskFollowUpRow>(`update task_follow_ups set delivery_status='failed',safe_error=$3,lease_expires_at=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.safeError,input.updatedAt]);return rows[0]?mapTaskFollowUp(rows[0]):null;}
-  async createTerminalTaskFollowUp(input:CreateTerminalTaskFollowUpInput):Promise<TaskFollowUp|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and terminal_reason is not null for update",[input.followUp.taskId]);if(!source.rows[0])return null;if(input.successor.reserveActive&&!await reserveActiveTaskWithClient(client,input.successor.task.projectId,input.successor.task.updatedAt))return null;const successor=await insertTaskWithClient(client,input.successor.task,input.successor.reserveActive);if(input.successor.runtimeState)await putJsonDocumentWithClient(client,"sandbox_runtime_state",successor.id,input.successor.runtimeState);if(input.successor.sandboxRun)await putJsonDocumentWithClient(client,"sandbox_run_state",input.successor.sandboxRun.runId,prepareSandboxRunDocument(input.successor.sandboxRun));return mapTaskFollowUp(await insertTaskFollowUpWithClient(client,{...input.followUp,followUpTaskId:successor.id,deliveryStatus:"successor_created"}));});}
-  async resolveTerminalPendingFollowUp(input:ResolveTerminalPendingFollowUpInput):Promise<TaskFollowUp|null>{return transaction(this.pool,async(client)=>{const locked=await client.query<TaskFollowUpRow>("select * from task_follow_ups where id=$1 for update",[input.followUpId]);const followUp=locked.rows[0];if(!followUp||!["dispatching","terminal_pending"].includes(followUp.delivery_status)||followUp.claim_token!==input.expectedClaimToken||asRecord(followUp.receipt)?.accepted===true)return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and terminal_reason is not null for update",[followUp.task_id]);if(!source.rows[0])return null;if(input.successor.reserveActive&&!await reserveActiveTaskWithClient(client,input.successor.task.projectId,input.updatedAt))return null;const successor=await insertTaskWithClient(client,input.successor.task,input.successor.reserveActive);if(input.successor.runtimeState)await putJsonDocumentWithClient(client,"sandbox_runtime_state",successor.id,input.successor.runtimeState);if(input.successor.sandboxRun)await putJsonDocumentWithClient(client,"sandbox_run_state",input.successor.sandboxRun.runId,prepareSandboxRunDocument(input.successor.sandboxRun));const updated=await client.query<TaskFollowUpRow>("update task_follow_ups set follow_up_task_id=$2,delivery_status='successor_created',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$3 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$4 returning *",[input.followUpId,successor.id,input.updatedAt,input.expectedClaimToken]);return updated.rows[0]?mapTaskFollowUp(updated.rows[0]):null;});}
-  async findTaskSummary(taskId: string): Promise<TaskSummary | null> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id, count(distinct e.id)::integer as event_count, count(distinct a.id)::integer as artifact_count, t.updated_at from agent_tasks t left join agent_task_events e on e.task_id=t.id left join agent_task_artifacts a on a.task_id=t.id where t.id=$1 group by t.id,t.updated_at`,[taskId]); return rows[0] ? mapTaskSummary(rows[0]) : null; }
-  async listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id, count(distinct e.id)::integer as event_count, count(distinct a.id)::integer as artifact_count, t.updated_at from agent_tasks t left join agent_task_events e on e.task_id=t.id left join agent_task_artifacts a on a.task_id=t.id where t.project_id=$1 and t.deleted_at is null group by t.id,t.updated_at order by t.updated_at desc,t.id desc`,[projectId]); return rows.map(mapTaskSummary); }
+  async createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage> { return transaction(this.pool, async (client) => mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message))); }
+  async createPendingTaskMessage(message:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[message.taskId]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message));await persistTaskInteractionChangesWithClient(client,message.taskId,interactionChange?[interactionChange]:[]);return created;});}
+  async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null order by created_at,id",[taskId]); return rows.map(mapPersistedTaskMessage); }
+  async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where id=$1",[id]);return rows[0]?mapPersistedTaskMessage(rows[0]):null; }
+  async updatePendingTaskMessage(id:string,content:string,requestHash:string,updatedAt:string,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[id]);if(!located.rows[0])return null;await client.query("select id from agent_tasks where id=$1 for update",[located.rows[0].task_id]);const rows=await client.query<TaskMessageRow>("update task_messages set content=$2,request_hash=$3,updated_at=$4 where id=$1 and delivery_status='pending' and deleted_at is null returning *",[id,content,requestHash,updatedAt]);if(!rows.rows[0])return null;await persistTaskInteractionChangesWithClient(client,rows.rows[0].task_id,interactionChange?[interactionChange]:[]);return mapPersistedTaskMessage(rows.rows[0]);});}
+  async deletePendingTaskMessage(id:string,deletedAt:string):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>("update task_messages set deleted_at=$2,updated_at=$2 where id=$1 and delivery_status='pending' and deleted_at is null returning *",[id,deletedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async listTaskMessagesDue(now:string,limit:number):Promise<PersistedTaskMessage[]>{const rows=await this.queryRows<TaskMessageRow>(`select * from task_messages where deleted_at is null and ((delivery_status='pending' and (next_retry_at is null or next_retry_at <= $1)) or (delivery_status in ('dispatching','terminal_pending') and lease_expires_at <= $1 and (next_retry_at is null or next_retry_at <= $1))) order by created_at,id limit $2`,[now,limit]);return rows.map(mapPersistedTaskMessage);}
+  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskMessageRow>(`update task_messages set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,attempt_count=attempt_count+1,safe_error=null,updated_at=$3 where id=$1 and delivery_status='pending' and claim_token is null and deleted_at is null and (next_retry_at is null or next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
+  async reclaimTaskMessage(input:TaskDeliveryReclaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskMessageRow>(`update task_messages set claim_token=$3,claimed_at=$4,lease_expires_at=$5,attempt_count=attempt_count+1,safe_error=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and lease_expires_at <= $4 and (next_retry_at is null or next_retry_at <= $4) and deleted_at is null returning *`,[input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
+  async recordTaskMessageReceipt(input:TaskMessageReceiptInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set receipt=$3::jsonb,timeline_cursor=$4,delivery_status='accepted',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$5 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$2 and delivery_key=$6 and request_hash=$7 and $8::boolean and deleted_at is null returning *`,[input.id,input.claimToken,JSON.stringify(input.receipt),input.timelineCursor,input.updatedAt,input.receipt.deliveryKey,input.receipt.requestHash,input.receipt.accepted]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async deferTaskMessage(input:TaskDeliveryDeferInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status=case when $3 then 'pending' else delivery_status end,claim_token=case when $3 then null else claim_token end,claimed_at=case when $3 then null else claimed_at end,lease_expires_at=case when $3 then null else lease_expires_at end,safe_error=$4,next_retry_at=$5,updated_at=$6 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.releaseClaim===true,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async failTaskMessage(input:TaskDeliveryFailureInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='failed',safe_error=$3,lease_expires_at=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.safeError,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async createTerminalTaskMessage(input:CreateTerminalTaskMessageInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and terminal_reason is not null for update",[input.message.taskId]);if(!source.rows[0])return null;if(input.successor.reserveActive&&!await reserveActiveTaskWithClient(client,input.successor.task.projectId,input.successor.task.updatedAt))return null;const successor=await insertTaskWithClient(client,input.successor.task,input.successor.reserveActive);if(input.successor.runtimeState)await putJsonDocumentWithClient(client,"sandbox_runtime_state",successor.id,input.successor.runtimeState);if(input.successor.sandboxRun)await putJsonDocumentWithClient(client,"sandbox_run_state",input.successor.sandboxRun.runId,prepareSandboxRunDocument(input.successor.sandboxRun));const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,{...input.message,targetTaskId:successor.id,deliveryStatus:"successor_created"}));await persistTaskInteractionChangesWithClient(client,input.message.taskId,input.messageInteractionChange?[input.messageInteractionChange]:[]);await persistTaskInteractionChangesWithClient(client,successor.id,input.successorInteractionChange?[input.successorInteractionChange]:[]);return created;});}
+  async resolveTerminalPendingMessage(input:ResolveTerminalPendingMessageInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.messageId]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and terminal_reason is not null for update",[located.rows[0].task_id]);if(!source.rows[0])return null;const locked=await client.query<TaskMessageRow>("select * from task_messages where id=$1 for update",[input.messageId]);const message=locked.rows[0];if(!message||message.task_id!==located.rows[0].task_id||!["dispatching","terminal_pending"].includes(message.delivery_status)||message.claim_token!==input.expectedClaimToken||asRecord(message.receipt)?.accepted===true)return null;if(input.successor.reserveActive&&!await reserveActiveTaskWithClient(client,input.successor.task.projectId,input.updatedAt))return null;const successor=await insertTaskWithClient(client,input.successor.task,input.successor.reserveActive);if(input.successor.runtimeState)await putJsonDocumentWithClient(client,"sandbox_runtime_state",successor.id,input.successor.runtimeState);if(input.successor.sandboxRun)await putJsonDocumentWithClient(client,"sandbox_run_state",input.successor.sandboxRun.runId,prepareSandboxRunDocument(input.successor.sandboxRun));const updated=await client.query<TaskMessageRow>("update task_messages set target_task_id=$2,delivery_status='successor_created',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$3 where id=$1 and delivery_status in ('dispatching','terminal_pending') and claim_token=$4 returning *",[input.messageId,successor.id,input.updatedAt,input.expectedClaimToken]);if(!updated.rows[0])return null;await persistTaskInteractionChangesWithClient(client,message.task_id,input.messageInteractionChange?[input.messageInteractionChange]:[]);await persistTaskInteractionChangesWithClient(client,successor.id,input.successorInteractionChange?[input.successorInteractionChange]:[]);return mapPersistedTaskMessage(updated.rows[0]);});}
+  async findTaskSummary(taskId: string): Promise<TaskSummary | null> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.id=$1 group by t.id,t.updated_at`,[taskId]); return rows[0] ? mapTaskSummary(rows[0]) : null; }
+  async listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.project_id=$1 and t.deleted_at is null group by t.id,t.updated_at order by t.updated_at desc,t.id desc`,[projectId]); return rows.map(mapTaskSummary); }
 
-  private async claimTaskStage(stage:"artifact"|"cleanup",input:TaskStageClaimInput):Promise<AgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const allowed=stage==="artifact"?"('draining','failed')":"('pending','running','failed')";const extra=stage==="artifact"?"terminal_reason is not null":"terminal_reason is not null and artifact_projection_status='drained'";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status=${stage==="artifact"?"'draining'":"'running'"},${prefix}_claim_token=$2,${prefix}_lease_expires_at=$4,${prefix}_attempt_count=${prefix}_attempt_count+1,${stage==="artifact"?"artifact_projection_error":"cleanup_error"}=null,updated_at=$3 where id=$1 and ${extra} and ${prefix}_status in ${allowed} and (${prefix}_lease_expires_at is null or ${prefix}_lease_expires_at <= $3) and (${prefix}_next_retry_at is null or ${prefix}_next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows[0]?mapTask(rows[0]):null;}
-  private async completeTaskStage(stage:"artifact"|"cleanup",input:TaskStageCompleteInput):Promise<AgentTask|null>{return transaction(this.pool,async(client)=>{const rows=await completeTaskStageWithClient(client,stage,input);return rows[0]?mapTask(rows[0]):null;});}
-  private async failTaskStage(stage:"artifact"|"cleanup",input:TaskStageFailureInput):Promise<AgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const error=stage==="artifact"?"artifact_projection_error":"cleanup_error";const current=stage==="artifact"?"draining":"running";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status='failed',${prefix}_claim_token=null,${prefix}_lease_expires_at=null,${prefix}_next_retry_at=$4,${error}=$3,updated_at=$5 where id=$1 and ${prefix}_status='${current}' and ${prefix}_claim_token=$2 returning *`,[input.id,input.claimToken,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapTask(rows[0]):null;}
+  private async claimTaskStage(stage:"artifact"|"cleanup",input:TaskStageClaimInput):Promise<PersistedAgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const allowed=stage==="artifact"?"('draining','failed')":"('pending','running','failed')";const extra=stage==="artifact"?"terminal_reason is not null":"terminal_reason is not null and artifact_projection_status='drained'";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status=${stage==="artifact"?"'draining'":"'running'"},${prefix}_claim_token=$2,${prefix}_lease_expires_at=$4,${prefix}_attempt_count=${prefix}_attempt_count+1,${stage==="artifact"?"artifact_projection_error":"cleanup_error"}=null,updated_at=$3 where id=$1 and ${extra} and ${prefix}_status in ${allowed} and (${prefix}_lease_expires_at is null or ${prefix}_lease_expires_at <= $3) and (${prefix}_next_retry_at is null or ${prefix}_next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows[0]?mapTask(rows[0]):null;}
+  private async completeTaskStage(stage:"artifact"|"cleanup",input:TaskStageCompleteInput):Promise<PersistedAgentTask|null>{return transaction(this.pool,async(client)=>{const rows=await completeTaskStageWithClient(client,stage,input);return rows[0]?mapTask(rows[0]):null;});}
+  private async failTaskStage(stage:"artifact"|"cleanup",input:TaskStageFailureInput):Promise<PersistedAgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const error=stage==="artifact"?"artifact_projection_error":"cleanup_error";const current=stage==="artifact"?"draining":"running";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status='failed',${prefix}_claim_token=null,${prefix}_lease_expires_at=null,${prefix}_next_retry_at=$4,${error}=$3,updated_at=$5 where id=$1 and ${prefix}_status='${current}' and ${prefix}_claim_token=$2 returning *`,[input.id,input.claimToken,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapTask(rows[0]):null;}
 
   private async queryRows<T>(sql: string, values: unknown[] = []): Promise<T[]> {
     const result = await this.pool.query(sql, values);
@@ -1146,10 +1122,10 @@ class PostgresLeaseStoreImpl implements PostgresLeaseStore {
   }
 }
 
-async function transaction<T>(pool: PgPool, callback: (client: PoolClient) => Promise<T>): Promise<T> {
+async function transaction<T>(pool: PgPool, callback: (client: PoolClient) => Promise<T>, isolation?: "repeatable read"): Promise<T> {
   const client = await pool.connect();
   try {
-    await client.query("begin");
+    await client.query(isolation ? `begin isolation level ${isolation}` : "begin");
     const result = await callback(client);
     await client.query("commit");
     return result;
@@ -1189,16 +1165,89 @@ async function insertAuditEventWithClient(client: PoolClient, event: ProjectAudi
   );
 }
 
-async function insertTaskWithClient(client: PoolClient, task: AgentTask, activeReservation: boolean): Promise<AgentTaskRow> {
+async function persistTaskInteractionChangesWithClient(client:PoolClient,taskId:string,changes:TaskInteractionChangeInput[]):Promise<{inserted:PersistedTaskInteractionChange[];nextSeq:number}>{
+  let nextSeq=Number((await client.query<{maximum:string}>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1",[taskId])).rows[0]?.maximum??0);
+  const inserted:PersistedTaskInteractionChange[]=[];
+  for(const change of changes){
+    validatePostgresInteractionChange(taskId,change);
+    const duplicate=await client.query<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and source_kind=$2 and source_id=$3 and source_revision=$4",[taskId,change.sourceKind,change.sourceId,change.sourceRevision]);
+    if(duplicate.rows[0])continue;
+    if(change.sourceKind==="product"){
+      const latestSource=await client.query<{revision:string|number}>("select source_revision as revision from task_interaction_changes where task_id=$1 and source_kind='product' and source_id=$2 order by source_revision desc limit 1",[taskId,change.sourceId]);
+      if(latestSource.rows[0]&&change.sourceRevision<=parseTaskInteractionSourceRevision(latestSource.rows[0].revision))throw new Error("Task interaction source revision is not monotonic");
+    }
+    const latest=await client.query<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and interaction_id=$2 order by revision desc,change_seq desc limit 1",[taskId,change.interaction.id]);
+    if(latest.rows[0]&&(change.interaction.revision<=latest.rows[0].revision||change.interaction.position!==Number(latest.rows[0].position)))throw new Error("Task interaction revision is not monotonic");
+    nextSeq+=1;
+    const row=await client.query<TaskInteractionChangeRow>(`insert into task_interaction_changes (task_id,change_seq,source_kind,source_id,source_revision,interaction_id,revision,position,interaction_kind,interaction,tool_call_id,work_task_id,callback_id,occurred_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15) returning *`,[taskId,nextSeq,change.sourceKind,change.sourceId,change.sourceRevision,change.interaction.id,change.interaction.revision,change.interaction.position,change.interaction.kind,JSON.stringify(change.interaction),change.correlation?.toolCallId??null,change.correlation?.workTaskId??null,change.correlation?.callbackId??null,change.interaction.occurredAt,change.interaction.updatedAt]);
+    inserted.push(mapTaskInteractionChange(row.rows[0]!));
+  }
+  return{inserted,nextSeq};
+}
+
+async function finalizeTaskLifecycleWithClient(client: PoolClient, input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
+  const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [input.taskId]);
+  const current = locked.rows[0];
+  if (!current) return null;
+  if (current.terminal_reason) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingMessageIds: [] };
+  const messages = await client.query<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null and delivery_status in ('pending','dispatching','terminal_pending') order by created_at,id for update", [input.taskId]);
+  const candidates = new Map(input.successors.map((candidate) => [candidate.messageId, candidate]));
+  const terminalPendingChanges = new Map((input.terminalPendingChanges??[]).map((candidate)=>[candidate.messageId,candidate.interactionChange]));
+  const missingPendingMessageIds = messages.rows.filter((row) => row.delivery_status === "pending" && (!candidates.has(row.id) || candidates.get(row.id)!.create.task.prompt !== row.content)).map((row) => row.id);
+  if (missingPendingMessageIds.length > 0) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingMessageIds };
+  if (current.active_reservation) await releaseActiveTaskWithClient(client, current.project_id, input.updatedAt);
+  const successorTaskIds: string[] = [];
+  for (const message of messages.rows) {
+    if (message.delivery_status === "dispatching") {
+      await client.query("update task_messages set delivery_status='terminal_pending',updated_at=$2 where id=$1", [message.id,input.updatedAt]);
+      const interactionChange=terminalPendingChanges.get(message.id);
+      await persistTaskInteractionChangesWithClient(client,input.taskId,interactionChange?[interactionChange]:[]);
+      continue;
+    }
+    if (message.delivery_status !== "pending") continue;
+    const candidate = candidates.get(message.id)!;
+    if (candidate.create.reserveActive && !await reserveActiveTaskWithClient(client, candidate.create.task.projectId, input.updatedAt)) {
+      await client.query("update task_messages set delivery_status='failed',safe_error='Project active tasks limit reached',updated_at=$2 where id=$1", [message.id,input.updatedAt]);
+      await persistTaskInteractionChangesWithClient(client,input.taskId,candidate.messageFailureInteractionChange?[candidate.messageFailureInteractionChange]:[]);
+      continue;
+    }
+    const successor = await insertTaskWithClient(client, candidate.create.task, candidate.create.reserveActive);
+    if (candidate.create.runtimeState) await putJsonDocumentWithClient(client,"sandbox_runtime_state",candidate.create.task.id,candidate.create.runtimeState);
+    if (candidate.create.sandboxRun) await putJsonDocumentWithClient(client,"sandbox_run_state",candidate.create.sandboxRun.runId,prepareSandboxRunDocument(candidate.create.sandboxRun));
+    await client.query("update task_messages set target_task_id=$2,delivery_status='successor_created',safe_error=null,updated_at=$3 where id=$1", [message.id,successor.id,input.updatedAt]);
+    await persistTaskInteractionChangesWithClient(client,input.taskId,candidate.messageSuccessInteractionChange?[candidate.messageSuccessInteractionChange]:[]);
+    await persistTaskInteractionChangesWithClient(client,successor.id,candidate.successorInteractionChange?[candidate.successorInteractionChange]:[]);
+    successorTaskIds.push(successor.id);
+  }
+  const terminal = await client.query<AgentTaskRow>(`update agent_tasks set status=$2,terminal_reason=$3,terminalized_at=$4::timestamptz,active_reservation=false,finalization_intent_status=null,finalization_intent_at=null,artifact_projection_status=case when execution_mode='live' then 'draining' else 'drained' end,artifact_projection_error=null,cleanup_status=case when execution_mode='live' then 'pending' else 'completed' end,cleanup_error=null,cleanup_completed_at=case when execution_mode='live' then null else $4::timestamptz end,updated_at=$4::timestamptz where id=$1 and terminal_reason is null returning *`, [input.taskId,statusForTerminalReason(input.terminalReason),input.terminalReason,input.updatedAt]);
+  const row = terminal.rows[0];
+  if (!row) return { task: mapTask(current), applied: false, successorTaskIds: [], missingPendingMessageIds: [] };
+  await insertAuditEventWithClient(client,input.auditEvent);
+  return { task: mapTask(row), applied: true, successorTaskIds, missingPendingMessageIds: [] };
+}
+
+async function persistTaskArtifactProjectionWithClient(client:PoolClient,input:PersistTaskArtifactProjectionInput):Promise<"created"|"existing"|"limit_exceeded"> {
+  const existing=await client.query("select id from agent_task_artifacts where task_id=$1 and file_id=$2",[input.artifact.taskId,input.artifact.fileId]);
+  if(existing.rowCount){await insertAuditEventWithClient(client,input.auditEvent);return "existing";}
+  const usage=await client.query(`update project_resource_usage u set project_file_bytes=u.project_file_bytes+$2,updated_at=$3 from project_resource_policies p where u.project_id=$1 and p.project_id=u.project_id and (p.project_file_bytes_limit is null or u.project_file_bytes+$2 <= p.project_file_bytes_limit) returning u.project_id`,[input.projectId,input.artifact.bytes,input.updatedAt]);
+  if(!usage.rowCount)return "limit_exceeded";
+  await client.query(`insert into agent_task_artifacts (id,task_id,file_id,name,bytes,sha256,media_type,preview_text,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[input.artifact.id,input.artifact.taskId,input.artifact.fileId,input.artifact.name,input.artifact.bytes,input.artifact.sha256??null,input.artifact.mediaType??null,input.artifact.previewText??null,input.artifact.createdAt]);
+  await insertAuditEventWithClient(client,input.auditEvent);
+  return "created";
+}
+
+async function insertTaskWithClient(client: PoolClient, task: PersistedAgentTask, activeReservation: boolean): Promise<AgentTaskRow> {
   const columns = [
     "id","workspace_id","project_id","endpoint_id","title","prompt","input_paths","status","run_id","source_task_id","execution_mode","active_reservation","archived_at","deleted_at","terminal_reason","terminalized_at",
     "start_delivery_key","start_request_hash","start_claim_token","start_receipt","start_timeline_cursor","start_intent_status","start_claimed_at","start_lease_expires_at","start_attempt_count","start_next_retry_at","start_safe_error",
+    "interaction_source_cursor","interaction_history_status","interaction_last_synced_at",
     "artifact_projection_status","artifact_projection_error","artifact_projection_claim_token","artifact_projection_lease_expires_at","artifact_projection_attempt_count","artifact_projection_next_retry_at",
     "cleanup_status","cleanup_error","cleanup_claim_token","cleanup_lease_expires_at","cleanup_attempt_count","cleanup_next_retry_at","cleanup_completed_at","sandbox","finalization_intent_status","finalization_intent_at","created_at","updated_at"
   ];
   const values: unknown[] = [
     task.id,task.workspaceId,task.projectId,task.endpointId,task.title ?? task.prompt.replace(/[\r\n]+/g," ").slice(0,160),task.prompt,JSON.stringify(task.inputPaths ?? []),task.status,task.runId,task.sourceTaskId ?? null,task.executionMode,activeReservation,task.archivedAt ?? null,task.deletedAt ?? null,task.terminalReason ?? null,task.terminalizedAt ?? null,
     task.startDeliveryKey ?? null,task.startRequestHash ?? null,task.startClaimToken ?? null,task.startReceipt ? JSON.stringify(task.startReceipt) : null,task.startTimelineCursor ?? null,task.startIntentStatus ?? null,task.startClaimedAt ?? null,task.startLeaseExpiresAt ?? null,task.startAttemptCount ?? 0,task.startNextRetryAt ?? null,task.startSafeError ?? null,
+    null,"complete",null,
     task.artifactProjectionStatus ?? "pending",task.artifactProjectionError ?? null,task.artifactProjectionClaimToken ?? null,task.artifactProjectionLeaseExpiresAt ?? null,task.artifactProjectionAttemptCount ?? 0,task.artifactProjectionNextRetryAt ?? null,
     task.cleanupStatus ?? "pending",task.cleanupError ?? null,task.cleanupClaimToken ?? null,task.cleanupLeaseExpiresAt ?? null,task.cleanupAttemptCount ?? 0,task.cleanupNextRetryAt ?? null,task.cleanupCompletedAt ?? null,JSON.stringify(task.sandbox),task.finalizationIntentStatus ?? null,task.finalizationIntentAt ?? null,task.createdAt,task.updatedAt
   ];
@@ -1208,9 +1257,9 @@ async function insertTaskWithClient(client: PoolClient, task: AgentTask, activeR
   return inserted.rows[0]!;
 }
 
-async function insertTaskFollowUpWithClient(client: PoolClient, followUp: TaskFollowUp): Promise<TaskFollowUpRow> {
-  const inserted = await client.query<TaskFollowUpRow>(`insert into task_follow_ups (id,task_id,prompt,follow_up_task_id,delivery_key,request_hash,claim_token,receipt,timeline_cursor,delivery_status,claimed_at,lease_expires_at,attempt_count,next_retry_at,safe_error,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) returning *`,[
-    followUp.id,followUp.taskId,followUp.prompt,followUp.followUpTaskId??null,followUp.deliveryKey??null,followUp.requestHash??null,followUp.claimToken??null,followUp.receipt?JSON.stringify(followUp.receipt):null,followUp.timelineCursor??null,followUp.deliveryStatus??"pending",followUp.claimedAt??null,followUp.leaseExpiresAt??null,followUp.attemptCount??0,followUp.nextRetryAt??null,followUp.safeError??null,followUp.createdAt,followUp.updatedAt??followUp.createdAt,followUp.deletedAt??null
+async function insertPersistedTaskMessageWithClient(client: PoolClient, message: PersistedTaskMessage): Promise<TaskMessageRow> {
+  const inserted = await client.query<TaskMessageRow>(`insert into task_messages (id,task_id,content,target_task_id,delivery_key,request_hash,claim_token,receipt,timeline_cursor,delivery_status,claimed_at,lease_expires_at,attempt_count,next_retry_at,safe_error,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) returning *`,[
+    message.id,message.taskId,message.content,message.targetTaskId??null,message.deliveryKey??null,message.requestHash??null,message.claimToken??null,message.receipt?JSON.stringify(message.receipt):null,message.timelineCursor??null,message.deliveryStatus??"pending",message.claimedAt??null,message.leaseExpiresAt??null,message.attemptCount??0,message.nextRetryAt??null,message.safeError??null,message.createdAt,message.updatedAt??message.createdAt,message.deletedAt??null
   ]);
   return inserted.rows[0]!;
 }
@@ -1335,6 +1384,9 @@ interface AgentTaskRow {
   start_attempt_count: number | null;
   start_next_retry_at: unknown;
   start_safe_error: string | null;
+  interaction_source_cursor: string | null;
+  interaction_history_status: "complete" | "gap";
+  interaction_last_synced_at: unknown;
   artifact_projection_status: AgentTask["artifactProjectionStatus"];
   artifact_projection_error: string | null;
   artifact_projection_claim_token: string | null;
@@ -1349,7 +1401,7 @@ interface AgentTaskRow {
   cleanup_next_retry_at: unknown;
   cleanup_completed_at: unknown;
   sandbox: unknown;
-  finalization_intent_status: AgentTask["finalizationIntentStatus"];
+  finalization_intent_status: PersistedAgentTask["finalizationIntentStatus"];
   finalization_intent_at: unknown;
   created_at: unknown;
   updated_at: unknown;
@@ -1366,18 +1418,6 @@ interface ProviderSettlementRow {
   provider_tokens: string | number | null; provider_cost: string | number | null; updated_at: unknown;
 }
 
-interface AgentTaskEventRow {
-  id: string;
-  task_id: string;
-  kind: AgentTaskEvent["kind"];
-  cursor: string;
-  botified_seq: number;
-  botified_type: string;
-  session_id: string;
-  payload: unknown;
-  created_at: unknown;
-}
-
 interface AgentTaskArtifactRow {
   id: string;
   task_id: string;
@@ -1391,9 +1431,10 @@ interface AgentTaskArtifactRow {
 }
 interface ProjectChatThreadRow { id: string; project_id: string; endpoint_id: string | null; title: string | null; pinned_at: unknown; starred_at: unknown; deleted_at: unknown; created_at: unknown; updated_at: unknown; }
 interface ProjectChatMessageRow { sequence: string | number; id: string; thread_id: string; role: ProjectChatMessage["role"]; content: string; version: number; delivery_status: ProjectChatMessage["deliveryStatus"]; created_at: unknown; updated_at: unknown; }
-interface TaskFollowUpRow { id:string; task_id:string; prompt:string; follow_up_task_id:string|null; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<TaskFollowUp["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
+interface TaskMessageRow { id:string; task_id:string; content:string; target_task_id:string|null; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
+interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
 interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown; }
-interface TaskSummaryRow { task_id:string; event_count:number; artifact_count:number; updated_at:unknown; }
+interface TaskSummaryRow { task_id:string; artifact_count:number; updated_at:unknown; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
@@ -1491,7 +1532,7 @@ function mapEndpoint(row: ModelEndpointRow): ModelEndpoint {
 function mapCredential(row: ProjectCredentialRow): ProjectCredential { return { id:row.id,projectId:row.project_id,name:row.name,type:row.type,baseUrl:row.base_url,fingerprint:row.fingerprint,version:row.version,createdAt:toIso(row.created_at),lastRotatedAt:row.last_rotated_at?toIso(row.last_rotated_at):null,updatedAt:toIso(row.updated_at) }; }
 function mapStoredCredential(row: ProjectCredentialRow): StoredProjectCredential { return { ...mapCredential(row),keyId:row.key_id,nonce:Buffer.from(row.nonce),ciphertext:Buffer.from(row.ciphertext),authTag:Buffer.from(row.auth_tag) }; }
 
-function mapTask(row: AgentTaskRow): AgentTask {
+function mapTask(row: AgentTaskRow): PersistedAgentTask {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -1550,22 +1591,8 @@ function mapProviderSettlement(row: ProviderSettlementRow): ProjectProviderSettl
   return { id: row.id, projectId: row.project_id, taskId: row.task_id, endpointId: row.endpoint_id,actorId:row.actor_id,reservedTokens:Number(row.reserved_tokens),reservedCost:Number(row.reserved_cost), status: row.status, reservedAt: toIso(row.reserved_at), expiresAt: toIso(row.expires_at), dispatchedAt: row.dispatched_at ? toIso(row.dispatched_at) : null, deliveredAt: row.delivered_at ? toIso(row.delivered_at) : null, settledAt: row.settled_at ? toIso(row.settled_at) : null, ...(tokens !== undefined || cost !== undefined ? { usage: { ...(tokens !== undefined ? { tokens } : {}), ...(cost !== undefined ? { cost } : {}) } } : {}), updatedAt: toIso(row.updated_at) };
 }
 
-function mapTaskEvent(row: AgentTaskEventRow): AgentTaskEvent {
-  return {
-    id: row.id,
-    taskId: row.task_id,
-    kind: row.kind,
-    cursor: row.cursor,
-    botifiedSeq: row.botified_seq,
-    botifiedType: row.botified_type,
-    sessionId: row.session_id,
-    payload: asRecord(row.payload),
-    createdAt: toIso(row.created_at)
-  };
-}
-
-function mapTaskArtifact(row: AgentTaskArtifactRow): AgentTaskArtifact {
-  const artifact: AgentTaskArtifact = {
+function mapTaskArtifact(row: AgentTaskArtifactRow): PersistedTaskArtifact {
+  const artifact: PersistedTaskArtifact = {
     id: row.id,
     taskId: row.task_id,
     fileId: row.file_id,
@@ -1582,10 +1609,27 @@ function mapTaskArtifact(row: AgentTaskArtifactRow): AgentTaskArtifact {
 }
 function mapChatThread(row: ProjectChatThreadRow): ProjectChatThread { return { id: row.id, projectId: row.project_id, endpointId: row.endpoint_id, title: row.title ?? null, pinnedAt: row.pinned_at ? toIso(row.pinned_at) : null, starredAt: row.starred_at ? toIso(row.starred_at) : null, deletedAt: row.deleted_at ? toIso(row.deleted_at) : null, createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) }; }
 function mapChatMessage(row: ProjectChatMessageRow): ProjectChatMessage { return { id: row.id, threadId: row.thread_id, sequence:Number(row.sequence),role: row.role, content: row.content,version:row.version,deliveryStatus:row.delivery_status,createdAt: toIso(row.created_at),updatedAt:toIso(row.updated_at) }; }
-function mapTaskFollowUp(row: TaskFollowUpRow): TaskFollowUp { return { id:row.id, taskId:row.task_id, prompt:row.prompt, followUpTaskId:row.follow_up_task_id, deliveryKey:row.delivery_key, requestHash:row.request_hash, claimToken:row.claim_token, receipt:mapTaskDeliveryReceipt(row.receipt), timelineCursor:row.timeline_cursor, deliveryStatus:row.delivery_status, claimedAt:row.claimed_at?toIso(row.claimed_at):null, leaseExpiresAt:row.lease_expires_at?toIso(row.lease_expires_at):null, attemptCount:row.attempt_count??0, nextRetryAt:row.next_retry_at?toIso(row.next_retry_at):null, safeError:row.safe_error, createdAt:toIso(row.created_at), updatedAt:toIso(row.updated_at), deletedAt:row.deleted_at?toIso(row.deleted_at):null }; }
-function mapTaskSummary(row: TaskSummaryRow): TaskSummary { return { taskId:row.task_id,eventCount:Number(row.event_count),artifactCount:Number(row.artifact_count),updatedAt:toIso(row.updated_at) }; }
+function mapPersistedTaskMessage(row: TaskMessageRow): PersistedTaskMessage { return { id:row.id, taskId:row.task_id, content:row.content, targetTaskId:row.target_task_id, deliveryKey:row.delivery_key, requestHash:row.request_hash, claimToken:row.claim_token, receipt:mapTaskDeliveryReceipt(row.receipt), timelineCursor:row.timeline_cursor, deliveryStatus:row.delivery_status, claimedAt:row.claimed_at?toIso(row.claimed_at):null, leaseExpiresAt:row.lease_expires_at?toIso(row.lease_expires_at):null, attemptCount:row.attempt_count??0, nextRetryAt:row.next_retry_at?toIso(row.next_retry_at):null, safeError:row.safe_error, createdAt:toIso(row.created_at), updatedAt:toIso(row.updated_at), deletedAt:row.deleted_at?toIso(row.deleted_at):null }; }
+function mapTaskInteractionChange(row: TaskInteractionChangeRow): PersistedTaskInteractionChange {
+  const interaction = asRecord(row.interaction) as unknown as TaskInteractionItem;
+  const sourceRevision = parseTaskInteractionSourceRevision(row.source_revision);
+  if (interaction.id !== row.interaction_id || interaction.taskId !== row.task_id || interaction.revision !== row.revision || interaction.kind !== row.interaction_kind || interaction.position !== Number(row.position) || (row.source_kind === "botified" && sourceRevision !== 0)) throw new Error("Stored task interaction is inconsistent");
+  return { changeSeq:Number(row.change_seq),sourceKind:row.source_kind,sourceId:row.source_id,sourceRevision,interaction,correlation:{toolCallId:row.tool_call_id,workTaskId:row.work_task_id,callbackId:row.callback_id} };
+}
+function parseTaskInteractionSourceRevision(value:string|number):number {
+  const revision=Number(value);
+  if(!Number.isSafeInteger(revision)||revision<0)throw new Error("Stored task interaction source revision is invalid");
+  return revision;
+}
+function mapTaskSummary(row: TaskSummaryRow): TaskSummary { return { taskId:row.task_id,artifactCount:Number(row.artifact_count),updatedAt:toIso(row.updated_at) }; }
 
-function mapTaskDeliveryReceipt(value: unknown): NonNullable<AgentTask["startReceipt"]> | null {
+function validatePostgresInteractionChange(taskId:string,change:PersistTaskInteractionMutationInput["changes"][number]):void {
+  if(change.interaction.taskId!==taskId||change.interaction.id.length===0||change.sourceId.length===0)throw new Error("Task interaction identity mismatch");
+  if(change.sourceKind==="botified"&&change.sourceRevision!==0)throw new Error("Botified interaction revisions are cursor-based");
+  if(!Number.isSafeInteger(change.sourceRevision)||change.sourceRevision<0||!Number.isSafeInteger(change.interaction.revision)||change.interaction.revision<1||!Number.isSafeInteger(change.interaction.position)||change.interaction.position<0)throw new Error("Task interaction sequence is invalid");
+}
+
+function mapTaskDeliveryReceipt(value: unknown): NonNullable<PersistedAgentTask["startReceipt"]> | null {
   const receipt = asRecord(value);
   if (typeof receipt.accepted !== "boolean" || typeof receipt.deliveryKey !== "string" || typeof receipt.requestHash !== "string") return null;
   return {

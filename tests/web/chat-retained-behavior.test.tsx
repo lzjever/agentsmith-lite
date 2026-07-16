@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatThread } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatThread } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
@@ -62,8 +62,9 @@ describe("retained chat and overview behavior", () => {
   });
 
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {
-    const original = { projectCapabilities: apiClient.projectCapabilities, members: apiClient.members, currentIdentity: apiClient.currentIdentity };
+    const original = { projectCapabilities: apiClient.projectCapabilities, projectSettings: apiClient.projectSettings, members: apiClient.members, currentIdentity: apiClient.currentIdentity };
     apiClient.projectCapabilities = async () => readOnly;
+    apiClient.projectSettings = async () => ({ project: { id: "project_1", workspaceId: "workspace_1", name: "Project", lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: { canManageSettings: false } });
     apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Project Owner", email: "owner@example.test", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, { projectId: "project_1", userId: "viewer_1", role: "viewer", displayName: "Viewer", email: "viewer@example.test", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
     apiClient.currentIdentity = async () => ({ user: { id: "viewer_1", email: "viewer@example.test" } });
     try {
@@ -81,6 +82,35 @@ describe("retained chat and overview behavior", () => {
       assert.ok(screen.getByRole("link", { name: "Tasks" }));
     } finally {
       apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.projectSettings = original.projectSettings;
+      apiClient.members = original.members;
+      apiClient.currentIdentity = original.currentIdentity;
+    }
+  });
+
+  it("keeps the overview readable and retries a failed lifecycle request locally", async () => {
+    const original = { projectCapabilities: apiClient.projectCapabilities, projectSettings: apiClient.projectSettings, members: apiClient.members, currentIdentity: apiClient.currentIdentity };
+    apiClient.projectCapabilities = async () => readOnly;
+    apiClient.members = async () => [];
+    apiClient.currentIdentity = async () => ({ user: { id: "viewer_1", email: "viewer@example.test" } });
+    let settingsReads = 0;
+    apiClient.projectSettings = async () => {
+      if (settingsReads++ === 0) throw new ApiError(503, "Project lifecycle is temporarily unavailable.");
+      return { project: { id: "project_1", workspaceId: "workspace_1", name: "Project", lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: { canManageSettings: false } };
+    };
+    try {
+      render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
+      await screen.findByText("This project is available for viewing.");
+      await screen.findByText("Project lifecycle unavailable");
+      assert.ok(screen.getByText("Project status: Unknown."));
+      assert.ok(screen.getByText("Status: Unknown · You can view this project, but you cannot make changes."));
+      assert.equal(screen.queryByText("Project status: Active."), null);
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByText("Project status: Active.");
+      assert.equal(settingsReads, 2);
+    } finally {
+      apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.projectSettings = original.projectSettings;
       apiClient.members = original.members;
       apiClient.currentIdentity = original.currentIdentity;
     }
@@ -147,6 +177,102 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("locks sending until failed history recovers and then anchors after the latest saved message", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
+    const afterMessageIds: Array<string | null> = [];
+    let historyReads = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => {
+      if (historyReads++ === 0) throw new ApiError(503, "History could not be loaded.");
+      return [{ id: "message_7", threadId: "chat_1", sequence: 7, version: 1, deliveryStatus: "completed", role: "assistant", content: "Saved context", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
+    };
+    apiClient.sendChatMessage = async (_projectId, _threadId, content, afterMessageId) => {
+      afterMessageIds.push(afterMessageId);
+      return {
+        message: { id: "message_8", threadId: "chat_1", sequence: 8, version: 1, deliveryStatus: "completed", role: "user", content, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt },
+        endpointSnapshot: { id: endpoint.id, baseUrl: endpoint.baseUrl, model: endpoint.model, protocol: endpoint.protocol },
+      };
+    };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("History could not be loaded.");
+      const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      assert.equal(composer.disabled, true);
+      assert.equal((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled, true);
+      fireEvent.click(screen.getByRole("button", { name: "Retry conversation" }));
+      await screen.findByText("Saved context");
+      await waitFor(() => assert.equal(composer.disabled, false));
+      fireEvent.change(composer, { target: { value: "Continue" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => assert.deepEqual(afterMessageIds, ["message_7"]));
+    } finally {
+      apiClient.endpoints = original.endpoints;
+      apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.chatThreads = original.chatThreads;
+      apiClient.chatMessages = original.chatMessages;
+      apiClient.sendChatMessage = original.sendChatMessage;
+    }
+  });
+
+  it("retains the active conversation when endpoint and thread refreshes fail", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    let endpointReads = 0;
+    let threadReads = 0;
+    apiClient.endpoints = async () => {
+      if (endpointReads++ > 0) throw new ApiError(503, "Endpoint refresh failed.");
+      return [endpoint];
+    };
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => {
+      if (threadReads++ > 0) throw new ApiError(503, "Conversation refresh failed.");
+      return threads;
+    };
+    apiClient.chatMessages = async () => [{ id: "message_1", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed", role: "assistant", content: "Retained conversation", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Retained conversation");
+      fireEvent.click(screen.getByRole("button", { name: "Refresh chat" }));
+      await screen.findByText(/Endpoint configuration could not be loaded/);
+      await screen.findByText("Conversation refresh failed.");
+      assert.ok(screen.getByText("Retained conversation"));
+      assert.ok(screen.getByRole("button", { name: "Product Q&A" }));
+      assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, false);
+    } finally {
+      apiClient.endpoints = original.endpoints;
+      apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.chatThreads = original.chatThreads;
+      apiClient.chatMessages = original.chatMessages;
+    }
+  });
+
+  it("switches conversations from the narrow-screen sheet without placing the rail before chat", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    const second = { ...threads[0]!, id: "chat_2", title: "Release notes" };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [...threads, second];
+    apiClient.chatMessages = async (_projectId, id) => [{ id: `message_${id}`, threadId: id, sequence: 1, version: 1, deliveryStatus: "completed", role: "assistant", content: `Message for ${id}`, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Message for chat_1");
+      const open = screen.getByRole("button", { name: "Open conversations" });
+      assert.match(open.parentElement?.className ?? "", /lg:hidden/);
+      fireEvent.click(open);
+      const sheet = await screen.findByRole("dialog", { name: "Conversations" });
+      fireEvent.click(within(sheet).getByRole("button", { name: "Release notes" }));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Conversations" }), null));
+      await screen.findByText("Message for chat_2");
+      assert.ok(screen.getByRole("textbox", { name: "Message" }));
+    } finally {
+      apiClient.endpoints = original.endpoints;
+      apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.chatThreads = original.chatThreads;
+      apiClient.chatMessages = original.chatMessages;
+    }
+  });
+
   it("selects the pinned remaining thread after deleting the current conversation", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, deleteChatThread: apiClient.deleteChatThread };
     const current = { ...threads[0]!, id: "chat_current", title: "Current" };
@@ -182,7 +308,7 @@ describe("retained chat and overview behavior", () => {
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,HTMLInputElement:dom.window.HTMLInputElement,HTMLTextAreaElement:dom.window.HTMLTextAreaElement, Element: dom.window.Element, Document: dom.window.Document, Node: dom.window.Node,NodeFilter:dom.window.NodeFilter, self: dom.window, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement,HTMLInputElement:dom.window.HTMLInputElement,HTMLTextAreaElement:dom.window.HTMLTextAreaElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node,NodeFilter:dom.window.NodeFilter, self: dom.window, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
   if (!("scrollIntoView" in dom.window.HTMLElement.prototype)) Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });

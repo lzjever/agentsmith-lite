@@ -1,264 +1,169 @@
 "use client";
 
-import { Archive, ArrowLeft, Copy, ExternalLink, Pencil, RefreshCw, RotateCcw, Send, Square, TerminalSquare, Trash2 } from "lucide-react";
+import { ArrowLeft, RefreshCw, TerminalSquare, Trash2, X } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import { apiClient, type ProjectCapabilities, type Task, type TaskArtifact, type TaskEvent, type TaskFollowUp, type TaskInput, type TaskSummary } from "../../lib/api/client";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import type { TaskCapabilities, TaskInteractionSnapshot } from "../../lib/api/client";
+import { apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { toast } from "../ui/toast";
-import { TaskActivity } from "./TaskActivity";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
+import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskInputsPanel } from "./TaskInputsPanel";
-import { TaskTranscript } from "./TaskTranscript";
 import { TaskTerminalPanel } from "./TaskTerminalPanel";
-import { isActiveTask, taskStateCopy, taskStatusLabel } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
+
+type WorkspaceMode = "conversation" | "terminal" | "artifacts";
+type LoadState = "loading" | "ready" | "error";
 
 export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly = false }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly?: boolean }) {
   const mutationKeys = useTaskMutationKeys();
   const [task, setTask] = useState<Task>();
-  const [events, setEvents] = useState<TaskEvent[]>([]);
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
   const [inputs, setInputs] = useState<TaskInput[]>([]);
-  const [summary, setSummary] = useState<TaskSummary>();
-  const [followUps, setFollowUps] = useState<TaskFollowUp[]>([]);
-  const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [error, setError] = useState("");
-  const [cancelling, setCancelling] = useState(false);
-  const [followUp, setFollowUp] = useState("");
-  const [followingUp, setFollowingUp] = useState(false);
+  const [capabilities, setCapabilities] = useState<TaskCapabilities>();
+  const [runState, setRunState] = useState<TaskInteractionSnapshot["runState"]>();
+  const [taskState, setTaskState] = useState<LoadState>("loading");
+  const [artifactsState, setArtifactsState] = useState<LoadState>("loading");
+  const [inputsState, setInputsState] = useState<LoadState>("loading");
+  const [taskError, setTaskError] = useState("");
+  const [artifactsError, setArtifactsError] = useState("");
+  const [inputsError, setInputsError] = useState("");
+  const [mode, setMode] = useState<WorkspaceMode>(artifactsOnly ? "artifacts" : "conversation");
   const [refreshingArtifacts, setRefreshingArtifacts] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-  const [editTitle, setEditTitle] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [conversationKey, setConversationKey] = useState(0);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [terminalOpen,setTerminalOpen]=useState(false);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
 
-  const load = useCallback(async (quiet = false) => {
-    if (!quiet) setState("loading");
+  const loadTask = useCallback(async (quiet = false) => {
+    if (!quiet) setTaskState("loading");
+    setTaskError("");
     try {
-      const [found, timeline, output, taskInputs, projected, nextSummary, nextFollowUps] = await Promise.all([
-        apiClient.task(taskId),
-        apiClient.taskEvents(taskId),
-        apiClient.taskArtifacts(taskId),
-        apiClient.taskInputs(taskId),
-        apiClient.projectCapabilities(projectId),
-        apiClient.taskSummary(taskId),
-        apiClient.taskFollowUps(taskId)
-      ]);
-      setTask(found);
-      setEvents(timeline);
-      setArtifacts(output);
-      setInputs(taskInputs);
-      setCapabilities(projected);
-      setSummary(nextSummary);
-      setFollowUps(nextFollowUps);
-      setError("");
-      setState("ready");
+      setTask(await apiClient.task(taskId));
+      setTaskState("ready");
     } catch (reason) {
-      setError(message(reason));
-      setState("error");
+      setTaskError(message(reason));
+      setTaskState("error");
     }
-  }, [projectId, taskId]);
+  }, [taskId]);
 
-  useEffect(() => { void load(); }, [load]);
-  useEffect(() => {
-    if (!task || !isActiveTask(task.status)) return;
-    const timer = window.setInterval(() => void load(true), 5_000);
-    return () => window.clearInterval(timer);
-  }, [load, task]);
-  useEffect(() => {
-    if (!task || isActiveTask(task.status) || !needsTerminalRecovery(task)) return;
-    const timer = window.setInterval(() => void load(true), 5_000);
-    return () => window.clearInterval(timer);
-  }, [load, task]);
-
-  const canCancel = Boolean(task && isActiveTask(task.status) && capabilities?.canCancelTasks);
-  const canFollowUp = capabilities?.canCreateTasks === true;
-  const canManage = capabilities?.canCreateTasks === true;
-
-  async function refreshArtifacts() {
+  const loadArtifacts = useCallback(async () => {
     setRefreshingArtifacts(true);
-    try { await load(true); }
-    catch (reason) { setError(message(reason)); }
-    finally { setRefreshingArtifacts(false); }
-  }
-
-  async function cancel() {
-    setCancelling(true);
-    setError("");
+    setArtifactsError("");
+    setArtifactsState("loading");
     try {
-      const identity = taskId;
-      await apiClient.cancelTask(taskId, mutationKeys.key("task-cancel", identity));
-      mutationKeys.complete("task-cancel", identity);
-      await load(true);
-      toast.success("Task cancellation requested");
+      setArtifacts(await apiClient.taskArtifacts(taskId));
+      setArtifactsState("ready");
     } catch (reason) {
-      const detail = message(reason);
-      setError(detail);
-      toast.error(detail);
-    } finally { setCancelling(false); }
-  }
+      setArtifactsError(message(reason));
+      setArtifactsState("error");
+    } finally {
+      setRefreshingArtifacts(false);
+    }
+  }, [taskId]);
 
-  async function retry(duplicate = false) {
-    const operation = duplicate ? "task-duplicate" : "task-retry";
-    const identity = taskId;
+  const loadInputs = useCallback(async () => {
+    setInputsError("");
+    setInputsState("loading");
     try {
-      const key = mutationKeys.key(operation, identity);
-      const next = duplicate ? await apiClient.duplicateTask(taskId, key) : await apiClient.retryTask(taskId, key);
-      mutationKeys.complete(operation, identity);
-      window.location.assign(`${basePath}/${next.id}`);
-    } catch (reason) { setError(message(reason)); }
-  }
+      setInputs(await apiClient.taskInputs(taskId));
+      setInputsState("ready");
+    } catch (reason) {
+      setInputsError(message(reason));
+      setInputsState("error");
+    }
+  }, [taskId]);
 
-  async function submitFollowUp() {
-    if (!followUp.trim() || followingUp) return;
-    setFollowingUp(true);
+  useEffect(() => {
+    void loadTask();
+  }, [loadTask]);
+  useEffect(() => {
+    void loadArtifacts();
+  }, [loadArtifacts]);
+  useEffect(() => {
+    if (!artifactsOnly) void loadInputs();
+  }, [artifactsOnly, loadInputs]);
+
+  function refresh() {
+    void loadTask(true);
+    void loadArtifacts();
+    if (!artifactsOnly) {
+      void loadInputs();
+      setConversationKey((value) => value + 1);
+    }
+  }
+  const handleArtifactPublished = useCallback(() => {
+    void loadArtifacts();
+  }, [loadArtifacts]);
+
+  async function cancelTask() {
+    setCancelling(true);
     try {
-      const prompt = followUp.trim();
-      const identity = `${taskId}:${prompt}`;
-      const saved = await apiClient.followUpTask(taskId, prompt, mutationKeys.key("task-follow-up", identity));
-      mutationKeys.complete("task-follow-up", identity);
-      setFollowUp("");
-      setFollowUps((current) => [...current, saved]);
-      if (saved.followUpTaskId) {
-        window.location.assign(`${basePath}/${saved.followUpTaskId}`);
-        return;
-      }
-      await load(true);
-    } catch (reason) { setError(message(reason)); }
-    finally { setFollowingUp(false); }
+      await apiClient.cancelTask(taskId, mutationKeys.key("task-cancel", taskId));
+      mutationKeys.complete("task-cancel", taskId);
+      refresh();
+      toast.success("Task cancellation requested");
+    } finally {
+      setCancelling(false);
+    }
   }
-
-  async function saveTitle() {
-    if (!task || !editTitle.trim() || editing) return;
-    const title = editTitle.trim();
-    const identity = `${task.id}:${title}`;
-    setEditing(true);
-    setError("");
-    try {
-      const updated = await apiClient.updateTask(task.id, title, mutationKeys.key("task-edit", identity));
-      mutationKeys.complete("task-edit", identity);
-      setTask(updated);
-      setEditOpen(false);
-      toast.success("Task title updated");
-    } catch (reason) { setError(message(reason)); }
-    finally { setEditing(false); }
-  }
-
-  async function archiveTask() {
-    if (!task) return;
-    const updated = await apiClient.archiveTask(task.id, mutationKeys.key("task-archive", task.id));
-    mutationKeys.complete("task-archive", task.id);
-    setTask(updated);
-    toast.success("Task archived");
-  }
-
   async function deleteTask() {
-    if (!task) return;
-    await apiClient.deleteTask(task.id, mutationKeys.key("task-delete", task.id));
-    mutationKeys.complete("task-delete", task.id);
+    await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
+    mutationKeys.complete("task-delete", taskId);
     window.location.assign(basePath);
   }
 
-  async function editFollowUp(item: TaskFollowUp, prompt: string) {
-    const identity = `${item.id}:${prompt}`;
-    const updated = await apiClient.updateTaskFollowUp(taskId, item.id, prompt, mutationKeys.key("follow-up-edit", identity));
-    mutationKeys.complete("follow-up-edit", identity);
-    setFollowUps((current) => current.map((candidate) => candidate.id === item.id ? updated : candidate));
-  }
-
-  async function deleteFollowUp(item: TaskFollowUp) {
-    await apiClient.deleteTaskFollowUp(taskId, item.id, mutationKeys.key("follow-up-delete", item.id));
-    mutationKeys.complete("follow-up-delete", item.id);
-    setFollowUps((current) => current.filter((candidate) => candidate.id !== item.id));
-  }
-
-  if (state === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;
-  if (state === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{error}</p><Button className="mt-4" onClick={() => void load()}>Try again</Button></div></PageState></PageLayout>;
+  if (taskState === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;
+  if (taskState === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{taskError}</p><Button className="mt-4" onClick={() => void loadTask()}>Try again</Button></div></PageState></PageLayout>;
   if (!task) return null;
 
-  const terminal = !isActiveTask(task.status);
-  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${terminalLabel(task)} · ${task.executionMode === "dry-run" ? "Dry run" : "Live execution"} · ${task.id}`} actions={<>
-    <Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={() => void load()}><RefreshCw size={17} /></Button>
-    {canManage && !artifactsOnly ? <Button variant="quiet" size="icon" aria-label="Edit task title" title="Edit task title" onClick={() => { setEditTitle(task.title?.trim() || task.prompt.slice(0, 160)); setEditOpen(true); }}><Pencil size={16} /></Button> : null}
-    {terminal && canManage ? <><Button variant="quiet" onClick={() => void retry()}><RotateCcw size={15} />Retry</Button><Button variant="quiet" onClick={() => void retry(true)}><Copy size={15} />Duplicate</Button>{!task.archivedAt ? <Button variant="quiet" onClick={() => setArchiveOpen(true)}><Archive size={15} />Archive</Button> : null}<Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button></> : null}
-    {canCancel ? <Button variant="danger" disabled={cancelling} onClick={() => void cancel()}><Square size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}
-    {task.executionMode==="live"&&isActiveTask(task.status)&&canManage&&!artifactsOnly?<Button variant="quiet" onClick={()=>setTerminalOpen((open)=>!open)}><TerminalSquare size={15}/>{terminalOpen?"Hide terminal":"Terminal"}</Button>:null}
-  </>} />;
+  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${runState?.replaceAll("_", " ") ?? task.status.replaceAll("_", " ")} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
+  const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
 
-  return <PageLayout header={header}>
+  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link><section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;
+
+  const showArtifacts = artifactsState !== "ready" || artifacts.length > 0;
+  const showTerminal = capabilities?.openTerminal || mode === "terminal";
+  return <PageLayout header={header} contentWidth="full">
     <Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>
-    {error ? <div className="border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}
-    {summary ? <p className="text-sm text-secondary">{summary.eventCount} events · {summary.artifactCount} artifacts</p> : null}
-    <TaskStatePanel task={task} />
-    {task.sourceTaskId ? <p className="text-sm text-secondary">Follow-up to <Link className="text-foreground underline" href={`${basePath}/${task.sourceTaskId}`}>{task.sourceTaskId}</Link></p> : null}
-    {task.executionMode === "dry-run" ? <DryRunTaskDetail prompt={task.prompt} /> : artifactsOnly ? <ArtifactOnly taskId={taskId} basePath={basePath} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /> : <>
-      <div className="grid min-h-[36rem] min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_17rem]" data-testid="task-workspace">
-        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace">
-          {terminalOpen ? <TaskTerminalPanel taskId={taskId} /> : <>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5"><TaskTranscript taskId={taskId} /></div>
-            {followUps.length > 0 ? <div className="border-t border-border px-4 sm:px-5"><FollowUpList followUps={followUps} basePath={basePath} canManage={canManage} onEdit={editFollowUp} onDelete={deleteFollowUp} /></div> : null}
-            {canFollowUp ? <div className="border-t border-border bg-background px-4 py-4 sm:px-5"><FollowUpComposer active={isActiveTask(task.status)} value={followUp} busy={followingUp} onChange={setFollowUp} onSubmit={submitFollowUp} /></div> : null}
-          </>}
-        </section>
-        <aside className="min-h-0 min-w-0 border border-border bg-background xl:overflow-y-auto">
-          <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div>
-          <div className="p-3"><TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={refreshArtifacts} refreshing={refreshingArtifacts} /></div>
-        </aside>
-      </div>
-      <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Inputs and original prompt</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.7fr)_minmax(0,1fr)]"><TaskInputsPanel taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} /><div><h3 className="type-caption text-tertiary">Task prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
-      <details className="border-b border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Execution details · {events.length} events</summary><div className="mt-4"><TaskActivity events={events} /></div></details>
-    </>}
-    {task.executionMode === "dry-run" && !artifactsOnly ? <>{followUps.length > 0 ? <FollowUpList followUps={followUps} basePath={basePath} canManage={canManage} onEdit={editFollowUp} onDelete={deleteFollowUp} /> : null}{canFollowUp ? <FollowUpComposer active={isActiveTask(task.status)} value={followUp} busy={followingUp} onChange={setFollowUp} onSubmit={submitFollowUp} /> : null}</> : null}
-    <Dialog open={editOpen} onOpenChange={(open) => { if (!editing) { setEditOpen(open); if (!open) mutationKeys.clear("task-edit"); } }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); void saveTitle(); }}><DialogHeader title="Edit task title" description="Use a short title that is easy to scan in the task list." /><div className="px-5 py-5"><Label htmlFor="task-title">Title</Label><Input id="task-title" className="mt-2" value={editTitle} maxLength={160} onChange={(event) => setEditTitle(event.target.value)} autoFocus /></div><DialogFooter><Button type="button" variant="quiet" disabled={editing} onClick={() => setEditOpen(false)}>Cancel</Button><Button type="submit" disabled={editing || !editTitle.trim()}>{editing ? "Saving..." : "Save title"}</Button></DialogFooter></form></DialogContent></Dialog>
-    <ConfirmationDialog open={archiveOpen} onOpenChange={setArchiveOpen} title="Archive task?" description="The task remains available through the archived filter, including its transcript and artifacts." confirmText="Archive task" variant="default" onConfirm={archiveTask} errorContext="Task could not be archived" />
+    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</WorkspaceTab>{showTerminal ? <WorkspaceTab active={mode === "terminal"} onClick={() => setMode("terminal")}><TerminalSquare size={14} />Terminal</WorkspaceTab> : null}{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => setMode("artifacts")} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
+    <div className="grid h-[clamp(24rem,calc(100dvh-12rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
+      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} onCapabilities={setCapabilities} onRunState={setRunState} onArtifactPublished={handleArtifactPublished} /></div>
+      {showTerminal ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} /></div> : null}
+      {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
+    </div>
+    <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Task details</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.7fr)_minmax(0,1fr)]"><InputsSection taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} state={inputsState} error={inputsError} onRetry={loadInputs} /><div><h3 className="type-caption text-tertiary">Original prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
     <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This removes the task from the product after its sandbox cleanup is complete." confirmText="Delete task" onConfirm={deleteTask} errorContext="Task could not be deleted" />
+    <ConfirmationDialog open={cancelOpen} onOpenChange={setCancelOpen} title="Cancel task?" description="This ends the task and begins cleanup. Stop current turn only interrupts the active agent turn." confirmText="Cancel task" onConfirm={cancelTask} errorContext="Task could not be cancelled" />
   </PageLayout>;
 }
 
-function TaskStatePanel({ task }: { task: Task }) {
-  const resourceKinds = [...new Set(task.sandbox.resources.map((resource) => resource.kind))];
-  const attention = task.status === "failed" || task.artifactProjectionStatus === "failed" || task.cleanupStatus === "failed";
-  return <section className="border-y border-subtle py-4" aria-label="Sandbox summary"><h2 className="type-title text-foreground">Sandbox summary</h2><p className="mt-2 text-sm text-secondary" role={attention ? "alert" : undefined}>{taskStateCopy(task)}</p><dl className="mt-3 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2"><StateField label="Execution" value={task.executionMode === "live" ? "Live" : "Dry run"} /><StateField label="Status" value={terminalLabel(task)} /><StateField label="Namespace" value={task.sandbox.namespace} mono /><StateField label="Resources" value={resourceKinds.length ? resourceKinds.join(", ") : "None"} /><StateField label="Updated" value={new Date(task.updatedAt).toLocaleString()} />{task.artifactProjectionStatus ? <StateField label="Artifacts" value={task.artifactProjectionStatus} /> : null}{task.cleanupStatus ? <StateField label="Cleanup" value={task.cleanupStatus} /> : null}{task.finalizationIntentStatus ? <StateField label="Finalization" value={taskStatusLabel(task.finalizationIntentStatus)} /> : null}</dl>{task.artifactProjectionError ? <p className="mt-3 text-sm text-error">Artifact recovery: {task.artifactProjectionError}</p> : null}{task.cleanupError ? <p className="mt-3 text-sm text-error">Cleanup recovery: {task.cleanupError}</p> : null}</section>;
+function ArtifactsSection({ taskId, artifacts, state, error, refreshing, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; onRetry: () => Promise<void> }) {
+  if (state === "loading" && artifacts.length === 0) return <p className="py-6 text-center text-sm text-secondary">Loading artifacts...</p>;
+  if (state === "error" && artifacts.length === 0) return <SectionError title="Artifacts unavailable" message={error} onRetry={onRetry} />;
+  return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRetry} refreshing={refreshing} /></>;
 }
 
-function StateField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) { return <div><dt className="text-tertiary">{label}</dt><dd className={mono ? "font-mono text-xs text-foreground" : "text-foreground"}>{value}</dd></div>; }
-
-function needsTerminalRecovery(task: Task): boolean {
-  return task.executionMode === "live" && (["pending", "draining", "failed"].includes(task.artifactProjectionStatus ?? "") || ["pending", "running", "failed"].includes(task.cleanupStatus ?? ""));
+function InputsSection({ taskId, inputs, selectedPaths, state, error, onRetry }: { taskId: string; inputs: TaskInput[]; selectedPaths: string[]; state: LoadState; error: string; onRetry: () => Promise<void> }) {
+  if (state === "loading" && inputs.length === 0) return <p className="py-6 text-center text-sm text-secondary">Loading task inputs...</p>;
+  if (state === "error" && inputs.length === 0) return <SectionError title="Task inputs unavailable" message={error} onRetry={onRetry} />;
+  return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskInputsPanel taskId={taskId} inputs={inputs} selectedPaths={selectedPaths} /></>;
 }
 
-function FollowUpComposer({ active, value, busy, onChange, onSubmit }: { active: boolean; value: string; busy: boolean; onChange: (value: string) => void; onSubmit: () => Promise<void> }) {
-  return <form className="flex flex-col gap-2 sm:flex-row sm:items-end" onSubmit={(event) => { event.preventDefault(); void onSubmit(); }}><div className="min-w-0 flex-1"><Label htmlFor="task-follow-up">Follow-up prompt</Label><Input id="task-follow-up" value={value} onChange={(event) => onChange(event.target.value)} className="mt-1" placeholder={active ? "Send follow-up" : "Start follow-up task"} /></div><Button className="sm:shrink-0" type="submit" disabled={busy || !value.trim()}><Send size={15} />{busy ? "Starting..." : active ? "Send follow-up" : "Start follow-up"}</Button></form>;
+function SectionError({ title, message: detail, onRetry }: { title: string; message: string; onRetry: () => Promise<void> }) {
+  return <div className="border border-error/30 bg-error/10 px-3 py-3 text-sm" role="alert"><p className="font-medium text-foreground">{title}</p><p className="mt-1 break-words text-secondary">{detail}</p><Button className="mt-3" variant="quiet" size="sm" onClick={() => void onRetry()}><RefreshCw size={14} />Try again</Button></div>;
 }
 
-function FollowUpList({ followUps, basePath, canManage, onEdit, onDelete }: { followUps: TaskFollowUp[]; basePath: string; canManage: boolean; onEdit: (item: TaskFollowUp, prompt: string) => Promise<void>; onDelete: (item: TaskFollowUp) => Promise<void> }) {
-  const [editing, setEditing] = useState<TaskFollowUp>();
-  const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [removing, setRemoving] = useState<TaskFollowUp>();
-  const [error, setError] = useState("");
-  async function save() { if (!editing || !prompt.trim()) return; setBusy(true); setError(""); try { await onEdit(editing, prompt.trim()); setEditing(undefined); } catch (reason) { setError(message(reason)); } finally { setBusy(false); } }
-  async function remove() { if (!removing) return; await onDelete(removing); setRemoving(undefined); }
-  return <section className="border-y border-border py-3"><h2 className="type-title text-foreground">Follow-ups</h2><ul className="mt-2 divide-y divide-border text-sm text-secondary">{followUps.map((item) => <li key={item.id} className="flex flex-wrap items-start justify-between gap-3 py-3"><div className="min-w-0 flex-1"><p>{item.followUpTaskId ? <Link className="text-foreground underline" href={`${basePath}/${item.followUpTaskId}`}>Follow-up task</Link> : followUpLabel(item.deliveryStatus)}: <span className="text-foreground">{item.prompt}</span></p>{item.safeError ? <p className="mt-1 text-error">{item.safeError}</p> : null}</div>{canManage && item.deliveryStatus === "pending" ? <div className="flex gap-1"><Button variant="quiet" size="icon" aria-label="Edit queued follow-up" title="Edit queued follow-up" onClick={() => { setEditing(item); setPrompt(item.prompt); setError(""); }}><Pencil size={15} /></Button><Button variant="quiet" size="icon" aria-label="Delete queued follow-up" title="Delete queued follow-up" onClick={() => setRemoving(item)}><Trash2 size={15} /></Button></div> : null}</li>)}</ul><Dialog open={Boolean(editing)} onOpenChange={(open) => { if (!open && !busy) setEditing(undefined); }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); void save(); }}><DialogHeader title="Edit queued follow-up" description="Only follow-ups that have not started delivery can be changed." />{error ? <p className="mx-5 mt-4 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}<div className="px-5 py-5"><Label htmlFor="queued-follow-up">Prompt</Label><Input id="queued-follow-up" className="mt-2" value={prompt} onChange={(event) => setPrompt(event.target.value)} autoFocus /></div><DialogFooter><Button type="button" variant="quiet" disabled={busy} onClick={() => setEditing(undefined)}>Cancel</Button><Button type="submit" disabled={busy || !prompt.trim()}>{busy ? "Saving..." : "Save follow-up"}</Button></DialogFooter></form></DialogContent></Dialog><ConfirmationDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(undefined)} title="Delete queued follow-up?" description="The prompt has not started delivery and can be removed safely." confirmText="Delete follow-up" onConfirm={remove} errorContext="Follow-up could not be deleted" /></section>;
+function WorkspaceTab({ active, onClick, children, className }: { active: boolean; onClick: () => void; children: ReactNode; className?: string }) {
+  return <Button variant={active ? "default" : "quiet"} size="sm" className={className} role="tab" aria-selected={active} onClick={onClick}>{children}</Button>;
 }
 
-function followUpLabel(status: TaskFollowUp["deliveryStatus"]): string { return status === "pending" ? "Queued follow-up" : status === "dispatching" ? "Sending follow-up" : status === "terminal_pending" ? "Waiting for task delivery to settle" : status === "failed" ? "Follow-up delivery failed" : "Sent to active task"; }
-
-function DryRunTaskDetail({ prompt }: { prompt: string }) { return <section className="border-y border-border py-5" aria-labelledby="dry-run-title"><h2 id="dry-run-title" className="type-title text-foreground">Dry run</h2><p className="mt-2 text-sm text-secondary">This task was created in dry-run mode. No sandbox resources, runtime events, or artifacts are expected.</p><div className="mt-5 border-t border-border pt-5"><h3 className="type-title text-foreground">Task input</h3><p className="mt-2 whitespace-pre-wrap text-sm text-secondary">{prompt}</p></div></section>; }
-
-function ArtifactOnly({ taskId, basePath, artifacts, onRefresh, refreshing }: { taskId: string; basePath: string; artifacts: TaskArtifact[]; onRefresh: () => Promise<void>; refreshing: boolean }) { return <section><div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h2 className="type-title text-foreground">Published artifacts</h2><p className="mt-1 text-sm text-secondary">Files retained by the product after the sandbox lifecycle ends.</p></div><Link href={`${basePath}/${taskId}`} className="inline-flex shrink-0 items-center gap-1 text-sm text-secondary hover:text-foreground">Task activity <ExternalLink size={14} /></Link></div><TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRefresh} refreshing={refreshing} /></section>; }
-
-function terminalLabel(task: Task): string { return task.terminalReason === "cancelled" ? "Cancelled" : task.terminalReason === "not_executed" ? "Not executed" : task.terminalReason === "cleaned_legacy" ? "Cleaned up" : task.terminalReason ? task.terminalReason.replaceAll("_", " ") : taskStatusLabel(task.status); }
-function message(error: unknown): string { return error instanceof Error ? error.message : "The task could not be loaded."; }
+function message(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "The task request could not be completed.";
+}

@@ -3,14 +3,14 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import React from "react";
-import { apiClient, type Profile, type ProjectSettings } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Profile, type ProjectSettings } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { ProfilePage } = await import("../../src/components/profile/ProfilePage.js");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 const profile: Profile = { user: { id: "user_1", email: "owner@example.test", pictureUrl: "https://idp.test/owner.png", emailVerified: true, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, preferences: { userId: "user_1", displayName: "Owner", timezone: "UTC", bio: "Builds tools", jobTitle: "Engineer", company: "AgentSmith", greetingPreference: "Hello", interests: ["Engineering"], updatedAt: "2026-07-11T00:00:00.000Z" } };
 const settings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", name: "Project", taskConcurrencyLimit: 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
@@ -61,6 +61,51 @@ describe("profile and settings pages", () => {
     apiClient.members=async()=>[{projectId:"project_1",userId:"user_1",role:"owner",createdAt:"x",updatedAt:"x"},{projectId:"project_1",userId:"user_2",role:"member",createdAt:"x",updatedAt:"x"}];
     apiClient.unarchiveProject=async()=>({...settings.project,ownerUserId:"user_1",lifecycleStatus:"active"});
     try { render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1"/></AppRouterContext.Provider>); await screen.findByRole("status"); assert.equal((screen.getByRole("textbox",{name:"Project name"}) as HTMLInputElement).disabled,true); assert.ok(screen.getByRole("button",{name:"Unarchive project"})); assert.ok(screen.getByRole("combobox",{name:"New project owner"})); } finally {apiClient.projectSettings=original.projectSettings;apiClient.currentIdentity=original.currentIdentity;apiClient.members=original.members;apiClient.unarchiveProject=original.unarchiveProject;}
+  });
+
+  it("preserves the project return path on the single profile page", async () => {
+    const original = apiClient.profile;
+    apiClient.profile = async () => profile;
+    window.history.replaceState({}, "", "/profile?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    try {
+      render(<ProfilePage />);
+      const back = await screen.findByRole("link", { name: "Back to project" });
+      assert.equal(back.getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+    } finally { apiClient.profile = original; }
+  });
+
+  it("keeps a specific settings load error with retry and return actions", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity };
+    apiClient.projectSettings = async () => { throw new ApiError(403, "Project settings require administrator access."); };
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const alert = await screen.findByRole("alert");
+      assert.ok(alert.textContent?.includes("Project settings require administrator access."));
+      assert.ok(screen.getByRole("button", { name: "Try again" }));
+      assert.equal(screen.getByRole("link", { name: "Back to project" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/overview");
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("allows an administrator to archive but not restore a project", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, archiveProject: apiClient.archiveProject };
+    const archived = { ...settings.project, ownerUserId: "owner_1", lifecycleStatus: "archived" as const };
+    apiClient.currentIdentity = async () => ({ user: { id: "admin_1", email: "admin@example.test" } });
+    apiClient.projectSettings = async () => ({ ...settings, project: { ...settings.project, ownerUserId: "owner_1", lifecycleStatus: "active" } });
+    apiClient.archiveProject = async () => archived;
+    try {
+      const view = render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Archive project" }));
+      const dialog = screen.getByRole("alertdialog");
+      assert.ok(within(dialog).getByRole("heading", { name: "Archive project" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Archive project" }));
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Unarchive project" }), null));
+      view.unmount();
+      apiClient.projectSettings = async () => ({ ...settings, project: archived });
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      await screen.findByRole("status");
+      assert.equal(screen.queryByRole("button", { name: "Unarchive project" }), null);
+    } finally { Object.assign(apiClient, original); }
   });
 });
 

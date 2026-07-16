@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import React from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMember } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { WorkspaceDirectoryPage } = await import("../../src/components/workspaces/WorkspaceDirectoryPage.js");
 const { WorkspaceProjectsEntryPage } = await import("../../src/components/workspaces/WorkspaceProjectsEntryPage.js");
 const { WorkspaceMembersPage } = await import("../../src/components/workspaces/WorkspaceMembersPage.js");
@@ -25,7 +26,7 @@ describe("workspace identity UX", () => {
       await screen.findByText("Owner: Owner Person · Your access: Viewer");
       assert.equal(screen.queryByText("owner_1"), null);
       directory.unmount();
-      render(<WorkspaceProjectsEntryPage workspaceId={workspace.id} />);
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
       await screen.findByText("Owner: Owner Person · Your access: Viewer");
     } finally { apiClient.workspaces = original; }
   });
@@ -56,14 +57,48 @@ describe("workspace identity UX", () => {
     const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
     apiClient.workspaces = async () => [{ ...workspace, projects: [project] }];
     try {
-      render(<WorkspaceProjectsEntryPage workspaceId={workspace.id} />);
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
       const pin = (await screen.findAllByRole("button", { name: "Pin Pinned project" }))[0]!;
       fireEvent.click(pin);
       assert.equal(window.localStorage.getItem(`agentsmith:projects:pinned:${workspace.id}`), JSON.stringify([project.id]));
       assert.ok((await screen.findAllByRole("button", { name: "Unpin Pinned project" })).length > 0);
     } finally { apiClient.workspaces = original; }
   });
+
+  it("enters a project immediately after creating it", async () => {
+    const original = { workspaces: apiClient.workspaces, createProject: apiClient.createProject };
+    const pushed: string[] = [];
+    const created = { id: "project_new", workspaceId: workspace.id, name: "New project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
+    apiClient.workspaces = async () => [{ ...workspace, capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.createProject = async () => created;
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
+      fireEvent.click(await within(screen.getByTestId("page-layout__header")).findByRole("button", { name: "New project" }));
+      fireEvent.change(screen.getByLabelText("Project name"), { target: { value: created.name } });
+      fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+      await waitFor(() => assert.deepEqual(pushed, [`/workspaces/${workspace.id}/projects/${created.id}/overview`]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("confirms before removing a workspace member", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, removeWorkspaceMember: apiClient.removeWorkspaceMember };
+    const member: WorkspaceMember = { workspaceId: workspace.id, userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp };
+    const removed: string[] = [];
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner, member];
+    apiClient.removeWorkspaceMember = async (_workspaceId, userId) => { removed.push(userId); return { deleted: true }; };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Remove Member Person" }));
+      assert.deepEqual(removed, []);
+      assert.ok(screen.getByRole("alertdialog", { name: "Remove workspace member" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove member" }));
+      await waitFor(() => assert.deepEqual(removed, [member.userId]));
+    } finally { Object.assign(apiClient, original); }
+  });
 });
+
+function router(pushed: string[] = []) { return { back() {}, forward() {}, refresh() {}, push(path: string) { pushed.push(path); }, replace() {}, prefetch() {} }; }
 
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

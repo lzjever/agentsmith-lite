@@ -194,7 +194,11 @@ fn build_router(state: HttpState, max_upload_request_bytes: u64) -> Router {
         .route("/v1/files/:file_id", get(download_file_handler))
         .route("/v1/timeline", get(timeline_handler))
         .route("/v1/llm-text-preview", get(llm_text_preview_handler))
-        .route("/v1/abort", post(abort_handler));
+        .route("/v1/abort", post(abort_handler))
+        .route(
+            "/v1/background-tasks/:task_id/stop",
+            post(stop_background_task_handler),
+        );
     router = router.route("/v1/terminal/ws", get(terminal_ws_handler));
 
     if registry_enabled {
@@ -687,6 +691,32 @@ async fn abort_handler(
         queue_length: status.queue_length,
         state: status.state,
     }))
+}
+
+async fn stop_background_task_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, state.service_key.as_deref())?;
+    let result = state
+        .service
+        .cancel_background_task(&task_id)
+        .ok_or_else(ApiError::background_task_not_found)?;
+    let state_name = result
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "persistence_error",
+            "background task cancellation returned an invalid state",
+            true,
+        ))?;
+    Ok(Json(json!({
+        "ok": true,
+        "task_id": task_id,
+        "state": state_name,
+    })))
 }
 
 async fn registry_ws_handler(
@@ -2215,6 +2245,15 @@ impl ApiError {
         }
     }
 
+    fn background_task_not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "background_task_not_found",
+            "background task was not found",
+            false,
+        )
+    }
+
     fn unsupported_last_event_id() -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -2604,5 +2643,75 @@ impl IntoResponse for ApiError {
                 .insert(HISTORY_BOUNDARY_HEADER, HeaderValue::from_static(boundary));
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::agent_loop::AgentConfig;
+    use crate::provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
+
+    struct PanicProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for PanicProvider {
+        async fn complete(
+            &self,
+            _request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderResponse, ProviderError> {
+            panic!("provider should not be called")
+        }
+    }
+
+    #[tokio::test]
+    async fn background_task_stop_route_requires_service_auth_and_returns_a_safe_missing_task_error() {
+        let service = Service::new(
+            AgentConfig::new("test").with_session("http-background-stop"),
+            Arc::new(PanicProvider),
+            Vec::new(),
+        );
+        let app = router(service, Some("service-secret".to_owned()));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/background-tasks/task_1/stop")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/background-tasks/task_1/stop")
+                    .header("authorization", "Bearer service-secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), MAX_HTTP_JSON_BYTES)
+            .await
+            .expect("response body should read");
+        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(body["error"]["code"], "background_task_not_found");
+        assert_eq!(body["error"]["retryable"], false);
     }
 }

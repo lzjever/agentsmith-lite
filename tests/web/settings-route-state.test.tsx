@@ -13,7 +13,10 @@ describe("settings route recovery", () => {
     const view = render(<SettingsRouteLoading />);
     assert.ok(screen.getByRole("status"));
     view.unmount();
-    render(<SettingsRouteError reset={() => retries.push(1)} />);
+    window.history.replaceState({}, "", "/workspaces/ws_1/settings");
+    render(<SettingsRouteError error={new Error("Workspace settings request timed out.")} reset={() => retries.push(1)} />);
+    assert.ok(screen.getByRole("alert").textContent?.includes("Workspace settings request timed out."));
+    assert.equal(screen.getByRole("link", { name: "Back" }).getAttribute("href"), "/workspaces/ws_1");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     assert.deepEqual(retries, [1]);
   });

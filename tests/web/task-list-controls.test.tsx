@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { after, afterEach, describe, it } from "node:test";
 import React from "react";
-import type { Endpoint, Task, TaskSummary } from "../../src/lib/api/client.js";
+import type { Endpoint, Task } from "../../src/lib/api/client.js";
 
 const dom = installDom();
 const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
@@ -18,10 +18,9 @@ after(() => {
 describe("task list controls", () => {
   it("sends search and cursor actions to the server-owned list controller", () => {
     const tasks = [task(9, "Release checklist"), task(10, "Task 10")];
-    const summaries: TaskSummary[] = tasks.map((item) => ({ taskId: item.id, eventCount: 0, artifactCount: 0, updatedAt: item.updatedAt }));
     const queries: unknown[] = [];
     let next = 0;
-    render(<TaskList page={{ items: tasks, total: 10, nextCursor: "cursor-2" }} summaries={summaries} basePath="/workspaces/ws/projects/project/tasks" query={{ archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 }} pageIndex={0} onQueryChange={(query) => queries.push(query)} onNext={() => { next += 1; }} onPrevious={() => undefined} />);
+    render(<TaskList page={{ items: tasks, total: 10, nextCursor: "cursor-2" }} basePath="/workspaces/ws/projects/project/tasks" query={{ archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 }} pageIndex={0} onQueryChange={(query) => queries.push(query)} onNext={() => { next += 1; }} onPrevious={() => undefined} />);
 
     assert.equal(screen.getByRole("link", { name: /Release checklist/ }).getAttribute("href"), "/workspaces/ws/projects/project/tasks/task_9");
     fireEvent.change(screen.getByRole("textbox", { name: "Search tasks" }), { target: { value: "release" } });

@@ -1,18 +1,23 @@
 # Architecture
 
-AgentSmith Lite is a clean app repo, not a release wrapper around the old system. The P0 implementation has:
+AgentSmith Lite is a product API and Web client for the local single-node Kubernetes loop. The Node server owns authorization, projects, endpoints, tasks, task conversations, artifacts, and sandbox lifecycle. The Web UI is a presentation client: it does not call model providers, Botified, Kubernetes, databases, object storage, or filesystem APIs directly.
 
-- Node API serving product routes and static Web assets.
-- Server-side services for auth, workspace/project records, endpoint config, a direct OpenAI-compatible Chat Completions adapter, path validation, and task state.
-- App-owned Postgres is the default product store. SQL migrations live in `infra/db/migrations/*.sql`, are applied with `POSTGRES_APP_URL npm run db:migrate`, and are recorded in the `agentsmith_migrations` ledger.
-- The Postgres-backed `ProductStore` covers product records, typed JSON document collections, fenced runtime leases, and typed sandbox run state backed by the existing JSON docs table. The in-memory adapter is only a tests/local fallback when `POSTGRES_APP_URL` is absent.
-- A sandbox controller package that renders namespaced sandbox manifests, reconciles the six lifecycle resources in tests, and includes a low-dependency in-cluster Kubernetes port/action applier used by TaskService live startup, the live runtime tick, and explicit one-shot cleanup.
-- A Botified runtime package that generates hardened per-task config, projects timeline events, and starts only `botified serve`.
+Postgres is the product store when `POSTGRES_APP_URL` is set; only local dry-run and tests may use the in-memory fallback. SQL migrations live in `infra/db/migrations/*.sql`. Sandbox lifecycle uses app-owned labels, task/run identity, and resource UID fences, so cancel, TTL, and reap affect only the matching task resources.
 
-The Web UI is a presentation client. It does not call model providers, Botified services, Kubernetes, databases, object storage, or filesystem APIs directly.
+## Task Conversations
 
-Chat requests go from the browser to `/api/v1/projects/{projectId}/chat`, then the Node service loads the endpoint's `credentialId` binding and decrypts the project-scoped provider credential only for the server-side request. The endpoint base URL must match the credential base URL after normalization before the server calls the OpenAI-compatible `/chat/completions` endpoint. Credential plaintext is never returned to the browser, persisted in task state, or passed to Botified.
+The application projector is the single conversation read-model owner. It reads canonical Botified history and product message state, redacts display text, correlates stable Botified identities, and upserts typed `TaskInteractionItem` revisions. The Web receives only the projected interaction snapshot, message receipts, capabilities, and SSE changes; it does not parse NDJSON, merge lifecycle events, or infer business state.
 
-The API store factory is environment controlled: `POSTGRES_APP_URL` selects the real Postgres adapter, while unset local/test runs use memory. Live sandbox mode fails fast without `POSTGRES_APP_URL`; only local dry-run/test flows may use the in-memory fallback. Substrate-only metadata such as JuiceFS state is not read by product migrations or the app store.
+`task_interaction_changes` is the durable interaction log. Each mutation atomically persists interaction revisions, correlation fields, source cursor/history state, and any task lifecycle update. Source identity and interaction revision uniqueness make repeated timeline reads idempotent and preserve in-place updates through process recovery.
 
-Live sandbox recovery has a P0 single-replica runtime tick for active task sync plus automatic reap. Cleanup remains scoped to app-owned task resources.
+Botified history is the canonical input. The server resumes from a safe source cursor, recovers complete history by paging backward then forward when needed, and records `historyStatus: gap` when an earlier boundary is unavailable. A gap is surfaced to the client; it is never hidden by a tail-only reset or by advancing a cursor past unavailable history.
+
+The runtime config enables Botified LLM text preview. The server relays it as transient `assistant_preview` SSE for the active assistant interaction and does not persist it as final conversation truth. Completed timeline interactions replace the preview. Preview loss affects only the live display, not timeline recovery.
+
+`abortTurn` is a current-turn operation through Botified and leaves the task and detached work alive. Task cancellation is a separate task-lifecycle operation: it fences delivery, drains artifacts, and starts scoped cleanup. Stoppable background work is also a typed interaction operation, not a task cancellation.
+
+## Secrets
+
+The server decrypts a project-scoped provider credential only for its OpenAI-compatible request. Botified receives task-scoped access only; the browser never receives provider credentials or Botified service keys. Per-task service keys are derived from server secret and task/run identity, held in memory for service calls, and placed only in the live Kubernetes Secret apply body. Runtime and run-state records contain non-secret metadata only.
+
+Interaction projection redacts secret-like fields and values, including bearer tokens, service keys, provider keys, and task-known credential values. Raw Botified payloads, internal file URLs and paths, Kubernetes Secrets, session tokens, and provider credentials are not public task-conversation data.

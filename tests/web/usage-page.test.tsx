@@ -20,6 +20,9 @@ describe("usage page", () => {
     try {
       render(<UsagePage projectId="project_1" />);
       await screen.findByRole("heading", { name: "Project limits" });
+      assert.ok(screen.getByRole("heading", { name: "Usage scope" }));
+      assert.ok(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
+      assert.ok(screen.getByText("The endpoint filter applies to your provider usage and the 30-day provider trend. Project limits and endpoint totals remain project-wide."));
       assert.ok(screen.getByText("58 remaining of 100"));
       assert.equal(screen.getAllByText("Current state").length, 2);
       assert.equal(screen.getAllByText(/Project lifetime/).length, 3);

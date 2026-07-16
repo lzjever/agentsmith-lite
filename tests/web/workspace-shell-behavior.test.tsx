@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
+import { PathParamsContext, PathnameContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime";
 import type { Project, Workspace } from "../../src/lib/api/client.js";
 
 installDom();
 
-const { fireEvent, cleanup, render, waitFor } = await import("@testing-library/react");
+const { act, fireEvent, cleanup, render, waitFor } = await import("@testing-library/react");
 const React = (await import("react")).default;
 const { useState } = await import("react");
 const { ProjectSwitcher } = await import("../../src/components/app-shell/Topbar.js");
@@ -13,6 +15,7 @@ const { ShellNavigation } = await import("../../src/components/app-shell/Sidebar
 const { ThemeToggle } = await import("../../src/components/theme/ThemeToggle.js");
 const { TooltipProvider } = await import("../../src/components/ui/tooltip.js");
 const { CreateProjectDialog } = await import("../../src/components/projects/CreateProjectDialog.js");
+const { AppShell } = await import("../../src/components/app-shell/AppShell.js");
 const { ApiError, apiClient } = await import("../../src/lib/api/client.js");
 
 const workspace: Workspace = {
@@ -31,6 +34,7 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   document.documentElement.dataset.theme = "light";
+  setSystemDark(false);
 });
 
 describe("workspace and shell interactions", () => {
@@ -70,13 +74,54 @@ describe("workspace and shell interactions", () => {
 
   it("selects projects from the mobile switcher and changes the mobile theme", async () => {
     const selected: string[] = [];
-    const view = render(<><ProjectSwitcher workspace={workspace} project={workspace.projects[0]!} mobile onSelect={(projectId) => selected.push(projectId)} /><ThemeToggle mobile /></>);
+    const view = render(<><ProjectSwitcher workspace={workspace} project={workspace.projects[0]!} mobile onSelect={(projectId) => selected.push(projectId)} onViewAll={() => selected.push("all")} /><ThemeToggle mobile /></>);
     fireEvent.pointerDown(view.getByRole("button", { name: "Current project" }), { button: 0, ctrlKey: false });
     fireEvent.click(await view.findByRole("menuitem", { name: "Second project" }));
     assert.deepEqual(selected, ["proj_2"]);
+    fireEvent.pointerDown(view.getByRole("button", { name: "Current project" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await view.findByRole("menuitem", { name: "View all projects" }));
+    assert.deepEqual(selected, ["proj_2", "all"]);
     fireEvent.click(view.getByRole("button", { name: "Dark" }));
     assert.equal(document.documentElement.dataset.theme, "dark");
     assert.equal(view.getByRole("button", { name: "Dark" }).getAttribute("aria-pressed"), "true");
+  });
+
+  it("follows system theme changes until the user saves a preference", async () => {
+    setSystemDark(true);
+    const view = render(<ThemeToggle mobile />);
+    await waitFor(() => assert.equal(document.documentElement.dataset.theme, "dark"));
+    act(() => setSystemDark(false));
+    await waitFor(() => assert.equal(document.documentElement.dataset.theme, "light"));
+    fireEvent.click(view.getByRole("button", { name: "Dark" }));
+    act(() => setSystemDark(false));
+    assert.equal(document.documentElement.dataset.theme, "dark");
+  });
+
+  it("keeps independently loaded content usable when workspace navigation fails", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => { throw new ApiError(503, "Directory offline"); };
+    apiClient.notifications = async () => [];
+    try {
+      renderShell(<p>Independent workspace content</p>, "/workspaces/ws_1", { workspace: "ws_1" }, "ws_1");
+      await waitFor(() => assert.ok(document.body.textContent?.includes("Independent workspace content")));
+      assert.ok(document.body.textContent?.includes("Workspace navigation is unavailable"));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("shows a recovery path for a project under the wrong workspace URL", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    const other = { ...workspace, id: "ws_2", name: "Other workspace", projects: [{ ...workspace.projects[0]!, workspaceId: "ws_2", id: "proj_other" }] };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace, other];
+    apiClient.notifications = async () => [];
+    try {
+      renderShell(<p>Wrong child</p>, "/workspaces/ws_1/projects/proj_other/overview", { workspace: "ws_1", project: "proj_other" }, "ws_1");
+      await waitFor(() => assert.ok(document.body.textContent?.includes("Project and workspace do not match")));
+      const recovery = document.querySelector('a[href="/workspaces/ws_2/projects/proj_other/overview"]');
+      assert.ok(recovery);
+      assert.equal(document.body.textContent?.includes("Wrong child"), false);
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
@@ -91,6 +136,19 @@ describe("workspace and shell interactions", () => {
 function ProjectDialogHarness() {
   const [open, setOpen] = useState(true);
   return <CreateProjectDialog workspaceId={workspace.id} open={open} onOpenChange={setOpen} onCreated={() => undefined} />;
+}
+
+function renderShell(children: React.ReactNode, pathname: string, params: Record<string, string>, workspaceId?: string) {
+  return render(<AppRouterContext.Provider value={router()}><PathnameContext.Provider value={pathname}><PathParamsContext.Provider value={params}><AppShell {...(workspaceId ? { workspaceId } : {})}>{children}</AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider>);
+}
+
+function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
+
+let systemDark = false;
+const themeListeners = new Set<(event: MediaQueryListEvent) => void>();
+function setSystemDark(next: boolean) {
+  systemDark = next;
+  for (const listener of themeListeners) listener({ matches: next } as MediaQueryListEvent);
 }
 
 function installDom(): void {
@@ -114,6 +172,7 @@ function installDom(): void {
   });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
+  Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ get matches() { return systemDark; }, media: "(prefers-color-scheme: dark)", onchange: null, addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.add(listener), removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.delete(listener), addListener() {}, removeListener() {}, dispatchEvent: () => true }) });
   Object.assign(dom.window.HTMLElement.prototype, { attachEvent() {}, detachEvent() {} });
   if (!("ResizeObserver" in globalThis)) {
     Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });

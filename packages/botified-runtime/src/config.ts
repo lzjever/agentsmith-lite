@@ -69,7 +69,7 @@ export interface BotifiedConfig {
     output_dir: null;
     run_label: null;
   };
-  llm_text_preview: { enabled: false };
+  llm_text_preview: { enabled: true };
   registry: { enabled: false };
 }
 
@@ -186,7 +186,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
       output_dir: null,
       run_label: null
     },
-    llm_text_preview: { enabled: false },
+    llm_text_preview: { enabled: true },
     registry: { enabled: false }
   };
 }

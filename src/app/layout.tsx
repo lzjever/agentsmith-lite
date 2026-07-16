@@ -8,6 +8,6 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  const themeScript = "try { document.documentElement.dataset.theme = localStorage.getItem('agentsmith-theme') === 'dark' ? 'dark' : 'light'; } catch { document.documentElement.dataset.theme = 'light'; }";
+  const themeScript = "try { const saved = localStorage.getItem('agentsmith-theme'); const theme = saved === 'light' || saved === 'dark' ? saved : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme; } catch { const theme = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme; }";
   return <html lang="en" data-theme="light" suppressHydrationWarning><body className={appFontVariables}><script dangerouslySetInnerHTML={{ __html: themeScript }} />{children}</body></html>;
 }

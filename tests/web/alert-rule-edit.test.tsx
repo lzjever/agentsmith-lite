@@ -30,7 +30,7 @@ describe("alert rule editing", () => {
       fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
       await screen.findByRole("heading", { name: "Create alert rule" });
       fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
-      await waitFor(() => assert.deepEqual(creates, [{ name:"Task capacity",alertType: "active_tasks_limit",threshold:1,windowSeconds:null,scope:{kind:"project"}, enabled: true }]));
+      await waitFor(() => assert.deepEqual(creates, [{ name:"Task capacity",alertType: "active_tasks_limit",metric:"active_tasks",threshold:1,windowSeconds:null,scope:{kind:"project"}, enabled: true }]));
       await screen.findByText("Task capacity");
     } finally {
       restoreClient(original);
@@ -56,12 +56,14 @@ describe("alert rule editing", () => {
       await screen.findByRole("heading", { name: "Edit alert rule" });
       const nativeSelect = document.querySelector("select");
       assert.ok(nativeSelect, "Radix Select should render its native form bridge");
-      fireEvent.change(nativeSelect, { target: { value: "provider_failure" } });
+      fireEvent.change(nativeSelect, { target: { value: "provider_requests_limit" } });
+      assert.equal((screen.getByRole("textbox", { name: "Metric" }) as HTMLInputElement).value, "provider requests");
+      assert.ok(screen.getByRole("combobox", { name: "Evaluation window" }));
       fireEvent.click(screen.getByRole("checkbox", { name: "Enabled" }));
       fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
       await waitFor(() => assert.equal(updates.length, 1));
-      assert.deepEqual(updates[0], { projectId, ruleId: existing.id, input: { name:"Task failure",alertType: "provider_failure",threshold:1,windowSeconds:null,scope:{kind:"project"}, enabled: false } });
+      assert.deepEqual(updates[0], { projectId, ruleId: existing.id, input: { name:"Task failure",alertType: "provider_requests_limit",metric:"provider_requests",threshold:1,windowSeconds:null,scope:{kind:"project"}, enabled: false } });
       await screen.findByText("Task failure");
       assert.ok(screen.getByText("Disabled"));
       assert.deepEqual(successes, ["Alert rule updated."]);

@@ -6,9 +6,10 @@ import { apiClient, type Endpoint, type ProjectAlertRule } from "../../lib/api/c
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { toast } from "../ui/toast";
-import { AlertRuleFormDialog, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
+import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
-const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: alertRuleTypes[0]!.value, threshold: 1, windowSeconds: null, scope: { kind: "project" }, enabled: true };
+const initialType = alertRuleTypes[0]!;
+const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
 
 export function AlertRulesPanel({ projectId, canManage }: { projectId: string; canManage: boolean }) {
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
@@ -41,8 +42,9 @@ export function AlertRulesPanel({ projectId, canManage }: { projectId: string; c
   }
 
   function openEdit(rule: ProjectAlertRule) {
+    const type = alertRuleType(rule.alertType);
     setEditing(rule);
-    setValue({ name: rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label ?? "Alert rule", alertType: rule.alertType, threshold: rule.threshold ?? 1, windowSeconds: rule.windowSeconds ?? null, scope: rule.scope ?? { kind: "project" }, enabled: rule.enabled });
+    setValue({ name: rule.name ?? type.label, alertType: type.value, metric: type.metric, threshold: rule.threshold ?? 1, windowSeconds: rule.windowSeconds ?? type.defaultWindowSeconds, scope: rule.scope ?? { kind: "project" }, enabled: rule.enabled });
     setFormError("");
     setDialogOpen(true);
   }

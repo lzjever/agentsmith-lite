@@ -15,6 +15,12 @@ export interface BotifiedRuntimeHttpClient {
   uploadFile(baseUrl: string, serviceKey: string, file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult>;
   downloadFile(baseUrl: string, serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult>;
   abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult>;
+  stopBackgroundTask?(baseUrl: string, serviceKey: string, taskId: string): Promise<BotifiedBackgroundTaskStopResult>;
+  streamLlmTextPreview?(
+    baseUrl: string,
+    serviceKey: string,
+    options?: BotifiedLlmTextPreviewOptions
+  ): AsyncIterable<BotifiedLlmTextPreviewFrame>;
 }
 
 export interface BotifiedPostMessageResult {
@@ -46,31 +52,62 @@ export interface BotifiedRuntimeStateResult {
 }
 
 export interface BotifiedReadTimelineOptions {
+  direction?: "forward" | "backward" | "history";
   limit?: number;
   follow?: boolean;
 }
 
-export type BotifiedTimelineReadResult = BotifiedTimelineOkResult | BotifiedTimelineResetResult;
+export type BotifiedTimelineHistoryBoundary = "none" | "start" | "expired";
+
+export type BotifiedTimelineReadResult = BotifiedTimelineOkResult | BotifiedTimelineGapResult;
 
 export interface BotifiedTimelineOkResult {
   status: "ok";
   events: unknown[];
   nextCursor?: string;
   hasMoreAfter?: boolean;
+  hasMoreBefore?: boolean;
   pageStartCursor?: string;
   pageEndCursor?: string;
-  historyBoundary?: string;
+  historyBoundary?: BotifiedTimelineHistoryBoundary;
 }
 
-export interface BotifiedTimelineResetResult {
-  status: "reset";
+export interface BotifiedTimelineGapResult {
+  status: "gap";
   reason: "stale_cursor";
-  events: unknown[];
+  events: [];
   nextCursor?: string;
-  pageStartCursor?: string;
-  pageEndCursor?: string;
-  historyBoundary: string;
+  recoveryCursor?: string;
+  historyBoundary: "expired";
 }
+
+export interface BotifiedBackgroundTaskStopResult {
+  taskId: string;
+  state: "running" | "cancelling" | "completed" | "failed" | "timed_out" | "cancelled" | "lost";
+}
+
+export interface BotifiedLlmTextPreviewOptions {
+  providerRequestId?: string;
+  cycleId?: string;
+  inputId?: string;
+}
+
+interface BotifiedLlmTextPreviewFrameBase {
+  time: string;
+  providerRequestId: string;
+  turnId?: string;
+  cycleId?: string;
+  providerCallIndex: number;
+  inputIds: string[];
+}
+
+export type BotifiedLlmTextPreviewFrame =
+  | (BotifiedLlmTextPreviewFrameBase & { type: "started" })
+  | (BotifiedLlmTextPreviewFrameBase & { type: "text_delta"; delta: string })
+  | (BotifiedLlmTextPreviewFrameBase & { type: "finished"; textEmitted: boolean; stopReason: string })
+  | (BotifiedLlmTextPreviewFrameBase & { type: "aborted"; reason: string })
+  | (BotifiedLlmTextPreviewFrameBase & { type: "error"; code: string; retryable: boolean; providerStatus?: number })
+  | (BotifiedLlmTextPreviewFrameBase & { type: "status"; code: string });
 
 export interface BotifiedUploadFileInput {
   filename: string;
@@ -247,15 +284,16 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       if (error.code !== "stale_cursor") {
         throw error;
       }
-      const tail = await this.readTimelineTail(baseUrl, serviceKey);
-      const reset: BotifiedTimelineResetResult = {
-        status: "reset",
+      const gap: BotifiedTimelineGapResult = {
+        status: "gap",
         reason: "stale_cursor",
-        historyBoundary: error.historyBoundary ?? "expired",
-        events: tail.events
+        historyBoundary: "expired",
+        events: []
       };
-      copyTimelineHeaders(tail, reset);
-      return reset;
+      if (error.timelineCursor !== undefined) {
+        gap.recoveryCursor = error.timelineCursor;
+      }
+      return gap;
     }
     if (!response.ok) {
       throw this.httpError(response, await readJsonBody(response));
@@ -329,12 +367,83 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return result;
   }
 
-  private async readTimelineTail(baseUrl: string, serviceKey: string): Promise<BotifiedTimelineOkResult> {
-    const response = await this.fetchTimeline(baseUrl, serviceKey, "/v1/timeline?tail=1");
+  async stopBackgroundTask(
+    baseUrl: string,
+    serviceKey: string,
+    taskId: string
+  ): Promise<BotifiedBackgroundTaskStopResult> {
+    const body = await this.requestJson(baseUrl, `/v1/background-tasks/${encodeURIComponent(taskId)}/stop`, {
+      method: "POST",
+      serviceKey
+    });
+    const record = asRecord(body);
+    const responseTaskId = stringField(record, "task_id");
+    const state = backgroundTaskStateField(record, "state");
+    if (record?.ok !== true || responseTaskId === undefined || state === undefined) {
+      throw new BotifiedHttpError({
+        status: 200,
+        code: "invalid_background_task_stop_response",
+        message: "Botified background task stop response was invalid",
+        retryable: true,
+        responseBody: body
+      });
+    }
+    return { taskId: responseTaskId, state };
+  }
+
+  async *streamLlmTextPreview(
+    baseUrl: string,
+    serviceKey: string,
+    options: BotifiedLlmTextPreviewOptions = {}
+  ): AsyncIterable<BotifiedLlmTextPreviewFrame> {
+    const response = await this.#fetchImpl(buildUrl(baseUrl, llmTextPreviewPath(options)), {
+      method: "GET",
+      headers: authHeaders(serviceKey)
+    });
     if (!response.ok) {
       throw this.httpError(response, await readJsonBody(response));
     }
-    return this.timelineOkResult(response, await response.text());
+    if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream")) {
+      throw invalidPreviewStreamError("Botified preview response was not an event stream");
+    }
+    if (!response.body) {
+      throw invalidPreviewStreamError("Botified preview response did not include a stream body");
+    }
+
+    const decoder = new TextDecoder();
+    const reader = response.body.getReader();
+    let pending = "";
+    let completed = false;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          completed = true;
+          break;
+        }
+        const parsed = splitSseEvents(pending + decoder.decode(chunk.value, { stream: true }));
+        pending = parsed.remaining;
+        for (const event of parsed.events) {
+          yield previewFrameFromSse(event);
+        }
+      }
+
+      const parsed = splitSseEvents(pending + decoder.decode());
+      if (parsed.remaining.trim() !== "") {
+        throw invalidPreviewStreamError("Botified preview stream ended with an incomplete event");
+      }
+      for (const event of parsed.events) {
+        yield previewFrameFromSse(event);
+      }
+    } finally {
+      try {
+        if (!completed) await reader.cancel();
+      } catch {
+        // The original stream or parser error remains authoritative.
+      } finally {
+        reader.releaseLock();
+      }
+    }
   }
 
   private async fetchTimeline(baseUrl: string, serviceKey: string, path: string): Promise<Response> {
@@ -386,14 +495,18 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     };
     const nextCursor = response.headers.get("x-botified-next-cursor") ?? undefined;
     const hasMoreAfter = boolHeader(response, "x-botified-has-more-after");
+    const hasMoreBefore = boolHeader(response, "x-botified-has-more-before");
     const pageStartCursor = response.headers.get("x-botified-page-start-cursor") ?? undefined;
     const pageEndCursor = response.headers.get("x-botified-page-end-cursor") ?? undefined;
-    const historyBoundary = response.headers.get("x-botified-history-boundary") ?? undefined;
+    const historyBoundary = historyBoundaryHeader(response);
     if (nextCursor !== undefined) {
       result.nextCursor = nextCursor;
     }
     if (hasMoreAfter !== undefined) {
       result.hasMoreAfter = hasMoreAfter;
+    }
+    if (hasMoreBefore !== undefined) {
+      result.hasMoreBefore = hasMoreBefore;
     }
     if (pageStartCursor !== undefined) {
       result.pageStartCursor = pageStartCursor;
@@ -469,6 +582,12 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
   async abort(): Promise<BotifiedAbortResult> {
     return { aborted: true };
   }
+
+  async stopBackgroundTask(_baseUrl: string, _serviceKey: string, taskId: string): Promise<BotifiedBackgroundTaskStopResult> {
+    return { taskId, state: "cancelled" };
+  }
+
+  async *streamLlmTextPreview(): AsyncIterable<BotifiedLlmTextPreviewFrame> {}
 }
 
 function buildUrl(baseUrl: string, path: string): string {
@@ -476,17 +595,41 @@ function buildUrl(baseUrl: string, path: string): string {
 }
 
 function timelinePath(cursor: string | undefined, options: BotifiedReadTimelineOptions): string {
-  if (cursor === undefined) {
-    return "/v1/timeline?tail=1";
+  if (options.direction === "backward" && cursor === undefined) {
+    throw new Error("Botified backward timeline reads require a cursor");
+  }
+  if (options.direction === "history" && cursor !== undefined) {
+    throw new Error("Botified timeline history reads cannot include a cursor");
+  }
+  if (options.direction === "history" || cursor === undefined) {
+    if (options.follow === true) {
+      throw new Error("Botified timeline history reads cannot follow");
+    }
+    return `/v1/timeline?tail=${options.limit ?? 200}`;
   }
   const params = new URLSearchParams();
   params.set("cursor", cursor);
-  if (options.follow === true) {
+  if (options.direction === "backward") {
+    if (options.follow === true) {
+      throw new Error("Botified backward timeline reads cannot follow");
+    }
+    params.set("direction", "backward");
+    params.set("limit", String(options.limit ?? 200));
+  } else if (options.follow === true) {
     params.set("follow", "true");
   } else {
     params.set("limit", String(options.limit ?? 200));
   }
   return `/v1/timeline?${params.toString()}`;
+}
+
+function llmTextPreviewPath(options: BotifiedLlmTextPreviewOptions): string {
+  const params = new URLSearchParams();
+  if (options.providerRequestId !== undefined) params.set("provider_request_id", options.providerRequestId);
+  if (options.cycleId !== undefined) params.set("cycle_id", options.cycleId);
+  if (options.inputId !== undefined) params.set("input_id", options.inputId);
+  const query = params.toString();
+  return query ? `/v1/llm-text-preview?${query}` : "/v1/llm-text-preview";
 }
 
 function authHeaders(serviceKey: string): Headers {
@@ -620,18 +763,6 @@ function parseNdjson(text: string, status: number): unknown[] {
   return events;
 }
 
-function copyTimelineHeaders(source: BotifiedTimelineOkResult, target: BotifiedTimelineResetResult): void {
-  if (source.nextCursor !== undefined) {
-    target.nextCursor = source.nextCursor;
-  }
-  if (source.pageStartCursor !== undefined) {
-    target.pageStartCursor = source.pageStartCursor;
-  }
-  if (source.pageEndCursor !== undefined) {
-    target.pageEndCursor = source.pageEndCursor;
-  }
-}
-
 function boolHeader(response: Response, name: string): boolean | undefined {
   const value = response.headers.get(name);
   if (value === "true") {
@@ -641,6 +772,19 @@ function boolHeader(response: Response, name: string): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function historyBoundaryHeader(response: Response): BotifiedTimelineHistoryBoundary | undefined {
+  const value = response.headers.get("x-botified-history-boundary");
+  if (value === null) return undefined;
+  if (value === "none" || value === "start" || value === "expired") return value;
+  throw new BotifiedHttpError({
+    status: response.status,
+    code: "invalid_timeline_history_boundary",
+    message: "Botified timeline response contained an invalid history boundary",
+    retryable: true,
+    responseBody: {}
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -684,6 +828,124 @@ function numberField(record: Record<string, unknown> | undefined, key: string): 
 function boolField(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
   const value = record?.[key];
   return typeof value === "boolean" ? value : undefined;
+}
+
+function backgroundTaskStateField(
+  record: Record<string, unknown> | undefined,
+  key: string
+): BotifiedBackgroundTaskStopResult["state"] | undefined {
+  const value = stringField(record, key);
+  return value === "running" || value === "cancelling" || value === "completed" || value === "failed" ||
+    value === "timed_out" || value === "cancelled" || value === "lost"
+    ? value
+    : undefined;
+}
+
+function splitSseEvents(value: string): { events: string[]; remaining: string } {
+  const events: string[] = [];
+  let remaining = value;
+  while (true) {
+    const match = /\r?\n\r?\n/.exec(remaining);
+    if (!match || match.index === undefined) return { events, remaining };
+    events.push(remaining.slice(0, match.index));
+    remaining = remaining.slice(match.index + match[0].length);
+  }
+}
+
+function previewFrameFromSse(event: string): BotifiedLlmTextPreviewFrame {
+  let eventName: string | undefined;
+  const data: string[] = [];
+  for (const line of event.split(/\r?\n/)) {
+    if (line.startsWith(":")) continue;
+    const separator = line.indexOf(":");
+    const key = separator === -1 ? line : line.slice(0, separator);
+    const value = separator === -1 ? "" : line.slice(separator + 1).replace(/^ /, "");
+    if (key === "event") eventName = value;
+    if (key === "data") data.push(value);
+  }
+  if (eventName === undefined || data.length === 0) {
+    throw invalidPreviewStreamError("Botified preview event was incomplete");
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(data.join("\n"));
+  } catch {
+    throw invalidPreviewStreamError("Botified preview event contained invalid JSON");
+  }
+  return previewFrameFromBody(body, eventName);
+}
+
+function previewFrameFromBody(body: unknown, eventName: string): BotifiedLlmTextPreviewFrame {
+  const record = asRecord(body);
+  const type = stringField(record, "type");
+  const base = previewFrameBase(record);
+  if (!base || type !== eventName) {
+    throw invalidPreviewStreamError("Botified preview event did not match its declared type");
+  }
+  switch (type) {
+    case "started":
+      return { type, ...base };
+    case "text_delta": {
+      const delta = stringField(record, "delta");
+      if (delta === undefined) break;
+      return { type, ...base, delta };
+    }
+    case "finished": {
+      const textEmitted = boolField(record, "text_emitted");
+      const stopReason = stringField(record, "stop_reason");
+      if (textEmitted === undefined || stopReason === undefined) break;
+      return { type, ...base, textEmitted, stopReason };
+    }
+    case "aborted": {
+      const reason = stringField(record, "reason");
+      if (reason === undefined) break;
+      return { type, ...base, reason };
+    }
+    case "error": {
+      const code = stringField(record, "code");
+      const retryable = boolField(record, "retryable");
+      const providerStatus = numberField(record, "provider_status");
+      if (code === undefined || retryable === undefined) break;
+      return providerStatus === undefined ? { type, ...base, code, retryable } : { type, ...base, code, retryable, providerStatus };
+    }
+    case "status": {
+      const code = stringField(record, "code");
+      if (code === undefined) break;
+      return { type, ...base, code };
+    }
+  }
+  throw invalidPreviewStreamError("Botified preview event had invalid fields");
+}
+
+function previewFrameBase(record: Record<string, unknown> | undefined): BotifiedLlmTextPreviewFrameBase | undefined {
+  const time = stringField(record, "time");
+  const providerRequestId = stringField(record, "provider_request_id");
+  const providerCallIndex = numberField(record, "provider_call_index");
+  const inputIds = arrayFieldOrUndefined(record, "input_ids");
+  if (time === undefined || providerRequestId === undefined || providerCallIndex === undefined || inputIds === undefined || !inputIds.every((id) => typeof id === "string")) {
+    return undefined;
+  }
+  const result: BotifiedLlmTextPreviewFrameBase = {
+    time,
+    providerRequestId,
+    providerCallIndex,
+    inputIds: inputIds as string[]
+  };
+  const turnId = stringField(record, "turn_id");
+  const cycleId = stringField(record, "cycle_id");
+  if (turnId !== undefined) result.turnId = turnId;
+  if (cycleId !== undefined) result.cycleId = cycleId;
+  return result;
+}
+
+function invalidPreviewStreamError(message: string): BotifiedHttpError {
+  return new BotifiedHttpError({
+    status: 502,
+    code: "invalid_preview_stream",
+    message,
+    retryable: true,
+    responseBody: {}
+  });
 }
 
 function arrayField(record: Record<string, unknown> | undefined, key: string): unknown[] {

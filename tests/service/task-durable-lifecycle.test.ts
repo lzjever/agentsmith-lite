@@ -5,19 +5,25 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
+import type { TaskAssistantPreviewUpdate } from "../../packages/application/src/taskService.js";
+import { projectTaskInteraction } from "../../packages/application/src/taskInteractionProjector.js";
+import type { BotifiedTimelineEvent } from "../../packages/botified-runtime/src/projection.js";
 import type { AgentTask, KubernetesResource, ProjectAuditEvent } from "../../packages/contracts/src/api.js";
 import type {
   BotifiedAbortResult,
   BotifiedDeliveryMessageInput,
   BotifiedDeliveryReceipt,
   BotifiedDownloadFileResult,
+  BotifiedLlmTextPreviewFrame,
   BotifiedPostMessageResult,
   BotifiedRuntimeHttpClient,
+  BotifiedRuntimeStateResult,
   BotifiedTimelineReadResult,
   BotifiedUploadFileInput,
   BotifiedUploadFileResult
 } from "../../packages/ports/src/botified.js";
 import type { KubernetesResourceRef, PodReadiness, SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
+import type { TaskInteractionChangeInput } from "../../packages/ports/src/store.js";
 
 describe("durable task lifecycle", () => {
   const roots: string[] = [];
@@ -60,9 +66,11 @@ describe("durable task lifecycle", () => {
   it("atomically persists live reservation, start intent, and runtime metadata", async () => {
     const setup = await createSetup(true);
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "start later" }, "create-live");
+    const persistedTask = await setup.store.findTask(task.id);
+    assert.ok(persistedTask);
     assert.equal(task.status, "starting");
     assert.equal(task.startIntentStatus, "pending");
-    assert.equal(task.startClaimToken, null);
+    assert.equal(persistedTask.startClaimToken, null);
     assert.equal(task.activeReservation, true);
     assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.activeTasks, 1);
     assert.ok(await setup.store.jsonDocs.get("sandbox_runtime_state", task.id));
@@ -103,7 +111,215 @@ describe("durable task lifecycle", () => {
     const terminal=await setup.services.tasks.openTaskTerminal(setup.userId,task.id);
     assert.equal(terminal.serviceKey,"service-key");
     assert.match(terminal.baseUrl,/^http:\/\//);
+    setup.services.tasks.closeTaskTerminal(task.id);
     await assert.rejects(() => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "escape", inputPaths: ["../outside"] }, "create-invalid-input"), /must stay under files/);
+  });
+
+  it("holds editable messages in the AgentSmith queue until the active Botified turn is idle", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "queue-during-active-turn");
+    const initialPostCount = setup.botified.posts.length;
+
+    const queued = await setup.services.tasks.sendTaskMessage(setup.userId, task.id, "first version", "queue-active-message");
+
+    assert.equal(queued.disposition, "queued_for_active_run");
+    assert.deepEqual(queued.queuedMessage && {
+      content: queued.queuedMessage.content,
+      deliveryStatus: queued.queuedMessage.deliveryStatus,
+      editable: queued.queuedMessage.editable,
+      deletable: queued.queuedMessage.deletable
+    }, { content: "first version", deliveryStatus: "pending", editable: true, deletable: true });
+    assert.equal(setup.botified.posts.length, initialPostCount);
+
+    await setup.services.tasks.editTaskMessage(setup.userId, task.id, queued.messageId, "edited before dispatch", "edit-active-message");
+    const removable = await setup.services.tasks.sendTaskMessage(setup.userId, task.id, "remove before dispatch", "queue-removable-message");
+    assert.equal(removable.queuedMessage?.deletable, true);
+    await setup.services.tasks.deleteTaskMessage(setup.userId, task.id, removable.messageId, "delete-active-message");
+    setup.botified.state = "idle";
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.findTaskMessage(queued.messageId))?.deliveryStatus, "accepted");
+    assert.ok((await setup.store.findTaskMessage(removable.messageId))?.deletedAt);
+    assert.deepEqual(setup.botified.posts.slice(initialPostCount).map((post) => post.text), ["edited before dispatch"]);
+  });
+
+  it("keeps a cancelled Botified cycle non-terminal and dispatches the next message on the same task", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "abort-cycle-continues");
+
+    const aborted = await setup.services.tasks.abortTaskTurn(setup.userId, task.id, "abort-current-turn");
+    assert.equal(aborted.aborted, true);
+    assert.equal((await setup.services.tasks.abortTaskTurn(setup.userId, task.id, "abort-current-turn")).aborted, true);
+    const abortChanges = await setup.store.listTaskInteractionChanges(task.id, 0, 100);
+    assert.deepEqual(
+      abortChanges.filter((change) => change.sourceId === "turn:cycle-current:abort").map((change) => [change.sourceRevision, change.interaction.kind, change.interaction.body]),
+      [[1, "assistant_message", "Current turn stopped."]]
+    );
+    assert.equal(setup.botified.abortCalls, 1);
+    const queued = await setup.services.tasks.sendTaskMessage(setup.userId, task.id, "continue after abort", "message-after-abort");
+    assert.equal(queued.disposition, "queued_for_active_run");
+    assert.equal(queued.queuedMessage?.deliveryStatus, "pending");
+
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(1, "cycle.failed", {
+        cycle_id: "cycle-1",
+        input_ids: ["message-1"],
+        queue_length: 0,
+        error: { code: "cancelled", message: "agent run cancelled", retryable: true },
+        retryable: true
+      }, { id:"cycle-1", type:"cycle", status:"failed" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+    setup.botified.state = "idle";
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const persistedTask = await setup.store.findTask(task.id);
+    const delivered = await setup.store.findTaskMessage(queued.messageId);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(persistedTask?.status, "running");
+    assert.equal(persistedTask?.terminalReason, null);
+    assert.equal(delivered?.deliveryStatus, "accepted");
+    assert.equal(delivered?.targetTaskId, null);
+    assert.equal(interactions.items.some((item) => item.kind === "system_error"), false);
+    assert.deepEqual((await setup.store.listTasksForProject(setup.projectId)).map((candidate) => candidate.id), [task.id]);
+    assert.equal(setup.botified.posts.filter((post) => post.text === "continue after abort").length, 1);
+  });
+
+  it("projects background stop once without cancelling the task or restoring canStop", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "background-stop-product-source");
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(1, "background_task.started", {
+        task_id: "work-stop-1",
+        tool_call_id: "call-stop-1",
+        state: "running",
+        work_summary: "Compile release"
+      }, { id:"task_work-stop-1", type:"background_task", status:"running" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+    await setup.services.tasks.syncActiveTasksOnce();
+    const before = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    const work = before.items.find((item) => item.kind === "background_task");
+    assert.ok(work && work.kind === "background_task");
+    assert.equal(work.canStop, true);
+
+    const stopped = await setup.services.tasks.stopTaskBackgroundWork(setup.userId, task.id, work.id, "stop-background-once");
+    const replay = await setup.services.tasks.stopTaskBackgroundWork(setup.userId, task.id, work.id, "stop-background-once");
+    assert.equal(stopped.state, "cancelling");
+    assert.deepEqual(replay, stopped);
+    assert.deepEqual(setup.botified.stopCalls, ["work-stop-1"]);
+
+    const stopChanges = (await setup.store.listTaskInteractionChanges(task.id, 0, 100))
+      .filter((change) => change.sourceId === "background-work:work-stop-1:stop");
+    assert.equal(stopChanges.length, 1);
+    assert.equal(stopChanges[0]?.sourceRevision, 2);
+    assert.equal(stopChanges[0]?.interaction.kind, "background_task");
+    assert.equal(stopChanges[0]?.interaction.body, "Compile release");
+    assert.equal(stopChanges[0]?.interaction.kind === "background_task" && stopChanges[0].interaction.canStop, false);
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason, null);
+
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(2, "background_task.started", {
+        task_id: "work-stop-1",
+        tool_call_id: "call-stop-1",
+        state: "running",
+        work_summary: "stale running update"
+      }, { id:"task_work-stop-1", type:"background_task", status:"running" })],
+      nextCursor: "evt_test_2"
+    });
+    await setup.services.tasks.syncActiveTasksOnce();
+    const latest = await setup.store.findLatestTaskInteractionChange(task.id, work.id);
+    assert.equal(latest?.interaction.kind === "background_task" && latest.interaction.canStop, false);
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason, null);
+  });
+
+  it("serializes runtime ticks and interaction reads for the same task", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "concurrent-timeline-sync");
+    setup.botified.timelineReadDelayMs = 10;
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(1, "assistant_message.completed", { assistant_message_id:"assistant-concurrent", text:"serialized" }, { id:"assistant-concurrent", type:"assistant_message", status:"completed" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+
+    const [, interactions] = await Promise.all([
+      setup.services.tasks.syncActiveTasksOnce(),
+      setup.services.tasks.taskInteractions(setup.userId, task.id)
+    ]);
+
+    assert.equal(interactions.items.some((item) => item.kind === "assistant_message" && item.body === "serialized"), true);
+    assert.equal((await setup.store.readTaskInteractionSnapshot(task.id, null, 10))?.sourceCursor, "evt_test_1");
+  });
+
+  it("terminalizes a genuine canonical cycle failure", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "provider-cycle-failure");
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(1, "cycle.failed", {
+        cycle_id: "cycle-1",
+        input_ids: ["message-1"],
+        queue_length: 0,
+        error: { code: "provider_error", message: "provider request failed", retryable: false },
+        retryable: false
+      }, { id:"cycle-1", type:"cycle", status:"failed" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const failed = await setup.store.findTask(task.id);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed?.terminalReason, "failed");
+    assert.equal(interactions.items.some((item) => item.kind === "system_error"), true);
+  });
+
+  it("emits a typed preview clear when Botified finishes, aborts, or errors without a durable assistant message", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "preview-clear");
+    setup.botified.previewFrames.push(
+      previewFrame({ type:"text_delta", delta:"Finished preview" }, "provider-finished"),
+      previewFrame({ type:"finished", textEmitted:true, stopReason:"stop" }, "provider-finished"),
+      previewFrame({ type:"text_delta", delta:"Aborted preview" }, "provider-aborted"),
+      previewFrame({ type:"aborted", reason:"cancelled" }, "provider-aborted"),
+      previewFrame({ type:"text_delta", delta:"Error preview" }, "provider-error"),
+      previewFrame({ type:"error", code:"provider_error", retryable:false }, "provider-error")
+    );
+
+    const updates: TaskAssistantPreviewUpdate[] = [];
+    for await (const update of setup.services.tasks.streamTaskAssistantPreviews(setup.userId, task.id)) updates.push(update);
+
+    assert.deepEqual(updates.map((update) => update.type), ["upsert", "clear", "upsert", "clear", "upsert", "clear"]);
+    assert.deepEqual([0,2,4].map((index) => [updates[index]?.interactionId, updates[index+1]?.interactionId]), [
+      [updates[0]?.interactionId, updates[0]?.interactionId],
+      [updates[2]?.interactionId, updates[2]?.interactionId],
+      [updates[4]?.interactionId, updates[4]?.interactionId]
+    ]);
+    assert.deepEqual(updates.filter((update) => update.type === "upsert").map((update) => update.body), ["Finished preview", "Aborted preview", "Error preview"]);
+    assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).items.some((item) => item.kind === "assistant_message"), false);
+  });
+
+  it("owns interactive terminal occupancy and capabilities in the task service", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "terminal-occupancy");
+    assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, true);
+
+    await setup.services.tasks.openTaskTerminal(setup.userId, task.id);
+
+    assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, false);
+    await assert.rejects(() => setup.services.tasks.openTaskTerminal(setup.userId, task.id), /already open/);
+    setup.services.tasks.closeTaskTerminal(task.id);
+    assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, true);
   });
 
   it("reconciles a crashed accepted start by delivery key without a second post", async () => {
@@ -121,11 +337,15 @@ describe("durable task lifecycle", () => {
     assert.equal(recovered?.startIntentStatus, "dispatched");
     assert.equal(recovered?.status, "running");
     assert.equal(recovered?.startReceipt?.accepted, true);
-    assert.equal(recovered?.startTimelineCursor, "cursor-1");
+    assert.equal(recovered?.startReceipt?.cursor, "cursor-1");
+    assert.equal(recovered?.startTimelineCursor, null);
     assert.equal(setup.botified.posts.length, 1);
     await setup.store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl: "http://task.test" });
+    setup.botified.timelineReads.push({ status:"ok", events:[timelineEvent(1,"input.accepted",{source:"user",input_id:recovered?.startReceipt?.messageId,text:"accept once"})], nextCursor:"evt_test_1", historyBoundary:"start" });
     await setup.services.tasks.syncActiveTasksOnce();
-    assert.equal(setup.botified.timelineCursors.at(-1), "cursor-1");
+    assert.equal(setup.botified.timelineCursors.at(-1), undefined, "delivery receipt cursor must not become the ingestion cursor");
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(interactions.items.filter((item) => item.kind === "user_message").length, 1);
   });
 
   it("reconciles an uncertain accepted start before cancellation cleanup", async () => {
@@ -201,62 +421,216 @@ describe("durable task lifecycle", () => {
     assert.deepEqual((await store.listProjectAuditEvents(task.projectId)).filter((event) => event.action === "task.failed").map((event) => event.action), ["task.failed"]);
   });
 
-  it("linearizes a terminal follow-up race to accepted after remote acceptance", async () => {
+  it("linearizes a terminal message race to accepted after remote acceptance", async () => {
     const setup = await createSetup(true);
     const source = await startTask(setup, "source-accepted");
+    setup.botified.state = "idle";
     setup.botified.throwAfterAcceptOnce = true;
-    const uncertain = await setup.services.tasks.followUpTask(setup.userId, source.id, "continue accepted", "follow-key");
-    assert.equal(uncertain.deliveryStatus, "dispatching");
+    const uncertain = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "continue accepted", "message-key");
+    assert.equal(uncertain.disposition, "queued_for_active_run");
+    const storedUncertain = await setup.store.findTaskMessage(uncertain.messageId);
+    assert.equal(storedUncertain?.deliveryStatus, "dispatching");
     await setup.services.tasks.cancelTask(setup.userId, source.id, "cancel-key");
-    assert.equal((await setup.store.findTaskFollowUp(uncertain.id))?.deliveryStatus, "terminal_pending");
-    await setup.store.deferTaskFollowUp({ id: uncertain.id, claimToken: uncertain.claimToken!, safeError: "wait before reconcile", nextRetryAt: "2999-01-01T00:00:00.000Z", updatedAt: new Date().toISOString() });
+    assert.equal((await setup.store.findTaskMessage(uncertain.messageId))?.deliveryStatus, "terminal_pending");
+    const pendingReplay = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "continue accepted", "message-key");
+    assert.equal(pendingReplay.disposition, "successor_pending");
+    assert.equal(pendingReplay.duplicate, true);
+    await setup.store.deferTaskMessage({ id: uncertain.messageId, claimToken: storedUncertain!.claimToken!, safeError: "wait before reconcile", nextRetryAt: "2999-01-01T00:00:00.000Z", updatedAt: new Date().toISOString() });
     await setup.services.tasks.syncActiveTasksOnce();
     assert.equal((await setup.store.findTask(source.id))?.artifactProjectionStatus, "failed");
     assert.equal((await setup.store.findTask(source.id))?.cleanupStatus, "pending");
     assert.ok(setup.port.resources.length > 0);
-    await setup.store.deferTaskFollowUp({ id: uncertain.id, claimToken: uncertain.claimToken!, safeError: "retry now", nextRetryAt: "2000-01-01T00:00:00.000Z", updatedAt: new Date().toISOString() });
+    await setup.store.deferTaskMessage({ id: uncertain.messageId, claimToken: storedUncertain!.claimToken!, safeError: "retry now", nextRetryAt: "2000-01-01T00:00:00.000Z", updatedAt: new Date().toISOString() });
     await setup.services.tasks.syncActiveTasksOnce();
-    const accepted = await setup.store.findTaskFollowUp(uncertain.id);
+    const accepted = await setup.store.findTaskMessage(uncertain.messageId);
     assert.equal(accepted?.deliveryStatus, "accepted");
-    assert.equal(accepted?.followUpTaskId, null);
-    const replay = await setup.services.tasks.followUpTask(setup.userId, source.id, "continue accepted", "follow-key");
-    assert.equal(replay.deliveryStatus, "accepted");
+    assert.equal(accepted?.targetTaskId, null);
+    const replay = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "continue accepted", "message-key");
+    assert.equal(replay.disposition, "accepted_by_active_run");
+    assert.equal(replay.duplicate, true);
     assert.equal(setup.botified.posts.filter((post) => post.text === "continue accepted").length, 1);
   });
 
-  it("allows only pending follow-ups to be edited and deleted", async () => {
+  it("allows only pending messages to be edited and deleted", async () => {
     const setup = await createSetup(true);
     const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "source pending" }, "create-pending-source");
-    const pending = await setup.services.tasks.followUpTask(setup.userId, source.id, "first prompt", "pending-follow");
-    assert.equal(pending.deliveryStatus, "pending");
-    const edited = await setup.services.tasks.editTaskFollowUp(setup.userId, source.id, pending.id, "edited prompt", "edit-pending");
-    assert.equal(edited.prompt, "edited prompt");
-    assert.notEqual(edited.requestHash, pending.requestHash);
-    assert.deepEqual(await setup.services.tasks.deleteTaskFollowUp(setup.userId, source.id, pending.id, "delete-pending"), { deleted: true, followUpId: pending.id });
-    assert.deepEqual(await setup.services.tasks.listTaskFollowUps(setup.userId, source.id), []);
+    const pending = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "first prompt", "pending-message");
+    assert.equal(pending.queuedMessage?.deliveryStatus, "pending");
+    const queuedReplay = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "first prompt", "pending-message");
+    assert.equal(queuedReplay.disposition, "queued_for_active_run");
+    assert.equal(queuedReplay.messageId, pending.messageId);
+    assert.equal(queuedReplay.duplicate, true);
+    const originalHash = (await setup.store.findTaskMessage(pending.messageId))?.requestHash;
+    const edited = await setup.services.tasks.editTaskMessage(setup.userId, source.id, pending.messageId, "edited prompt", "edit-pending");
+    assert.equal(edited.queuedMessage?.content, "edited prompt");
+    assert.equal((await setup.services.tasks.editTaskMessage(setup.userId, source.id, pending.messageId, "edited prompt", "edit-pending")).duplicate, true);
+    assert.notEqual((await setup.store.findTaskMessage(pending.messageId))?.requestHash, originalHash);
+    const other = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "other pending" }, "create-other-pending");
+    await assert.rejects(() => setup.services.tasks.editTaskMessage(setup.userId, other.id, pending.messageId, "wrong task", "edit-wrong-task"), /Task message not found/);
+    const deleted = await setup.services.tasks.deleteTaskMessage(setup.userId, source.id, pending.messageId, "delete-pending");
+    assert.equal(deleted.messageId, pending.messageId);
+    assert.equal(deleted.queuedMessage, null);
+    assert.equal((await setup.services.tasks.deleteTaskMessage(setup.userId, source.id, pending.messageId, "delete-pending")).duplicate, true);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, source.id);
+    assert.deepEqual(interactions.queuedMessages, []);
+    assert.equal(interactions.items.some((item) => item.body === "edited prompt"), false);
+    assert.equal(interactions.items.some((item) => item.kind === "user_message" && item.body === ""), false);
+    assert.equal(interactions.items.some((item) => item.kind === "user_message" && item.status === "rejected"), false);
+    await assert.rejects(() => setup.services.tasks.editTaskMessage(setup.userId, source.id, pending.messageId, "too late", "edit-deleted"), /Only a pending message can be edited/);
+  });
+
+  it("paginates backward recovery and marks an expired history boundary as a gap", async () => {
+    const setup = await createSetup(true);
+    setup.botified.timelineReads.push(
+      { status:"ok", events:[timelineEvent(3,"service.error",{code:"service_unavailable",message:"latest"})], nextCursor:"evt_test_3", pageStartCursor:"evt_test_3", pageEndCursor:"evt_test_3", hasMoreBefore:true, historyBoundary:"expired" },
+      { status:"ok", events:[timelineEvent(1,"service.error",{code:"service_unavailable",message:"oldest available"})], nextCursor:"evt_test_1", pageStartCursor:"evt_test_1", pageEndCursor:"evt_test_1", hasMoreBefore:false, historyBoundary:"expired" }
+    );
+    const task = await startTask(setup, "history-gap");
+    const snapshot = await setup.store.readTaskInteractionSnapshot(task.id, null, 20);
+    assert.equal(snapshot?.historyStatus, "gap");
+    assert.deepEqual(snapshot?.items.filter((item)=>item.kind==="system_error").map((item)=>item.body), ["oldest available","latest"]);
+    assert.deepEqual(setup.botified.timelineCursors.slice(-2), [undefined,"evt_test_3"]);
+  });
+
+  it("applies a delayed lifecycle update to an interaction older than the latest 1000", async () => {
+    const setup=await createSetup(true);
+    const task=await startTask(setup,"delayed-interaction");
+    const firstEvent=timelineEvent(1,"assistant_message.completed",{assistant_message_id:"assistant-old",text:"old"},{id:"assistant-old",type:"assistant_message",status:"completed"});
+    const first=projectTaskInteraction({sourceKind:"botified",taskId:task.id,event:firstEvent},null,{knownSecrets:new Set()}).interaction!;
+    const changes:TaskInteractionChangeInput[]=[{sourceKind:"botified",sourceId:"seed-old",sourceRevision:0,interaction:first}];
+    for(let index=0;index<1001;index+=1)changes.push({sourceKind:"botified",sourceId:`filler-${index}`,sourceRevision:0,interaction:{...first,id:`filler-${index}`,position:first.position+index+1}});
+    await setup.store.persistTaskInteractionMutation({taskId:task.id,changes});
+    setup.botified.timelineReads.push({status:"ok",events:[timelineEvent(2,"assistant_message.completed",{assistant_message_id:"assistant-old",text:"updated"},{id:"assistant-old",type:"assistant_message",status:"completed"})],nextCursor:"evt_test_2",historyBoundary:"start"});
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const updated=await setup.store.findLatestTaskInteractionChange(task.id,first.id);
+    assert.equal(updated?.interaction.revision,2);
+    assert.equal(updated?.interaction.body,"updated");
+  });
+
+  it("keeps a task active across a detached callback and completes after the callback cycle", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "detached-callback-lifecycle");
+    setup.botified.timelineReads.push({
+      status:"ok",
+      events:[
+        timelineEvent(1,"background_task.started",{task_id:"work-1",tool_call_id:"tool-1"},{id:"task_work-1",type:"background_task",status:"running"}),
+        timelineEvent(2,"assistant_message.completed",{assistant_message_id:"assistant-1",text:"background running"},{id:"assistant-1",type:"assistant_message",status:"completed"}),
+        timelineEvent(3,"cycle.completed",{ok:true})
+      ],
+      nextCursor:"evt_test_3",
+      historyBoundary:"start"
+    });
+    setup.botified.stateReads.push(botifiedRuntimeState("idle", { running:1 }, [
+      { id:"task_work-1", type:"background_task", status:"running" }
+    ]));
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const waiting = await setup.store.findTask(task.id);
+    assert.equal(waiting?.status, "running");
+    assert.equal(waiting?.terminalReason, null);
+    assert.equal(waiting?.cleanupStatus, "pending");
+    assert.ok(await setup.store.sandboxRuns.get(task.runId));
+
+    setup.botified.timelineReads.push({
+      status:"ok",
+      events:[
+        timelineEvent(4,"background_task.completed",{task_id:"work-1",tool_call_id:"tool-1",result_text:"BACKGROUND_FINISHED"},{id:"task_work-1",type:"background_task",status:"completed"}),
+        timelineEvent(5,"background_task.callback_queued",{task_id:"work-1",tool_call_id:"tool-1",callback_id:"callback-1",callback_status:"queued",result_text:"BACKGROUND_FINISHED"},{id:"task_work-1",type:"background_task",status:"completed"}),
+        timelineEvent(6,"input.queued",{input_id:"callback-1",source:"task_callback",text:"BACKGROUND_FINISHED"},{id:"input_callback-1",type:"input",status:"queued"}),
+        timelineEvent(7,"cycle.started",{queue_length:0}),
+        timelineEvent(8,"assistant_message.completed",{assistant_message_id:"assistant-2",text:"BACKGROUND_FINISHED"},{id:"assistant-2",type:"assistant_message",status:"completed"}),
+        timelineEvent(9,"cycle.completed",{ok:true})
+      ],
+      nextCursor:"evt_test_9"
+    });
+    setup.botified.stateReads.push(botifiedRuntimeState("idle"));
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const completed = await setup.store.findTask(task.id);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(completed?.terminalReason, "completed");
+    assert.equal(interactions.items.some((item) => item.kind === "assistant_message" && item.body === "BACKGROUND_FINISHED"), true);
+  });
+
+  it("completes an ordinary single cycle when the Botified session is quiescent", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "single-cycle-completion");
+    setup.botified.timelineReads.push({ status:"ok", events:[timelineEvent(1,"cycle.completed",{ok:true})], nextCursor:"evt_test_1", historyBoundary:"start" });
+    setup.botified.state = "idle";
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason, "completed");
+  });
+
+  it("waits for timeline catch-up when a quiescent state snapshot is ahead", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "state-cursor-fence");
+    setup.botified.timelineReads.push({ status:"ok", events:[timelineEvent(1,"cycle.completed",{ok:true})], nextCursor:"evt_test_1", historyBoundary:"start" });
+    setup.botified.stateReads.push({ ...botifiedRuntimeState("idle"), timelineCursor:"evt_test_3" });
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.findTask(task.id))?.status, "running");
+    setup.botified.timelineReads.push({
+      status:"ok",
+      events:[
+        timelineEvent(2,"assistant_message.completed",{assistant_message_id:"assistant-late",text:"BACKGROUND_FINISHED"},{id:"assistant-late",type:"assistant_message",status:"completed"}),
+        timelineEvent(3,"cycle.completed",{ok:true})
+      ],
+      nextCursor:"evt_test_3"
+    });
+    setup.botified.stateReads.push({ ...botifiedRuntimeState("idle"), timelineCursor:"evt_test_3" });
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason, "completed");
+    assert.equal(interactions.items.some((item) => item.kind === "assistant_message" && item.body === "BACKGROUND_FINISHED"), true);
+  });
+
+  it("does not complete while an AgentSmith message is still queued", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "queued-message-completion");
+    const queued = await setup.services.tasks.sendTaskMessage(setup.userId, task.id, "continue after this turn", "queued-before-completion");
+    assert.equal(queued.queuedMessage?.deliveryStatus, "pending");
+    setup.botified.timelineReads.push({ status:"ok", events:[timelineEvent(1,"cycle.completed",{ok:true})], nextCursor:"evt_test_1", historyBoundary:"start" });
+    setup.botified.stateReads.push(botifiedRuntimeState("running"), botifiedRuntimeState("idle"));
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.findTask(task.id))?.status, "running");
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason, null);
+    assert.equal((await setup.store.findTaskMessage(queued.messageId))?.deliveryStatus, "pending");
   });
 
   it("creates one linked successor when a terminal pending delivery is explicitly absent", async () => {
     const setup = await createSetup(true);
     const source = await startTask(setup, "source-successor");
+    setup.botified.state = "idle";
     setup.botified.throwBeforeAcceptOnce = true;
-    const uncertain = await setup.services.tasks.followUpTask(setup.userId, source.id, "continue as successor", "successor-key");
-    assert.equal(uncertain.deliveryStatus, "dispatching");
+    const uncertain = await setup.services.tasks.sendTaskMessage(setup.userId, source.id, "continue as successor", "successor-key");
+    assert.equal(uncertain.disposition, "queued_for_active_run");
     await setup.services.tasks.cancelTask(setup.userId, source.id, "cancel-successor");
     await setup.services.tasks.syncActiveTasksOnce();
-    const resolved = await setup.store.findTaskFollowUp(uncertain.id);
+    const resolved = await setup.store.findTaskMessage(uncertain.messageId);
     assert.equal(resolved?.deliveryStatus, "successor_created");
-    assert.ok(resolved?.followUpTaskId);
-    assert.equal((await setup.store.findTask(resolved!.followUpTaskId!))?.sourceTaskId, source.id);
+    assert.ok(resolved?.targetTaskId);
+    assert.equal((await setup.store.findTask(resolved!.targetTaskId!))?.sourceTaskId, source.id);
     assert.equal(resolved?.receipt, null);
   });
 
   it("drains a late artifact before fenced cleanup completes", async () => {
     const setup = await createSetup(true);
     setup.botified.timelineReads.push(
-      { status: "ok", events: [{ cursor: "done", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }], nextCursor: "done" },
-      { status: "ok", events: [{ cursor: "late", seq: 2, session_id: "s1", type: "file.published", payload: { file_id: "late-file", filename: "late.txt", size_bytes: 4 } }], nextCursor: "late" }
+      { status: "ok", events: [timelineEvent(1,"cycle.completed",{ok:true})], nextCursor: "evt_test_1", historyBoundary:"start" },
+      { status: "ok", events: [timelineEvent(2,"file.published",{file_id:"late-file",filename:"late.txt",size_bytes:4},{id:"late-file",type:"file",status:"available"})], nextCursor: "evt_test_2" }
     );
+    setup.botified.stateReads.push(botifiedRuntimeState("idle"));
     setup.botified.downloads.set("late-file", new TextEncoder().encode("late"));
     const task = await startTask(setup, "late-artifact");
     await setup.services.tasks.syncActiveTasksOnce();
@@ -284,16 +658,18 @@ describe("durable task lifecycle", () => {
     await mkdir(path.dirname(artifactPath), { recursive: true });
     await writeFile(artifactPath, "sandbox result");
     setup.botified.timelineReads.push(
-      { status: "ok", events: [{ cursor: "done", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }], nextCursor: "done" },
+      { status: "ok", events: [timelineEvent(1,"cycle.completed",{ok:true})], nextCursor: "evt_test_1", historyBoundary:"start" },
       { status: "ok", events: [], nextCursor: "done" }
     );
+    setup.botified.state = "idle";
 
     await setup.services.tasks.syncActiveTasksOnce();
 
     const completed = await setup.store.findTask(task.id);
     const artifacts = await setup.services.tasks.listTaskArtifacts(setup.userId, task.id);
     assert.equal(completed?.artifactProjectionStatus, "drained");
-    assert.deepEqual(artifacts.map((artifact) => [artifact.fileId, artifact.name, artifact.bytes]), [["sandbox:result.txt", "result.txt", 14]]);
+    assert.deepEqual(artifacts.map((artifact) => [artifact.name, artifact.bytes]), [["result.txt", 14]]);
+    assert.equal("fileId" in artifacts[0]!, false);
     assert.equal((await setup.services.tasks.downloadTaskArtifact(setup.userId, task.id, artifacts[0]!.id)).bytes.toString("utf8"), "sandbox result");
     assert.equal((await setup.services.tasks.downloadTaskInput(setup.userId, task.id, "files/input.txt")).bytes.toString("utf8"), "retained input");
     assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes, 14);
@@ -303,10 +679,11 @@ describe("durable task lifecycle", () => {
     const setup = await createSetup(true);
     const task = await startTask(setup, "terminal-pod-absent");
     setup.botified.timelineReads.push(
-      { status: "ok", events: [{ cursor: "done", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }], nextCursor: "done" },
+      { status: "ok", events: [timelineEvent(1,"cycle.completed",{ok:true})], nextCursor: "evt_test_1", historyBoundary:"start" },
       { status: "ok", events: [], nextCursor: "done" },
       new Error("Botified is gone with the Pod")
     );
+    setup.botified.state = "idle";
     setup.port.removePodBeforeNextInventory = true;
 
     const firstTick = await setup.services.tasks.syncActiveTasksOnce();
@@ -314,6 +691,7 @@ describe("durable task lifecycle", () => {
     const completedAt = completed?.cleanupCompletedAt;
 
     assert.deepEqual(firstTick.failedTaskIds, []);
+    assert.equal((await setup.store.listActiveTasks()).length, 0);
     assert.equal(completed?.terminalReason, "completed");
     assert.equal(completed?.artifactProjectionStatus, "drained");
     assert.equal(completed?.cleanupStatus, "completed");
@@ -335,7 +713,7 @@ describe("durable task lifecycle", () => {
     assert.equal(setup.botified.timelineCursors.length, timelineCalls);
   });
 
-  it("queries task list server-side and tails the authorized persistent transcript", async () => {
+  it("queries task list server-side and reads the authorized interaction snapshot", async () => {
     const setup = await createSetup(false);
     const alpha = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "alpha prompt", title: "Alpha" }, "alpha");
     const beta = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "beta prompt", title: "Beta" }, "beta");
@@ -343,13 +721,11 @@ describe("durable task lifecycle", () => {
     const page = await setup.services.tasks.listTasks(setup.userId, setup.projectId, { search: "alpha", statuses: ["completed"], archived: "exclude", sort: "title", direction: "asc", limit: 1 });
     assert.deepEqual(page.items.map((task) => task.id), [alpha.id]);
     assert.equal(page.total, 1);
-    await setup.store.appendTaskEvents([{ id: "event-user", taskId: alpha.id, kind: "user_input", cursor: "cursor-user", botifiedSeq: 1, botifiedType: "user.message", sessionId: "s1", payload: { text: "hello" }, createdAt: alpha.createdAt }, { id: "event-assistant", taskId: alpha.id, kind: "assistant_message", cursor: "cursor-assistant", botifiedSeq: 2, botifiedType: "assistant.message", sessionId: "s1", payload: { text: "world" }, createdAt: alpha.createdAt }]);
-    const transcript = await setup.services.tasks.taskTranscript(setup.userId, alpha.id, { limit: 10 });
-    assert.deepEqual(transcript.items.map((item) => [item.role, item.text]), [["user", "hello"], ["assistant", "world"]]);
-    assert.equal(transcript.nextCursor, "cursor-assistant");
-    assert.deepEqual(await setup.services.tasks.taskTranscript(setup.userId, alpha.id, { cursor: transcript.nextCursor!, limit: 10 }), { items: [], nextCursor: "cursor-assistant" });
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, alpha.id, { limit: 10 });
+    assert.deepEqual(interactions.items.map((item) => [item.kind, item.body]), [["user_message", "alpha prompt"]]);
+    assert.equal(typeof interactions.streamCursor, "string");
     const stranger = await setup.services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "stranger", email: "stranger@example.test", emailVerified: true });
-    await assert.rejects(() => setup.services.tasks.taskTranscript(stranger.user.id, alpha.id), /Project access denied/);
+    await assert.rejects(() => setup.services.tasks.taskInteractions(stranger.user.id, alpha.id), /Project access denied/);
   });
 
   async function createSetup(live: boolean) {
@@ -377,25 +753,46 @@ class DurableBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly timelineReads: Array<BotifiedTimelineReadResult | Error> = [];
   readonly timelineCursors: Array<string | undefined> = [];
   readonly downloads = new Map<string, Uint8Array>();
+  readonly previewFrames: BotifiedLlmTextPreviewFrame[] = [];
+  readonly stateReads: BotifiedRuntimeStateResult[] = [];
+  readonly stopCalls: string[] = [];
+  timelineCursor: string | undefined;
+  state = "running";
+  abortCalls = 0;
   throwAfterAcceptOnce = false;
   throwBeforeAcceptOnce = false;
   queryError: Error | null = null;
+  timelineReadDelayMs = 0;
   async health() { return { status: "ok" as const }; }
-  async readState() { return { snapshot: {}, state: "running" }; }
+  async readState() {
+    const result = this.stateReads.shift() ?? botifiedRuntimeState(this.state);
+    return result.timelineCursor || !this.timelineCursor ? result : { ...result, timelineCursor:this.timelineCursor };
+  }
   async postMessage(_baseUrl: string, _serviceKey: string, message: string): Promise<BotifiedPostMessageResult> { return { accepted: true, messageId: message, cursor: "cursor" }; }
   async postMessageWithDelivery(_baseUrl: string, _serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
     this.posts.push({ text: input.text, deliveryKey: input.deliveryKey, requestHash: input.requestHash });
     if (this.throwBeforeAcceptOnce) { this.throwBeforeAcceptOnce = false; throw new Error("post failed before acceptance"); }
+    this.state = "running";
     const receipt: BotifiedDeliveryReceipt = { accepted: true, deliveryKey: input.deliveryKey, requestHash: input.requestHash, messageId: `message-${this.posts.length}`, cursor: `cursor-${this.posts.length}` };
     this.receipts.set(input.deliveryKey, receipt);
     if (this.throwAfterAcceptOnce) { this.throwAfterAcceptOnce = false; throw new Error("crash after remote acceptance"); }
     return receipt;
   }
   async queryDeliveryReceipt(_baseUrl: string, _serviceKey: string, deliveryKey: string) { if (this.queryError) throw this.queryError; return this.receipts.get(deliveryKey) ?? null; }
-  async readTimeline(_baseUrl: string, _serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> { this.timelineCursors.push(cursor); const next = this.timelineReads.shift(); if (next instanceof Error) throw next; return next ?? { status: "ok", events: [], ...(cursor ? { nextCursor: cursor } : {}) }; }
+  async readTimeline(_baseUrl: string, _serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
+    if (this.timelineReadDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.timelineReadDelayMs));
+    this.timelineCursors.push(cursor);
+    const next = this.timelineReads.shift();
+    if (next instanceof Error) throw next;
+    const result = next ?? { status:"ok" as const, events:[], ...(cursor ? { nextCursor:cursor } : {}) };
+    if (result.nextCursor) this.timelineCursor = result.nextCursor;
+    return result;
+  }
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> { return { files: [] }; }
   async downloadFile(_baseUrl: string, _serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult> { const bytes = this.downloads.get(fileId) ?? new Uint8Array(); return { bytes, sizeBytes: bytes.byteLength, filename: fileId }; }
-  async abort(): Promise<BotifiedAbortResult> { return { aborted: true }; }
+  async abort(): Promise<BotifiedAbortResult> { this.abortCalls += 1; return { aborted: true }; }
+  async stopBackgroundTask(_baseUrl: string, _serviceKey: string, taskId: string) { this.stopCalls.push(taskId); return { taskId, state:"cancelling" as const }; }
+  async *streamLlmTextPreview(): AsyncIterable<BotifiedLlmTextPreviewFrame> { for (const frame of this.previewFrames) yield frame; }
 }
 
 class MemorySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
@@ -412,4 +809,38 @@ class MemorySandboxPort implements SandboxKubernetesMutationPort, SandboxKuberne
   async applyResource(resource: KubernetesResource) { this.resources = this.resources.filter((item) => item.kind !== resource.kind || item.metadata.name !== resource.metadata.name); this.resources.push(structuredClone(resource)); return "applied" as const; }
   async deleteResource(ref: KubernetesResourceRef) { this.deleteCalls += 1; const before = this.resources.length; this.resources = this.resources.filter((item) => item.kind !== ref.kind || item.metadata.name !== ref.name); return before === this.resources.length ? "not_found" as const : "deleted" as const; }
   async getPodReadiness(): Promise<PodReadiness> { return "ready"; }
+}
+
+function botifiedRuntimeState(
+  state: string,
+  tasks: Partial<Record<"running" | "cancelling" | "pending_callbacks" | "pending_asks", number>> = {},
+  workItems: Array<{ id: string; type: string; status: string }> = []
+): BotifiedRuntimeStateResult {
+  const activeItems = [
+    { id:"service", type:"service_status", status:state },
+    { id:"queue", type:"queue_state", status:"ready" },
+    ...(state === "running" ? [{ id:"cycle-current", type:"cycle", status:"running" }] : []),
+    ...workItems
+  ];
+  const snapshot = {
+    state,
+    queue_length:0,
+    tasks:{ running:0, cancelling:0, pending_callbacks:0, pending_asks:0, ...tasks },
+    active_items:activeItems
+  };
+  return { snapshot, state, activeItems };
+}
+
+function timelineEvent(seq:number,type:string,data:Record<string,unknown>,item:null|{id:string;type:string;status:string}=null):BotifiedTimelineEvent{
+  return{version:"botified.timeline.v1",seq,cursor:`evt_test_${seq}`,time:`2026-07-11T00:00:0${seq}.000Z`,session_id:"s1",type,trace:{cycle_id:"cycle-1"},item,data};
+}
+
+type PreviewFrameInput = BotifiedLlmTextPreviewFrame extends infer Frame
+  ? Frame extends BotifiedLlmTextPreviewFrame
+    ? Omit<Frame, "time" | "providerRequestId" | "providerCallIndex" | "inputIds">
+    : never
+  : never;
+
+function previewFrame(frame: PreviewFrameInput, providerRequestId = "provider-request-1"): BotifiedLlmTextPreviewFrame {
+  return { time:"2026-07-11T00:00:01.000Z", providerRequestId, providerCallIndex:0, inputIds:["input-1"], ...frame } as BotifiedLlmTextPreviewFrame;
 }

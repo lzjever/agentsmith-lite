@@ -1,8 +1,9 @@
 "use client";
 
-import type { ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint } from "../../../packages/contracts/src/api.js";
+import type { ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
+export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -49,8 +50,6 @@ export interface Task {
   sandbox: { namespace: string; resources: Array<{ apiVersion: string; kind: string; metadata: { name: string; namespace?: string } }> };
   createdAt: string; updatedAt: string;
 }
-export type TaskEventKind = "user_input" | "turn_started" | "turn_completed" | "turn_failed" | "assistant_message" | "tool_execution" | "artifact" | "runtime_error" | "diagnostic";
-export interface TaskEvent { id: string; taskId: string; kind: TaskEventKind; cursor: string; botifiedSeq: number; botifiedType: string; sessionId: string; payload: Record<string, unknown>; createdAt: string; }
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
 export interface TaskInput { path: string; name: string; bytes: number; sha256: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
@@ -62,19 +61,10 @@ export interface ChatResponse {
   usage?: { requests?: number; tokens?: number; cost?: number; };
 }
 export type ProjectChatThread = ApiProjectChatThread;
-export interface TaskSummary { taskId: string; eventCount: number; artifactCount: number; updatedAt: string; }
-export interface TaskFollowUp {
-  id: string; taskId: string; prompt: string; followUpTaskId?: string | null; createdAt: string;
-  deliveryStatus?: "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed";
-  safeError?: string | null;
-  updatedAt?: string;
-  deletedAt?: string | null;
-}
 export type TaskListSort = "created_at" | "updated_at" | "title" | "status";
 export type TaskListArchivedFilter = "exclude" | "include" | "only";
 export interface TaskListQuery { search?: string | undefined; statuses?: TaskStatus[] | undefined; archived?: TaskListArchivedFilter | undefined; sort?: TaskListSort | undefined; direction?: "asc" | "desc" | undefined; cursor?: string | undefined; limit?: number | undefined; }
 export interface TaskListPage { items: Task[]; nextCursor: string | null; total: number; }
-export interface TaskTranscriptEntry { id: string; taskId: string; role: "user" | "assistant" | "tool" | "system"; text: string; cursor: string; eventKind: TaskEventKind; createdAt: string; }
 export interface ProjectChatMessage extends ChatMessage { id: string; threadId: string; sequence:number;version:number;deliveryStatus:"pending"|"response_pending"|"completed"|"failed"|"stopped";createdAt: string;updatedAt:string; }
 export interface ProjectChatSendResponse { message: ProjectChatMessage; endpointSnapshot: Pick<Endpoint, "id" | "baseUrl" | "model" | "protocol">; }
 export type ContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
@@ -141,8 +131,12 @@ async function errorMessage(response: Response): Promise<string> {
   if (!text) return response.statusText;
   try {
     const body: unknown = JSON.parse(text);
-    if (body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string") {
-      return (body as { error: string }).error;
+    if (body && typeof body === "object") {
+      const error = (body as { error?: unknown }).error;
+      if (typeof error === "string") return error;
+      if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+        return (error as { message: string }).message;
+      }
     }
   } catch {
     // Preserve a non-JSON API error verbatim.
@@ -274,29 +268,21 @@ export const apiClient = {
     if (query.limit) params.set("limit", String(query.limit));
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
-  taskSummaries: (projectId: string) => request<TaskSummary[]>(`/projects/${encodeURIComponent(projectId)}/tasks/summaries`),
   createTask: (projectId: string, input: { prompt: string; endpointId: string; title?: string; inputPaths?: string[] }, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
-  taskEvents: (taskId: string) => request<TaskEvent[]>(`/tasks/${encodeURIComponent(taskId)}/events`),
   task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
-  taskSummary: (taskId: string) => request<TaskSummary>(`/tasks/${encodeURIComponent(taskId)}/summary`),
   taskInputs: (taskId: string) => request<TaskInput[]>(`/tasks/${encodeURIComponent(taskId)}/inputs`),
   taskInputDownloadUrl: (taskId: string, path: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/inputs/download?path=${encodeURIComponent(path)}`,
   taskTerminalWebSocketUrl: (taskId:string) => {
     const protocol=window.location.protocol==="https:"?"wss:":"ws:";
     return `${protocol}//${window.location.host}${apiBasePath}/tasks/${encodeURIComponent(taskId)}/terminal/ws`;
   },
-  taskFollowUps: (taskId: string) => request<TaskFollowUp[]>(`/tasks/${encodeURIComponent(taskId)}/follow-ups`),
-  followUpTask: (taskId: string, prompt: string, idempotencyKey: string) => jsonIdempotent<TaskFollowUp>(`/tasks/${encodeURIComponent(taskId)}/follow-ups`, "POST", idempotencyKey, { prompt }),
-  updateTaskFollowUp: (taskId: string, followUpId: string, prompt: string, idempotencyKey: string) => jsonIdempotent<TaskFollowUp>(`/tasks/${encodeURIComponent(taskId)}/follow-ups/${encodeURIComponent(followUpId)}`, "PATCH", idempotencyKey, { prompt }),
-  deleteTaskFollowUp: (taskId: string, followUpId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; followUpId: string }>(`/tasks/${encodeURIComponent(taskId)}/follow-ups/${encodeURIComponent(followUpId)}`, "DELETE", idempotencyKey),
-  retryTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/retry`, "POST", idempotencyKey),
-  duplicateTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/duplicate`, "POST", idempotencyKey),
-  updateTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
-  archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
-  deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
-  async streamTaskTranscript(taskId: string, cursor: string | undefined, signal: AbortSignal, onEntry: (entry: TaskTranscriptEntry) => void, onCursor: (nextCursor: string | null) => void): Promise<void> {
-    const params = new URLSearchParams({ limit: "100", ...(cursor ? { cursor } : {}) });
-    const response = await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/transcript/stream?${params}`, { credentials: "same-origin", headers: { accept: "text/event-stream" }, signal });
+  getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
+  async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
+    const response = await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
+      credentials: "same-origin",
+      headers: { accept: "text/event-stream", ...(cursor ? { "last-event-id": cursor } : {}) },
+      signal
+    });
     if (!response.ok || !response.body) throw new ApiError(response.status, await errorMessage(response));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -304,17 +290,14 @@ export const apiClient = {
     const receive = (frames: string[]) => {
       for (const frame of frames) {
         const event = /^event:\s*(.+)$/m.exec(frame)?.[1];
+        const cursor = /^id:\s*(.+)$/m.exec(frame)?.[1];
         const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice("data:".length).trimStart()).join("\n");
-        if (!event || !data) continue;
-        let value: unknown;
+        if (!event || event === "heartbeat" || (!data && event !== "done" && event !== "reconnect")) continue;
         try {
-          value = JSON.parse(data);
+          onEvent(parseTaskInteractionStreamEvent(event, cursor, data ? JSON.parse(data) : undefined));
         } catch {
-          throw new ApiError(502, "Task transcript stream contained an invalid event.");
+          throw new ApiError(502, "Task interaction stream contained an invalid event.");
         }
-        if (event === "transcript" && isTaskTranscriptEntry(value)) onEntry(value);
-        if (event === "cursor" && value && typeof value === "object" && (typeof (value as { nextCursor?: unknown }).nextCursor === "string" || (value as { nextCursor?: unknown }).nextCursor === null)) onCursor((value as { nextCursor: string | null }).nextCursor);
-        if (event === "error") throw new ApiError(502, value && typeof value === "object" && typeof (value as { error?: unknown }).error === "string" ? (value as { error: string }).error : "Task transcript stream failed.");
       }
     };
     while (true) {
@@ -330,6 +313,12 @@ export const apiClient = {
     receive(frames.slice(0, -1));
     if (frames.at(-1)?.trim()) receive([frames.at(-1)!]);
   },
+  sendTaskMessage: (taskId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages`, "POST", idempotencyKey, { content }),
+  updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
+  deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
+  abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
+  stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
+  deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
   cancelTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/cancel`, "POST", idempotencyKey, {}),
   artifactDownloadUrl: (taskId: string, artifactId: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
@@ -351,14 +340,95 @@ export function newIdempotencyKey(operation: string): string {
   return `web-${operation}-${id}`;
 }
 
-function isTaskTranscriptEntry(value: unknown): value is TaskTranscriptEntry {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<TaskTranscriptEntry>;
-  return typeof entry.id === "string" && typeof entry.taskId === "string" && typeof entry.text === "string" && typeof entry.cursor === "string" && typeof entry.createdAt === "string" && ["user", "assistant", "tool", "system"].includes(entry.role ?? "");
-}
-
 function isProjectAuditEvent(value: unknown): value is ProjectAuditEvent {
   return Boolean(value && typeof value === "object" && "action" in value && typeof value.action === "string" && value.action.length > 0 && "resourceKind" in value && typeof value.resourceKind === "string" && value.resourceKind.length > 0);
 }
+
+function parseTaskInteractionStreamEvent(event: string, cursor: string | undefined, value: unknown): TaskInteractionStreamEvent {
+  if (event === "interaction" && cursor && isTaskInteractionItem(value)) return { type: "interaction", cursor, item: value };
+  if (event === "state" && isRecord(value) && isTaskQueuedMessageArray(value.queuedMessages) && isTaskCapabilities(value.capabilities)) return {
+    type: "state",
+    queuedMessages: value.queuedMessages,
+    capabilities: value.capabilities
+  };
+  if (event === "run_state" && isRecord(value) && isTaskRunState(value.runState)) return { type: "run_state", runState: value.runState };
+  if (event === "connection" && isRecord(value) && isConnectionState(value.connectionState) && isRuntimeReachability(value.runtimeReachability) && isHistoryStatus(value.historyStatus) && isNullableString(value.lastSyncedAt) && isNullableString(value.message)) return {
+    type: "connection",
+    connectionState: value.connectionState,
+    runtimeReachability: value.runtimeReachability,
+    historyStatus: value.historyStatus,
+    lastSyncedAt: value.lastSyncedAt,
+    message: value.message
+  };
+  if (event === "assistant_preview" && isRecord(value) && typeof value.interactionId === "string" && typeof value.body === "string" && typeof value.occurredAt === "string") return { type: "assistant_preview", interactionId: value.interactionId, body: value.body, occurredAt: value.occurredAt };
+  if (event === "assistant_preview_clear" && isRecord(value) && typeof value.interactionId === "string") return { type: "assistant_preview_clear", interactionId: value.interactionId };
+  if (event === "reset" && isTaskInteractionSnapshot(value)) return { type: "reset", snapshot: value };
+  if (event === "reconnect") return { type: "reconnect" };
+  if (event === "done") return { type: "done" };
+  throw new ApiError(502, "Task interaction stream contained an unknown event.");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
+
+function isTaskInteractionSnapshot(value: unknown): value is TaskInteractionSnapshot {
+  return isRecord(value)
+    && Array.isArray(value.items) && value.items.every(isTaskInteractionItem)
+    && isNullableString(value.nextPageCursor) && typeof value.hasMoreBefore === "boolean" && typeof value.streamCursor === "string"
+    && isTaskInteractionState(value);
+}
+
+function isTaskInteractionState(value: unknown): value is Pick<TaskInteractionSnapshot, "queuedMessages" | "runState" | "runtimeReachability" | "historyStatus" | "lastSyncedAt" | "capabilities"> & Record<string, unknown> {
+  return isRecord(value) && isTaskQueuedMessageArray(value.queuedMessages)
+    && isTaskRunState(value.runState) && isRuntimeReachability(value.runtimeReachability) && isHistoryStatus(value.historyStatus)
+    && isNullableString(value.lastSyncedAt) && isTaskCapabilities(value.capabilities);
+}
+
+function isTaskCapabilities(value: unknown): value is TaskCapabilities {
+  return isRecord(value)
+    && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
+    && typeof value.abortTurn === "boolean" && typeof value.cancelTask === "boolean"
+    && typeof value.openTerminal === "boolean" && typeof value.deleteTask === "boolean";
+}
+
+function isTaskQueuedMessageArray(value: unknown): value is TaskQueuedMessage[] {
+  return Array.isArray(value) && value.every((message) => isRecord(message)
+    && typeof message.id === "string" && typeof message.content === "string"
+    && isStringUnion(message.deliveryStatus, ["pending", "dispatching", "terminal_pending", "failed"])
+    && typeof message.editable === "boolean" && typeof message.deletable === "boolean" && typeof message.updatedAt === "string");
+}
+
+function isTaskInteractionItem(value: unknown): value is TaskInteractionItem {
+  if (!isTaskInteractionBase(value)) return false;
+  switch (value.kind) {
+    case "user_message": return isStringUnion(value.status, ["pending", "dispatching", "retrying", "accepted", "queued", "rejected", "failed"]);
+    case "assistant_message": return isStringUnion(value.status, ["generating", "completed", "failed", "aborted"]);
+    case "tool": return isStringUnion(value.executionStatus, ["pending", "running", "completed", "failed", "cancelled"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.toolName === "string" && isNullableString(value.command) && isNullableString(value.outputTail) && isNullableNumber(value.exitCode) && typeof value.detailsOmitted === "boolean" && typeof value.canStop === "boolean";
+    case "background_task": return isStringUnion(value.executionStatus, ["queued", "running", "completed", "failed", "cancelled", "timed_out", "lost"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.label === "string" && isNullableString(value.workSummary) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean" && typeof value.canStop === "boolean";
+    case "task_question": return isStringUnion(value.status, ["waiting", "answered", "expired", "rejected", "reply_failed"]) && typeof value.question === "string" && isNullableString(value.expect) && isNullableString(value.answer);
+    case "task_notice": return isStringUnion(value.status, ["accepted", "rejected"]) && isNullableString(value.sender);
+    case "task_result": return isStringUnion(value.executionStatus, ["completed", "failed", "cancelled", "timed_out", "lost"]) && isDeliveryStatus(value.deliveryStatus) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";
+    case "subagent_result": return isStringUnion(value.executionStatus, ["completed", "failed", "cancelled"]) && isDeliveryStatus(value.deliveryStatus) && typeof value.name === "string" && isNullableString(value.purpose) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";
+    case "file": return isStringUnion(value.status, ["available", "failed"]) && typeof value.artifactId === "string" && typeof value.name === "string" && isNullableString(value.mediaType) && typeof value.bytes === "number";
+    case "execution_boundary": return isStringUnion(value.status, ["successor_pending", "successor_created", "failed"]) && isNullableString(value.targetTaskId);
+    case "system_error": return isStringUnion(value.status, ["active", "resolved"]) && isNullableString(value.code) && typeof value.retryable === "boolean" && typeof value.detailsOmitted === "boolean";
+  }
+}
+
+function isTaskInteractionBase(value: unknown): value is Record<string, unknown> & { kind: TaskInteractionItem["kind"] } {
+  return isRecord(value) && typeof value.id === "string" && typeof value.revision === "number" && typeof value.taskId === "string"
+    && isStringUnion(value.kind, ["user_message", "assistant_message", "tool", "background_task", "task_question", "task_notice", "task_result", "subagent_result", "file", "execution_boundary", "system_error"])
+    && typeof value.title === "string" && isNullableString(value.body) && isStringUnion(value.contentMode, ["full", "preview", "none"])
+    && typeof value.position === "number" && typeof value.occurredAt === "string" && typeof value.updatedAt === "string";
+}
+
+function isTaskRunState(value: unknown): value is TaskInteractionSnapshot["runState"] { return isStringUnion(value, ["idle", "starting", "running", "reconnecting", "aborting", "finalizing", "terminal"]); }
+function isRuntimeReachability(value: unknown): value is TaskInteractionSnapshot["runtimeReachability"] { return isStringUnion(value, ["unknown", "reachable", "unreachable"]); }
+function isHistoryStatus(value: unknown): value is TaskInteractionSnapshot["historyStatus"] { return isStringUnion(value, ["complete", "gap"]); }
+function isConnectionState(value: unknown): value is Extract<TaskInteractionStreamEvent, { type: "connection" }>["connectionState"] { return isStringUnion(value, ["connecting", "reconnecting", "connected", "disconnected", "recovered"]); }
+function isDeliveryStatus(value: unknown): value is "pending" | "delivered" | "failed" { return isStringUnion(value, ["pending", "delivered", "failed"]); }
+function isNullableDeliveryStatus(value: unknown): value is "pending" | "delivered" | "failed" | null { return value === null || isDeliveryStatus(value); }
+function isNullableString(value: unknown): value is string | null { return value === null || typeof value === "string"; }
+function isNullableNumber(value: unknown): value is number | null { return value === null || typeof value === "number"; }
+function isStringUnion<T extends string>(value: unknown, choices: readonly T[]): value is T { return typeof value === "string" && choices.some((choice) => choice === value); }
 
 async function readChatStream(response:Response,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!response.ok||!response.body)throw new ApiError(response.status,await response.text());const reader=response.body.getReader();const decoder=new TextDecoder();let buffer="";let done:ProjectChatSendResponse|undefined;while(true){const{done:ended,value}=await reader.read();if(ended)break;buffer+=decoder.decode(value,{stream:true});const frames=buffer.split("\n\n");buffer=frames.pop()??"";for(const frame of frames){const type=/event: (.+)/.exec(frame)?.[1];const data=/data: (.+)/.exec(frame)?.[1];if(!data)continue;const value=JSON.parse(data);if(type==="delta")onDelta(value.delta);else if(type==="done")done=value;else if(type==="error")throw new ApiError(502,value.error);}}if(!done)throw new ApiError(502,"Chat stream ended without a final message");return done;}

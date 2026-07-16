@@ -13,7 +13,7 @@ postgresDescribe("postgres migrations", () => {
     await client.connect();
     try {
       const expected = await readPostgresMigrations();
-      assert.equal(expected.at(-1)?.id, "046_chat_message_thread_sequence");
+      assert.equal(expected.at(-1)?.id, "048_task_interaction_source_revision_bigint");
       const ledger = await client.query<{ id: string; checksum: string }>(
         "select id, checksum from agentsmith_migrations order by id"
       );
@@ -32,7 +32,8 @@ postgresDescribe("postgres migrations", () => {
             'project_memberships',
             'model_endpoints',
             'agent_tasks',
-            'agent_task_events',
+            'task_interaction_changes',
+            'task_messages',
             'agent_task_artifacts',
             'postgres_json_docs',
             'runtime_leases'
@@ -41,7 +42,6 @@ postgresDescribe("postgres migrations", () => {
       `);
       assert.deepEqual(tables.rows.map((row) => row.table_name), [
         "agent_task_artifacts",
-        "agent_task_events",
         "agent_tasks",
         "auth_sessions",
         "model_endpoints",
@@ -49,26 +49,34 @@ postgresDescribe("postgres migrations", () => {
         "project_memberships",
         "projects",
         "runtime_leases",
+        "task_interaction_changes",
+        "task_messages",
         "users",
         "workspaces"
       ]);
 
-      const eventUniqueConstraints = await client.query<{ conname: string; definition: string }>(`
+      const interactionUniqueConstraints = await client.query<{ conname: string; definition: string }>(`
         select c.conname, pg_get_constraintdef(c.oid) as definition
         from pg_constraint c
         join pg_class t on t.oid = c.conrelid
-        where t.relname = 'agent_task_events'
+        where t.relname = 'task_interaction_changes'
           and c.contype = 'u'
         order by c.conname
       `);
       assert.equal(
-        eventUniqueConstraints.rows.some((row) => /UNIQUE \(task_id, cursor\)/i.test(row.definition)),
+        interactionUniqueConstraints.rows.some((row) => /UNIQUE \(task_id, source_kind, source_id, source_revision\)/i.test(row.definition)),
         true
       );
       assert.equal(
-        eventUniqueConstraints.rows.some((row) => /botified_seq/i.test(row.definition)),
-        false
+        interactionUniqueConstraints.rows.some((row) => /UNIQUE \(task_id, interaction_id, revision\)/i.test(row.definition)),
+        true
       );
+      const interactionSourceRevision = await client.query<{ data_type:string }>(`select data_type from information_schema.columns where table_schema='public' and table_name='task_interaction_changes' and column_name='source_revision'`);
+      assert.deepEqual(interactionSourceRevision.rows, [{ data_type:"bigint" }]);
+      const interactionSourceIdentity = await client.query<{ definition:string }>(`select pg_get_constraintdef(c.oid) as definition from pg_constraint c join pg_class t on t.oid=c.conrelid where t.relname='task_interaction_changes' and c.conname='task_interaction_changes_source_identity_check'`);
+      assert.match(interactionSourceIdentity.rows[0]?.definition??"", /source_revision >= 0.*source_kind.*<>.*botified.*source_revision = 0/i);
+      const interactionIndexes = await client.query<{ indexname:string }>("select indexname from pg_indexes where schemaname='public' and tablename='task_interaction_changes' order by indexname");
+      for(const name of ["task_interaction_changes_latest_idx","task_interaction_changes_history_idx","task_interaction_changes_tool_call_idx","task_interaction_changes_work_task_idx","task_interaction_changes_callback_idx"]) assert.equal(interactionIndexes.rows.some((row)=>row.indexname===name),true);
 
       const chatMessageUniqueConstraints = await client.query<{ definition: string }>(`
         select pg_get_constraintdef(c.oid) as definition
@@ -139,19 +147,53 @@ postgresDescribe("postgres migrations", () => {
       `);
       assert.deepEqual(legacyAliasColumn.rows, [{ is_nullable: "YES" }]);
 
-      const followUpColumns = await client.query<{ column_name: string; is_nullable: string }>(`
+      const messageColumns = await client.query<{ column_name: string; is_nullable: string }>(`
         select column_name, is_nullable
         from information_schema.columns
         where table_schema = 'public'
           and ((table_name = 'agent_tasks' and column_name = 'source_task_id')
-            or (table_name = 'task_follow_ups' and column_name = 'follow_up_task_id'))
+            or (table_name = 'task_messages' and column_name = 'target_task_id'))
         order by table_name, column_name
       `);
-      assert.deepEqual(followUpColumns.rows, [
+      assert.deepEqual(messageColumns.rows, [
         { column_name: "source_task_id", is_nullable: "YES" },
-        { column_name: "follow_up_task_id", is_nullable: "YES" }
+        { column_name: "target_task_id", is_nullable: "YES" }
       ]);
+      const removed = await client.query<{ table_name:string }>("select table_name from information_schema.tables where table_schema='public' and table_name in ('agent_task_events','task_follow_ups')");
+      assert.deepEqual(removed.rows, []);
     } finally {
+      await client.end();
+    }
+  });
+
+  it("drops the legacy audit action check before rewriting follow-up rows", async () => {
+    assert.ok(postgresUrl);
+    const migration = (await readPostgresMigrations()).find((item) => item.id === "047_task_interaction_changes");
+    assert.ok(migration);
+    const dropAt = migration.sql.indexOf("alter table project_audit_events drop constraint if exists project_audit_events_action_check");
+    const rewriteAt = migration.sql.indexOf("update project_audit_events set action='task.message.create' where action='task.follow_up.create'");
+    const installAt = migration.sql.indexOf("alter table project_audit_events add constraint project_audit_events_action_check");
+    assert.ok(dropAt >= 0 && dropAt < rewriteAt && rewriteAt < installAt);
+
+    const client = new pg.Client({ connectionString: postgresUrl });
+    await client.connect();
+    try {
+      await client.query("begin");
+      const ids = await insertProjectFixture(client, "legacy_follow_up_audit");
+      const auditIds = ["create","edit","delete"].map((operation) => `audit_legacy_follow_up_${operation}_${ids.suffix}`);
+      await client.query("alter table project_audit_events drop constraint project_audit_events_action_check");
+      await client.query("alter table project_audit_events add constraint project_audit_events_action_check check (action not like 'task.message.%') not valid");
+      for (const [index, operation] of ["create","edit","delete"].entries()) {
+        await client.query("insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,created_at) values ($1,$2,$3,$4,'accepted','task',$2,now())", [auditIds[index],ids.projectId,ids.userId,`task.follow_up.${operation}`]);
+      }
+      await client.query("savepoint constrained_rewrite");
+      await assert.rejects(client.query("update project_audit_events set action=replace(action,'task.follow_up.','task.message.') where id=any($1)", [auditIds]), isCheckViolation);
+      await client.query("rollback to savepoint constrained_rewrite");
+      await client.query("alter table project_audit_events drop constraint project_audit_events_action_check");
+      await client.query("update project_audit_events set action=replace(action,'task.follow_up.','task.message.') where id=any($1)", [auditIds]);
+      assert.deepEqual((await client.query<{ action:string }>("select action from project_audit_events where id=any($1) order by action", [auditIds])).rows, [{action:"task.message.create"},{action:"task.message.delete"},{action:"task.message.edit"}]);
+    } finally {
+      await client.query("rollback").catch(() => undefined);
       await client.end();
     }
   });

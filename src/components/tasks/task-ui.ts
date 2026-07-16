@@ -1,4 +1,4 @@
-import type { Endpoint, TaskEvent, TaskStatus } from "../../lib/api/client.js";
+import type { Endpoint, TaskStatus } from "../../lib/api/client.js";
 
 export const activeTaskStatuses = new Set<TaskStatus>(["queued", "starting", "running", "stopping"]);
 
@@ -37,26 +37,4 @@ export function formatArtifactBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export function activityCopy(event: TaskEvent): { title: string; detail: string | undefined } {
-  const payload = event.payload;
-  const text = stringField(payload, "text") ?? stringField(payload, "message") ?? stringField(payload, "summary");
-  const filename = stringField(payload, "filename") ?? stringField(payload, "name");
-  switch (event.kind) {
-    case "assistant_message": return { title: "Assistant response", detail: text };
-    case "tool_execution": return { title: "Tool execution", detail: stringField(payload, "tool") ?? stringField(payload, "name") };
-    case "artifact": return { title: "Artifact published", detail: filename };
-    case "turn_started": return { title: "Turn started", detail: undefined };
-    case "turn_completed": return { title: "Turn completed", detail: undefined };
-    case "turn_failed": return { title: "Turn failed", detail: text };
-    case "user_input": return { title: "Task input received", detail: undefined };
-    case "runtime_error": return { title: "Runtime issue", detail: text };
-    case "diagnostic": return { title: "Runtime update", detail: text };
-  }
-}
-
-function stringField(payload: Record<string, unknown>, key: string): string | undefined {
-  const value = payload[key];
-  return typeof value === "string" && value.trim() ? value : undefined;
 }

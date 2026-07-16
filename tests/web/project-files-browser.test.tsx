@@ -127,6 +127,21 @@ describe("project files browser", () => {
     try{render(<ProjectFilesPage projectId="project_1"/>);await screen.findByText("brief.txt");const filter=screen.getByRole("textbox",{name:"Filter files"});assert.match(filter.className,/border-border-input/);fireEvent.change(filter,{target:{value:"image"}});assert.equal(screen.queryByText("brief.txt"),null);assert.ok(screen.getByText("image.png"));fireEvent.click(screen.getByRole("button",{name:"Clear file filter"}));fireEvent.click(screen.getByRole("button",{name:"brief.txt"}));fireEvent.click(screen.getAllByRole("button",{name:"Preview"})[0]!);await screen.findByText("preview");fireEvent.click(screen.getByRole("button",{name:"Close preview"}));}finally{restoreClient(original);globalThis.fetch=originalFetch;}
   });
 
+  it("shows a distinct no-match state and clears the filter", async () => {
+    const original = snapshotClient();
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.projectCapabilities = async () => writable;
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      fireEvent.change(screen.getByRole("textbox", { name: "Filter files" }), { target: { value: "missing" } });
+      await screen.findByRole("heading", { name: "No matching files" });
+      assert.equal(screen.queryByRole("heading", { name: "No files yet" }), null);
+      fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+      assert.ok(screen.getByText("brief.txt"));
+    } finally { restoreClient(original); }
+  });
+
   it("shows and announces the single-file drop target state", async () => {
     const original = snapshotClient();
     apiClient.files = async () => ({ entries: [file] });

@@ -106,7 +106,10 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
 
   const parent = parentFilePath(path);
   const crumbs = fileBreadcrumbs(path);
-  const visibleEntries=entries.filter(entry=>entry.name.toLowerCase().includes(query.trim().toLowerCase())); const display = fileBrowserDisplay(state, visibleEntries, path);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleEntries = entries.filter((entry) => entry.name.toLowerCase().includes(normalizedQuery));
+  const display = fileBrowserDisplay(state, entries, path);
+  const noMatches = display === "listing" && normalizedQuery.length > 0 && visibleEntries.length === 0;
   const canWrite = capabilities?.canWriteFiles === true;
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Project files available to this project and its tasks." actions={<div className="flex items-center gap-2"><Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={state === "loading" || uploading}><RefreshCw size={16} /></Button>{canWrite ? <><Button onClick={() => input.current?.click()} disabled={uploading}>{uploading ? <RefreshCw className="animate-spin" size={16} /> : <Upload size={16} />}{uploading ? "Uploading" : "Upload"}</Button><input ref={input} className="sr-only" type="file" onChange={selectUpload} /></> : null}</div>} />}>
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
@@ -119,7 +122,8 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
         {display === "loading" ? <FileBrowserLoading /> : null}
         {display === "error" ? <FileBrowserError onRetry={load} /> : null}
         {display === "empty" ? <FileBrowserEmpty nested={path !== PROJECT_FILES_ROOT} /> : null}
-        {display === "listing" ? <FileBrowserList entries={visibleEntries} parent={parent} selectedPath={selected?.path} onNavigate={navigate} onSelect={select} /> : null}
+        {noMatches ? <FileBrowserNoMatches query={query.trim()} onClear={() => setQuery("")} /> : null}
+        {display === "listing" && !noMatches ? <FileBrowserList entries={visibleEntries} parent={parent} selectedPath={selected?.path} onNavigate={navigate} onSelect={select} /> : null}
       </section>
       <aside className="hidden rounded-md border border-subtle bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} canWrite={canWrite} onDelete={setDeleteTarget} onPreview={openPreview} /></aside>
     </div>
@@ -139,6 +143,10 @@ function FileBrowserError({ onRetry }: { onRetry: () => Promise<void> }) {
 
 function FileBrowserEmpty({ nested }: { nested: boolean }) {
   return <div className="grid min-h-64 place-items-center px-6 text-center"><div><FolderUp className="mx-auto size-7 text-tertiary" /><h2 className="mt-3 type-title">{nested ? "This folder is empty" : "No files yet"}</h2><p className="mt-2 text-sm text-secondary">{nested ? "Use the path trail to return to another folder." : "Upload files for this project. Tasks receive their own server-managed input snapshot."}</p></div></div>;
+}
+
+function FileBrowserNoMatches({ query, onClear }: { query: string; onClear: () => void }) {
+  return <div className="grid min-h-64 place-items-center px-6 text-center"><div><Search className="mx-auto size-7 text-tertiary" /><h2 className="mt-3 type-title">No matching files</h2><p className="mt-2 text-sm text-secondary">No files in this folder match "{query}".</p><Button className="mt-3" variant="quiet" onClick={onClear}>Clear filter</Button></div></div>;
 }
 
 function FileBrowserList({ entries, parent, selectedPath, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | undefined; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {

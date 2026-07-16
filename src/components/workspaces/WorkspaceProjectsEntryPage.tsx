@@ -2,6 +2,7 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
 import { CreateProjectDialog } from "../projects/CreateProjectDialog";
@@ -16,6 +17,7 @@ import { EmptyState, PageLoading } from "../ui/loading";
 type LoadState = "loading" | "ready" | "error";
 
 export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: string }) {
+  const router = useRouter();
   const [workspace, setWorkspace] = useState<Workspace>();
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
@@ -46,6 +48,7 @@ export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: strin
   function created(project: Project) {
     setWorkspace((current) => current ? { ...current, projects: [...current.projects, project] } : current);
     setCreateOpen(false);
+    router.push(`/workspaces/${workspaceId}/projects/${project.id}/overview`);
   }
   function togglePin(projectId: string) { setPinnedProjectIds((current) => { const next = new Set(current); next.has(projectId) ? next.delete(projectId) : next.add(projectId); window.localStorage.setItem(`agentsmith:projects:pinned:${workspaceId}`, JSON.stringify([...next])); return next; }); }
 

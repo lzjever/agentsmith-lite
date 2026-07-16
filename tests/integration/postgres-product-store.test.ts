@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
-import type { AgentTask, AgentTaskArtifact, AgentTaskEvent, ModelEndpoint, Project, ProjectMembership, StoredUser, Workspace } from "../../packages/contracts/src/api.js";
+import type { AgentTask, ModelEndpoint, Project, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
+import type { PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
@@ -21,7 +22,8 @@ postgresDescribe("postgres product store", () => {
       await client.query(`
         truncate table
           agent_task_artifacts,
-          agent_task_events,
+          task_interaction_changes,
+          task_messages,
           agent_tasks,
           model_endpoints,
           projects,
@@ -39,6 +41,21 @@ postgresDescribe("postgres product store", () => {
 
   after(async () => {
     await store.close();
+  });
+
+  it("initializes a new task interaction snapshot with complete history", async () => {
+    const timestamp = "2026-07-13T00:00:00.000Z";
+    await store.createUser({ id: "user_interaction_sync", email: "interaction-sync@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
+    await store.createWorkspace({ id: "ws_interaction_sync", name: "Interaction sync", ownerUserId: "user_interaction_sync", createdAt: timestamp, updatedAt: timestamp });
+    await store.createProject({ id: "proj_interaction_sync", workspaceId: "ws_interaction_sync", name: "Interaction sync", ownerUserId: "user_interaction_sync", rootPath: "workspaces/ws_interaction_sync/projects/proj_interaction_sync", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
+    await createTestCredential(store, "proj_interaction_sync", "cred_interaction_sync", timestamp);
+    await store.createEndpoint(endpointRecord("endpoint_interaction_sync", "proj_interaction_sync", "cred_interaction_sync", timestamp));
+    await store.createTask({ id: "task_interaction_sync", workspaceId: "ws_interaction_sync", projectId: "proj_interaction_sync", endpointId: "endpoint_interaction_sync", prompt: "hello", status: "starting", runId: "run_interaction_sync", executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
+
+    const snapshot = await store.readTaskInteractionSnapshot("task_interaction_sync", null, 10);
+    assert.equal(snapshot?.sourceCursor, null);
+    assert.equal(snapshot?.historyStatus, "complete");
+    assert.equal(snapshot?.lastSyncedAt, null);
   });
 
   it("atomically enforces active task capacity across concurrent store requests", async () => {
@@ -146,7 +163,7 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual((await store.listProjectAlerts(first.projectId)).map((alert) => [alert.id, alert.status]), [["alert_history_2", "active"], ["alert_history_1", "resolved"]]);
   });
 
-  it("atomically round-trips a terminal follow-up successor and rolls back a duplicate linkage", async () => {
+  it("atomically round-trips a terminal message successor and rolls back a duplicate linkage", async () => {
     const timestamp = "2026-07-11T00:00:00.000Z";
     await store.createUser({ id: "user_follow_up", email: "follow-up@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
     await store.createWorkspace({ id: "ws_follow_up", name: "Follow up", ownerUserId: "user_follow_up", createdAt: timestamp, updatedAt: timestamp });
@@ -156,13 +173,13 @@ postgresDescribe("postgres product store", () => {
     const source: AgentTask = { id: "task_follow_source", workspaceId: "ws_follow_up", projectId: "proj_follow_up", endpointId: "endpoint_follow_up", prompt: "source", status: "completed", runId: "run_follow_source", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
     const successor: AgentTask = { ...source, id: "task_follow_successor", prompt: "continue", status: "starting", runId: "run_follow_successor", sourceTaskId: source.id };
     await store.createTask(source);
-    const linked = await store.createTaskWithActiveReservationAndFollowUp(successor, { id: "follow_link", taskId: source.id, prompt: successor.prompt, followUpTaskId: successor.id, createdAt: timestamp });
+    const linked = await store.createTaskWithActiveReservationAndMessage(successor, { id: "message_link", taskId: source.id, content: successor.prompt, targetTaskId: successor.id, deliveryStatus:"successor_created",createdAt: timestamp });
     assert.equal(linked?.id, successor.id);
     assert.equal((await store.findTask(successor.id))?.sourceTaskId, source.id);
-    assert.deepEqual((await store.listTaskFollowUps(source.id)).map((followUp) => followUp.followUpTaskId), [successor.id]);
+    assert.deepEqual((await store.listTaskMessages(source.id)).map((message) => message.targetTaskId), [successor.id]);
 
     const rejected = { ...successor, id: "task_follow_rollback", runId: "run_follow_rollback" };
-    await assert.rejects(() => store.createTaskWithActiveReservationAndFollowUp(rejected, { id: "follow_link", taskId: source.id, prompt: rejected.prompt, followUpTaskId: rejected.id, createdAt: timestamp }));
+    await assert.rejects(() => store.createTaskWithActiveReservationAndMessage(rejected, { id: "message_link", taskId: source.id, content: rejected.prompt, targetTaskId: rejected.id, deliveryStatus:"successor_created",createdAt: timestamp }));
     assert.equal(await store.findTask(rejected.id), null);
   });
 
@@ -440,33 +457,26 @@ postgresDescribe("postgres product store", () => {
       createdAt: "2026-07-04T00:04:00.000Z",
       updatedAt: "2026-07-04T00:04:00.000Z"
     };
-    const event: AgentTaskEvent = {
-      id: "evt_pg",
+    const interaction: TaskAssistantMessageInteraction = {
+      id: "assistant_pg",
+      revision: 1,
       taskId: task.id,
       kind: "assistant_message",
-      cursor: "timeline:old:1",
-      botifiedSeq: 1,
-      botifiedType: "message",
-      sessionId: "sess_pg",
-      payload: { text: "hello" },
-      createdAt: "2026-07-04T00:05:00.000Z"
+      title: "Assistant",
+      body: "hello",
+      contentMode: "full",
+      position: 1,
+      status: "generating",
+      occurredAt: "2026-07-04T00:05:00.000Z",
+      updatedAt: "2026-07-04T00:05:00.000Z"
     };
-    const resetEvent: AgentTaskEvent = {
-      ...event,
-      id: "evt_pg_reset",
-      kind: "turn_completed",
-      cursor: "timeline:new:1",
-      botifiedType: "cycle.completed",
-      payload: { ok: true },
-      createdAt: "2026-07-04T00:05:01.000Z"
+    const completedInteraction: TaskAssistantMessageInteraction = {
+      ...interaction,
+      revision: 2,
+      status: "completed",
+      updatedAt: "2026-07-04T00:05:01.000Z"
     };
-    const duplicateResetEvent: AgentTaskEvent = {
-      ...resetEvent,
-      id: "evt_pg_reset_duplicate",
-      payload: { ok: false },
-      createdAt: "2026-07-04T00:05:02.000Z"
-    };
-    const artifact: AgentTaskArtifact = {
+    const artifact: PersistedTaskArtifact = {
       id: "art_pg",
       taskId: task.id,
       fileId: "file_pg",
@@ -516,8 +526,9 @@ postgresDescribe("postgres product store", () => {
       "running"
     );
     assert.equal(await store.updateTaskStatusIfStarting(task.id, "running", "2026-07-04T00:07:01.000Z"), null);
-    await store.appendTaskEvents([event, event, resetEvent, duplicateResetEvent]);
+    await store.persistTaskInteractionMutation({ taskId:task.id,changes:[{sourceKind:"botified",sourceId:"timeline:1",sourceRevision:0,interaction},{sourceKind:"botified",sourceId:"timeline:1",sourceRevision:0,interaction},{sourceKind:"botified",sourceId:"timeline:2",sourceRevision:0,interaction:completedInteraction}],sourceSync:{expectedSourceCursor:null,sourceCursor:"timeline:2",historyStatus:"complete",lastSyncedAt:completedInteraction.updatedAt} });
     await store.appendTaskArtifacts([artifact, artifact]);
+    await assert.rejects(store.persistTaskInteractionMutation({ taskId:task.id,changes:[{sourceKind:"product",sourceId:"conflicting-revision",sourceRevision:1,interaction:completedInteraction}],artifactProjections:[{projectId:project.id,artifact:{...artifact,id:"artifact_rollback",fileId:"file_rollback"},auditEvent:{id:"audit_rollback",projectId:project.id,actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"artifact_rollback",createdAt:"2026-07-04T00:08:00.000Z"},updatedAt:"2026-07-04T00:08:00.000Z"}],lifecycle:{kind:"active",expectedStatus:"running",status:"stopping",updatedAt:"2026-07-04T00:08:00.000Z"},sourceSync:{expectedSourceCursor:"timeline:2",sourceCursor:"timeline:rollback",historyStatus:"gap",lastSyncedAt:"2026-07-04T00:08:00.000Z"} }), /revision is not monotonic/);
 
     assert.deepEqual(await store.listWorkspacesForUser(user.id), [{ ...workspace, owner: { displayName: null, email: user.email }, memberRole: "owner" }]);
     assert.deepEqual(await store.listProjectsForWorkspace(workspace.id), [project]);
@@ -529,8 +540,42 @@ postgresDescribe("postgres product store", () => {
     const storedTask = await store.findTask(task.id);
     assert.equal(storedTask?.status, "running");
     assert.equal(storedTask?.executionMode, "live");
-    assert.deepEqual(await store.listTaskEvents(task.id), [event, resetEvent]);
+    assert.deepEqual((await store.listTaskInteractionChanges(task.id,0,10)).map((change)=>[change.changeSeq,change.interaction.revision]), [[1,1],[2,2]]);
+    assert.deepEqual((await store.readTaskInteractionSnapshot(task.id,null,10))?.items, [completedInteraction]);
+    assert.equal((await store.readTaskInteractionSnapshot(task.id,null,10))?.sourceCursor, "timeline:2");
     assert.deepEqual(await store.listTaskArtifacts(task.id), [artifact]);
+  });
+
+  it("round-trips and deduplicates bigint product interaction source revisions", async () => {
+    const timestamp = "2026-07-04T00:00:00.000Z";
+    await store.createUser({ id:"user_interaction_bigint",email:"interaction-bigint@example.test",emailVerified:false,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"ws_interaction_bigint",name:"Interaction bigint",ownerUserId:"user_interaction_bigint",createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"proj_interaction_bigint",workspaceId:"ws_interaction_bigint",name:"Interaction bigint",ownerUserId:"user_interaction_bigint",rootPath:"workspaces/ws_interaction_bigint/projects/proj_interaction_bigint",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    await createTestCredential(store,"proj_interaction_bigint","cred_interaction_bigint",timestamp);
+    await store.createEndpoint(endpointRecord("endpoint_interaction_bigint","proj_interaction_bigint","cred_interaction_bigint",timestamp));
+    await store.createTask({ id:"task_interaction_bigint",workspaceId:"ws_interaction_bigint",projectId:"proj_interaction_bigint",endpointId:"endpoint_interaction_bigint",prompt:"hello",status:"running",runId:"run_interaction_bigint",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},createdAt:timestamp,updatedAt:timestamp });
+
+    const sourceRevision = 17_840_091_560_973;
+    const interaction:TaskAssistantMessageInteraction={ id:"assistant_interaction_bigint",revision:1,taskId:"task_interaction_bigint",kind:"assistant_message",title:"Assistant",body:"hello",contentMode:"full",position:1,status:"completed",occurredAt:timestamp,updatedAt:timestamp };
+    const change={ sourceKind:"product" as const,sourceId:"task:task_interaction_bigint:prompt",sourceRevision,interaction };
+    const inserted=await store.persistTaskInteractionMutation({ taskId:interaction.taskId,changes:[change] });
+    const duplicate=await store.persistTaskInteractionMutation({ taskId:interaction.taskId,changes:[change] });
+
+    assert.equal(sourceRevision>2**31,true);
+    assert.deepEqual(inserted.changes.map((item)=>item.sourceRevision),[sourceRevision]);
+    assert.deepEqual(duplicate.changes,[]);
+    const readback=await store.listTaskInteractionChanges(interaction.taskId,0,10);
+    assert.equal(typeof readback[0]?.sourceRevision,"number");
+    assert.equal(readback[0]?.sourceRevision,sourceRevision);
+
+    const client=new pg.Client({connectionString:postgresUrl});
+    await client.connect();
+    try {
+      await client.query("update task_interaction_changes set source_revision=$2 where task_id=$1",[interaction.taskId,"9007199254740992"]);
+    } finally {
+      await client.end();
+    }
+    await assert.rejects(store.listTaskInteractionChanges(interaction.taskId,0,10),/source revision is invalid/);
   });
 
   it("atomically binds a legacy OIDC user during concurrent first login", async () => {

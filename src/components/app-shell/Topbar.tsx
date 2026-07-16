@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, FolderKanban, Globe, Menu } from "lucide-react";
+import { ChevronDown, FolderKanban, Globe, List, Menu } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, Workspace } from "../../lib/api/client";
 import { ThemeToggle } from "../theme/ThemeToggle";
@@ -19,12 +19,14 @@ export function Topbar({
   workspaces,
   workspace,
   project,
+  profileReturnTo,
   onOpenNavigation,
 }: {
   user: CurrentUser;
   workspaces: Workspace[];
   workspace?: Workspace | undefined;
   project?: Project | undefined;
+  profileReturnTo?: string | undefined;
   onOpenNavigation: () => void;
 }) {
   const router = useRouter();
@@ -57,15 +59,17 @@ export function Topbar({
             onSelect={(id) =>
               router.push(`/workspaces/${workspace.id}/projects/${id}/overview`)
             }
+            onViewAll={() => router.push(`/workspaces/${workspace.id}/projects`)}
           />
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-        <NotificationBell />
+        <NotificationBell {...(profileReturnTo ? { returnTo: profileReturnTo } : {})} />
         <ThemeToggle />
         <UserMenu
           user={user}
           {...(workspace ? { workspaceId: workspace.id } : {})}
+          {...(profileReturnTo ? { returnTo: profileReturnTo } : {})}
         />
       </div>
     </header>
@@ -109,11 +113,13 @@ export function ProjectSwitcher({
   project,
   mobile = false,
   onSelect,
+  onViewAll,
 }: {
   workspace: Workspace;
   project: Project;
   mobile?: boolean;
   onSelect: (projectId: string) => void;
+  onViewAll?: (() => void) | undefined;
 }) {
   return (
     <DropdownMenu.Root>
@@ -139,6 +145,7 @@ export function ProjectSwitcher({
             ) : null}
           </DropdownItem>
         ))}
+        {onViewAll ? <><DropdownMenu.Separator className="my-1 h-px bg-subtle" /><DropdownItem className="gap-2" onSelect={onViewAll}><List size={15} />View all projects</DropdownItem></> : null}
       </DropdownContent>
     </DropdownMenu.Root>
   );

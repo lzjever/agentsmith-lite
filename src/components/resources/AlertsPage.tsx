@@ -1,11 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import {
   AlertTriangle,
   Bell,
   Check,
   CheckCircle2,
+  ClipboardList,
   Clock,
+  Gauge,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -58,6 +61,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
     alert: ProjectAlert;
     action: "ack" | "silence";
   } | null>(null);
+  const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const load = useCallback(async () => {
     setState("loading");
     setError("");
@@ -79,6 +83,13 @@ export function AlertsPage({ projectId }: { projectId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+  useEffect(() => {
+    setSelectedAlertId(
+      typeof window === "undefined"
+        ? null
+        : new URLSearchParams(window.location.search).get("alertId"),
+    );
+  }, [projectId]);
   const canManage = capabilities?.canManagePolicy === true;
   async function transition(
     alert: ProjectAlert,
@@ -200,6 +211,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
               canManage={canManage}
               busyId={busyId}
               retry={retry}
+              selectedAlertId={selectedAlertId}
               onAck={(alert) => void instance(alert, "ack")}
               onSilence={(alert) => void instance(alert, "silence")}
               onResolve={(alert) =>
@@ -236,6 +248,7 @@ function AlertInstances({
   canManage,
   busyId,
   retry,
+  selectedAlertId,
   onAck,
   onSilence,
   onResolve,
@@ -245,6 +258,7 @@ function AlertInstances({
   canManage: boolean;
   busyId: string | null;
   retry: { alert: ProjectAlert; action: "ack" | "silence" } | null;
+  selectedAlertId: string | null;
   onAck: (alert: ProjectAlert) => void;
   onSilence: (alert: ProjectAlert) => void;
   onResolve: (alert: ProjectAlert) => void;
@@ -254,6 +268,15 @@ function AlertInstances({
   const visible = alerts.filter(
     (alert) => status === "all" || alert.status === status,
   );
+  useEffect(() => {
+    if (!selectedAlertId) return;
+    const frame = requestAnimationFrame(() => {
+      const target = document.getElementById(alertElementId(selectedAlertId));
+      target?.scrollIntoView({ block: "center" });
+      target?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [alerts, selectedAlertId]);
   if (!alerts.length)
     return (
       <PageState state="empty">
@@ -286,7 +309,10 @@ function AlertInstances({
               Date.parse(alert.silencedUntil) > Date.now();
             return (
               <li
-                className="grid gap-3 py-4 sm:grid-cols-[1.25rem_minmax(0,1fr)_auto]"
+                id={alertElementId(alert.id)}
+                tabIndex={-1}
+                aria-current={selectedAlertId === alert.id ? "true" : undefined}
+                className={`grid gap-3 px-3 py-4 outline-none sm:grid-cols-[1.25rem_minmax(0,1fr)_auto] ${selectedAlertId === alert.id ? "border-l-2 border-accent bg-surface-low" : ""}`}
                 key={alert.id}
               >
                 <AlertTriangle
@@ -314,6 +340,9 @@ function AlertInstances({
                     {silenced ? (
                       <Badge variant="outline">Silenced</Badge>
                     ) : null}
+                    {selectedAlertId === alert.id ? (
+                      <Badge variant="outline">Linked instance</Badge>
+                    ) : null}
                   </div>
                   <p className="mt-1 text-sm text-secondary">
                     {alert.metricValue !== null &&
@@ -334,6 +363,22 @@ function AlertInstances({
                       ? ` · recovered ${formatDate(alert.resolvedAt)}`
                       : ""}
                   </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <Link
+                      href={usageInvestigationPath(alert)}
+                      className="inline-flex items-center gap-1.5 text-xs text-secondary hover:text-foreground"
+                    >
+                      <Gauge size={14} />
+                      Investigate usage
+                    </Link>
+                    <Link
+                      href={`audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
+                      className="inline-flex items-center gap-1.5 text-xs text-secondary hover:text-foreground"
+                    >
+                      <ClipboardList size={14} />
+                      View related audit
+                    </Link>
+                  </div>
                   {retry?.alert.id === alert.id ? (
                     <div
                       className="mt-2 flex items-center gap-2 text-sm text-error"
@@ -413,4 +458,14 @@ function formatDate(value: string) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function alertElementId(alertId: string) {
+  return `alert-${alertId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+function usageInvestigationPath(alert: ProjectAlert) {
+  return alert.endpointId
+    ? `usage?endpointId=${encodeURIComponent(alert.endpointId)}`
+    : "usage";
 }

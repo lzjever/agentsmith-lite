@@ -54,7 +54,7 @@ describe("task lifecycle API routes", () => {
     for (const [method, pathname, body] of [
       ["POST", `/api/v1/tasks/${first.id}/retry`, {}],
       ["POST", `/api/v1/tasks/${first.id}/duplicate`, {}],
-      ["POST", `/api/v1/tasks/${first.id}/follow-ups`, { prompt: "continue" }],
+      ["POST", `/api/v1/tasks/${first.id}/messages`, { content: "continue" }],
       ["POST", `/api/v1/tasks/${first.id}/cancel`, {}],
       ["POST", `/api/v1/tasks/${first.id}/archive`, {}],
       ["DELETE", `/api/v1/tasks/${first.id}`, undefined]
@@ -105,27 +105,70 @@ describe("task lifecycle API routes", () => {
     assert.equal((await request("GET", `/api/v1/tasks/${beta.id}`)).status, 404);
   });
 
-  it("creates a linked terminal follow-up and serves authorized transcript tail and SSE", async () => {
+  it("creates one linked successor and serves authorized interaction snapshot and SSE", async () => {
     const source = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "source", title: "Source" }, "create-source");
-    const followUp = await json("POST", `/api/v1/tasks/${source.id}/follow-ups`, { prompt: "continue" }, "follow-source");
-    assert.equal(followUp.deliveryStatus, "successor_created");
-    assert.ok(followUp.followUpTaskId);
-    assert.equal((await json("GET", `/api/v1/tasks/${followUp.followUpTaskId}`)).sourceTaskId, source.id);
+    const receipt = await json("POST", `/api/v1/tasks/${source.id}/messages`, { content: "continue" }, "message-source");
+    assert.equal(receipt.disposition, "successor_created");
+    assert.notEqual(receipt.targetTaskId, source.id);
+    assert.equal((await json("GET", `/api/v1/tasks/${receipt.targetTaskId}`)).sourceTaskId, source.id);
 
-    await store.appendTaskEvents([
-      { id: "route-event-1", taskId: source.id, kind: "user_input", cursor: "route-cursor-1", botifiedSeq: 1, botifiedType: "user.message", sessionId: "s1", payload: { text: "hello" }, createdAt: source.createdAt },
-      { id: "route-event-2", taskId: source.id, kind: "assistant_message", cursor: "route-cursor-2", botifiedSeq: 2, botifiedType: "assistant.message", sessionId: "s1", payload: { text: "world" }, createdAt: source.createdAt }
-    ]);
-    const transcript = await json("GET", `/api/v1/tasks/${source.id}/transcript?limit=10`);
-    assert.deepEqual(transcript.items.map((item: { role: string; text: string }) => [item.role, item.text]), [["user", "hello"], ["assistant", "world"]]);
-    assert.equal(transcript.nextCursor, "route-cursor-2");
-    assert.deepEqual(await json("GET", `/api/v1/tasks/${source.id}/transcript?cursor=${transcript.nextCursor}&limit=10`), { items: [], nextCursor: "route-cursor-2" });
-    const stream = await request("GET", `/api/v1/tasks/${source.id}/transcript/stream?limit=10`);
+    const snapshot = await json("GET", `/api/v1/tasks/${source.id}/interactions?limit=10`);
+    assert.equal(snapshot.items.some((item: { kind: string; targetTaskId?: string }) => item.kind === "execution_boundary" && item.targetTaskId === receipt.targetTaskId), true);
+    assert.equal(typeof snapshot.streamCursor, "string");
+    const newest = await json("GET", `/api/v1/tasks/${source.id}/interactions?limit=1`);
+    assert.equal(newest.hasMoreBefore, true);
+    const older = await json("GET", `/api/v1/tasks/${source.id}/interactions?limit=1&cursor=${encodeURIComponent(newest.nextPageCursor)}`);
+    assert.equal(older.items.length, 1);
+    const timestamp = new Date().toISOString();
+    await store.persistTaskInteractionMutation({ taskId:source.id, changes:[{ sourceKind:"product", sourceId:"route-catch-up", sourceRevision:1, interaction:{ id:"route-catch-up", revision:1, taskId:source.id, kind:"system_error", title:"Recovered update", body:null, contentMode:"none", position:100, occurredAt:timestamp, updatedAt:timestamp, status:"resolved", code:null, retryable:false, detailsOmitted:false } }] });
+    const controller = new AbortController();
+    const stream = await fetch(api.baseUrl + `/api/v1/tasks/${source.id}/interactions/stream`, { headers:{cookie,"last-event-id":snapshot.streamCursor}, signal:controller.signal });
     assert.equal(stream.status, 200); assert.match(stream.headers.get("content-type") ?? "", /text\/event-stream/);
-    const body = await stream.text(); assert.match(body, /event: transcript/); assert.match(body, /event: cursor/);
-    assert.equal((await fetch(api.baseUrl + `/api/v1/tasks/${source.id}/transcript`)).status, 401);
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    const timeout = setTimeout(() => controller.abort(), 2_000);
+    const originalNow = Date.now;
+    const baseTime = originalNow();
+    let streamText = "";
+    try {
+      while (!streamText.includes("event: interaction")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        streamText += decoder.decode(chunk.value, { stream: true });
+      }
+      Date.now = () => baseTime + 6_000;
+      while (!streamText.includes(": heartbeat")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        streamText += decoder.decode(chunk.value, { stream: true });
+      }
+      Date.now = () => baseTime + 31_000;
+      while (!streamText.includes("event: reconnect")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        streamText += decoder.decode(chunk.value, { stream: true });
+      }
+    } finally {
+      Date.now = originalNow;
+      clearTimeout(timeout);
+      controller.abort();
+    }
+    assert.match(streamText, /event: state/);
+    assert.match(streamText, /event: state/);
+    assert.match(streamText, /event: interaction/);
+    assert.match(streamText, /id: tic1\./);
+    assert.match(streamText, /: heartbeat/);
+    assert.match(streamText, /event: reconnect/);
+    assert.equal((await request("GET", `/api/v1/tasks/${source.id}/interactions/stream?cursor=!`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/tasks/${receipt.targetTaskId}/interactions/stream?cursor=${encodeURIComponent(snapshot.streamCursor)}`)).status, 400);
+    assert.equal((await fetch(api.baseUrl + `/api/v1/tasks/${source.id}/interactions`)).status, 401);
+    assert.equal((await fetch(api.baseUrl + `/api/v1/tasks/${source.id}/messages`, { method:"POST", headers:{"content-type":"application/json","idempotency-key":"unauthorized-message"}, body:JSON.stringify({content:"no access"}) })).status, 401);
+    assert.equal((await request("GET", `/api/v1/tasks/${source.id}/events`)).status, 404);
+    assert.equal((await request("POST", `/api/v1/tasks/${source.id}/follow-ups`, {prompt:"continue"}, "old-follow-up")).status, 404);
     await json("DELETE", `/api/v1/tasks/${source.id}`, undefined, "delete-source");
-    assert.deepEqual(await json("POST", `/api/v1/tasks/${source.id}/follow-ups`, { prompt: "continue" }, "follow-source"), followUp);
+    const replay = await json("POST", `/api/v1/tasks/${source.id}/messages`, { content: "continue" }, "message-source");
+    assert.equal(replay.targetTaskId, receipt.targetTaskId);
+    assert.equal(replay.duplicate, true);
   });
 
   async function request(method: string, pathname: string, body?: unknown, idempotencyKey?: string): Promise<Response> {

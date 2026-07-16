@@ -138,6 +138,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
   const terminalSockets=new WebSocketServer({noServer:true});
   server.on("upgrade",(req,socket,head)=>{
     void (async()=>{
+      let terminalTaskId:string|null=null;
+      let terminalAcquired=false;
       try{
         const requestUrl=new URL(req.url??"/","http://localhost");
         const routed=routeUrlForAppBasePath(requestUrl,appBasePath);
@@ -145,17 +147,22 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
         if(!match)throw new ProductError("Route not found",404);
         if(options.publicBaseUrl&&req.headers.origin&&new URL(req.headers.origin).origin!==new URL(options.publicBaseUrl).origin)throw new ProductError("Terminal origin is not allowed",403);
         const principal=await services.auth.requireSessionPrincipal(getCookie(req,"asl_session"));
-        const target=await services.tasks.openTaskTerminal(principal.user.id,decodeURIComponent(match[1]!));
+        terminalTaskId=decodeURIComponent(match[1]!);
+        const target=await services.tasks.openTaskTerminal(principal.user.id,terminalTaskId);
+        terminalAcquired=true;
         terminalSockets.handleUpgrade(req,socket,head,(client)=>{
+          let released=false;
+          const release=()=>{if(released)return;released=true;services.tasks.closeTaskTerminal(terminalTaskId!);};
           const upstreamUrl=new URL("/v1/terminal/ws",target.baseUrl.replace(/^http/,"ws"));
           const upstream=new WebSocket(upstreamUrl,{headers:{authorization:`Bearer ${target.serviceKey}`}});
           upstream.on("message",(data,isBinary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
           client.on("message",(data,isBinary)=>{if(upstream.readyState===WebSocket.OPEN)upstream.send(data,{binary:isBinary});});
-          upstream.on("close",()=>client.close());
-          client.on("close",()=>upstream.close());
-          upstream.on("error",()=>{if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
+          upstream.on("close",()=>{release();client.close();});
+          client.on("close",()=>{release();upstream.close();});
+          client.on("error",()=>{release();upstream.close();client.close();});
+          upstream.on("error",()=>{release();if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
         });
-      }catch{socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");socket.destroy();}
+      }catch{if(terminalAcquired&&terminalTaskId)services.tasks.closeTaskTerminal(terminalTaskId);socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");socket.destroy();}
     })();
   });
 
@@ -582,24 +589,18 @@ async function routeApi(
     if (segments[4] === "summary" && method === "GET") return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId));
     if (segments[4] === "inputs" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.listTaskInputs(user.id,taskId));
     if (segments[4] === "inputs" && segments[5] === "download" && method === "GET") return sendTaskInputDownload(res,await services.tasks.downloadTaskInput(user.id,taskId,requiredSearchParam(url,"path")));
-    if (segments[4] === "follow-ups") {
-      if(!segments[5]&&method==="GET")return sendJson(res,200,await services.tasks.listTaskFollowUps(user.id,taskId));
-      if(!segments[5]&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["prompt"]);return sendJson(res,200,await services.tasks.followUpTask(user.id,taskId,asString(body.prompt),requireIdempotencyKey(req)));}
-      if(segments[5]&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["prompt"]);return sendJson(res,200,await services.tasks.editTaskFollowUp(user.id,taskId,segments[5],asString(body.prompt),requireIdempotencyKey(req)));}
-      if(segments[5]&&method==="DELETE")return sendJson(res,200,await services.tasks.deleteTaskFollowUp(user.id,taskId,segments[5],requireIdempotencyKey(req)));
+    if (segments[4] === "messages") {
+      if(!segments[5]&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="DELETE")return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));
     }
     if (segments[4] === "retry" && method === "POST") return sendJson(res,200,await services.tasks.retryTask(user.id,taskId,requireIdempotencyKey(req)));
     if (segments[4] === "duplicate" && method === "POST") return sendJson(res,200,await services.tasks.duplicateTask(user.id,taskId,requireIdempotencyKey(req)));
     if (segments[4] === "archive" && method === "POST") return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req)));
-    if (segments[4] === "transcript" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.taskTranscript(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})}));
-    if (segments[4] === "transcript" && segments[5] === "stream" && method === "GET") return sendTaskTranscriptStream(res,services,user.id,taskId,url);
-    if (segments[4] === "events" && method === "GET") {
-      try {
-        return sendJson(res, 200, await services.tasks.listTaskEvents(user.id, taskId));
-      } catch (error) {
-        return handleTaskRouteError(res, error);
-      }
-    }
+    if (segments[4] === "interactions" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})}));
+    if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") return sendTaskInteractionStream(req,res,services,user.id,taskId,url);
+    if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "work" && segments[5] && segments[6] === "stop" && method === "POST") { const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.stopTaskBackgroundWork(user.id,taskId,segments[5],requireIdempotencyKey(req))); }
     if (segments[4] === "artifacts" && segments[5] && segments[6] === "download" && method === "GET") {
       try {
         return sendArtifactDownload(res, await services.tasks.downloadTaskArtifact(user.id, taskId, segments[5]));
@@ -915,7 +916,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/files(?:\/(?:download|url-note))?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:events|artifacts|cancel|summary|inputs(?:\/download)?|retry|duplicate|archive|transcript(?:\/stream)?|follow-ups(?:\/[^/]+)?))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1041,13 +1042,92 @@ async function sendChatStream(req: IncomingMessage, res: ServerResponse, service
   } finally { if (started) res.end(); }
 }
 
-async function sendTaskTranscriptStream(res:ServerResponse,services:Services,userId:string,taskId:string,url:URL):Promise<void>{
-  const page=await services.tasks.taskTranscript(userId,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})});
+async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,services:Services,userId:string,taskId:string,url:URL):Promise<void>{
+  const queryCursor=url.searchParams.get("cursor");
+  const headerValue=req.headers["last-event-id"];
+  const headerCursor=Array.isArray(headerValue)?headerValue[0]:headerValue;
+  if(queryCursor&&headerCursor&&queryCursor!==headerCursor)throw new ProductError("Task interaction cursors do not match",400);
+  const authoritative=await services.tasks.taskInteractions(userId,taskId,{limit:1});
+  let cursor=queryCursor??headerCursor;
+  if(!cursor)cursor=authoritative.streamCursor;
+  let page=await services.tasks.taskInteractionChanges(userId,taskId,cursor);
+  let closed=false;
+  res.on("close",()=>{closed=true;});
   res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache","connection":"keep-alive","x-accel-buffering":"no"});
-  for(const item of page.items)res.write(`event: transcript\ndata: ${JSON.stringify(item)}\n\n`);
-  res.write(`event: cursor\ndata: ${JSON.stringify({nextCursor:page.nextCursor})}\n\n`);
-  res.end();
+  const event=(type:string,value:unknown,id?:string)=>{if(closed||res.writableEnded)return;res.write(`${id?`id: ${id}\n`:""}event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);};
+  let lastState="";
+  let lastRunState="";
+  let lastConnection="";
+  const state=(value:typeof page.state,force=false)=>{
+    const payload={queuedMessages:value.queuedMessages,capabilities:value.capabilities};
+    const serialized=JSON.stringify(payload);
+    if(!force&&serialized===lastState)return;
+    lastState=serialized;
+    event("state",payload);
+  };
+  const runState=(value:typeof page.state,force=false)=>{
+    const payload={runState:value.runState};
+    const serialized=JSON.stringify(payload);
+    if(!force&&serialized===lastRunState)return;
+    lastRunState=serialized;
+    event("run_state",payload);
+  };
+  const connection=(value:typeof page.state,connectionState:"connected"|"disconnected"|"recovered",message:string|null=null,force=false)=>{
+    const payload={connectionState,runtimeReachability:value.runtimeReachability,historyStatus:value.historyStatus,lastSyncedAt:value.lastSyncedAt,message};
+    const serialized=JSON.stringify(payload);
+    if(!force&&serialized===lastConnection)return;
+    lastConnection=serialized;
+    event("connection",payload);
+  };
+  const transientState=(value:typeof page.state,connectionState:"connected"|"disconnected"|"recovered",message:string|null=null,force=false)=>{
+    state(value,force);
+    runState(value,force);
+    connection(value,connectionState,message,force);
+  };
+  const previewIterator=services.tasks.streamTaskAssistantPreviews(userId,taskId)[Symbol.asyncIterator]();
+  let previewNext:ReturnType<typeof previewIterator.next>|null=previewIterator.next();
+  let previewUnavailable=false;
+  transientState(page.state,"connected",page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null,true);
+  const deadline=Date.now()+30_000;
+  let heartbeatAt=Date.now()+5_000;
+  try{
+    while(!closed&&Date.now()<deadline){
+      for(const change of page.changes){event("interaction",change.item,change.cursor);cursor=change.cursor;}
+      if(page.done){event("done",{});res.end();return;}
+      cursor=page.streamCursor;
+      transientState(page.state,previewUnavailable?"disconnected":"connected",previewUnavailable?"Live assistant preview is unavailable.":page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null);
+      if(Date.now()>=heartbeatAt){
+        res.write(": heartbeat\n\n");
+        heartbeatAt=Date.now()+5_000;
+      }
+      const preview=previewNext
+        ? await Promise.race([sleep(500).then(()=>null),previewNext.then((result)=>({result})).catch(()=>({result:null}))])
+        : (await sleep(500),null);
+      if(preview){
+        if(preview.result===null){
+          previewUnavailable=true;
+          connection(page.state,"disconnected","Live assistant preview is unavailable.",true);
+          previewNext=null;
+        }
+        else if(preview.result.done)previewNext=null;
+        else if(preview.result){
+          const update=preview.result.value;
+          if(update.type==="upsert")event("assistant_preview",{interactionId:update.interactionId,body:update.body,occurredAt:update.occurredAt});
+          else event("assistant_preview_clear",{interactionId:update.interactionId});
+          previewNext=previewIterator.next();
+        }
+      }
+      if(closed)break;
+      try{page=await services.tasks.taskInteractionChanges(userId,taskId,cursor);}
+      catch{connection(page.state,"disconnected","Task interaction authorization or connection changed.",true);res.end();return;}
+    }
+    if(!closed){event("reconnect",{});res.end();}
+  }finally{
+    void previewIterator.return?.();
+  }
 }
+
+function sleep(ms:number):Promise<void>{return new Promise((resolve)=>setTimeout(resolve,ms));}
 
 async function sendChatRetryStream(req:IncomingMessage,res:ServerResponse,services:Services,userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number):Promise<void>{
   const controller=new AbortController();res.on("close",()=>{if(!res.writableEnded)controller.abort();});let started=false;const start=()=>{if(started)return;started=true;res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache",connection:"keep-alive","x-accel-buffering":"no"});};const event=(type:string,value:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
@@ -1066,7 +1146,7 @@ function sendArtifactDownload(
   res.writeHead(200, {
     "content-type": safeDownloadMediaType(download.artifact.mediaType),
     "content-length": String(download.bytes.byteLength),
-    "content-disposition": contentDispositionFilename(download.artifact.name || download.artifact.fileId),
+    "content-disposition": contentDispositionFilename(download.artifact.name || download.artifact.id),
     "x-content-type-options": "nosniff"
   });
   res.end(download.bytes);

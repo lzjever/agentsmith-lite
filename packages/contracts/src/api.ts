@@ -153,7 +153,7 @@ export interface ProjectUsageOverview {
 export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure";
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
 export type ProjectAlertDeliveryStatus = "not_configured" | "pending" | "delivered" | "failed";
-export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","chat.thread.create","chat.thread.update","chat.thread.delete","chat.message.send","chat.message.retry","chat.message.stop","chat.message.edit","chat.message.delete","chat.message.branch","task.create","task.edit","task.archive","task.delete","task.follow_up.create","task.follow_up.edit","task.follow_up.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.failed","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
+export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","chat.thread.create","chat.thread.update","chat.thread.delete","chat.message.send","chat.message.retry","chat.message.stop","chat.message.edit","chat.message.delete","chat.message.branch","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.failed","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
 export type ProjectAuditAction = typeof PROJECT_AUDIT_ACTIONS[number];
 export const PROJECT_AUDIT_RESOURCE_KINDS = ["project","credential","endpoint","member","task","artifact","provider","file","file_quota","sandbox","alert"] as const;
 export type ProjectAuditResourceKind = typeof PROJECT_AUDIT_RESOURCE_KINDS[number];
@@ -189,8 +189,8 @@ export interface ProjectAuditEvent {
   detail?: ProjectAuditSafeDetail;
   createdAt: ISODateString;
 }
-export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; followUpId?: string; deliveryStatus?: TaskFollowUpDeliveryStatus; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
-export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","followUpId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","terminal_pending","accepted","successor_created","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as TaskFollowUpDeliveryStatus;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(typeof source.filePath==="string"&&source.filePath.length<=1024&&source.filePath.startsWith("files/")&&!source.filePath.split("/").includes(".."))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
+export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
+export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","terminal_pending","accepted","successor_created","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(typeof source.filePath==="string"&&source.filePath.length<=1024&&source.filePath.startsWith("files/")&&!source.filePath.split("/").includes(".."))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
 
 export interface ProjectAuditEventView extends ProjectAuditEvent {
   actorDisplayName: string | null;
@@ -307,13 +307,6 @@ export type TaskTerminalReason = "completed" | "failed" | "cancelled" | "expired
 export type TaskStartIntentStatus = "pending" | "dispatching" | "dispatched" | "failed";
 export type TaskArtifactProjectionStatus = "pending" | "draining" | "drained" | "failed";
 export type TaskCleanupStatus = "pending" | "running" | "completed" | "failed";
-export interface TaskDeliveryReceipt {
-  accepted: boolean;
-  deliveryKey: string;
-  requestHash: string;
-  messageId?: string;
-  cursor?: string;
-}
 
 export interface AgentTask {
   id: string;
@@ -333,32 +326,13 @@ export interface AgentTask {
   deletedAt?: ISODateString | null;
   terminalReason?: TaskTerminalReason | null;
   terminalizedAt?: ISODateString | null;
-  startDeliveryKey?: string | null;
-  startRequestHash?: string | null;
-  startClaimToken?: string | null;
-  startReceipt?: TaskDeliveryReceipt | null;
-  startTimelineCursor?: string | null;
   startIntentStatus?: TaskStartIntentStatus | null;
-  startClaimedAt?: ISODateString | null;
-  startLeaseExpiresAt?: ISODateString | null;
-  startAttemptCount?: number;
-  startNextRetryAt?: ISODateString | null;
   startSafeError?: string | null;
   artifactProjectionStatus?: TaskArtifactProjectionStatus;
   artifactProjectionError?: string | null;
-  artifactProjectionClaimToken?: string | null;
-  artifactProjectionLeaseExpiresAt?: ISODateString | null;
-  artifactProjectionAttemptCount?: number;
-  artifactProjectionNextRetryAt?: ISODateString | null;
   cleanupStatus?: TaskCleanupStatus;
   cleanupError?: string | null;
-  cleanupClaimToken?: string | null;
-  cleanupLeaseExpiresAt?: ISODateString | null;
-  cleanupAttemptCount?: number;
-  cleanupNextRetryAt?: ISODateString | null;
   cleanupCompletedAt?: ISODateString | null;
-  finalizationIntentStatus?: Extract<AgentTaskStatus, "completed" | "failed" | "expired" | "cleaned"> | null;
-  finalizationIntentAt?: ISODateString | null;
   createdAt: ISODateString;
   updatedAt: ISODateString;
 }
@@ -383,33 +357,9 @@ export interface ProjectProviderSettlement {
   updatedAt: ISODateString;
 }
 
-export type TaskEventKind =
-  | "user_input"
-  | "turn_started"
-  | "turn_completed"
-  | "turn_failed"
-  | "assistant_message"
-  | "tool_execution"
-  | "artifact"
-  | "runtime_error"
-  | "diagnostic";
-
-export interface AgentTaskEvent {
-  id: string;
-  taskId: string;
-  kind: TaskEventKind;
-  cursor: string;
-  botifiedSeq: number;
-  botifiedType: string;
-  sessionId: string;
-  payload: Record<string, unknown>;
-  createdAt: ISODateString;
-}
-
 export interface AgentTaskArtifact {
   id: string;
   taskId: string;
-  fileId: string;
   name: string;
   bytes: number;
   sha256?: string;
@@ -423,28 +373,211 @@ export interface TaskInputSnapshotEntry {
   bytes: number;
   sha256: string;
 }
-export type TaskFollowUpDeliveryStatus = "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed";
-export interface TaskFollowUp {
+export interface TaskSummary { taskId: string; artifactCount: number; updatedAt: ISODateString; }
+
+export type TaskInteractionKind =
+  | "user_message"
+  | "assistant_message"
+  | "tool"
+  | "background_task"
+  | "task_question"
+  | "task_notice"
+  | "task_result"
+  | "subagent_result"
+  | "file"
+  | "execution_boundary"
+  | "system_error";
+
+export type TaskInteractionContentMode = "full" | "preview" | "none";
+export type TaskInteractionDeliveryStatus = "pending" | "delivered" | "failed";
+
+export interface TaskInteractionBase {
   id: string;
+  revision: number;
   taskId: string;
-  prompt: string;
-  followUpTaskId?: string | null;
-  deliveryKey?: string | null;
-  requestHash?: string | null;
-  claimToken?: string | null;
-  receipt?: TaskDeliveryReceipt | null;
-  timelineCursor?: string | null;
-  deliveryStatus?: TaskFollowUpDeliveryStatus;
-  claimedAt?: ISODateString | null;
-  leaseExpiresAt?: ISODateString | null;
-  attemptCount?: number;
-  nextRetryAt?: ISODateString | null;
-  safeError?: string | null;
-  createdAt: ISODateString;
-  updatedAt?: ISODateString;
-  deletedAt?: ISODateString | null;
+  kind: TaskInteractionKind;
+  title: string;
+  body: string | null;
+  contentMode: TaskInteractionContentMode;
+  position: number;
+  occurredAt: ISODateString;
+  updatedAt: ISODateString;
 }
-export interface TaskSummary { taskId: string; eventCount: number; artifactCount: number; updatedAt: ISODateString; }
+
+export interface TaskUserMessageInteraction extends TaskInteractionBase {
+  kind: "user_message";
+  status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
+}
+
+export interface TaskAssistantMessageInteraction extends TaskInteractionBase {
+  kind: "assistant_message";
+  status: "generating" | "completed" | "failed" | "aborted";
+}
+
+export interface TaskToolInteraction extends TaskInteractionBase {
+  kind: "tool";
+  executionStatus: "pending" | "running" | "completed" | "failed" | "cancelled";
+  deliveryStatus: TaskInteractionDeliveryStatus | null;
+  toolName: string;
+  command: string | null;
+  outputTail: string | null;
+  exitCode: number | null;
+  detailsOmitted: boolean;
+  canStop: boolean;
+}
+
+export interface TaskBackgroundTaskInteraction extends TaskInteractionBase {
+  kind: "background_task";
+  executionStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "timed_out" | "lost";
+  deliveryStatus: TaskInteractionDeliveryStatus | null;
+  label: string;
+  workSummary: string | null;
+  result: string | null;
+  error: string | null;
+  detailsOmitted: boolean;
+  canStop: boolean;
+}
+
+export interface TaskQuestionInteraction extends TaskInteractionBase {
+  kind: "task_question";
+  status: "waiting" | "answered" | "expired" | "rejected" | "reply_failed";
+  question: string;
+  expect: string | null;
+  answer: string | null;
+}
+
+export interface TaskNoticeInteraction extends TaskInteractionBase {
+  kind: "task_notice";
+  status: "accepted" | "rejected";
+  sender: string | null;
+}
+
+export interface TaskResultInteraction extends TaskInteractionBase {
+  kind: "task_result";
+  executionStatus: "completed" | "failed" | "cancelled" | "timed_out" | "lost";
+  deliveryStatus: TaskInteractionDeliveryStatus;
+  result: string | null;
+  error: string | null;
+  detailsOmitted: boolean;
+}
+
+export interface TaskSubagentResultInteraction extends TaskInteractionBase {
+  kind: "subagent_result";
+  executionStatus: "completed" | "failed" | "cancelled";
+  deliveryStatus: TaskInteractionDeliveryStatus;
+  name: string;
+  purpose: string | null;
+  result: string | null;
+  error: string | null;
+  detailsOmitted: boolean;
+}
+
+export interface TaskFileInteraction extends TaskInteractionBase {
+  kind: "file";
+  status: "available" | "failed";
+  artifactId: string;
+  name: string;
+  mediaType: string | null;
+  bytes: number;
+}
+
+export interface TaskExecutionBoundaryInteraction extends TaskInteractionBase {
+  kind: "execution_boundary";
+  status: "successor_pending" | "successor_created" | "failed";
+  targetTaskId: string | null;
+}
+
+export interface TaskSystemErrorInteraction extends TaskInteractionBase {
+  kind: "system_error";
+  status: "active" | "resolved";
+  code: string | null;
+  retryable: boolean;
+  detailsOmitted: boolean;
+}
+
+export type TaskInteractionItem =
+  | TaskUserMessageInteraction
+  | TaskAssistantMessageInteraction
+  | TaskToolInteraction
+  | TaskBackgroundTaskInteraction
+  | TaskQuestionInteraction
+  | TaskNoticeInteraction
+  | TaskResultInteraction
+  | TaskSubagentResultInteraction
+  | TaskFileInteraction
+  | TaskExecutionBoundaryInteraction
+  | TaskSystemErrorInteraction;
+
+export interface TaskCapabilities {
+  sendMessage: boolean;
+  editQueuedMessage: boolean;
+  abortTurn: boolean;
+  cancelTask: boolean;
+  openTerminal: boolean;
+  deleteTask: boolean;
+}
+
+export type TaskRunState = "idle" | "starting" | "running" | "reconnecting" | "aborting" | "finalizing" | "terminal";
+export type TaskRuntimeReachability = "unknown" | "reachable" | "unreachable";
+export type TaskHistoryStatus = "complete" | "gap";
+
+export interface TaskQueuedMessage {
+  id: string;
+  content: string;
+  deliveryStatus: "pending" | "dispatching" | "terminal_pending" | "failed";
+  editable: boolean;
+  deletable: boolean;
+  updatedAt: ISODateString;
+}
+
+export interface TaskInteractionHistoryPage {
+  items: TaskInteractionItem[];
+  nextPageCursor: string | null;
+  hasMoreBefore: boolean;
+  streamCursor: string;
+  historyStatus: TaskHistoryStatus;
+}
+
+export interface TaskInteractionState {
+  queuedMessages: TaskQueuedMessage[];
+  runState: TaskRunState;
+  runtimeReachability: TaskRuntimeReachability;
+  lastSyncedAt: ISODateString | null;
+  historyStatus: TaskHistoryStatus;
+  capabilities: TaskCapabilities;
+}
+
+export interface TaskInteractionSnapshot extends TaskInteractionHistoryPage, TaskInteractionState {}
+
+export type TaskMessageDisposition =
+  | "accepted_by_active_run"
+  | "queued_for_active_run"
+  | "successor_pending"
+  | "successor_created"
+  | "failed";
+
+export interface TaskMessageReceipt {
+  messageId: string;
+  disposition: TaskMessageDisposition;
+  targetTaskId: string;
+  duplicate: boolean;
+  queuedMessage: TaskQueuedMessage | null;
+  interaction: TaskUserMessageInteraction | TaskExecutionBoundaryInteraction | null;
+  capabilities: TaskCapabilities;
+  safeError?: string;
+}
+
+export type TaskInteractionConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
+export type TaskInteractionStreamEvent =
+  | { type: "interaction"; cursor: string; item: TaskInteractionItem }
+  | { type: "state"; queuedMessages: TaskQueuedMessage[]; capabilities: TaskCapabilities }
+  | { type: "run_state"; runState: TaskRunState }
+  | { type: "connection"; connectionState: TaskInteractionConnectionState; runtimeReachability: TaskRuntimeReachability; historyStatus: TaskHistoryStatus; lastSyncedAt: ISODateString | null; message: string | null }
+  | { type: "assistant_preview"; interactionId: string; body: string; occurredAt: ISODateString }
+  | { type: "assistant_preview_clear"; interactionId: string }
+  | { type: "reset"; snapshot: TaskInteractionSnapshot }
+  | { type: "reconnect" }
+  | { type: "done" };
 
 export type TaskListSort = "created_at" | "updated_at" | "title" | "status";
 export type TaskListArchivedFilter = "exclude" | "include" | "only";
@@ -461,21 +594,6 @@ export interface TaskListPage {
   items: AgentTask[];
   nextCursor: string | null;
   total: number;
-}
-
-export type TaskTranscriptRole = "user" | "assistant" | "tool" | "system";
-export interface TaskTranscriptEntry {
-  id: string;
-  taskId: string;
-  role: TaskTranscriptRole;
-  text: string;
-  cursor: string;
-  eventKind: TaskEventKind;
-  createdAt: ISODateString;
-}
-export interface TaskTranscriptPage {
-  items: TaskTranscriptEntry[];
-  nextCursor: string | null;
 }
 
 export interface KubernetesResource {

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
-import type { AgentTask, ProjectAuditEvent, TaskFollowUp } from "../../packages/contracts/src/api.js";
-import type { AtomicTaskCreateInput, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
+import type { ProjectAuditEvent } from "../../packages/contracts/src/api.js";
+import type { AtomicTaskCreateInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskMessage, TaskInteractionChangeInput } from "../../packages/ports/src/store.js";
 
 const postgresUrl = process.env.POSTGRES_APP_URL;
 const postgresDescribe = postgresUrl ? describe : describe.skip;
@@ -15,7 +15,7 @@ postgresDescribe("postgres durable task store", () => {
 
   beforeEach(async () => {
     const client = new pg.Client({ connectionString: postgresUrl }); await client.connect();
-    try { await client.query("truncate table task_idempotency_records,task_follow_ups,agent_task_artifacts,agent_task_events,agent_tasks,project_audit_events,project_alerts,model_endpoints,projects,workspaces,auth_sessions,users,postgres_json_docs,runtime_leases cascade"); }
+    try { await client.query("truncate table task_idempotency_records,task_messages,agent_task_artifacts,task_interaction_changes,agent_tasks,project_audit_events,project_alerts,model_endpoints,projects,workspaces,auth_sessions,users,postgres_json_docs,runtime_leases cascade"); }
     finally { await client.end(); }
     await store.createUser({ id: "user_task", email: "task@example.test", emailVerified: true, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
     await store.createWorkspace({ id: "workspace_task", name: "Workspace", ownerUserId: "user_task", createdAt: timestamp, updatedAt: timestamp });
@@ -91,26 +91,51 @@ postgresDescribe("postgres durable task store", () => {
 
   it("linearizes dispatching follow-up terminal races to one accepted or successor outcome", async () => {
     await store.createTaskAtomically(liveCreate("task_source", "run_source"));
-    const followUp = pendingFollowUp("follow-accepted", "task_source");
-    await store.createPendingTaskFollowUp(followUp);
-    await store.claimTaskFollowUp({ id: followUp.id, claimToken: "follow-claim", claimedAt: timestamp, leaseExpiresAt: timestamp });
+    const message = pendingMessage("follow-accepted", "task_source");
+    await store.createPendingTaskMessage(message);
+    await store.claimTaskMessage({ id: message.id, claimToken: "follow-claim", claimedAt: timestamp, leaseExpiresAt: timestamp });
     await store.finalizeTaskLifecycle(finalizeInput("task_source", "cancelled", "audit-cancel", "task.cancel"));
-    assert.equal((await store.findTaskFollowUp(followUp.id))?.deliveryStatus, "terminal_pending");
-    const accepted = await store.recordTaskFollowUpReceipt({ id: followUp.id, claimToken: "follow-claim", receipt: { accepted: true, deliveryKey: followUp.deliveryKey!, requestHash: followUp.requestHash!, messageId: "message" }, timelineCursor: null, updatedAt: timestamp });
+    assert.equal((await store.findTaskMessage(message.id))?.deliveryStatus, "terminal_pending");
+    const accepted = await store.recordTaskMessageReceipt({ id: message.id, claimToken: "follow-claim", receipt: { accepted: true, deliveryKey: message.deliveryKey!, requestHash: message.requestHash!, messageId: "message" }, timelineCursor: null, updatedAt: timestamp });
     assert.equal(accepted?.deliveryStatus, "accepted");
-    assert.equal(accepted?.followUpTaskId, null);
+    assert.equal(accepted?.targetTaskId, null);
 
     await store.createTaskAtomically(liveCreate("task_source_2", "run_source_2"));
-    const absent = pendingFollowUp("follow-successor", "task_source_2");
-    await store.createPendingTaskFollowUp(absent);
-    await store.claimTaskFollowUp({ id: absent.id, claimToken: "absent-claim", claimedAt: timestamp, leaseExpiresAt: timestamp });
+    const absent = pendingMessage("follow-successor", "task_source_2");
+    await store.createPendingTaskMessage(absent);
+    await store.claimTaskMessage({ id: absent.id, claimToken: "absent-claim", claimedAt: timestamp, leaseExpiresAt: timestamp });
     await store.finalizeTaskLifecycle(finalizeInput("task_source_2", "completed", "audit-source-2", "task.completed"));
     const successor = liveCreate("task_successor", "run_successor");
     successor.task.sourceTaskId = "task_source_2";
-    const resolved = await store.resolveTerminalPendingFollowUp({ followUpId: absent.id, expectedClaimToken: "absent-claim", successor, updatedAt: timestamp });
+    const resolved = await store.resolveTerminalPendingMessage({ messageId: absent.id, expectedClaimToken: "absent-claim", successor, updatedAt: timestamp });
     assert.equal(resolved?.deliveryStatus, "successor_created");
-    assert.equal(resolved?.followUpTaskId, "task_successor");
-    assert.equal(await store.recordTaskFollowUpReceipt({ id: absent.id, claimToken: "absent-claim", receipt: { accepted: true, deliveryKey: absent.deliveryKey!, requestHash: absent.requestHash! }, timelineCursor: null, updatedAt: timestamp }), null);
+    assert.equal(resolved?.targetTaskId, "task_successor");
+    assert.equal(await store.recordTaskMessageReceipt({ id: absent.id, claimToken: "absent-claim", receipt: { accepted: true, deliveryKey: absent.deliveryKey!, requestHash: absent.requestHash! }, timelineCursor: null, updatedAt: timestamp }), null);
+  });
+
+  it("rolls terminal successor state back when its interaction write fails", async () => {
+    await store.createTaskAtomically(liveCreate("task_atomic_source","run_atomic_source"));
+    await store.finalizeTaskLifecycle(finalizeInput("task_atomic_source","completed","audit-atomic-source","task.completed"));
+    const successor=liveCreate("task_atomic_successor","run_atomic_successor");
+    successor.task.sourceTaskId="task_atomic_source";
+    const message=pendingMessage("message_atomic_successor","task_atomic_source");
+    const invalid:TaskInteractionChangeInput={...interactionChange("task_atomic_source","message-atomic",0),interaction:{...interactionChange("task_atomic_source","message-atomic",0).interaction,taskId:"wrong-task"}};
+
+    await assert.rejects(()=>store.createTerminalTaskMessage({message,successor,messageInteractionChange:invalid}),/interaction identity mismatch/i);
+
+    assert.equal(await store.findTaskMessage(message.id),null);
+    assert.equal(await store.findTask(successor.task.id),null);
+    assert.equal((await store.findProjectResourceUsage("project_task"))?.activeTasks,0);
+    assert.deepEqual(await store.listTaskInteractionChanges("task_atomic_source",0,10),[]);
+  });
+
+  it("finds a delayed interaction directly beyond the latest 1000 changes", async () => {
+    await store.createTaskAtomically(liveCreate("task_delayed_interaction","run_delayed_interaction"));
+    await store.persistTaskInteractionMutation({taskId:"task_delayed_interaction",changes:Array.from({length:1002},(_,index)=>interactionChange("task_delayed_interaction",`interaction-${index}`,index))});
+
+    const delayed=await store.findLatestTaskInteractionChange("task_delayed_interaction","interaction-0");
+    assert.equal(delayed?.interaction.id,"interaction-0");
+    assert.equal(delayed?.changeSeq,1);
   });
 
   it("fences artifact drain and cleanup completion", async () => {
@@ -138,11 +163,12 @@ postgresDescribe("postgres durable task store", () => {
   });
 
   function liveCreate(taskId: string, runId: string): AtomicTaskCreateInput {
-    const task: AgentTask = { id: taskId, workspaceId: "workspace_task", projectId: "project_task", endpointId: "endpoint_task", title: taskId, prompt: taskId, inputPaths: [], status: "starting", runId, sourceTaskId: null, executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, terminalReason: null, startDeliveryKey: `delivery-${taskId}`, startRequestHash: `hash-${taskId}`, startClaimToken: null, startIntentStatus: "pending", startAttemptCount: 0, artifactProjectionStatus: "pending", cleanupStatus: "pending", createdAt: timestamp, updatedAt: timestamp };
+    const task: PersistedAgentTask = { id: taskId, workspaceId: "workspace_task", projectId: "project_task", endpointId: "endpoint_task", title: taskId, prompt: taskId, inputPaths: [], status: "starting", runId, sourceTaskId: null, executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, terminalReason: null, startDeliveryKey: `delivery-${taskId}`, startRequestHash: `hash-${taskId}`, startClaimToken: null, startIntentStatus: "pending", startAttemptCount: 0, artifactProjectionStatus: "pending", cleanupStatus: "pending", createdAt: timestamp, updatedAt: timestamp };
     const run: PersistedSandboxRunState = { namespace: "agentsmith", workspaceId: task.workspaceId, projectId: task.projectId, taskId, runId, phase: "starting", image: "runner", pvcName: "files", projectSubPath: "workspaces/workspace_task/projects/project_task", botifiedPort: 3099, resourceNames: { pod: `${taskId}-pod`, service: `${taskId}-service`, configMap: `${taskId}-config`, secret: `${taskId}-secret` }, serviceKeySecretRef: { name: `${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" }, directories: { taskHome: `/tasks/${taskId}/home`, artifacts: `/tasks/${taskId}/artifacts`, botified: `/tasks/${taskId}/botified` }, resourceLimits: { cpuRequest: "1m", memoryRequest: "1Mi", cpuLimit: "1", memoryLimit: "1Gi" }, fencingToken: 1, cleanupStatus: "active", createdAt: timestamp, updatedAt: timestamp };
     return { task, reserveActive: true, runtimeState: { botifiedBaseUrl: `http://${taskId}` }, sandboxRun: run };
   }
 
-  function pendingFollowUp(id: string, taskId: string): TaskFollowUp { return { id, taskId, prompt: id, followUpTaskId: null, deliveryKey: `delivery-${id}`, requestHash: `hash-${id}`, claimToken: null, receipt: null, timelineCursor: null, deliveryStatus: "pending", claimedAt: null, leaseExpiresAt: null, attemptCount: 0, nextRetryAt: null, safeError: null, createdAt: timestamp, updatedAt: timestamp, deletedAt: null }; }
+  function pendingMessage(id: string, taskId: string): PersistedTaskMessage { return { id, taskId, content: id, targetTaskId: null, deliveryKey: `delivery-${id}`, requestHash: `hash-${id}`, claimToken: null, receipt: null, timelineCursor: null, deliveryStatus: "pending", claimedAt: null, leaseExpiresAt: null, attemptCount: 0, nextRetryAt: null, safeError: null, createdAt: timestamp, updatedAt: timestamp, deletedAt: null }; }
   function finalizeInput(taskId: string, terminalReason: "completed" | "failed" | "cancelled", auditId: string, action: ProjectAuditEvent["action"]) { return { taskId, terminalReason, updatedAt: timestamp, auditEvent: { id: auditId, projectId: "project_task", actorId: null, action, status: "accepted" as const, resourceKind: "task" as const, resourceId: taskId, detail: { endpointId: "endpoint_task" }, createdAt: timestamp }, successors: [] }; }
+  function interactionChange(taskId:string,id:string,index:number):TaskInteractionChangeInput{return{sourceKind:"botified",sourceId:`cursor-${index}`,sourceRevision:0,interaction:{id,revision:1,taskId,kind:"assistant_message",title:"Assistant",body:id,contentMode:"full",status:"completed",position:index,occurredAt:timestamp,updatedAt:timestamp}};}
 });

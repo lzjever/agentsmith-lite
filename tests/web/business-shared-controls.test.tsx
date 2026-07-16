@@ -6,7 +6,7 @@ import React, { useState } from "react";
 import { apiClient, type EndpointInput, type ProjectCredential, type ProjectSettings, type WorkspaceSettings } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { EndpointDialog } = await import("../../src/components/endpoints/EndpointDialog.js");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
 const { WorkspaceSettingsPage } = await import("../../src/components/settings/WorkspaceSettingsPage.js");
@@ -90,6 +90,26 @@ describe("business shared controls", () => {
       assert.equal(screen.queryByRole("combobox", { name: "New workspace owner" }), null);
     } finally { restoreClient(original); }
   });
+
+  it("confirms workspace archiving before changing lifecycle state", async () => {
+    const original = snapshotClient();
+    let archived = false;
+    apiClient.workspaceSettings = async () => workspaceSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.workspaceMembers = async () => [];
+    apiClient.archiveWorkspace = async () => {
+      archived = true;
+      return { ...workspaceSettings.workspace, lifecycleStatus: "archived" };
+    };
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Archive workspace" }));
+      assert.equal(archived, false);
+      const dialog = screen.getByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Archive workspace" }));
+      await waitFor(() => assert.equal(archived, true));
+    } finally { restoreClient(original); }
+  });
 });
 
 function EndpointHarness({ saving = false, onChange }: { saving?: boolean; onChange: (value: EndpointInput) => void }) {
@@ -97,7 +117,7 @@ function EndpointHarness({ saving = false, onChange }: { saving?: boolean; onCha
   return <EndpointDialog open input={input} editing={false} saving={saving} discovering={false} models={[]} canSubmit error="" credentials={credentials} onDiscoverModels={() => undefined} onDismissError={() => undefined} onOpenChange={() => undefined} onChange={(value) => { setInput(value); onChange(value); }} onSubmit={(event) => event.preventDefault()} />;
 }
 
-function snapshotClient() { return { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, transferProjectOwner: apiClient.transferProjectOwner, transferWorkspaceOwner: apiClient.transferWorkspaceOwner }; }
+function snapshotClient() { return { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, transferProjectOwner: apiClient.transferProjectOwner, transferWorkspaceOwner: apiClient.transferWorkspaceOwner, archiveWorkspace: apiClient.archiveWorkspace }; }
 function restoreClient(value: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, value); }
 function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
 

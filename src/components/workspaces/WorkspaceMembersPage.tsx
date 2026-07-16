@@ -8,6 +8,7 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
@@ -26,6 +27,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   const [mutationError, setMutationError] = useState<MutationError>();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<WorkspaceMember>();
+  const [memberToRemove, setMemberToRemove] = useState<WorkspaceMember>();
 
   const refresh = useCallback(async () => {
     const [workspaces, listed] = await Promise.all([apiClient.workspaces(), apiClient.workspaceMembers(workspaceId)]);
@@ -100,6 +102,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
       await refresh();
     } catch (reason) {
       await recoverMutation(reason, () => void remove(member));
+      throw reason;
     } finally {
       setBusyUserId(undefined);
     }
@@ -111,11 +114,12 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     {state === "ready" ? <section className="space-y-4" aria-label="Workspace members">
       {mutationError && !open ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}
       <label className="relative block max-w-sm"><span className="sr-only">Search workspace members</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search members" /></label>
-      {filtered.length === 0 ? <PageState state="empty">No workspace members match this search.</PageState> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={busyUserId === member.userId} onChange={change} onRemove={remove} onView={setSelected} />)}</div>}
+      {filtered.length === 0 ? <PageState state="empty">No workspace members match this search.</PageState> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={busyUserId === member.userId} onChange={change} onRemove={setMemberToRemove} onView={setSelected} />)}</div>}
       {!canManage ? <p className="text-sm text-secondary">Your workspace access is read-only.</p> : null}
     </section> : null}
     <Dialog open={open} onOpenChange={(next) => { if (busyUserId !== "new") setOpen(next); }}><DialogContent><DialogHeader title="Add workspace member" description="Grant an existing identity access to this workspace." />{mutationError ? <div className="px-5 pt-4"><MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Email<Input value={email} onChange={(event) => setEmail(event.target.value)} type="email" /></label><Select value={role} onValueChange={(value) => setRole(value as Exclude<WorkspaceMemberRole, "owner">)}><SelectTrigger aria-label="Workspace member role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select></div><DialogFooter><Button variant="quiet" onClick={() => setOpen(false)} disabled={busyUserId === "new"}>Cancel</Button><Button disabled={!email.trim() || !canManage || busyUserId === "new"} onClick={() => void add()}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(selected)} onOpenChange={(next) => !next && setSelected(undefined)}><DialogContent>{selected ? <><DialogHeader title="Member details" description="Workspace membership identity." /><dl className="grid gap-4 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]"><dt className="text-secondary">Name</dt><dd className="break-all text-foreground">{memberLabel(selected)}</dd><dt className="text-secondary">Email</dt><dd className="break-all text-foreground">{selected.email}</dd><dt className="text-secondary">Role</dt><dd>{selected.role}</dd><dt className="text-secondary">Joined</dt><dd>{new Date(selected.createdAt).toLocaleString("en-US")}</dd></dl></> : null}</DialogContent></Dialog>
+    <ConfirmationDialog open={Boolean(memberToRemove)} onOpenChange={(next) => !next && setMemberToRemove(undefined)} title="Remove workspace member" description={memberToRemove ? `Remove ${memberLabel(memberToRemove)} from this workspace? They will lose access to its projects.` : undefined} confirmText="Remove member" onConfirm={() => memberToRemove ? remove(memberToRemove) : undefined} errorContext="Workspace member could not be removed" />
   </PageLayout>;
 }
 
