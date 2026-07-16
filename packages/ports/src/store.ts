@@ -449,6 +449,7 @@ export interface ProductStore {
   updateTaskTitle(taskId: string, title: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
   archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
   softDeleteTask(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
+  deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null>;
   listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]>;
   claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null>;
   reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<PersistedAgentTask | null>;

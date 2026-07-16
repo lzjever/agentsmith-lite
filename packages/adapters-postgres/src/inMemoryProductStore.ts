@@ -612,6 +612,23 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
   }
 
+  async deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null> {
+    const current = this.tasks.get(taskId);
+    if (!current || !isTerminalTask(current)) return null;
+    const releasedArtifactBytes = this.artifacts.filter((artifact) => artifact.taskId === taskId).reduce((total, artifact) => total + artifact.bytes, 0);
+    this.artifacts.splice(0, this.artifacts.length, ...this.artifacts.filter((artifact) => artifact.taskId !== taskId));
+    this.messages.splice(0, this.messages.length, ...this.messages.filter((message) => message.taskId !== taskId));
+    this.interactionChanges.splice(0, this.interactionChanges.length, ...this.interactionChanges.filter((change) => change.interaction.taskId !== taskId));
+    this.interactionSync.delete(taskId);
+    await this.jsonDocs.delete("sandbox_runtime_state", taskId);
+    await this.jsonDocs.delete("sandbox_run_state", current.runId);
+    const usage = this.usage.get(current.projectId);
+    if (usage) this.usage.set(current.projectId, clone({ ...usage, projectFileBytes: Math.max(0, usage.projectFileBytes - releasedArtifactBytes), updatedAt: deletedAt }));
+    const task = { ...current, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
+    this.tasks.set(taskId, clone(task));
+    return { task: clone(task), releasedArtifactBytes };
+  }
+
   async listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]> {
     return [...this.tasks.values()].filter((task) => !task.deletedAt && !task.terminalReason && (
       task.startIntentStatus === "pending" && (!task.startNextRetryAt || task.startNextRetryAt <= now) ||

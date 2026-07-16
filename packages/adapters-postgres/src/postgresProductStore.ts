@@ -770,6 +770,23 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
+  async deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null> {
+    return transaction(this.pool, async (client) => {
+      const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [taskId]);
+      const current = locked.rows[0];
+      if (!current || !current.terminal_reason) return null;
+      const released = await client.query<{ bytes: string }>("select coalesce(sum(bytes),0)::text as bytes from agent_task_artifacts where task_id=$1", [taskId]);
+      const releasedArtifactBytes = Number(released.rows[0]?.bytes ?? 0);
+      await client.query("delete from task_interaction_changes where task_id=$1", [taskId]);
+      await client.query("delete from task_messages where task_id=$1", [taskId]);
+      await client.query("delete from agent_task_artifacts where task_id=$1", [taskId]);
+      await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)", [taskId,current.run_id]);
+      await client.query("update project_resource_usage set project_file_bytes=greatest(0,project_file_bytes-$2),updated_at=$3 where project_id=$1", [current.project_id,releasedArtifactBytes,deletedAt]);
+      const updated = await client.query<AgentTaskRow>("update agent_tasks set deleted_at=coalesce(deleted_at,$2),updated_at=$2 where id=$1 returning *", [taskId,deletedAt]);
+      return { task: mapTask(updated.rows[0]!), releasedArtifactBytes };
+    });
+  }
+
   async listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where deleted_at is null and terminal_reason is null and ((start_intent_status='pending' and (start_next_retry_at is null or start_next_retry_at <= $1)) or (start_intent_status='dispatching' and start_lease_expires_at <= $1 and (start_next_retry_at is null or start_next_retry_at <= $1))) order by created_at,id limit $2`, [now, limit]);
     return rows.map(mapTask);

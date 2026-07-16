@@ -720,6 +720,12 @@ describe("durable task lifecycle", () => {
       () => setup.services.tasks.downloadTaskArtifact(setup.userId, task.id, "artifact_legacy_symlink"),
       /symlink/
     );
+
+    await setup.services.tasks.deleteTask(setup.userId, task.id, "delete-shared-artifact-task");
+    assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes, 0);
+    assert.deepEqual(await setup.store.listTaskArtifacts(task.id), []);
+    await assert.rejects(() => readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "inputs", "manifest.json")), { code: "ENOENT" });
+    assert.deepEqual((await setup.store.listProjectAuditEvents(setup.projectId)).filter((event) => event.action === "task.delete").map((event) => event.resourceId), [task.id]);
   });
 
   it("completes terminal drained cleanup when the pod is already absent and repeated ticks are idempotent", async () => {

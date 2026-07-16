@@ -162,6 +162,25 @@ postgresDescribe("postgres durable task store", () => {
     assert.deepEqual((await store.listProjectAuditEvents("project_task")).map((event) => event.id), [input.auditEvent.id]);
   });
 
+  it("atomically deletes terminal task data and releases artifact usage", async () => {
+    await store.createTaskAtomically(liveCreate("task_delete_data", "run_delete_data"));
+    await store.finalizeTaskLifecycle(finalizeInput("task_delete_data", "completed", "audit-delete-data-terminal", "task.completed"));
+    const artifact = { id:"artifact_delete_data",taskId:"task_delete_data",fileId:"file_delete_data",name:"result.txt",bytes:4,sha256:"sha",mediaType:"text/plain",previewText:"test",createdAt:timestamp };
+    await store.persistTaskArtifactProjection({projectId:"project_task",artifact,auditEvent:{id:"audit-delete-data-artifact",projectId:"project_task",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:artifact.id,createdAt:timestamp},updatedAt:timestamp});
+    await store.createTaskMessage(pendingMessage("message_delete_data", "task_delete_data"));
+    await store.persistTaskInteractionMutation({taskId:"task_delete_data",changes:[interactionChange("task_delete_data","interaction-delete-data",0)]});
+
+    const deleted = await store.deleteTaskData("task_delete_data", "2026-07-12T00:01:00.000Z");
+
+    assert.equal(deleted?.task.deletedAt, "2026-07-12T00:01:00.000Z");
+    assert.equal(deleted?.releasedArtifactBytes, 4);
+    assert.equal((await store.findProjectResourceUsage("project_task"))?.projectFileBytes, 0);
+    assert.deepEqual(await store.listTaskArtifacts("task_delete_data"), []);
+    assert.deepEqual(await store.listTaskMessages("task_delete_data"), []);
+    assert.deepEqual(await store.listTaskInteractionChanges("task_delete_data",0,10), []);
+    assert.equal(await store.jsonDocs.get("sandbox_runtime_state","task_delete_data"), null);
+  });
+
   function liveCreate(taskId: string, runId: string): AtomicTaskCreateInput {
     const task: PersistedAgentTask = { id: taskId, workspaceId: "workspace_task", projectId: "project_task", endpointId: "endpoint_task", title: taskId, prompt: taskId, inputPaths: [], status: "starting", runId, sourceTaskId: null, executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, terminalReason: null, startDeliveryKey: `delivery-${taskId}`, startRequestHash: `hash-${taskId}`, startClaimToken: null, startIntentStatus: "pending", startAttemptCount: 0, artifactProjectionStatus: "pending", cleanupStatus: "pending", createdAt: timestamp, updatedAt: timestamp };
     const run: PersistedSandboxRunState = { namespace: "agentsmith", workspaceId: task.workspaceId, projectId: task.projectId, taskId, runId, phase: "starting", image: "runner", pvcName: "files", projectSubPath: "workspaces/workspace_task/projects/project_task", botifiedPort: 3099, resourceNames: { pod: `${taskId}-pod`, service: `${taskId}-service`, configMap: `${taskId}-config`, secret: `${taskId}-secret` }, serviceKeySecretRef: { name: `${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" }, directories: { taskHome: `/tasks/${taskId}/home`, artifacts: `/tasks/${taskId}/artifacts`, botified: `/tasks/${taskId}/botified` }, resourceLimits: { cpuRequest: "1m", memoryRequest: "1Mi", cpuLimit: "1", memoryLimit: "1Gi" }, fencingToken: 1, cleanupStatus: "active", createdAt: timestamp, updatedAt: timestamp };

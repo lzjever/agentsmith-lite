@@ -160,6 +160,7 @@ export class ProjectPolicyService {
     }
     throw new ProductError("Project policy usage not found", 409);
   }
+  async refreshFileAlerts(projectId: string): Promise<void> { await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit"); }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
   private async check(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string | null, delta: Partial<ProjectResourceUsage>, limit: Limit) {
