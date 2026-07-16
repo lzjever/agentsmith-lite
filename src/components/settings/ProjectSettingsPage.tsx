@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2, Users } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -17,7 +17,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { toast } from "../ui/toast";
 
 export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  return <ProjectSettings key={`${workspaceId}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
+}
+
+function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
   const router = useRouter();
+  const mounted = useRef(true);
+  const loadRequest = useRef(0);
+  const memberRequest = useRef(0);
   const [data, setData] = useState<ProjectSettings>();
   const [user, setUser] = useState<CurrentUser>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -30,12 +37,26 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
   const [deleteName, setDeleteName] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [members,setMembers]=useState<ProjectMember[]>([]);const [memberState,setMemberState]=useState<"loading"|"ready"|"error">("loading");const [ownerTarget,setOwnerTarget]=useState("");const [ownerOpen,setOwnerOpen]=useState(false);const [lifecycleBusy,setLifecycleBusy]=useState(false);
-  const loadMembers = useCallback(async () => { setMemberState("loading"); try { setMembers(await apiClient.members(projectId)); setMemberState("ready"); } catch { setMemberState("error"); } }, [projectId]);
+  const loadMembers = useCallback(async () => {
+    const request = ++memberRequest.current;
+    setMemberState("loading");
+    try {
+      const listed = await apiClient.members(projectId);
+      if (!mounted.current || request !== memberRequest.current) return;
+      setMembers(listed);
+      setMemberState("ready");
+    } catch {
+      if (!mounted.current || request !== memberRequest.current) return;
+      setMemberState("error");
+    }
+  }, [projectId]);
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setLoadError("");
     try {
       const [settings, identity] = await Promise.all([apiClient.projectSettings(projectId), apiClient.currentIdentity()]);
+      if (!mounted.current || request !== loadRequest.current) return;
       if (settings.project.workspaceId !== workspaceId) throw new ApiError(404, "This project does not belong to this workspace.");
       setData(settings);
       setProjectName(settings.project.name);
@@ -43,11 +64,18 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
       setState("ready");
       if (settings.project.ownerUserId === identity.user.id) await loadMembers(); else { setMembers([]); setMemberState("ready"); }
     } catch (reason) {
+      if (!mounted.current || request !== loadRequest.current) return;
       setLoadError(settingsErrorMessage(reason, "Project settings could not be loaded."));
       setState("error");
     }
   }, [loadMembers, projectId, workspaceId]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -55,13 +83,15 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
     setSaving(true);
     try {
       const saved = await apiClient.updateProjectSettings(projectId, { name: projectName });
+      if (!mounted.current) return;
       setData(saved);
       setProjectName(saved.project.name);
       toast.success("Project settings saved.");
     } catch (reason) {
+      if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Project settings could not be saved."));
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   }
 
@@ -73,10 +103,11 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
   const canArchive=data?.capabilities.canManageSettings===true&&isActive;
   const canRestore=isOwner&&archived;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);setData({...data,project});toast.success(archived?"Project restored.":"Project archived.");}catch(reason){toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{setLifecycleBusy(false)}}
+  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);if(!mounted.current)return;setData({...data,project});toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data)return;
     await apiClient.transferProjectOwner(projectId,ownerTarget);
+    if(!mounted.current)return;
     setData({...data,project:{...data.project,ownerUserId:ownerTarget}});
     setOwnerOpen(false);
     setOwnerTarget("");
@@ -87,13 +118,15 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
     setDeleteBusy(true);
     try {
       await apiClient.deleteProject(projectId);
+      if (!mounted.current) return;
       toast.success("Project deleted.");
       router.push(`/workspaces/${workspaceId}`);
     } catch (error) {
+      if (!mounted.current) return;
       setDeleteError(deletionMessage(error));
       throw error;
     } finally {
-      setDeleteBusy(false);
+      if (mounted.current) setDeleteBusy(false);
     }
   }
 

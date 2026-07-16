@@ -6,7 +6,7 @@ import React from "react";
 import { ApiError, apiClient, type ProjectSettings, type WorkspaceSettings } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
 const { WorkspaceSettingsPage } = await import("../../src/components/settings/WorkspaceSettingsPage.js");
 
@@ -55,6 +55,36 @@ describe("settings deletion", () => {
       project.unmount();
       render(<AppRouterContext.Provider value={router([])}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
       assert.ok(await screen.findByRole("button", { name: "Continue workspace deletion" }));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("does not navigate when deletion finishes after switching projects", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, deleteProject: apiClient.deleteProject };
+    const pushed: string[] = [];
+    let finishDelete: (() => void) | undefined;
+    apiClient.projectSettings = async (requestedProjectId) => ({
+      ...projectSettings,
+      project: {
+        ...projectSettings.project,
+        id: requestedProjectId,
+        workspaceId: requestedProjectId === "project_1" ? "workspace_1" : "workspace_2",
+        name: requestedProjectId === "project_1" ? "Project Alpha" : "Project Beta",
+      },
+    });
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.deleteProject = async () => new Promise((resolve) => { finishDelete = () => resolve({ deleted: true }); });
+    try {
+      const view = render(<AppRouterContext.Provider value={router(pushed)}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Open project deletion confirmation" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Project name confirmation" }), { target: { value: "Project Alpha" } });
+      fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+      await waitFor(() => assert.ok(finishDelete));
+
+      view.rerender(<AppRouterContext.Provider value={router(pushed)}><ProjectSettingsPage workspaceId="workspace_2" projectId="project_2" /></AppRouterContext.Provider>);
+      assert.equal((await screen.findByRole("textbox", { name: "Project name" }) as HTMLInputElement).value, "Project Beta");
+      await act(async () => finishDelete!());
+      assert.deepEqual(pushed, []);
+      assert.equal((screen.getByRole("textbox", { name: "Project name" }) as HTMLInputElement).value, "Project Beta");
     } finally { Object.assign(apiClient, original); }
   });
 
