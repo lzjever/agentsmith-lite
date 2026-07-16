@@ -192,6 +192,37 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("does not apply an alert update after switching projects", async () => {
+    const original = snapshotClient();
+    let resolveTransition: ((value: ProjectAlert) => void) | undefined;
+    const projectAlert = (requestedProjectId: string): ProjectAlert => ({
+      id: `alert_${requestedProjectId}`,
+      projectId: requestedProjectId,
+      type: requestedProjectId === "project_1" ? "task_failure" : "provider_failure",
+      status: "active",
+      deliveryStatus: "delivered",
+      createdAt: policy.createdAt,
+      updatedAt: policy.updatedAt,
+      resolvedAt: null,
+      dismissedAt: null,
+    });
+    apiClient.alerts = async (requestedProjectId) => [projectAlert(requestedProjectId)];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.transitionAlert = async () => new Promise((resolve) => { resolveTransition = resolve; });
+    try {
+      const view = render(<AlertsPage projectId="project_1" />);
+      await screen.findByText("Task failure");
+      fireEvent.click(screen.getByRole("button", { name: "Resolve alert" }));
+      await waitFor(() => assert.ok(resolveTransition));
+
+      view.rerender(<AlertsPage projectId="project_2" />);
+      await screen.findByText("Provider failure");
+      await act(async () => resolveTransition!({ ...projectAlert("project_1"), status: "resolved", resolvedAt: policy.updatedAt }));
+      assert.ok(screen.getByText("Provider failure"));
+      assert.equal(screen.queryByText("Task failure"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps alert instances readable but disables actions when permissions cannot be loaded", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };

@@ -51,6 +51,11 @@ const labels: Record<ProjectAlert["type"], string> = {
 };
 
 export function AlertsPage({ projectId }: { projectId: string }) {
+  return <ProjectAlertsPage key={projectId} projectId={projectId} />;
+}
+
+function ProjectAlertsPage({ projectId }: { projectId: string }) {
+  const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [alerts, setAlerts] = useState<ProjectAlert[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
@@ -64,6 +69,12 @@ export function AlertsPage({ projectId }: { projectId: string }) {
     action: "ack" | "silence";
   } | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
     setState("loading");
@@ -74,7 +85,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
       apiClient.alerts(projectId),
       apiClient.projectCapabilities(projectId),
     ]);
-    if (request !== loadRequest.current) return;
+    if (!mounted.current || request !== loadRequest.current) return;
     if (alertsResult.status === "rejected") {
       setError(
         alertsResult.reason instanceof Error ? alertsResult.reason.message : "Alerts could not be loaded.",
@@ -114,16 +125,18 @@ export function AlertsPage({ projectId }: { projectId: string }) {
         alert.id,
         status,
       );
+      if (!mounted.current) return;
       replace(saved);
       setDismiss(null);
       toast.success(
         status === "resolved" ? "Alert resolved." : "Alert dismissed.",
       );
     } catch (cause) {
+      if (!mounted.current) return;
       forbidden(cause);
       throw cause;
     } finally {
-      setBusyId(null);
+      if (mounted.current) setBusyId(null);
     }
   }
   async function instance(alert: ProjectAlert, action: "ack" | "silence") {
@@ -144,6 +157,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
               alert.id,
               silenced ? null : new Date(Date.now() + 3_600_000).toISOString(),
             );
+      if (!mounted.current) return;
       replace(saved);
       toast.success(
         action === "ack"
@@ -153,9 +167,10 @@ export function AlertsPage({ projectId }: { projectId: string }) {
             : "Alert silence cleared.",
       );
     } catch (cause) {
+      if (!mounted.current) return;
       if (!forbidden(cause)) setRetry({ alert, action });
     } finally {
-      setBusyId(null);
+      if (mounted.current) setBusyId(null);
     }
   }
   function replace(saved: ProjectAlert) {
@@ -184,7 +199,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
     toast.error("Alert could not be updated.");
     return accessDenied;
   }
-  const active = alerts.filter((alert) => alert.status === "active").length;
+  const activeCount = alerts.filter((alert) => alert.status === "active").length;
   return (
     <PageLayout
       header={
@@ -224,7 +239,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
         <Tabs defaultValue="instances">
           <TabsList aria-label="Alerts view">
             <TabsTrigger value="instances">
-              Instances {active ? `(${active})` : ""}
+              Instances {activeCount ? `(${activeCount})` : ""}
             </TabsTrigger>
             <TabsTrigger value="rules">Rules</TabsTrigger>
           </TabsList>
