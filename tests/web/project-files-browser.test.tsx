@@ -136,6 +136,26 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("shows quota conflicts as upload errors instead of replacement prompts", async () => {
+    const original = snapshotClient();
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.uploadFile = async () => {
+      throw new ApiError(409, "Project project file bytes limit reached");
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "No files yet" });
+      fireEvent.change(document.querySelector('input[type="file"]')!, {
+        target: { files: [new File(["a"], "quota-denied.txt")] },
+      });
+      const alert = await screen.findByRole("alert");
+      assert.match(alert.textContent ?? "", /project file bytes limit reached/i);
+      assert.ok(screen.getByRole("button", { name: "Retry upload" }));
+      assert.equal(screen.queryByRole("alertdialog", { name: "Replace quota-denied.txt?" }), null);
+    } finally { restoreClient(original); }
+  });
+
   it("commits a successful delete without depending on another listing read", async () => {
     const original = snapshotClient();
     let lists = 0;

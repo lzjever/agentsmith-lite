@@ -121,7 +121,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     } catch (error) {
       if (!mounted.current) return;
       if (revokeWriteAccess(error)) return;
-      if (!overwrite && error instanceof ApiError && error.status === 409) {
+      if (!overwrite && error instanceof ApiError && error.status === 409 && error.message === "Project file already exists") {
         setReplaceTarget({ file, path: uploadPath });
       } else if (overwrite) {
         throw new Error(errorMessage(error, "File could not be replaced."));
