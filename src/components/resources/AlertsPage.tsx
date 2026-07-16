@@ -211,6 +211,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
               variant="quiet"
               size="icon"
               aria-label="Refresh alerts"
+              disabled={busyId !== null}
               onClick={() => void load()}
             >
               <RefreshCw size={16} />

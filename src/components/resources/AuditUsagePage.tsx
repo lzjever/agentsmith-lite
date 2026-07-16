@@ -222,7 +222,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         {resourceId ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-2">
             <p className="text-sm text-secondary">
-              Showing events for alert instance <strong>{resourceId}</strong>.
+              Showing events for {kind === "alert" ? "alert instance" : `${kind === "all" ? "linked" : kind.replaceAll("_", " ")} resource`} <strong>{resourceId}</strong>.
             </p>
             <Button
               variant="quiet"

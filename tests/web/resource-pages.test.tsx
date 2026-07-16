@@ -59,6 +59,27 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("does not allow a refresh to race an in-flight policy save", async () => {
+    const original = snapshotClient();
+    let policyReads = 0;
+    let resolveSave!: (value: ProjectResourcePolicy) => void;
+    apiClient.policy = async () => { policyReads += 1; return policy; };
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async () => new Promise((resolve) => { resolveSave = resolve; });
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name:"Save policy" }));
+      await waitFor(() => assert.ok(resolveSave));
+      const refresh = screen.getByRole("button", { name:"Refresh policy" }) as HTMLButtonElement;
+      assert.equal(refresh.disabled, true);
+      fireEvent.click(refresh);
+      assert.equal(policyReads, 1);
+      await act(async () => resolveSave(policy));
+      await waitFor(() => assert.equal(refresh.disabled, false));
+    } finally { restoreClient(original); }
+  });
+
   it("uses projected policy capability from the first ready render and sends the complete policy update", async () => {
     const original = snapshotClient();
     const updates: ProjectPolicyInput[] = [];

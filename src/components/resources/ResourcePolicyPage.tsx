@@ -137,6 +137,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
               variant="quiet"
               size="icon"
               aria-label="Refresh policy"
+              disabled={saving}
               onClick={() => void load()}
             >
               <RefreshCw size={16} />
@@ -230,7 +231,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                 <span className="text-sm text-error">
                   Endpoint windows could not be loaded: {endpointError}
                 </span>
-                <Button variant="quiet" size="sm" onClick={() => void load()}>
+                <Button variant="quiet" size="sm" disabled={saving} onClick={() => void load()}>
                   <RefreshCw size={15} />
                   Retry
                 </Button>
