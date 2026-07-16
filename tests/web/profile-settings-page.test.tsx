@@ -129,6 +129,17 @@ describe("profile and settings pages", () => {
     } finally { apiClient.profile = original; }
   });
 
+  it("removes the deployed app base path from the profile return route", async () => {
+    const original = apiClient.profile;
+    apiClient.profile = async () => profile;
+    window.history.replaceState({}, "", "/app/profile?returnTo=%2Fapp%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
+      const back = await screen.findByRole("link", { name: "Back to project" });
+      assert.equal(back.getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+    } finally { apiClient.profile = original; }
+  });
+
   it("confirms before leaving with unsaved profile changes", async () => {
     const original = apiClient.profile;
     const pushed: string[] = [];
