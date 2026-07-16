@@ -13,11 +13,16 @@ describe("workspace memberships", () => {
     const viewer=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"viewer",email:"viewer@example.test",emailVerified:true});
     const workspace=await services.workspaces.createWorkspace(owner.user.id,{name:"Workspace"});
     await store.upsertUserProfilePreferences({userId:owner.user.id,displayName:"Owner display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()});
+    await store.upsertUserProfilePreferences({userId:member.user.id,displayName:"Member display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()});
     const ownerWorkspace = (await services.workspaces.listWorkspaces(owner.user.id))[0];
     assert.equal(ownerWorkspace?.capabilities.canManageMembers,true);
     assert.deepEqual([ownerWorkspace?.owner, ownerWorkspace?.memberRole], [{ displayName: "Owner display", email: owner.user.email }, "owner"]);
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:admin.user.email},"admin");
-    await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"member");
+    const addedMember=await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"member");
+    assert.deepEqual([addedMember.displayName,addedMember.email,addedMember.role],["Member display",member.user.email,"member"]);
+    const changedMember=await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"viewer");
+    assert.deepEqual([changedMember.displayName,changedMember.email,changedMember.role],["Member display",member.user.email,"viewer"]);
+    await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"member");
     await assert.rejects(()=>services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"viewer"),status(409));
     assert.equal((await store.findWorkspaceMembership(workspace.id,member.user.id))?.role,"member");
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:viewer.user.email},"viewer");

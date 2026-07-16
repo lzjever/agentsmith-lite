@@ -19,6 +19,7 @@ describe("project membership authorization", () => {
     const viewer = await services.auth.loginExternalPrincipal({ issuer, subject: "viewer", email: "viewer@example.test", emailVerified: true });
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await store.upsertUserProfilePreferences({ userId: member.user.id, displayName: "Member display", timezone: null, bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt: new Date().toISOString() });
 
     assert.equal((await store.findProjectMembership(project.id, owner.user.id))?.role, "owner");
     assert.equal((await services.authorization.requireProject(owner.user.id, project.id, "admin")).id, project.id);
@@ -34,12 +35,14 @@ describe("project membership authorization", () => {
     );
     assert.equal(await store.findProjectMembership(project.id, member.user.id), null);
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "member@example.test" }, "member");
-    await services.memberships.addMember(owner.user.id, project.id, member.user.id, "member");
+    const addedMember = await services.memberships.addMember(owner.user.id, project.id, member.user.id, "member");
+    assert.deepEqual([addedMember.displayName, addedMember.email, addedMember.role], ["Member display", member.user.email, "member"]);
     await assert.rejects(() => services.memberships.addMember(owner.user.id, project.id, member.user.id, "viewer"), status(409));
     assert.equal((await store.findProjectMembership(project.id, member.user.id))?.role, "member");
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "viewer@example.test" }, "viewer");
     await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
-    await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer");
+    const changedMember = await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer");
+    assert.deepEqual([changedMember.displayName, changedMember.email, changedMember.role], ["Member display", member.user.email, "viewer"]);
     await services.memberships.removeMember(owner.user.id, project.id, viewer.user.id);
 
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.actorId, event.resourceId, event.status]), [

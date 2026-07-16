@@ -1,4 +1,4 @@
-import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembership, ProjectMembershipView } from "../../contracts/src/api.js";
+import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembershipView } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -15,7 +15,7 @@ export class MembershipService {
     return this.store.listProjectMemberships(projectId);
   }
 
-  async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
+  async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembershipView> {
     let memberId: string | null = null;
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
@@ -26,15 +26,16 @@ export class MembershipService {
       if (!membership) {
         throw new ProductError("User must be a workspace member before joining a project", 409);
       }
+      const view = await this.view(projectId, memberId);
       await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
-      return membership;
+      return view;
     } catch (error) {
       await this.audit(projectId, actorUserId, "membership.add", memberId, "rejected");
       throw error;
     }
   }
 
-  async changeMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
+  async changeMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembershipView> {
     let memberId: string | null = null;
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
@@ -50,8 +51,9 @@ export class MembershipService {
       if (!membership) {
         throw new NotFoundError("Project membership not found");
       }
+      const view = await this.view(projectId, memberId);
       await this.audit(projectId, actorUserId, "membership.change", memberId, "accepted");
-      return membership;
+      return view;
     } catch (error) {
       await this.audit(projectId, actorUserId, "membership.change", memberId, "rejected");
       throw error;
@@ -89,6 +91,12 @@ export class MembershipService {
     if (await this.store.findProjectMembership(projectId, userId)) {
       throw new ProductError("Project membership already exists", 409);
     }
+  }
+
+  private async view(projectId: string, userId: string): Promise<ProjectMembershipView> {
+    const member = (await this.store.listProjectMemberships(projectId)).find((candidate) => candidate.userId === userId);
+    if (!member) throw new NotFoundError("Project membership not found");
+    return member;
   }
 
 }

@@ -135,7 +135,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     try {
       const added = await apiClient.addMember(projectId, candidateUserId, role);
       if (!mounted.current) return;
-      setMembers((current) => [...current.filter((member) => member.userId !== added.userId), { ...added, displayName: candidate.displayName, email: candidate.email }]);
+      setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
       setInviteOpen(false);
       setCandidateUserId("");
       setRole("member");
@@ -156,7 +156,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     try {
       const updated = await apiClient.changeMember(projectId, member.userId, nextRole);
       if (!mounted.current) return;
-      setMembers((current) => current.map((item) => item.userId === updated.userId ? { ...item, ...updated } : item));
+      setMembers((current) => current.map((item) => item.userId === updated.userId ? updated : item));
       toast.success("Member role updated");
     } catch (reason) {
       if (!mounted.current) return;
