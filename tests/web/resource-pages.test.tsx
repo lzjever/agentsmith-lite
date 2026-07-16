@@ -299,6 +299,26 @@ describe("project resource pages", () => {
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
   });
 
+  it("starts audit from default filters after switching projects", async () => {
+    const original = snapshotClient();
+    const calls: Array<{ projectId: string; query: Record<string, unknown> }> = [];
+    apiClient.audit = async (requestedProjectId, query = {}) => { calls.push({ projectId: requestedProjectId, query }); return { items: [], nextCursor: null }; };
+    try {
+      const view = render(<AuditPage projectId="project_1" />);
+      await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1")));
+      fireEvent.click(screen.getByRole("combobox", { name: "Result" }));
+      fireEvent.click(await screen.findByRole("option", { name: "rejected" }));
+      fireEvent.change(screen.getByLabelText("From timestamp"), { target: { value: "2026-07-10T12:00" } });
+      await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1" && call.query.status === "rejected" && typeof call.query.from === "string")));
+
+      view.rerender(<AuditPage projectId="project_2" />);
+      await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_2")));
+      const projectTwo = calls.find((call) => call.projectId === "project_2")!;
+      assert.equal(projectTwo.query.status, undefined);
+      assert.equal(projectTwo.query.from, undefined);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps the latest audit refresh when an older page finishes last", async () => {
     const original = snapshotClient();
     const auditEvent = (id: string, action: string): ProjectAuditEvent => ({ id, projectId, actorId: "user_1", action, status: "accepted", resourceKind: "alert", resourceId: id, createdAt: policy.createdAt } as ProjectAuditEvent);

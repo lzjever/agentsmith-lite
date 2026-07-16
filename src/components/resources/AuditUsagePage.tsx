@@ -109,6 +109,11 @@ const actions = ["all", ...PROJECT_AUDIT_ACTIONS] as const;
 const kinds = ["all", ...PROJECT_AUDIT_RESOURCE_KINDS] as const;
 
 export function AuditPage({ projectId }: { projectId: string }) {
+  return <AuditProjectPage key={projectId} projectId={projectId} />;
+}
+
+function AuditProjectPage({ projectId }: { projectId: string }) {
+  const active = useRef(true);
   const [items, setItems] = useState<ProjectAuditEvent[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
@@ -126,6 +131,8 @@ export function AuditPage({ projectId }: { projectId: string }) {
   const requestRevision = useRef(0);
   const cursor = cursors.at(-1);
 
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+
   const load = useCallback(async () => {
     const revision = ++requestRevision.current;
     setState("loading");
@@ -140,12 +147,12 @@ export function AuditPage({ projectId }: { projectId: string }) {
         from: from ? new Date(from).toISOString() : undefined,
         to: to ? new Date(to).toISOString() : undefined,
       });
-      if (revision !== requestRevision.current) return;
+      if (!active.current || revision !== requestRevision.current) return;
       setItems(page.items);
       setNext(page.nextCursor);
       setState("ready");
     } catch {
-      if (revision !== requestRevision.current) return;
+      if (!active.current || revision !== requestRevision.current) return;
       setState("error");
     }
   }, [projectId, cursor, action, status, kind, resourceId, from, to]);
