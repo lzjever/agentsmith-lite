@@ -213,6 +213,7 @@ const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
 const DEFAULT_MAINTENANCE_LEASE_MS = 60_000;
 const DEFAULT_TASK_RETRY_DELAY_MS = 5_000;
+const MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS = 3;
 const IDEMPOTENCY_LEASE_MS = 30_000;
 const INTERACTION_HISTORY_PAGE_LIMIT = 100;
 const INTERACTION_SYNC_PAGE_LIMIT = 200;
@@ -944,18 +945,38 @@ export class TaskService {
     try{
       const unresolvedMessage=(await this.store.listTaskMessages(claimed.id)).some((message)=>message.deliveryStatus==="dispatching"||message.deliveryStatus==="terminal_pending");
       if(unresolvedMessage)throw new ProductError("Task message delivery reconciliation is pending",409);
-      let delivered:PersistedAgentTask|null=claimed;
-      if(claimed.startIntentStatus==="dispatching"){
-        const reconciled=await this.reconcileStartDelivery(claimed);
-        if(reconciled===null)delivered=null;
-        else if(reconciled.startIntentStatus==="dispatched")delivered=reconciled;
-        else throw new ProductError("Task start delivery reconciliation is still uncertain",502);
+      try {
+        let delivered:PersistedAgentTask|null=claimed;
+        if(claimed.startIntentStatus==="dispatching"){
+          const reconciled=await this.reconcileStartDelivery(claimed);
+          if(reconciled===null)delivered=null;
+          else if(reconciled.startIntentStatus==="dispatched")delivered=reconciled;
+          else throw new ProductError("Task start delivery reconciliation is still uncertain",502);
+        }
+        if(delivered?.startIntentStatus==="dispatched")await this.syncTaskTimeline(delivered,{updateRunLifecycle:false,preserveTerminalStatus:true});
+      } catch (error) {
+        if ((claimed.artifactProjectionAttemptCount ?? 0) < MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS) throw error;
+        await this.markTaskInteractionHistoryGap(claimed.id);
       }
-      if(delivered?.startIntentStatus==="dispatched")await this.syncTaskTimeline(delivered,{updateRunLifecycle:false,preserveTerminalStatus:true});
       await this.projectSandboxArtifactFiles(claimed);
       if(claimed.terminalReason==="failed")await this.policies.evaluateTaskFailure(claimed.projectId,claimed.endpointId);
       if(!await this.store.completeTaskArtifactProjection({id:task.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task artifact drain fence changed",409);
     }catch(error){await this.store.failTaskArtifactProjection({id:task.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
+  }
+
+  private async markTaskInteractionHistoryGap(taskId: string): Promise<void> {
+    const snapshot = await this.store.readTaskInteractionSnapshot(taskId, null, 1);
+    if (!snapshot || snapshot.historyStatus === "gap") return;
+    await this.store.persistTaskInteractionMutation({
+      taskId,
+      changes: [],
+      sourceSync: {
+        expectedSourceCursor: snapshot.sourceCursor,
+        sourceCursor: snapshot.sourceCursor,
+        historyStatus: "gap",
+        lastSyncedAt: nowIso()
+      }
+    });
   }
 
   private async cleanupTaskRuntime(task:PersistedAgentTask):Promise<void>{

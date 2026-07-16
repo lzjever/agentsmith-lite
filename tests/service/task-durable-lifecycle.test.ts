@@ -430,6 +430,64 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.store.findTask(task.id))?.startIntentStatus, "dispatched");
   });
 
+  it("finishes expired cleanup after bounded uncertain start reconciliation", async () => {
+    const setup = await createSetup(true);
+    setup.botified.throwAfterAcceptOnce = true;
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "expire uncertain start" }, "create-expired-uncertain");
+    await setup.services.tasks.syncActiveTasksOnce();
+    assert.equal((await setup.store.findTask(task.id))?.startIntentStatus, "dispatching");
+    await setup.services.tasks.finalizeTaskForRunCleanup(task.id, "expired");
+    setup.botified.queryError = new Error("delivery query remains unreachable");
+
+    await setup.services.tasks.syncActiveTasksOnce();
+    await setup.services.tasks.syncActiveTasksOnce();
+    assert.equal((await setup.store.findTask(task.id))?.cleanupStatus, "pending");
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const settled = await setup.store.findTask(task.id);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(settled?.artifactProjectionStatus, "drained");
+    assert.equal(settled?.cleanupStatus, "completed");
+    assert.equal(settled?.artifactProjectionAttemptCount, 3);
+    assert.equal(interactions.historyStatus, "gap");
+    assert.equal(interactions.runState, "terminal");
+    assert.equal(setup.botified.posts.length, 1);
+    assert.equal(setup.port.resources.length, 0);
+  });
+
+  it("finishes expired cleanup after bounded final timeline failures", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "expire-final-timeline");
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(1, "assistant_message.completed", { assistant_message_id: "assistant-before-expiry", text: "saved before expiry" }, { id: "assistant-before-expiry", type: "assistant_message", status: "completed" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+    await setup.services.tasks.syncActiveTasksOnce();
+    assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).historyStatus, "complete");
+    await setup.services.tasks.finalizeTaskForRunCleanup(task.id, "expired");
+    setup.botified.timelineReads.push(
+      new Error("final timeline unavailable"),
+      new Error("final timeline unavailable"),
+      new Error("final timeline unavailable")
+    );
+
+    await setup.services.tasks.syncActiveTasksOnce();
+    await setup.services.tasks.syncActiveTasksOnce();
+    assert.equal((await setup.store.findTask(task.id))?.cleanupStatus, "pending");
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const settled = await setup.store.findTask(task.id);
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(settled?.artifactProjectionStatus, "drained");
+    assert.equal(settled?.cleanupStatus, "completed");
+    assert.equal(settled?.artifactProjectionAttemptCount, 3);
+    assert.equal(interactions.historyStatus, "gap");
+    assert.equal(interactions.runState, "terminal");
+    assert.equal(setup.port.resources.length, 0);
+  });
+
   it("keeps terminal reason first-wins and releases the reservation once", async () => {
     const setup = await createSetup(true);
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "race" }, "create-race");
