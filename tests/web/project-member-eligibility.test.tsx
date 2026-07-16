@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -69,6 +69,22 @@ describe("project member eligibility", () => {
       assert.ok(screen.getByRole("alert").textContent?.includes("Workspace members could not be loaded"));
       assert.equal(screen.queryByRole("heading", { name: "Members unavailable" }), null);
       assert.equal(screen.getByRole("link", { name: "Manage workspace members" }).getAttribute("href"), `/workspaces/${workspaceId}/members`);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps the member directory readable and skips candidates when permissions cannot be loaded", async () => {
+    const original = snapshotClient();
+    let candidateReads = 0;
+    apiClient.members = async () => [owner];
+    apiClient.workspaceMembers = async () => { candidateReads += 1; return [workspaceOwner, candidate]; };
+    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      await screen.findAllByText("Owner");
+      assert.match(screen.getByRole("alert").textContent ?? "", /read-only until refreshed/i);
+      assert.equal(screen.queryByRole("heading", { name: "Members unavailable" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Add member" }), null);
+      assert.equal(candidateReads, 0);
     } finally { restoreClient(original); }
   });
 });

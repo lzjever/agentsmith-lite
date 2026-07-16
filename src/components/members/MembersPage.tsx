@@ -25,6 +25,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [candidateState, setCandidateState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
+  const [capabilitiesError, setCapabilitiesError] = useState("");
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | MemberRole>("all");
   const [selected, setSelected] = useState<ProjectMember>();
@@ -47,24 +48,35 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   }, [workspaceId]);
 
   const refreshMembers = useCallback(async () => {
-    const [listed, projected] = await Promise.all([apiClient.members(projectId), apiClient.projectCapabilities(projectId)]);
-    setMembers(listed);
-    setCapabilities(projected);
+    setMembers(await apiClient.members(projectId));
   }, [projectId]);
 
   const load = useCallback(async () => {
     setState("loading");
     setError("");
-    const candidates = loadCandidates();
-    try {
-      await refreshMembers();
-      setState("ready");
-    } catch (reason) {
-      setError(message(reason));
+    setCapabilities(undefined);
+    setCapabilitiesError("");
+    setWorkspaceMembers([]);
+    setCandidateState("loading");
+    const [membersResult, capabilitiesResult] = await Promise.allSettled([
+      refreshMembers(),
+      apiClient.projectCapabilities(projectId),
+    ]);
+    if (membersResult.status === "rejected") {
+      setError(message(membersResult.reason));
       setState("error");
+      return;
     }
-    await candidates;
-  }, [loadCandidates, refreshMembers]);
+    if (capabilitiesResult.status === "fulfilled") {
+      setCapabilities(capabilitiesResult.value);
+      if (capabilitiesResult.value.canManageMembers) void loadCandidates();
+      else setCandidateState("ready");
+    } else {
+      setCapabilitiesError("Project permissions could not be loaded. Members are read-only until refreshed.");
+      setCandidateState("ready");
+    }
+    setState("ready");
+  }, [loadCandidates, projectId, refreshMembers]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -140,6 +152,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
 
   const workspaceMembersHref = `/workspaces/${workspaceId}/members`;
   return <PageLayout header={<PageHeader title="Members" subtitle="People with access to this project and the role they hold." actions={canAdd ? <Button onClick={openInvite}><Plus size={16} />Add member</Button> : undefined} />}>
+    {state === "ready" && capabilitiesError ? <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</div> : null}
     {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
     {state === "error" ? <PageState state="error"><ErrorState title="Members unavailable" message={error} onRetry={() => void load()} /></PageState> : null}
     {state === "ready" && members.length === 0 ? <PageState state="empty"><EmptyState icon={Users} title="No project members" description="Project access begins with a workspace member." {...(canAdd ? { action: { label: "Add member", onClick: openInvite } } : {})} /></PageState> : null}
