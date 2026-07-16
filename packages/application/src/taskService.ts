@@ -2160,6 +2160,10 @@ export class TaskService {
       abortTurn: canInteract && task.executionMode === "live" && !task.terminalReason && runState === "running",
       cancelTask: canWrite && retained && !task.terminalReason && isActiveTaskStatus(task.status),
       openTerminal: canInteract && task.executionMode === "live" && !task.terminalReason && isActiveTaskStatus(task.status) && !this.occupiedTerminalTaskIds.has(task.id),
+      editTask: canWrite && !task.deletedAt,
+      retryTask: canWrite && !task.deletedAt && Boolean(task.terminalReason),
+      duplicateTask: canWrite && !task.deletedAt,
+      archiveTask: canWrite && !task.deletedAt && !task.archivedAt && Boolean(task.terminalReason),
       deleteTask: canWrite && Boolean(task.terminalReason) && (task.executionMode !== "live" || task.cleanupStatus === "completed")
     };
   }
@@ -2587,7 +2591,7 @@ function stableTaskInteractionId(taskId: string, sourceId: string): string {
 
 function defaultTaskCapabilities(task: PersistedAgentTask): TaskCapabilities {
   const active = !task.terminalReason && isActiveTaskStatus(task.status);
-  return { sendMessage:!task.deletedAt, editQueuedMessage:false, abortTurn:false, cancelTask:active, openTerminal:active&&task.executionMode==="live", deleteTask:Boolean(task.terminalReason)&&(task.executionMode!=="live"||task.cleanupStatus==="completed") };
+  return { sendMessage:!task.deletedAt, editQueuedMessage:false, abortTurn:false, cancelTask:active, openTerminal:active&&task.executionMode==="live", editTask:!task.deletedAt, retryTask:!task.deletedAt&&Boolean(task.terminalReason), duplicateTask:!task.deletedAt, archiveTask:!task.deletedAt&&!task.archivedAt&&Boolean(task.terminalReason), deleteTask:Boolean(task.terminalReason)&&(task.executionMode!=="live"||task.cleanupStatus==="completed") };
 }
 
 function normalizeTaskStatuses(statuses: AgentTaskStatus[] | undefined): AgentTaskStatus[] {

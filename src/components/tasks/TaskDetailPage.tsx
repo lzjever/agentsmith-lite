@@ -14,6 +14,7 @@ import { toast } from "../ui/toast";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
 import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskInputsPanel } from "./TaskInputsPanel";
+import { TaskLifecycleActions } from "./TaskLifecycleActions";
 import { TaskTerminalPanel } from "./TaskTerminalPanel";
 import { useTaskMutationKeys } from "./task-mutation-key";
 import { taskFinalizationPresentation, taskNeedsRefresh, taskResultLabel, type TaskFinalizationPresentation } from "./task-ui";
@@ -190,7 +191,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
 
   const finalization = taskFinalizationPresentation(task);
   const artifactEmptyMessage = task.artifactProjectionStatus === "failed" || task.artifactProjectionStatus === "pending" || task.artifactProjectionStatus === "draining" ? "Artifacts are not fully available yet." : null;
-  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskResultLabel(task)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
+  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskResultLabel(task)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities && !artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} basePath={basePath} onRefresh={() => loadTask(true)} /> : null}{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} {...(artifactEmptyMessage ? { emptyMessage:artifactEmptyMessage } : {})} onRetry={loadArtifacts} />;
 
   if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;

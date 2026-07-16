@@ -11,7 +11,7 @@ afterEach(() => cleanup());
 
 describe("task composer receipts", () => {
   it("retains the draft when the server resolves the mutation with a safe failure", async () => {
-    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, deleteTask: false }} queuedMessages={[]} busy={false} onSend={async () => { throw new Error("Delivery is unavailable."); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[]} busy={false} onSend={async () => { throw new Error("Delivery is unavailable."); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
     const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Please continue" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));

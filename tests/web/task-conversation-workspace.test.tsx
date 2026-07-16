@@ -101,7 +101,7 @@ describe("TaskConversationWorkspace", () => {
 
 });
 
-const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, deleteTask: false };
+const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false };
 const snapshot: TaskInteractionSnapshot = { items: [], nextPageCursor: null, hasMoreBefore: false, streamCursor: "cursor_1", historyStatus: "complete", queuedMessages: [], runState: "idle", runtimeReachability: "reachable", lastSyncedAt: "2026-07-15T00:00:00.000Z", capabilities };
 
 function installDom(): void {

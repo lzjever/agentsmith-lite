@@ -253,7 +253,7 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 });
 
-const available: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, deleteTask: false };
+const available: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false };
 const occupied: TaskCapabilities = { ...available, openTerminal: false };
 const task: Task = { id: "task_fa832", workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", prompt: "Inspect the workspace", status: "running", runId: "run_1", executionMode: "live", sandbox: { namespace: "task-f58", resources: [] }, createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z" };
 

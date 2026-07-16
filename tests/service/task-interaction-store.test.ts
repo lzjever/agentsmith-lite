@@ -143,7 +143,7 @@ describe("task interaction store", () => {
 
   it("defines authoritative state events without a durable interaction cursor", () => {
     const events: TaskInteractionStreamEvent[] = [
-      { type:"state", queuedMessages:[], capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,cancelTask:true,openTerminal:true,deleteTask:false} },
+      { type:"state", queuedMessages:[], capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,cancelTask:true,openTerminal:true,editTask:true,retryTask:false,duplicateTask:true,archiveTask:false,deleteTask:false} },
       { type:"run_state", runState:"running" },
       { type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:timestamp(3), message:null }
     ];

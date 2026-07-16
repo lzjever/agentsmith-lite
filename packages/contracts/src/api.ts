@@ -529,6 +529,10 @@ export interface TaskCapabilities {
   abortTurn: boolean;
   cancelTask: boolean;
   openTerminal: boolean;
+  editTask: boolean;
+  retryTask: boolean;
+  duplicateTask: boolean;
+  archiveTask: boolean;
   deleteTask: boolean;
 }
 

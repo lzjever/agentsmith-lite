@@ -332,6 +332,10 @@ export const apiClient = {
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
   stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
+  editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
+  retryTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/retry`, "POST", idempotencyKey, {}),
+  duplicateTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/duplicate`, "POST", idempotencyKey, {}),
+  archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
   cancelTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/cancel`, "POST", idempotencyKey, {}),
@@ -401,7 +405,9 @@ function isTaskCapabilities(value: unknown): value is TaskCapabilities {
   return isRecord(value)
     && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
     && typeof value.abortTurn === "boolean" && typeof value.cancelTask === "boolean"
-    && typeof value.openTerminal === "boolean" && typeof value.deleteTask === "boolean";
+    && typeof value.openTerminal === "boolean" && typeof value.editTask === "boolean"
+    && typeof value.retryTask === "boolean" && typeof value.duplicateTask === "boolean"
+    && typeof value.archiveTask === "boolean" && typeof value.deleteTask === "boolean";
 }
 
 function isTaskQueuedMessageArray(value: unknown): value is TaskQueuedMessage[] {
