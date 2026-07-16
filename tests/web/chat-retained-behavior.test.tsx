@@ -172,6 +172,28 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("keeps an explicit new-conversation draft when the thread list arrives late", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    let resolveThreads!: (value: ProjectChatThread[]) => void;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => new Promise((resolve) => { resolveThreads = resolve; });
+    apiClient.chatMessages = async () => [];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      const create = await screen.findByRole("button", { name: "New conversation" });
+      await waitFor(() => assert.equal(create.hasAttribute("disabled"), false));
+      fireEvent.click(create);
+      assert.ok(screen.getByRole("combobox", { name: "Chat endpoint" }));
+      await act(async () => { resolveThreads(threads); await Promise.resolve(); });
+      assert.ok(screen.getByRole("button", { name: "Product Q&A" }));
+      assert.ok(screen.getByRole("combobox", { name: "Chat endpoint" }));
+      assert.equal(screen.queryByLabelText("Thread endpoint fixed"), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("aborts and clears a project stream when the user switches projects", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     let activeSignal: AbortSignal | undefined;

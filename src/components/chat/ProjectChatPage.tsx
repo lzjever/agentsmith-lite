@@ -45,6 +45,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const threadLoadVersion = useRef(0);
   const messageLoadVersion = useRef(0);
   const loadedThreadId = useRef("");
+  const draftingNewThread = useRef(false);
 
   useEffect(() => {
     active.current = true;
@@ -95,7 +96,9 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       const savedThreads = await apiClient.chatThreads(projectId);
       if (!active.current || version !== threadLoadVersion.current) return;
       setThreads(savedThreads);
-      setThreadId((current) => savedThreads.some((thread) => thread.id === current) ? current : (savedThreads[0]?.id ?? ""));
+      setThreadId((current) => draftingNewThread.current
+        ? ""
+        : savedThreads.some((thread) => thread.id === current) ? current : (savedThreads[0]?.id ?? ""));
       setThreadsError("");
       setThreadsStatus("ready");
     } catch (reason) {
@@ -155,6 +158,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   function beginNewThread() {
+    draftingNewThread.current = true;
     ++messageLoadVersion.current;
     loadedThreadId.current = "";
     setThreadId("");
@@ -171,6 +175,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       const created = await apiClient.createChatThread(projectId, endpointId);
       if (!active.current) return false;
       setThreads((current) => orderedThreads([created, ...current]));
+      draftingNewThread.current = false;
       setThreadId(created.id);
       return true;
     } catch (reason) {
@@ -183,6 +188,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     if (sending || id === threadId) return;
     const selected = threads.find((thread) => thread.id === id);
     if (!selected) return;
+    draftingNewThread.current = false;
     ++messageLoadVersion.current;
     setMessages([]);
     setMessagesError("");
@@ -221,6 +227,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setMessages([]);
       setMessagesError("");
       setMessagesStatus("loading");
+      draftingNewThread.current = false;
       setThreadId(next.id);
       setEndpointId(next.endpointId ?? "");
     } catch (reason) {
@@ -304,6 +311,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setMessages([]);
       setMessagesError("");
       setMessagesStatus("loading");
+      draftingNewThread.current = false;
       setThreadId(branch.id);
       setEndpointId(branch.endpointId ?? "");
       setActionError("");
