@@ -17,7 +17,8 @@ export interface ProfileResponse { user: ProfileUser; preferences: UserProfilePr
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: ISODateString; lastRotatedAt: ISODateString | null; updatedAt: ISODateString; }
 export interface StoredProjectCredential extends ProjectCredential { keyId: string; nonce: Uint8Array; ciphertext: Uint8Array; authTag: Uint8Array; }
 export type ProjectContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
-export interface ProjectContextEntry { id: string; workspaceId: string; projectId: string | null; ownerUserId: string | null; scope: ProjectContextScope; contextKey: string; content: string; version: number; createdAt: ISODateString; updatedAt: ISODateString; }
+export type ProjectContextContentType = "text" | "json" | "markdown" | "yaml";
+export interface ProjectContextEntry { id: string; workspaceId: string; projectId: string | null; ownerUserId: string | null; scope: ProjectContextScope; contextKey: string; content: string; contentType?: ProjectContextContentType; version: number; createdAt: ISODateString; updatedAt: ISODateString; }
 export interface UserNotification { id: string; userId: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditResourceKind | null; resourceId: string | null; linkPath: string | null; readAt: ISODateString | null; createdAt: ISODateString; }
 export type AlertRuleMetric = "active_tasks" | "provider_requests" | "provider_tokens" | "provider_cost" | "project_file_bytes" | "failure_count";
 export type AlertRuleCondition = "greater_than_or_equal";

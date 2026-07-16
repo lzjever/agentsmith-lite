@@ -42,6 +42,7 @@ export interface PersistedDeliveryReceipt {
 }
 
 export interface PersistedAgentTask extends AgentTask {
+  agentContext?: string;
   startDeliveryKey?: string | null;
   startRequestHash?: string | null;
   startClaimToken?: string | null;

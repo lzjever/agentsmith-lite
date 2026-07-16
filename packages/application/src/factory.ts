@@ -84,7 +84,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     endpoints,
     providerBroker,
     credentials,
-    policies
+    policies,
+    contexts
   );
   const namespace = input.namespace ?? "agentsmith";
   const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
@@ -127,6 +128,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     ...(input.taskDeliveryLeaseMs !== undefined ? { deliveryLeaseMs: input.taskDeliveryLeaseMs } : {}),
     ...(input.taskMaintenanceLeaseMs !== undefined ? { maintenanceLeaseMs: input.taskMaintenanceLeaseMs } : {}),
     ...(input.taskRetryDelayMs !== undefined ? { retryDelayMs: input.taskRetryDelayMs } : {}),
+    contexts,
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
     ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})

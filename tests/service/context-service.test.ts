@@ -53,6 +53,28 @@ describe("context service", () => {
     assert.equal(renamed.version, 2);
     await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: 1, contextKey: "notes", content: "stale", contentType: "text" }), status(409));
   });
+
+  it("resolves effective agent context by key from broad shared defaults to personal project overrides", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "context-owner", email: "context-owner@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer, subject: "context-member", email: "context-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
+    await services.memberships.addMember(owner.user.id, project.id, { email: member.user.email }, "member");
+    await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_shared", contextKey: "style", content: "workspace shared", contentType: "text" });
+    await services.contexts.upsert(member.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "style", content: "workspace personal", contentType: "text" });
+    await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, projectId: project.id, scope: "project_shared", contextKey: "style", content: "project shared", contentType: "text" });
+    await services.contexts.upsert(member.user.id, { workspaceId: workspace.id, projectId: project.id, scope: "project_personal", contextKey: "style", content: "project personal", contentType: "text" });
+    await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, projectId: project.id, scope: "project_shared", contextKey: "project.rule", content: "keep this", contentType: "text" });
+
+    const resolved = await services.contexts.resolveForAgent(member.user.id, project.id);
+
+    assert.match(resolved, /project personal/);
+    assert.match(resolved, /project\.rule[\s\S]*keep this/);
+    assert.doesNotMatch(resolved, /workspace shared|workspace personal|project shared/);
+  });
 });
 
 function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }

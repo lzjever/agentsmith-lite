@@ -73,7 +73,8 @@ describe("postgres adapter ports", () => {
       "045_project_credential_binding_correctness",
       "046_chat_message_thread_sequence",
       "047_task_interaction_changes",
-      "048_task_interaction_source_revision_bigint"
+      "048_task_interaction_source_revision_bigint",
+      "049_agent_execution_context"
     ]);
     assert.match(migrationSql, /create table if not exists workspaces/i);
     assert.match(migrationSql, /create table if not exists agent_tasks/i);

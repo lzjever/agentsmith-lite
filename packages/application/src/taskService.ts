@@ -85,6 +85,7 @@ import { FilePathValidationService } from "./filePathValidationService.js";
 import { detectProjectFileMediaType, withProjectFileLock } from "./fileService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import type { ProjectPermission } from "./authorizationService.js";
+import type { ContextService } from "./contextService.js";
 
 export interface TaskLiveSandboxConfig {
   port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort & SandboxKubernetesInventoryPort;
@@ -127,6 +128,7 @@ export interface TaskServiceConfig {
   deliveryLeaseMs?: number;
   maintenanceLeaseMs?: number;
   retryDelayMs?: number;
+  contexts?: ContextService;
 }
 
 export interface BotifiedTaskAddressInput {
@@ -300,7 +302,8 @@ export class TaskService {
       const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
       requireTaskEndpointCapabilities(endpoint);
       if (this.config.liveSandbox) await this.requireNamespaceSandboxCapacity();
-      const create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId });
+      const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
+      const create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext });
       let persisted: PersistedAgentTask | null = null;
       try {
         persisted = await this.store.createTaskAtomically(create);
@@ -328,6 +331,7 @@ export class TaskService {
     title: string;
     inputPaths: string[];
     sourceTaskId: string | null;
+    agentContext: string;
   }): Promise<AtomicTaskCreateInput> {
     const timestamp = nowIso();
     const runId = newId("run");
@@ -388,6 +392,7 @@ export class TaskService {
       cleanupStatus: live ? "pending" : "completed",
       cleanupError: null,
       cleanupCompletedAt: live ? null : timestamp,
+      agentContext: input.agentContext,
       createdAt: timestamp,
       updatedAt: timestamp
     };
@@ -881,7 +886,7 @@ export class TaskService {
     const project = await this.store.findProject(source.projectId);
     if (!project) throw new ProductError("Task project not found", 409);
     const endpoint = await this.endpoints.requireEndpointForProject(source.projectId, source.endpointId);
-    return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id });
+    return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"" });
   }
 
   private async cleanupUnusedTaskCreate(create:AtomicTaskCreateInput):Promise<void>{if(create.task.executionMode!=="live")return;const project=await this.store.findProject(create.task.projectId);if(project)await this.bestEffortRemoveTaskInputs(project.rootPath,create.task.id);}
@@ -1770,7 +1775,8 @@ export class TaskService {
     for (const directory of runnerWritableDirectories) {
       await prepareRunnerWritableDirectory(directory);
     }
-    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`, { mode: 0o664 });
+    const taskGuidance = `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`;
+    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), task.agentContext ? `${taskGuidance}\n${task.agentContext}` : taskGuidance, { mode: 0o664 });
   }
 
   private async snapshotProjectInputs(projectRootPath: string, taskId: string, inputPaths: string[]): Promise<void> {

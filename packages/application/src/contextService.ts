@@ -1,14 +1,12 @@
-import type { ProjectContextEntry, ProjectContextScope } from "../../contracts/src/api.js";
+import type { ProjectContextContentType, ProjectContextEntry, ProjectContextScope } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
 
-export type ContextContentType = "text" | "json" | "markdown" | "yaml";
+export type ContextContentType = ProjectContextContentType;
 
-export interface ContextEntryView extends ProjectContextEntry {
-  contentType: ContextContentType;
-}
+export type ContextEntryView = ProjectContextEntry & { contentType: ContextContentType };
 
 export interface ContextListResult {
   items: ContextEntryView[];
@@ -29,7 +27,8 @@ export interface UpsertContextEntryInput extends ContextRequestTarget {
   contentType: ContextContentType;
 }
 
-const MAX_CONTEXT_BYTES = 64 * 1024;
+const MAX_CONTEXT_BYTES = 30 * 1024;
+const MAX_AGENT_CONTEXT_BYTES = 32 * 1024;
 const MAX_CONTEXT_KEY_LENGTH = 160;
 const contextScopes = new Set<ProjectContextScope>(["workspace_shared", "workspace_personal", "project_shared", "project_personal"]);
 const contentTypes = new Set<ContextContentType>(["text", "json", "markdown", "yaml"]);
@@ -72,6 +71,7 @@ export class ContextService {
       scope: target.scope,
       contextKey,
       content,
+      contentType,
       version: existing ? existing.version + 1 : 1,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp
@@ -97,6 +97,40 @@ export class ContextService {
     if (!entry || !(await this.store.deleteProjectContextEntry(entry))) {
       throw new NotFoundError("Context entry not found");
     }
+  }
+
+  async resolveForAgent(userId: string, projectId: string): Promise<string> {
+    const project = await this.workspaces.requireProjectForUser(userId, projectId, "view");
+    const workspaceId = project.workspaceId;
+    const effective = new Map<string, ProjectContextEntry>();
+    for (const [scope, scopedProjectId, ownerUserId] of [
+      ["workspace_shared", null, null],
+      ["workspace_personal", null, userId],
+      ["project_shared", projectId, null],
+      ["project_personal", projectId, userId]
+    ] as const) {
+      for (const entry of await this.store.listProjectContextEntries(workspaceId, scopedProjectId, scope, ownerUserId)) {
+        effective.set(entry.contextKey, entry);
+      }
+    }
+    if (effective.size === 0) return "";
+    const rendered = [
+      "# AgentSmith Context",
+      "",
+      "These entries are reusable workspace and project guidance. Project entries override workspace defaults with the same key; personal entries override shared entries at the same scope. Direct instructions in the current request take priority.",
+      "",
+      ...[...effective.values()].sort((left, right) => left.contextKey.localeCompare(right.contextKey)).flatMap((entry) => [
+        `## ${entry.contextKey}`,
+        `Scope: ${entry.scope}`,
+        "",
+        entry.content,
+        ""
+      ])
+    ].join("\n").trimEnd() + "\n";
+    if (Buffer.byteLength(rendered, "utf8") > MAX_AGENT_CONTEXT_BYTES) {
+      throw new ProductError("Effective agent context exceeds the 32 KiB execution limit", 413);
+    }
+    return rendered;
   }
 
   private async authorize(userId: string, target: Required<ContextRequestTarget>, action: "view" | "write"): Promise<{ canWrite: boolean }> {
@@ -145,7 +179,7 @@ function requireContextKey(value: string): string {
 
 function requireContent(value: string): string {
   if (typeof value !== "string") throw new ProductError("Context content must be text");
-  if (Buffer.byteLength(value, "utf8") > MAX_CONTEXT_BYTES) throw new ProductError("Context content exceeds the 64 KiB limit", 413);
+  if (Buffer.byteLength(value, "utf8") > MAX_CONTEXT_BYTES) throw new ProductError("Context content exceeds the 30 KiB limit", 413);
   return value;
 }
 
@@ -163,7 +197,7 @@ function validateJson(content: string): void {
 }
 
 function toView(entry: ProjectContextEntry, contentType?: ContextContentType): ContextEntryView {
-  return { ...entry, contentType: contentType ?? inferredContentType(entry.content) };
+  return { ...entry, contentType: contentType ?? entry.contentType ?? inferredContentType(entry.content) };
 }
 
 function inferredContentType(content: string): ContextContentType {

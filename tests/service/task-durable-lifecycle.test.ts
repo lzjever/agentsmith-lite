@@ -115,6 +115,19 @@ describe("durable task lifecycle", () => {
     await assert.rejects(() => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "escape", inputPaths: ["../outside"] }, "create-invalid-input"), /must stay under files/);
   });
 
+  it("snapshots effective context into the Botified task workspace", async () => {
+    const setup = await createSetup(true);
+    await setup.services.contexts.upsert(setup.userId, { workspaceId: setup.workspaceId, projectId: setup.projectId, scope: "project_personal", contextKey: "task.style", content: "Use terse task updates.", contentType: "text" });
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "use context" }, "create-context-snapshot");
+    await setup.services.contexts.upsert(setup.userId, { workspaceId: setup.workspaceId, projectId: setup.projectId, scope: "project_personal", contextKey: "task.style", content: "This later edit must not replace the task snapshot.", contentType: "text", expectedVersion: 1 });
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    const instructions = await readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "home", "AGENTS.md"), "utf8");
+    assert.match(instructions, /task\.style[\s\S]*Use terse task updates/);
+    assert.doesNotMatch(instructions, /later edit/);
+  });
+
   it("holds editable messages in the AgentSmith queue until the active Botified turn is idle", async () => {
     const setup = await createSetup(true);
     const task = await startTask(setup, "queue-during-active-turn");

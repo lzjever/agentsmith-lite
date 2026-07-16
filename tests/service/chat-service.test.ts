@@ -32,6 +32,27 @@ describe("ChatService", () => {
     assert.deepEqual((await services.chat.listMessages(user.id, project.id, (await services.chat.listThreads(user.id, project.id))[0]!.id)).map((message) => [message.role, message.content]), [["user", "hello"], ["assistant", "fake response"]]);
   });
 
+  it("adds effective context to provider input without storing it in conversation history", async () => {
+    const calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient(calls) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, user.id, project.id);
+    await services.contexts.upsert(user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "answer.style", content: "Answer in one sentence.", contentType: "text" });
+
+    await sendThreadMessage(services, user.id, project.id, endpoint.id, "hello");
+
+    assert.equal(calls[0]?.messages[0]?.role, "user");
+    assert.match(calls[0]?.messages[0]?.content ?? "", /answer\.style[\s\S]*Answer in one sentence/);
+    assert.deepEqual(calls[0]?.messages.at(-1), { role: "user", content: "hello" });
+    const thread = (await services.chat.listThreads(user.id, project.id))[0]!;
+    assert.deepEqual((await services.chat.listMessages(user.id, project.id, thread.id)).map(({ role, content }) => ({ role, content })), [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "fake response" }
+    ]);
+  });
+
   it("persists the user message and releases the reserved request when a streamed chat is aborted", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({
@@ -156,6 +177,7 @@ describe("ChatService", () => {
       id: "endp_preexisting",
       projectId: project.id,
       ...endpointInput({ credentialId: credential.id }),
+      health: { status: "healthy", checkedAt: "2026-01-01T00:00:00.000Z", errorCategory: null },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
     });
@@ -197,7 +219,7 @@ describe("ChatService", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
-    const endpoint = await store.createEndpoint({ id: "endp_missing_credential", projectId: project.id, ...endpointInput(), credentialId: "", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    const endpoint = await store.createEndpoint({ id: "endp_missing_credential", projectId: project.id, ...endpointInput(), credentialId: "", health: { status: "healthy", checkedAt: "2026-01-01T00:00:00.000Z", errorCategory: null }, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
 
     await assert.rejects(
       () => sendThreadMessage(services, user.id, project.id, endpoint.id, "hello"),
@@ -219,7 +241,7 @@ describe("ChatService", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
     const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.com/v1", secret: "sk-resolved" });
-    const endpoint = await store.createEndpoint({ id: "endp_wrong_binding", projectId: project.id, ...endpointInput({ baseUrl: "https://evil.example.com/v1", credentialId: credential.id }), createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    const endpoint = await store.createEndpoint({ id: "endp_wrong_binding", projectId: project.id, ...endpointInput({ baseUrl: "https://evil.example.com/v1", credentialId: credential.id }), health: { status: "healthy", checkedAt: "2026-01-01T00:00:00.000Z", errorCategory: null }, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
 
     await assert.rejects(
       () => sendThreadMessage(services, user.id, project.id, endpoint.id, "hello"),
