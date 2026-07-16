@@ -12,6 +12,13 @@ const { UserMenu } = await import("../../src/components/app-shell/UserMenu.js");
 afterEach(() => cleanup());
 
 describe("user menu sign out", () => {
+  it("links My workspace context directly to the personal scope", async () => {
+    render(<UserMenu user={{ id: "user_1", email: "owner@example.test" }} workspaceId="workspace_1" />);
+    openMenu();
+    const item = await screen.findByRole("menuitem", { name: "My workspace context" });
+    assert.equal(item.getAttribute("href"), "/workspaces/workspace_1/context?scope=workspace_personal");
+  });
+
   it("serializes sign out attempts and lets the user retry after a failure", async () => {
     const originalLogout = apiClient.logout;
     const originalError = toast.error;

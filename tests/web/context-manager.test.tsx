@@ -8,9 +8,30 @@ installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { ContextManager } = await import("../../src/components/context/ContextManager.js");
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 describe("context manager", () => {
+  it("opens a valid personal scope deep link and ignores unknown scopes", async () => {
+    const original = { contexts: apiClient.contexts };
+    const calls: string[] = [];
+    apiClient.contexts = async (input) => {
+      calls.push(input.scope);
+      return { items: [], canWrite: true };
+    };
+    try {
+      window.history.replaceState({}, "", "/?scope=workspace_personal");
+      const view = render(<ContextManager workspaceId="workspace_1" />);
+      await waitFor(() => assert.deepEqual(calls, ["workspace_personal"]));
+      assert.equal(screen.getByRole("tab", { name: "My workspace" }).getAttribute("data-state"), "active");
+
+      view.unmount();
+      calls.length = 0;
+      window.history.replaceState({}, "", "/?scope=project_personal");
+      render(<ContextManager workspaceId="workspace_1" />);
+      await waitFor(() => assert.deepEqual(calls, ["workspace_shared"]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps the newest context scope response", async () => {
     const original = { contexts: apiClient.contexts };
     let resolveShared!: (value: ContextList) => void;

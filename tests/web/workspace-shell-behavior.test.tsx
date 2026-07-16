@@ -32,6 +32,7 @@ const workspace: Workspace = {
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState({}, "", "/");
   window.localStorage.clear();
   document.documentElement.dataset.theme = "light";
   setSystemDark(false);
@@ -164,6 +165,22 @@ describe("workspace and shell interactions", () => {
       Object.assign(apiClient, original);
       window.history.replaceState({}, "", "/");
     }
+  });
+
+  it("keeps the full current route when opening Profile", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    window.history.replaceState({}, "", "/workspaces/ws_1/context?scope=workspace_personal");
+    try {
+      const view = renderShell(<p>Personal context</p>, "/workspaces/ws_1/context", { workspace: "ws_1" }, "ws_1");
+      await waitFor(() => assert.ok(document.body.textContent?.includes("Personal context")));
+
+      fireEvent.pointerDown(view.getByRole("button", { name: "Open account menu" }), { button: 0, ctrlKey: false });
+      const profile = await view.findByRole("menuitem", { name: "Profile" });
+      assert.equal(profile.getAttribute("href"), "/profile?returnTo=%2Fworkspaces%2Fws_1%2Fcontext%3Fscope%3Dworkspace_personal");
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {

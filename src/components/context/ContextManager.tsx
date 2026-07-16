@@ -38,6 +38,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     { scope: "workspace_personal", label: "My workspace", description: "Only visible to you in this workspace." }
   ];
   const [scope, setScope] = useState<ContextScope>(tabs[0]!.scope);
+  const [scopeReady, setScopeReady] = useState(false);
   const [result, setResult] = useState<ContextList>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
@@ -69,7 +70,12 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       mounted.current = false;
     };
   }, []);
-  useEffect(() => { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); }, [load]);
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("scope");
+    setScope(tabs.some((tab) => tab.scope === requested) ? requested as ContextScope : tabs[0]!.scope);
+    setScopeReady(true);
+  }, []);
+  useEffect(() => { if (scopeReady) { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); } }, [load, scopeReady]);
   const selected = useMemo(() => result?.items.find((entry) => entry.contextKey === selectedKey), [result, selectedKey]);
   const dirty = result?.canWrite === true && (selected
     ? contextKey !== selected.contextKey || content !== selected.content || contentType !== selected.contentType
@@ -89,6 +95,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       setContent("");
       setContentType("text");
       setState("loading");
+      replaceContextScope(navigation.scope, tabs[0]!.scope);
       setScope(navigation.scope);
       return;
     }
@@ -165,6 +172,13 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     <ConfirmationDialog open={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description="Your edits have not been saved. Discard them and continue?" confirmText="Discard changes" onConfirm={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} errorContext="Context navigation failed" />
     <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete context entry" description={selected ? `Delete ${selected.contextKey}? This cannot be undone.` : ""} confirmText={deleting ? "Deleting" : "Delete entry"} confirmDisabled={!selected || deleting} onConfirm={remove} errorContext="Context entry could not be deleted" />
   </PageLayout>;
+}
+
+function replaceContextScope(scope: ContextScope, defaultScope: ContextScope) {
+  const url = new URL(window.location.href);
+  if (scope === defaultScope) url.searchParams.delete("scope");
+  else url.searchParams.set("scope", scope);
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : "Context could not be loaded."; }
