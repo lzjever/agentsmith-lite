@@ -36,7 +36,12 @@ test("projects use the shared searchable data table and retain pagination", () =
   assert.equal(screen.getAllByTestId("projects-table__row").length, 20);
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
   assert.equal(screen.getByTestId("projects-table__row").textContent?.includes("Z Needle"), true);
-  fireEvent.change(screen.getByRole("textbox", { name: "Search projects" }), { target: { value: "Z Needle" } });
+  const search = screen.getByRole("textbox", { name: "Search projects" });
+  search.focus();
+  fireEvent.change(search, { target: { value: "Z" } });
+  assert.equal(document.activeElement, search);
+  fireEvent.change(search, { target: { value: "Z Needle" } });
+  assert.equal(document.activeElement, search);
   assert.equal(screen.getAllByTestId("projects-table__row").length, 1);
 });
 

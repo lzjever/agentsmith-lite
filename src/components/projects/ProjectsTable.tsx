@@ -45,13 +45,16 @@ export function ProjectsTable({
   const pageSize = 20;
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visible = filtered.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
+  const visible = useMemo(
+    () =>
+      filtered.slice(
+        (currentPage - 1) * pageSize,
+        currentPage * pageSize,
+      ),
+    [currentPage, filtered],
   );
-  const table = useReactTable({
-    data: visible,
-    columns: [
+  const tableColumns = useMemo(
+    () => [
       columns.accessor("name", {
         header: "Project",
         cell: ({ row }) => (
@@ -109,6 +112,11 @@ export function ProjectsTable({
         ),
       }),
     ],
+    [onTogglePin, pinBusyId, workspaceId],
+  );
+  const table = useReactTable({
+    data: visible,
+    columns: tableColumns,
     getCoreRowModel: getCoreRowModel(),
   });
   function changeQuery(value: string) {

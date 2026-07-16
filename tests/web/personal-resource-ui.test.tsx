@@ -25,7 +25,12 @@ describe("personal and resource UI", () => {
     try {
       render(<MembersPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findAllByText("Viewer Person");
-      fireEvent.change(screen.getByRole("textbox", { name: "Search members" }), { target: { value: "viewer@example.test" } });
+      const search = screen.getByRole("textbox", { name: "Search members" });
+      search.focus();
+      fireEvent.change(search, { target: { value: "viewer" } });
+      assert.equal(document.activeElement, search);
+      fireEvent.change(search, { target: { value: "viewer@example.test" } });
+      assert.equal(document.activeElement, search);
       assert.ok(screen.getAllByText("Viewer Person").length > 0);
       fireEvent.click(screen.getByRole("combobox", { name: "Member role" }));
       fireEvent.click(await screen.findByRole("option", { name: "Viewer" }));
