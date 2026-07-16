@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2 } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type CurrentUser, type WorkspaceMember, type WorkspaceSettings } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -16,7 +16,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { toast } from "../ui/toast";
 
 export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) {
+  return <WorkspaceSettings key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
+  const mounted = useRef(true);
+  const loadRequest = useRef(0);
+  const memberRequest = useRef(0);
   const [data, setData] = useState<WorkspaceSettings>();
   const [user, setUser] = useState<CurrentUser>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -29,23 +36,44 @@ export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) 
   const [deleteName, setDeleteName] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [members,setMembers]=useState<WorkspaceMember[]>([]); const [memberState,setMemberState]=useState<"loading"|"ready"|"error">("loading"); const [ownerTarget,setOwnerTarget]=useState(""); const [ownerOpen,setOwnerOpen]=useState(false); const [lifecycleBusy,setLifecycleBusy]=useState(false);
-  const loadMembers=useCallback(async()=>{setMemberState("loading");try{setMembers(await apiClient.workspaceMembers(workspaceId));setMemberState("ready");}catch{setMemberState("error");}},[workspaceId]);
+  const loadMembers = useCallback(async () => {
+    const request = ++memberRequest.current;
+    setMemberState("loading");
+    try {
+      const listed = await apiClient.workspaceMembers(workspaceId);
+      if (!mounted.current || request !== memberRequest.current) return;
+      setMembers(listed);
+      setMemberState("ready");
+    } catch {
+      if (!mounted.current || request !== memberRequest.current) return;
+      setMemberState("error");
+    }
+  }, [workspaceId]);
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setLoadError("");
     try {
       const [settings, identity] = await Promise.all([apiClient.workspaceSettings(workspaceId), apiClient.currentIdentity()]);
+      if (!mounted.current || request !== loadRequest.current) return;
       setData(settings);
       setWorkspaceName(settings.workspace.name);
       setUser(identity.user);
       setState("ready");
       if(settings.workspace.ownerUserId===identity.user.id)await loadMembers();else{setMembers([]);setMemberState("ready");}
     } catch (reason) {
+      if (!mounted.current || request !== loadRequest.current) return;
       setLoadError(settingsErrorMessage(reason, "Workspace settings could not be loaded."));
       setState("error");
     }
   }, [loadMembers,workspaceId]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -53,13 +81,15 @@ export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) 
     setSaving(true);
     try {
       const saved = await apiClient.updateWorkspaceSettings(workspaceId, { name: workspaceName });
+      if (!mounted.current) return;
       setData(saved);
       setWorkspaceName(saved.workspace.name);
       toast.success("Workspace settings saved.");
     } catch (reason) {
+      if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Workspace settings could not be saved."));
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   }
 
@@ -71,10 +101,11 @@ export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) 
   const canArchive=data?.capabilities.canManageSettings===true&&isActive;
   const canRestore=isOwner&&archived;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const workspace=archived?await apiClient.unarchiveWorkspace(workspaceId):await apiClient.archiveWorkspace(workspaceId);setData({...data,workspace});toast.success(archived?"Workspace restored.":"Workspace archived.");}catch(reason){toast.error(settingsErrorMessage(reason,"Workspace lifecycle could not be updated."));}finally{setLifecycleBusy(false)}}
+  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const workspace=archived?await apiClient.unarchiveWorkspace(workspaceId):await apiClient.archiveWorkspace(workspaceId);if(!mounted.current)return;setData({...data,workspace});toast.success(archived?"Workspace restored.":"Workspace archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Workspace lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data)return;
     await apiClient.transferWorkspaceOwner(workspaceId,ownerTarget);
+    if(!mounted.current)return;
     setData({...data,workspace:{...data.workspace,ownerUserId:ownerTarget}});
     setOwnerOpen(false);
     setOwnerTarget("");
@@ -85,13 +116,15 @@ export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) 
     setDeleting(true);
     try {
       await apiClient.deleteWorkspace(workspaceId);
+      if (!mounted.current) return;
       toast.success("Workspace deleted.");
       router.push("/");
     } catch (error) {
+      if (!mounted.current) return;
       setDeleteError(deletionMessage(error));
       throw error;
     } finally {
-      setDeleting(false);
+      if (mounted.current) setDeleting(false);
     }
   }
 

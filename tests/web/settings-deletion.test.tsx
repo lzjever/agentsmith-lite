@@ -88,6 +88,35 @@ describe("settings deletion", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("does not navigate when deletion finishes after switching workspaces", async () => {
+    const original = { workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, deleteWorkspace: apiClient.deleteWorkspace };
+    const pushed: string[] = [];
+    let finishDelete: (() => void) | undefined;
+    apiClient.workspaceSettings = async (requestedWorkspaceId) => ({
+      ...workspaceSettings,
+      workspace: {
+        ...workspaceSettings.workspace,
+        id: requestedWorkspaceId,
+        name: requestedWorkspaceId === "workspace_1" ? "Workspace Alpha" : "Workspace Beta",
+      },
+    });
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.deleteWorkspace = async () => new Promise((resolve) => { finishDelete = () => resolve({ deleted: true }); });
+    try {
+      const view = render(<AppRouterContext.Provider value={router(pushed)}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Open workspace deletion confirmation" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Workspace name confirmation" }), { target: { value: "Workspace Alpha" } });
+      fireEvent.click(screen.getByRole("button", { name: "Delete workspace" }));
+      await waitFor(() => assert.ok(finishDelete));
+
+      view.rerender(<AppRouterContext.Provider value={router(pushed)}><WorkspaceSettingsPage workspaceId="workspace_2" /></AppRouterContext.Provider>);
+      assert.equal((await screen.findByRole("textbox", { name: "Workspace name" }) as HTMLInputElement).value, "Workspace Beta");
+      await act(async () => finishDelete!());
+      assert.deepEqual(pushed, []);
+      assert.equal((screen.getByRole("textbox", { name: "Workspace name" }) as HTMLInputElement).value, "Workspace Beta");
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("does not expose deletion to a non-owner and returns to workspaces after workspace deletion", async () => {
     const original = { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, deleteWorkspace: apiClient.deleteWorkspace };
     const pushed: string[] = [];
