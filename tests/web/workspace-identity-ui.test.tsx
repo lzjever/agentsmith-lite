@@ -31,7 +31,7 @@ describe("workspace identity UX", () => {
     } finally { apiClient.workspaces = original; }
   });
 
-  it("reloads access after a denied workspace membership mutation and keeps an inline retry", async () => {
+  it("fails closed after a denied workspace membership mutation", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
     let workspaceReads = 0;
     apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: workspaceReads++ === 0 } }];
@@ -46,7 +46,9 @@ describe("workspace identity UX", () => {
       await screen.findByRole("alert");
       await waitFor(() => assert.ok(workspaceReads >= 2));
       assert.ok(screen.getByText("Workspace access denied."));
-      assert.ok(screen.getByRole("button", { name: "Retry" }));
+      assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+      assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Add member" }), null);
       assert.ok(screen.getByText("Your workspace access is read-only."));
       assert.ok(screen.getByText("Owner"));
     } finally { Object.assign(apiClient, original); }

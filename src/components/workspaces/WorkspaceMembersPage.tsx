@@ -14,7 +14,7 @@ import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
-type MutationError = { message: string; retry: () => void };
+type MutationError = { message: string; retry?: () => void };
 
 export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   const [workspace, setWorkspace] = useState<Workspace>();
@@ -59,12 +59,18 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   const filtered = useMemo(() => members.filter((member) => `${member.displayName ?? ""} ${member.email} ${member.role}`.toLowerCase().includes(query.trim().toLowerCase())), [members, query]);
 
   async function recoverMutation(reason: unknown, retry: () => void) {
+    const accessDenied = reason instanceof ApiError && reason.status === 403;
     try {
       await refresh();
     } catch {
       // Preserve the original mutation error while the page remains usable.
     }
-    setMutationError({ message: errorMessage(reason), retry });
+    if (accessDenied) {
+      setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
+      setOpen(false);
+      setMemberToRemove(undefined);
+    }
+    setMutationError({ message: errorMessage(reason), ...(!accessDenied && { retry }) });
   }
 
   async function add() {
@@ -137,7 +143,7 @@ function WorkspaceMemberRow({ member, canManage, busy, onChange, onRemove, onVie
 }
 
 function MutationNotice({ error, onDismiss }: { error: MutationError; onDismiss: () => void }) {
-  return <div className="flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{error.message}</span><span className="flex gap-2"><Button size="sm" variant="quiet" onClick={error.retry}>Retry</Button><Button size="icon" variant="quiet" aria-label="Dismiss member error" onClick={onDismiss}><X size={15} /></Button></span></div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{error.message}</span><span className="flex gap-2">{error.retry ? <Button size="sm" variant="quiet" onClick={error.retry}>Retry</Button> : null}<Button size="icon" variant="quiet" aria-label="Dismiss member error" onClick={onDismiss}><X size={15} /></Button></span></div>;
 }
 
 function memberLabel(member: WorkspaceMember): string { return member.displayName || member.email || "Workspace member"; }
