@@ -306,6 +306,10 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
 
   function failAction(reason: unknown): false {
     const detail = message(reason);
+    if (reason instanceof ApiError && reason.status === 403) {
+      setCapabilities((current) => current ? { ...current, canSendChat: false } : current);
+      setCapabilitiesStatus("ready");
+    }
     setActionError(detail);
     toast.error(detail);
     return false;

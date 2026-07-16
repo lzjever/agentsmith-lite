@@ -153,6 +153,27 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("makes chat read-only when the server revokes write access", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [];
+    apiClient.sendChatMessage = async () => { throw new ApiError(403, "Chat access was revoked."); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      await waitFor(() => assert.equal(composer.disabled, false));
+      fireEvent.change(composer, { target: { value: "Can I still send?" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await screen.findAllByText("Chat access was revoked.");
+      assert.equal(composer.disabled, true);
+      assert.ok(screen.getByText("Your project access is read-only."));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the persisted user message after stopping an active stream", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     let aborted = false;
