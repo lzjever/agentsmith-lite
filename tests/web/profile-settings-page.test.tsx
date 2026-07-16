@@ -6,7 +6,7 @@ import React from "react";
 import { ApiError, apiClient, type Profile, type ProjectSettings } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { ProfilePage } = await import("../../src/components/profile/ProfilePage.js");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
 
@@ -54,6 +54,24 @@ describe("profile and settings pages", () => {
       apiClient.updateProjectSettings = original.updateProjectSettings;
       apiClient.currentIdentity = original.currentIdentity;
     }
+  });
+
+  it("keeps the project name stable while saving and adopts the saved server value", async () => {
+    const original = { projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
+    let finishSave!: (value: ProjectSettings) => void;
+    apiClient.projectSettings = async () => settings;
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.updateProjectSettings = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Project name" }) as HTMLInputElement;
+      fireEvent.change(name, { target: { value: "  Renamed project  " } });
+      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+      await waitFor(() => assert.equal(name.disabled, true));
+      await act(async () => finishSave({ ...settings, project: { ...settings.project, name: "Renamed project" } }));
+      assert.equal(name.value, "Renamed project");
+      assert.equal(name.disabled, false);
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("shows archived project read-only state and keeps ownership transfer owner-scoped", async () => {

@@ -22,6 +22,7 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
   const [user, setUser] = useState<CurrentUser>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [loadError, setLoadError] = useState("");
+  const [projectName, setProjectName] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -37,6 +38,7 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
       const [settings, identity] = await Promise.all([apiClient.projectSettings(projectId), apiClient.currentIdentity()]);
       if (settings.project.workspaceId !== workspaceId) throw new ApiError(404, "This project does not belong to this workspace.");
       setData(settings);
+      setProjectName(settings.project.name);
       setUser(identity.user);
       setState("ready");
       if (settings.project.ownerUserId === identity.user.id) await loadMembers(); else { setMembers([]); setMemberState("ready"); }
@@ -52,7 +54,9 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
     event.preventDefault();
     setSaving(true);
     try {
-      setData(await apiClient.updateProjectSettings(projectId, { name: String(new FormData(event.currentTarget).get("name") || "") }));
+      const saved = await apiClient.updateProjectSettings(projectId, { name: projectName });
+      setData(saved);
+      setProjectName(saved.project.name);
       toast.success("Project settings saved.");
     } catch (reason) {
       toast.error(settingsErrorMessage(reason, "Project settings could not be saved."));
@@ -107,7 +111,7 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
     {state === "ready" && data ? <>
       <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{lifecycleMessage("project",lifecycleStatus)}</p>
       <form onSubmit={submit} className="grid gap-5 border-y border-subtle py-5">
-        <label className="grid gap-2 text-sm"><span>Project name</span><Input name="name" defaultValue={data.project.name} disabled={!data.capabilities.canManageSettings||!isActive} /></label>
+        <label className="grid gap-2 text-sm"><span>Project name</span><Input name="name" value={projectName} onChange={(event) => setProjectName(event.target.value)} disabled={saving||!data.capabilities.canManageSettings||!isActive} /></label>
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" disabled={saving}><Save size={16} />{saving ? "Saving..." : "Save project"}</Button> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
       </form>
       {canArchive||canRestore?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p><Button className="mt-4" variant="outline" disabled={lifecycleBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)}><Archive size={16}/>{archived?"Unarchive project":"Archive project"}</Button></section>:null}
