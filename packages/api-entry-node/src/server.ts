@@ -324,6 +324,7 @@ async function routeApi(
     if (method === "PATCH") return sendJson(res, 200, await services.profile.updateProfile(user.id, await readJson(req)));
   }
   if (url.pathname === "/api/v1/notifications" && method === "GET") return sendJson(res, 200, await services.notifications.list(user.id, url.searchParams.get("unread") === "true"));
+  if (url.pathname === "/api/v1/notifications/read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markAllRead(user.id));
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "notifications" && segments[3]) {
     if (segments[4] === "read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markRead(user.id, segments[3]));
     if (method === "DELETE") return sendJson(res, 200, await services.notifications.dismiss(user.id, segments[3]));

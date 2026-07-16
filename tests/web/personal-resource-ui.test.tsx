@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
+import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import React from "react";
 import { apiClient, type ProjectCapabilities, type ProjectMember, type UserNotification } from "../../src/lib/api/client.js";
 
@@ -43,7 +44,7 @@ describe("personal and resource UI", () => {
     apiClient.notifications = async () => [notification];
     apiClient.markNotificationRead = async () => { attempts += 1; if (attempts === 1) throw new Error("offline"); return { ...notification, readAt: "2026-07-12T00:01:00.000Z" }; };
     try {
-      render(<NotificationsPage />);
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
       await screen.findByText("Task finished");
       assert.ok(screen.getByText("Validation project: task completed."));
       fireEvent.click(screen.getByRole("button", { name: "Mark notification read" }));
@@ -54,11 +55,27 @@ describe("personal and resource UI", () => {
     } finally { apiClient.notifications = original.notifications; apiClient.markNotificationRead = original.markNotificationRead; }
   });
 
+  it("marks a linked notification read before navigating to its resource", async () => {
+    const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
+    const pushed: string[] = [];
+    let finishRead!: (value: UserNotification) => void;
+    const linked = { ...notification, linkPath: "/workspaces/workspace_1/projects/project_1/tasks/task_1" };
+    apiClient.notifications = async () => [linked];
+    apiClient.markNotificationRead = async () => new Promise((resolve) => { finishRead = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><NotificationsPage /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("link", { name: "Task finished" }));
+      assert.deepEqual(pushed, []);
+      finishRead({ ...linked, readAt: "2026-07-12T00:01:00.000Z" });
+      await waitFor(() => assert.deepEqual(pushed, [linked.linkPath]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows safe notification context in the global bell", async () => {
     const original = apiClient.notifications;
     apiClient.notifications = async () => [notification];
     try {
-      render(<NotificationBell returnTo="/workspaces/workspace_1/projects/project_1/tasks" />);
+      render(<AppRouterContext.Provider value={router()}><NotificationBell returnTo="/workspaces/workspace_1/projects/project_1/tasks" /></AppRouterContext.Provider>);
       fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
       await screen.findByText("Validation project: task completed.");
       assert.ok(screen.getByText("Task finished"));
@@ -66,12 +83,45 @@ describe("personal and resource UI", () => {
     } finally { apiClient.notifications = original; }
   });
 
+  it("keeps the notification menu open until a linked item is marked read", async () => {
+    const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
+    const pushed: string[] = [];
+    let finishRead!: (value: UserNotification) => void;
+    const linked = { ...notification, linkPath: "/workspaces/workspace_1/projects/project_1/tasks/task_1" };
+    apiClient.notifications = async () => [linked];
+    apiClient.markNotificationRead = async () => new Promise((resolve) => { finishRead = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><NotificationBell /></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("link", { name: /Task finished/ }));
+      assert.deepEqual(pushed, []);
+      assert.ok(screen.getByText("Validation project: task completed."));
+      finishRead({ ...linked, readAt: "2026-07-12T00:01:00.000Z" });
+      await waitFor(() => assert.deepEqual(pushed, [linked.linkPath]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("marks all notifications read with one server operation", async () => {
+    const original = { notifications: apiClient.notifications, markAllNotificationsRead: apiClient.markAllNotificationsRead };
+    const second = { ...notification, id: "notice_2", title: "Another task finished" };
+    let attempts = 0;
+    apiClient.notifications = async () => [notification, second];
+    apiClient.markAllNotificationsRead = async () => { attempts += 1; return [notification, second].map((item) => ({ ...item, readAt: "2026-07-12T00:01:00.000Z" })); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell /></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("button", { name: "Mark all read" }));
+      await waitFor(() => assert.equal(attempts, 1));
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Mark all read" }), null));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a project return path and explains notification load failures", async () => {
     const original = apiClient.notifications;
     apiClient.notifications = async () => { throw new Error("offline"); };
     window.history.replaceState({}, "", "/notifications?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
     try {
-      render(<NotificationsPage />);
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
       const alert = await screen.findByRole("alert");
       assert.ok(alert.textContent?.includes("Notifications could not be loaded."));
       assert.equal(screen.getByRole("link", { name: "Back to project" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
@@ -88,3 +138,5 @@ function installDom() {
   Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} });
   if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
 }
+
+function router(pushed: string[] = []) { return { back() {}, forward() {}, refresh() {}, push(path: string) { pushed.push(path); }, replace() {}, prefetch() {} }; }

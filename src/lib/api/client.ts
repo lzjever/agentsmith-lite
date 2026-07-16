@@ -161,6 +161,7 @@ export const apiClient = {
   logout: () => json<{ loggedOut: true }>("/auth/logout", "POST"),
   notifications: (unreadOnly = false) => request<UserNotification[]>(`/notifications${unreadOnly ? "?unread=true" : ""}`),
   markNotificationRead: (notificationId: string) => json<UserNotification>(`/notifications/${encodeURIComponent(notificationId)}/read`, "PATCH"),
+  markAllNotificationsRead: () => json<UserNotification[]>("/notifications/read", "PATCH"),
   dismissNotification: (notificationId: string) => json<{ dismissed: true }>(`/notifications/${encodeURIComponent(notificationId)}`, "DELETE"),
   profile: () => request<Profile>("/me/profile"),
   updateProfile: (input: { displayName?: string | null; timezone?: string | null; bio?: string | null; jobTitle?: string | null; company?: string | null; greetingPreference?: string | null; interests?: string[] }) => json<Profile>("/me/profile", "PATCH", input),

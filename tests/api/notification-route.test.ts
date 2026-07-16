@@ -17,14 +17,22 @@ describe("notification API", () => {
       const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
       const identity = await login.json() as { user: { id: string }; csrfToken: string };
       await store.createUserNotification({ id: "notice_route", userId: identity.user.id, type: "project_alert", title: "Project alert: active tasks limit", body: "Alert project: active tasks limit.", projectId: "proj", resourceKind: "project", resourceId: "proj", linkPath: "/workspaces/ws/projects/proj/alerts", readAt: null, createdAt: "2026-07-12T00:00:00.000Z" }, "project-alert:alert_route:" + identity.user.id);
+      await store.createUserNotification({ id: "notice_newer", userId: identity.user.id, type: "task", title: "Task finished", body: "A newer event.", projectId: "proj", resourceKind: "task", resourceId: "task", linkPath: "/workspaces/ws/projects/proj/tasks/task", readAt: null, createdAt: "2026-07-13T00:00:00.000Z" });
 
       const listed = await fetch(api.baseUrl + "/api/v1/notifications", { headers: { cookie } });
       assert.equal(listed.status, 200);
-      const item = (await listed.json() as Array<{ id: string; body: string; projectId: string; resourceKind: string; resourceId: string }>)[0]!;
+      const items = await listed.json() as Array<{ id: string; body: string; projectId: string; resourceKind: string; resourceId: string }>;
+      assert.deepEqual(items.map((value) => value.id), ["notice_newer", "notice_route"]);
+      const item = items[1]!;
       assert.deepEqual([item.id, item.body, item.projectId, item.resourceKind, item.resourceId], ["notice_route", "Alert project: active tasks limit.", "proj", "project", "proj"]);
       const read = await fetch(api.baseUrl + "/api/v1/notifications/notice_route/read", { method: "PATCH", headers: { cookie, "x-csrf-token": identity.csrfToken } });
       assert.equal(read.status, 200);
       assert.ok((await read.json() as { readAt: string | null }).readAt);
+      const allRead = await fetch(api.baseUrl + "/api/v1/notifications/read", { method: "PATCH", headers: { cookie, "x-csrf-token": identity.csrfToken } });
+      assert.equal(allRead.status, 200);
+      assert.equal((await allRead.json() as Array<{ readAt: string | null }>).every((value) => value.readAt !== null), true);
+      const unread = await fetch(api.baseUrl + "/api/v1/notifications?unread=true", { headers: { cookie } });
+      assert.deepEqual(await unread.json(), []);
       const dismissed = await fetch(api.baseUrl + "/api/v1/notifications/notice_route", { method: "DELETE", headers: { cookie, "x-csrf-token": identity.csrfToken } });
       assert.equal(dismissed.status, 200);
       assert.deepEqual(await dismissed.json(), { dismissed: true });

@@ -335,6 +335,7 @@ export interface ProductStore {
   createUserNotification(value: UserNotification, dedupeKey?: string): Promise<UserNotification>;
   listUserNotifications(userId: string, unreadOnly?: boolean): Promise<UserNotification[]>;
   markUserNotificationRead(id: string, userId: string, readAt: string): Promise<UserNotification | null>;
+  markAllUserNotificationsRead(userId: string, readAt: string): Promise<number>;
   dismissUserNotification(id: string, userId: string): Promise<boolean>;
 
   createSession(session: AuthSession): Promise<AuthSession>;
