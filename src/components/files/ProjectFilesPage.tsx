@@ -18,6 +18,11 @@ type BrowserState = "loading" | "ready" | "error";
 const previewImageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const previewTextTypes = new Set(["text/plain", "text/csv", "text/markdown", "application/json"]);
 const maxPreviewBytes = 512_000;
+export type FilePreview = { kind:"text"|"image";value:string;name:string;path:string };
+
+export function invalidateFilePreview(preview: FilePreview | null, path: string): FilePreview | null {
+  return preview?.path === path ? null : preview;
+}
 
 export function ProjectFilesPage({ projectId }: { projectId: string }) {
   return <ProjectFiles key={projectId} projectId={projectId} />;
@@ -37,7 +42,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   const [replaceTarget, setReplaceTarget] = useState<{ file: File; path: string }>();
   const [deleting, setDeleting] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
-  const [query,setQuery]=useState(""); const [preview,setPreview]=useState<{kind:"text"|"image";value:string;name:string}|null>(null); const [dropReady,setDropReady]=useState(false);
+  const [query,setQuery]=useState(""); const [preview,setPreview]=useState<FilePreview|null>(null); const [dropReady,setDropReady]=useState(false);
   const input = useRef<HTMLInputElement>(null);
   const currentPath = useRef(path);
   const loadVersion = useRef(0);
@@ -55,6 +60,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       if (filesResult.status === "rejected") throw filesResult.reason;
       setEntries(sortFileEntries(filesResult.value.entries));
       setSelected((current) => filesResult.value.entries.find((entry) => entry.path === current?.path));
+      setPreview(null);
       if (capabilitiesResult.status === "fulfilled") setCapabilities(capabilitiesResult.value);
       else setMessage("File permissions could not be loaded. Files are read-only until refreshed.");
       setState("ready");
@@ -78,12 +84,14 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   function navigate(nextPath: string) {
     currentPath.current = nextPath;
     setSelected(undefined);
+    setPreview(null);
     setMobileDetailsOpen(false);
     setPath(nextPath);
   }
 
   function select(entry: ProjectFile) {
     setSelected(entry);
+    setPreview((current) => current?.path === entry.path ? current : null);
     setMobileDetailsOpen(true);
   }
 
@@ -116,6 +124,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
         setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
         setSelected((current) => current?.path === written.path ? entry : current);
       }
+      if (overwrite) setPreview((current) => invalidateFilePreview(current, written.path));
       if (overwrite) setReplaceTarget(undefined);
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
@@ -139,7 +148,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     if (file) void upload(file);
   }
   useEffect(()=>()=>{if(preview?.kind==="image")URL.revokeObjectURL(preview.value);},[preview]);
-  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current)return;setPreview({kind:"text",value,name:entry.name});return;}throw new Error();}catch{if(mounted.current)toast.error("Preview is unavailable for this file.");}}
+  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name,path:entry.path};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current)return;setPreview({kind:"text",value,name:entry.name,path:entry.path});return;}throw new Error();}catch{if(mounted.current)toast.error("Preview is unavailable for this file.");}}
 
   async function removeSelectedFile() {
     if (!deleteTarget) return;
@@ -150,6 +159,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       if (!mounted.current) return;
       setDeleteTarget(undefined);
       setSelected((current) => current?.path === deleteTarget.path ? undefined : current);
+      setPreview((current) => invalidateFilePreview(current, deleteTarget.path));
       setEntries((current) => current.filter((entry) => entry.path !== deleteTarget.path));
       toast.success("File deleted");
     } catch (error) {

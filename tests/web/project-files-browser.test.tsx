@@ -6,7 +6,7 @@ import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from 
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
-const { DeleteFileDialog, ProjectFilesPage } = await import("../../src/components/files/ProjectFilesPage.js");
+const { DeleteFileDialog, ProjectFilesPage, invalidateFilePreview } = await import("../../src/components/files/ProjectFilesPage.js");
 
 const file: ProjectFile = { name: "brief.txt", path: "files/brief.txt", type: "file", size: 12, updatedAt: "2026-07-11T00:00:00.000Z" };
 const writable: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
@@ -298,6 +298,29 @@ describe("project files browser", () => {
     try{render(<ProjectFilesPage projectId="project_1"/>);await screen.findByText("brief.txt");const filter=screen.getByRole("textbox",{name:"Filter files"});assert.match(filter.className,/border-border-input/);fireEvent.change(filter,{target:{value:"image"}});assert.equal(screen.queryByText("brief.txt"),null);assert.ok(screen.getByText("image.png"));fireEvent.click(screen.getByRole("button",{name:"Clear file filter"}));fireEvent.click(screen.getByRole("button",{name:"brief.txt"}));fireEvent.click(screen.getAllByRole("button",{name:"Preview"})[0]!);await screen.findByText("preview");fireEvent.click(screen.getByRole("button",{name:"Close preview"}));}finally{restoreClient(original);globalThis.fetch=originalFetch;}
   });
 
+  it("invalidates only the preview bound to a replaced or deleted path", () => {
+    const preview = { kind: "text" as const, value: "old", name: file.name, path: file.path };
+    assert.equal(invalidateFilePreview(preview, file.path), null);
+    assert.equal(invalidateFilePreview(preview, "files/other.txt"), preview);
+  });
+
+  it("closes the selected file preview when navigating into a folder", async () => {
+    const original = snapshotClient();
+    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
+    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [file, folder] : [] });
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.downloadProjectFile = async () => new Blob(["preview"], { type: "text/plain" });
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Preview" })[0]!);
+      await screen.findByText("preview");
+      fireEvent.click(screen.getByRole("button", { name: "reports" }));
+      await screen.findByRole("heading", { name: "This folder is empty" });
+      assert.equal(screen.queryByText("preview"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("shows a distinct no-match state and clears the filter", async () => {
     const original = snapshotClient();
     apiClient.files = async () => ({ entries: [file] });
@@ -336,8 +359,8 @@ function DeleteDialogHarness() {
   return <DeleteFileDialog entry={open ? file : undefined} deleting={false} onCancel={() => setOpen(false)} onConfirm={() => undefined} />;
 }
 
-function snapshotClient() { return { files: apiClient.files, projectCapabilities: apiClient.projectCapabilities, uploadFile: apiClient.uploadFile, deleteFile: apiClient.deleteFile }; }
-function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.files = original.files; apiClient.projectCapabilities = original.projectCapabilities; apiClient.uploadFile = original.uploadFile; apiClient.deleteFile = original.deleteFile; }
+function snapshotClient() { return { files: apiClient.files, projectCapabilities: apiClient.projectCapabilities, uploadFile: apiClient.uploadFile, downloadProjectFile: apiClient.downloadProjectFile, deleteFile: apiClient.deleteFile }; }
+function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.files = original.files; apiClient.projectCapabilities = original.projectCapabilities; apiClient.uploadFile = original.uploadFile; apiClient.downloadProjectFile = original.downloadProjectFile; apiClient.deleteFile = original.deleteFile; }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
