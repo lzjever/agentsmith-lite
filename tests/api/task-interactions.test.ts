@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -220,7 +221,7 @@ describe("task interactions API", () => {
       fileId: "f1",
       name: "../bad/报告\"\r\n.txt",
       bytes: artifactBytes.byteLength,
-      sha256: "c".repeat(64),
+      sha256: createHash("sha256").update(artifactBytes).digest("hex"),
       createdAt: new Date(0).toISOString()
     };
     await store.appendTaskArtifacts([artifact]);

@@ -112,6 +112,12 @@ describe("api product workflow", () => {
     const filePath = "files/docs/readme.md";
     const fileContent = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
     const uploadedFile = await requestRawFile(project.id, filePath, fileContent, cookie, csrf);
+    await assertApiError(
+      await requestRawFileResponse(project.id, filePath, Buffer.from("unconfirmed replacement"), cookie, csrf),
+      409,
+      "Project file already exists"
+    );
+    await requestRawFile(project.id, filePath, fileContent, cookie, csrf, "application/octet-stream", true);
     const listedRootFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=files`, undefined, cookie);
     const listedNestedFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
     const downloadedFile = await request(
@@ -329,9 +335,19 @@ describe("api product workflow", () => {
     bytes: Uint8Array,
     cookie: string,
     csrf: string,
-    contentType = "application/octet-stream"
+    contentType = "application/octet-stream",
+    overwrite = false
   ) {
-    const response = await fetch(baseUrl + `/api/v1/projects/${projectId}/files?path=${encodeURIComponent(filePath)}`, {
+    const response = await requestRawFileResponse(projectId, filePath, bytes, cookie, csrf, contentType, overwrite);
+    if (response.status !== 200) {
+      assert.fail(await response.text());
+    }
+    return response.json();
+  }
+
+  async function requestRawFileResponse(projectId: string, filePath: string, bytes: Uint8Array, cookie: string, csrf: string, contentType = "application/octet-stream", overwrite = false) {
+    const query = new URLSearchParams({ path: filePath, ...(overwrite ? { overwrite: "true" } : {}) });
+    return fetch(baseUrl + `/api/v1/projects/${projectId}/files?${query}`, {
       method: "PUT",
       headers: {
         "content-type": contentType,
@@ -340,10 +356,6 @@ describe("api product workflow", () => {
       },
       body: Buffer.from(bytes)
     });
-    if (response.status !== 200) {
-      assert.fail(await response.text());
-    }
-    return response.json();
   }
 
   async function rawRequest(pathname: string, cookie: string, csrf: string, headers: Record<string, string>) {

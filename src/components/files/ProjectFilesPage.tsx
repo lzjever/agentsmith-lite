@@ -29,6 +29,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
   const [deleteTarget, setDeleteTarget] = useState<ProjectFile>();
   const [uploading, setUploading] = useState(false);
   const [uploadFailure, setUploadFailure] = useState<{ file: File; message: string }>();
+  const [replaceTarget, setReplaceTarget] = useState<File>();
   const [deleting, setDeleting] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [query,setQuery]=useState(""); const [preview,setPreview]=useState<{kind:"text"|"image";value:string;name:string}|null>(null); const [dropReady,setDropReady]=useState(false);
@@ -37,11 +38,14 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
   const load = useCallback(async () => {
     setState("loading");
     setMessage("");
+    setCapabilities(undefined);
     try {
-      const [result, projected] = await Promise.all([apiClient.files(projectId, path), apiClient.projectCapabilities(projectId)]);
-      setEntries(sortFileEntries(result.entries));
-      setCapabilities(projected);
-      setSelected((current) => result.entries.find((entry) => entry.path === current?.path));
+      const [filesResult, capabilitiesResult] = await Promise.allSettled([apiClient.files(projectId, path), apiClient.projectCapabilities(projectId)]);
+      if (filesResult.status === "rejected") throw filesResult.reason;
+      setEntries(sortFileEntries(filesResult.value.entries));
+      setSelected((current) => filesResult.value.entries.find((entry) => entry.path === current?.path));
+      if (capabilitiesResult.status === "fulfilled") setCapabilities(capabilitiesResult.value);
+      else setMessage("File permissions could not be loaded. Files are read-only until refreshed.");
       setState("ready");
     } catch (error) {
       setMessage(errorMessage(error, "Files could not be loaded."));
@@ -64,16 +68,23 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setMobileDetailsOpen(true);
   }
 
-  async function upload(file: File) {
+  async function upload(file: File, overwrite = false) {
     setUploading(true);
     setUploadFailure(undefined);
     setMessage("");
     try {
-      await apiClient.uploadFile(projectId, childFilePath(path, file.name), file);
+      await apiClient.uploadFile(projectId, childFilePath(path, file.name), file, { overwrite });
+      if (overwrite) setReplaceTarget(undefined);
       await load();
-      toast.success("File uploaded");
+      toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
-      setUploadFailure({ file, message: errorMessage(error, "File could not be uploaded.") });
+      if (!overwrite && error instanceof ApiError && error.status === 409) {
+        setReplaceTarget(file);
+      } else if (overwrite) {
+        throw new Error(errorMessage(error, "File could not be replaced."));
+      } else {
+        setUploadFailure({ file, message: errorMessage(error, "File could not be uploaded.") });
+      }
     } finally {
       setUploading(false);
     }
@@ -130,6 +141,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     <div className="lg:hidden">{selected ? <Button variant="quiet" className="w-full justify-between" aria-expanded={mobileDetailsOpen} onClick={() => setMobileDetailsOpen((open) => !open)}><span>File details</span><ChevronRight className={mobileDetailsOpen ? "rotate-90 transition-transform" : "transition-transform"} size={16} /></Button> : null}{showFileDetails(selected, true, mobileDetailsOpen) ? <div className="mt-2 rounded-md border border-subtle bg-surface p-4"><FileDetails entry={selected} projectId={projectId} canWrite={canWrite} onDelete={setDeleteTarget} onPreview={openPreview} /></div> : null}</div>
     {preview?<div className="mt-4 rounded-md border border-subtle bg-surface p-4"><div className="mb-3 flex justify-between"><strong>{preview.name}</strong><Button variant="quiet" size="icon" aria-label="Close preview" onClick={()=>{if(preview.kind==="image")URL.revokeObjectURL(preview.value);setPreview(null);}}><X size={15}/></Button></div>{preview.kind==="image"?<img className="max-h-96 max-w-full" src={preview.value} alt={preview.name}/>:<pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{preview.value}</pre>}</div>:null}
     <DeleteFileDialog entry={deleteTarget} deleting={deleting} onCancel={() => { if (!deleting) setDeleteTarget(undefined); }} onConfirm={removeSelectedFile} />
+    <ConfirmationDialog open={Boolean(replaceTarget)} onOpenChange={(open) => !open && !uploading && setReplaceTarget(undefined)} title={`Replace ${replaceTarget?.name ?? "file"}?`} description="A file with this name already exists in this folder. This will permanently replace its contents." confirmText="Replace file" variant="default" confirmDisabled={uploading} onConfirm={() => replaceTarget ? upload(replaceTarget, true) : undefined} errorContext="File could not be replaced" />
   </PageLayout>;
 }
 

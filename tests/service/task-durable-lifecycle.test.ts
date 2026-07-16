@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -706,9 +706,20 @@ describe("durable task lifecycle", () => {
     assert.equal(completed?.artifactProjectionStatus, "drained");
     assert.deepEqual(artifacts.map((artifact) => [artifact.name, artifact.bytes]), [["result.txt", 14]]);
     assert.equal("fileId" in artifacts[0]!, false);
+    await writeFile(artifactPath, "tampered after projection");
     assert.equal((await setup.services.tasks.downloadTaskArtifact(setup.userId, task.id, artifacts[0]!.id)).bytes.toString("utf8"), "sandbox result");
     assert.equal((await setup.services.tasks.downloadTaskInput(setup.userId, task.id, "files/input.txt")).bytes.toString("utf8"), "retained input");
     assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes, 14);
+
+    const outside = path.join(setup.dataRoot, setup.projectRootPath, "api-private.txt");
+    const legacyPath = path.join(path.dirname(artifactPath), "legacy-link.txt");
+    await writeFile(outside, "must not be disclosed");
+    await symlink(outside, legacyPath);
+    await setup.store.appendTaskArtifacts([{ id:"artifact_legacy_symlink",taskId:task.id,fileId:"sandbox:legacy-link.txt",name:"legacy-link.txt",bytes:20,sha256:"unused",mediaType:"text/plain",previewText:null,createdAt:new Date().toISOString() }]);
+    await assert.rejects(
+      () => setup.services.tasks.downloadTaskArtifact(setup.userId, task.id, "artifact_legacy_symlink"),
+      /symlink/
+    );
   });
 
   it("completes terminal drained cleanup when the pod is already absent and repeated ticks are idempotent", async () => {

@@ -17,7 +17,7 @@ P0 implements path validation as product logic:
 
 File CRUD uses the live filesystem under each project root and narrows product file operations to the `files/` subtree:
 
-- `PUT /api/v1/projects/{projectId}/files?path=files/name.bin` uploads the raw binary request body with `Content-Type: application/octet-stream`;
+- `PUT /api/v1/projects/{projectId}/files?path=files/name.bin` creates a raw binary file and returns `409` when it already exists; a user-confirmed replacement adds `overwrite=true`;
 - `GET /api/v1/projects/{projectId}/files?path=files` lists one directory level without following symlink entries;
 - `GET /api/v1/projects/{projectId}/files/download?path=files/name.bin` downloads the original bytes;
 - `DELETE /api/v1/projects/{projectId}/files` deletes a path from JSON `{ "path": "files/name.txt" }`.

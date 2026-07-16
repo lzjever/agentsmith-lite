@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { type TaskArtifact } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { TaskArtifactActions } from "./TaskArtifactActions";
+import { isPreviewableText, TaskArtifactActions } from "./TaskArtifactActions";
 import { formatArtifactBytes, formatTaskDate } from "./task-ui";
 
 export function TaskArtifactsPanel({ taskId, artifacts, onRefresh, refreshing = false, emptyMessage = "No artifacts published yet." }: { taskId: string; artifacts: TaskArtifact[]; onRefresh?: () => void | Promise<void>; refreshing?: boolean; emptyMessage?: string }) {
@@ -14,7 +14,7 @@ export function TaskArtifactsPanel({ taskId, artifacts, onRefresh, refreshing = 
   return <section aria-label="Published artifacts"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-secondary">{artifacts.length} artifact{artifacts.length === 1 ? "" : "s"}</p><div className="flex items-center gap-2"><Select value={filter} onValueChange={(value) => setFilter(value as typeof filter)}><SelectTrigger aria-label="Artifact type" className="h-8 w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All types</SelectItem><SelectItem value="text">Text</SelectItem><SelectItem value="image">Images</SelectItem><SelectItem value="file">Files</SelectItem></SelectContent></Select>{onRefresh ? <Button variant="quiet" size="icon" aria-label="Refresh artifacts" title="Refresh artifacts" disabled={refreshing} onClick={() => void onRefresh()}><RefreshCw size={15} className={refreshing ? "animate-spin" : undefined} /></Button> : null}</div></div>{artifacts.length === 0 ? <div className="grid min-h-36 place-items-center border border-dashed border-border px-5 text-center"><div><FileOutput className="mx-auto size-5 text-icon-default" /><p className="mt-2 text-sm text-secondary">{emptyMessage}</p></div></div> : visibleArtifacts.length === 0 ? <div className="grid min-h-28 place-items-center border border-dashed border-border px-5 text-center"><p className="text-sm text-secondary">No {filter} artifacts published yet.</p></div> : <div className="divide-y divide-border border border-border">{visibleArtifacts.map((artifact) => <ArtifactRow key={artifact.id} taskId={taskId} artifact={artifact} />)}</div>}</section>;
 }
 
-function artifactKind(artifact: TaskArtifact): "text" | "image" | "file" { if (artifact.mediaType?.startsWith("image/")) return "image"; if (artifact.mediaType?.startsWith("text/")) return "text"; return "file"; }
+function artifactKind(artifact: TaskArtifact): "text" | "image" | "file" { if (artifact.mediaType?.startsWith("image/")) return "image"; if (isPreviewableText(artifact.mediaType)) return "text"; return "file"; }
 
 function ArtifactRow({ taskId, artifact }: { taskId: string; artifact: TaskArtifact }) {
   return <div className="px-3 py-3">

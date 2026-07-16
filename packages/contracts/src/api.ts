@@ -682,6 +682,7 @@ export interface ProjectFileListResponse {
 export interface UploadProjectFileInput {
   path: string;
   bytes: Uint8Array;
+  overwrite?: boolean;
 }
 
 export interface ProjectFileWriteResponse {

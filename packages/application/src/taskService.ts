@@ -1134,18 +1134,19 @@ export class TaskService {
     if (!artifact) {
       throw new ProductError("Task artifact not found", 404);
     }
-    const { filePath } = await this.taskArtifactStoragePath(task, artifact);
-    try {
-      return {
-        artifact: publicArtifact(artifact),
-        bytes: await readFile(filePath)
-      };
-    } catch (error) {
-      if (isNotFound(error)) {
-        throw new ProductError("Task artifact file not found", 404);
+    const stored = await this.taskArtifactStoragePath(task, artifact);
+    for (const filePath of [stored.filePath, ...(stored.legacyFilePath ? [stored.legacyFilePath] : [])]) {
+      try {
+        const bytes = await readRegularFileWithoutFollowingSymlink(filePath, "Task artifact");
+        if (bytes.byteLength !== artifact.bytes || artifact.sha256 && createHash("sha256").update(bytes).digest("hex") !== artifact.sha256.toLowerCase()) {
+          throw new ProductError("Stored task artifact no longer matches its published metadata", 409);
+        }
+        return { artifact: publicArtifact(artifact), bytes };
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
       }
-      throw error;
     }
+    throw new ProductError("Task artifact file not found", 404);
   }
 
   taskRuntimePaths(task: AgentTask): { projectMountPath: string; taskHomePath: string; botifiedDataPath: string; artifactPath: string } {
@@ -1601,19 +1602,26 @@ export class TaskService {
     };
   }
 
-  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{ root: string; filePath: string }> {
+  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{ root: string; filePath: string; legacyFilePath?: string }> {
     const project = await this.store.findProject(task.projectId);
     if (!project) {
       throw new ProductError("Task project not found", 409);
     }
     const dataRoot = path.resolve(this.config.dataRoot);
-    const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
+    const taskRoot = path.resolve(dataRoot, project.rootPath, "tasks", task.id);
+    assertPathInside(dataRoot, taskRoot, "Task artifact directory is outside the data root");
+    const legacySandboxArtifact = artifact.fileId.startsWith("sandbox:");
+    const root = path.resolve(taskRoot, legacySandboxArtifact ? "artifacts" : "published-artifacts");
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
-    const sandboxPath = artifact.fileId.startsWith("sandbox:") ? artifact.fileId.slice("sandbox:".length) : null;
+    const sandboxPath = legacySandboxArtifact ? artifact.fileId.slice("sandbox:".length) : null;
     const filename = `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`;
     const filePath = sandboxPath ? path.resolve(root, ...sandboxPath.split("/")) : path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
-    return { root, filePath };
+    if (legacySandboxArtifact) return { root, filePath };
+    const legacyRoot = path.resolve(taskRoot, "artifacts");
+    const legacyFilePath = path.resolve(legacyRoot, filename);
+    assertPathInside(legacyRoot, legacyFilePath, "Legacy task artifact path is outside the artifact directory");
+    return { root, filePath, legacyFilePath };
   }
 
   private async projectSandboxArtifactFiles(task: PersistedAgentTask): Promise<void> {
@@ -1628,14 +1636,17 @@ export class TaskService {
     const files = await listRegularArtifactFiles(root, MAX_TASK_ARTIFACT_FILES);
     for (const relativePath of files) {
       if (productStoredNames.has(relativePath)) continue;
-      const fileId = `sandbox:${relativePath}`;
-      if (existingFileIds.has(fileId)) continue;
+      const fileId = `sandbox-published:${relativePath}`;
       const filePath = path.resolve(root, ...relativePath.split("/"));
       assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
+      if (existingFileIds.has(fileId)) {
+        await rm(filePath, { force: true });
+        continue;
+      }
       const bytes = await readRegularFileWithoutFollowingSymlink(filePath);
       if (bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) throw new ProductError("Task artifact exceeds the maximum file size", 409);
       const artifact: PersistedTaskArtifact = {
-        id: newId("art"),
+        id: stableSandboxArtifactId(task.id, fileId),
         taskId: task.id,
         fileId,
         name: normalizeArtifactDisplayName(relativePath, "artifact"),
@@ -1644,6 +1655,17 @@ export class TaskService {
         ...artifactPreview(bytes, relativePath),
         createdAt: nowIso()
       };
+      const stored = await this.taskArtifactStoragePath(task, artifact);
+      await mkdir(stored.root, { recursive: true });
+      try {
+        await writeFile(stored.filePath, bytes, { flag: "wx" });
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        const existingBytes = await readRegularFileWithoutFollowingSymlink(stored.filePath, "Task artifact");
+        if (existingBytes.byteLength !== bytes.byteLength || createHash("sha256").update(existingBytes).digest("hex") !== artifact.sha256) {
+          throw new ProductError("Stored task artifact does not match the sandbox publication", 409);
+        }
+      }
       const persisted = await this.store.persistTaskArtifactProjection({
         projectId: task.projectId,
         artifact,
@@ -1651,11 +1673,13 @@ export class TaskService {
         updatedAt: nowIso()
       });
       if (persisted === "limit_exceeded") {
+        await rm(stored.filePath, { force: true });
         await rm(filePath, { force: true });
         await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
         await this.policies.recordOperation(task.projectId, null, "file.quota", "rejected", artifact.id, "file_quota");
         throw new ProductError("Project project file bytes limit reached", 409);
       }
+      await rm(filePath, { force: true });
       existingFileIds.add(fileId);
     }
   }
@@ -2594,24 +2618,28 @@ function isTerminalTask(task: PersistedAgentTask): boolean {
   return Boolean(task.terminalReason) || ["completed","failed","expired","cancelled","cleaned"].includes(task.status);
 }
 
-async function readRegularFileWithoutFollowingSymlink(source: string): Promise<Buffer> {
+async function readRegularFileWithoutFollowingSymlink(source: string, label = "Task input source"): Promise<Buffer> {
   let handle;
   try {
     handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (isSymlinkOpenError(error)) {
-      throw new ProductError("Task input source uses a symlink");
+      throw new ProductError(`${label} uses a symlink`);
     }
     throw error;
   }
   try {
     if (!(await handle.stat()).isFile()) {
-      throw new ProductError("Task input source must contain regular files and directories");
+      throw new ProductError(`${label} must be a regular file`);
     }
     return handle.readFile();
   } finally {
     await handle.close();
   }
+}
+
+function stableSandboxArtifactId(taskId: string, fileId: string): string {
+  return `art_${createHash("sha256").update(taskId).update("\0").update(fileId).digest("base64url").slice(0, 24)}`;
 }
 
 async function listRegularArtifactFiles(root: string, limit: number): Promise<string[]> {

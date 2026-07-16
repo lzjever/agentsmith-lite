@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type ProjectCapabilities, type ProjectFile } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -75,6 +75,28 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("requires explicit confirmation before replacing an existing file", async () => {
+    const original = snapshotClient();
+    const attempts: boolean[] = [];
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.uploadFile = async (_projectId, _path, _file, options) => {
+      attempts.push(options?.overwrite === true);
+      if (!options?.overwrite) throw new ApiError(409, "Project file already exists");
+      return { path: file.path, bytes: file.size ?? 0 };
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["replacement"], "brief.txt")] } });
+      const dialog = await screen.findByRole("alertdialog", { name: "Replace brief.txt?" });
+      assert.match(dialog.textContent ?? "", /permanently replace/i);
+      fireEvent.click(screen.getByRole("button", { name: "Replace file" }));
+      await waitFor(() => assert.deepEqual(attempts, [false, true]));
+      await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Replace brief.txt?" }), null));
+    } finally { restoreClient(original); }
+  });
+
   it("uses retry and a nested-folder empty state", async () => {
     const original = snapshotClient();
     let attempts = 0;
@@ -105,6 +127,21 @@ describe("project files browser", () => {
       apiClient.projectCapabilities = async () => readOnly;
       render(<ProjectFilesPage projectId="project_1" />);
       await screen.findByText("brief.txt");
+      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
+      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
+      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
+      assert.ok(screen.getAllByRole("link", { name: "Download" }).length > 0);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps files readable but fails closed to read-only when capabilities are unavailable", async () => {
+    const original = snapshotClient();
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      assert.match(screen.getByRole("alert").textContent ?? "", /read-only until refreshed/i);
       assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
       fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
       assert.equal(screen.queryByRole("button", { name: "Delete" }), null);

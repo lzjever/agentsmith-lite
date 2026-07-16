@@ -103,7 +103,7 @@ export class ProjectPolicyService {
     await this.auditEvent(projectId, actorId, action, status, resourceId, resourceKind, detail);
   }
   async raiseAlert(projectId: string, type: ProjectAlertType): Promise<void> { await this.openAlert(projectId, type); }
-  async evaluateTaskFailure(projectId:string,endpointId:string):Promise<void>{await emitProjectAlert(this.store,projectId,"task_failure",{endpointId});}
+  async evaluateTaskFailure(projectId:string,endpointId:string):Promise<void>{await emitProjectAlert(this.store,projectId,"task_failure",{endpointId});await recoverProjectAlerts(this.store,projectId,"task_failure");}
   async recordProviderFailure(projectId:string,actorId:string|null,endpointId:string|null,errorCategory:EndpointHealthErrorCategory):Promise<void>{
     const timestamp=nowIso();
     await recordProjectFailure(this.store,"provider_failure",{

@@ -64,6 +64,17 @@ describe("task artifact previews", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh artifacts" }));
     assert.equal(refreshes, 1);
   });
+
+  it("treats JSON artifacts as safe text previews", async () => {
+    const json = { ...image, id: "json", name: "result.json", mediaType: "application/json", previewText: '{"ok":true}' };
+    render(<TaskArtifactsPanel taskId="task_1" artifacts={[json]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    assert.ok(screen.getByText('{"ok":true}'));
+    fireEvent.click(screen.getByRole("combobox", { name: "Artifact type" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Text" }));
+    assert.ok(screen.getByText("result.json"));
+  });
 });
 
 function installDom() { const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" }); Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, HTMLInputElement: dom.window.HTMLInputElement, HTMLFormElement: dom.window.HTMLFormElement, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true }); Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator }); Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent }); if (!("scrollIntoView" in dom.window.HTMLElement.prototype)) Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} }); if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } }); }

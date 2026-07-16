@@ -93,7 +93,10 @@ export class FileService {
     }
     return withProjectFileLock(projectRoot, async () => {
       const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
-      const previous = await readOptionalRegularFile(absolutePath);
+      if (input.overwrite !== true && await regularFileExists(absolutePath)) {
+        throw new ProductError("Project file already exists", 409);
+      }
+      const previous = input.overwrite === true ? await readOptionalRegularFile(absolutePath) : null;
       await mkdir(path.dirname(absolutePath), { recursive: true });
       await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
       const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.tmp`);
@@ -139,37 +142,36 @@ export class FileService {
     }
 
     const entries = await readdir(absolutePath, { withFileTypes: true });
-    const resolvedEntries = await Promise.all(entries.map(async (entry): Promise<ProjectFileEntry | null> => {
+    const resolvedEntries: ProjectFileEntry[] = [];
+    for (const entry of entries) {
       const entryPath = path.posix.join(normalizedPath, entry.name);
       const entryStat = await lstat(path.join(absolutePath, entry.name));
       if (entryStat.isSymbolicLink()) {
-        return null;
+        continue;
       }
       if (entryStat.isDirectory()) {
-        return {
+        resolvedEntries.push({
           name: entry.name,
           path: entryPath,
           type: "directory",
           updatedAt: entryStat.mtime.toISOString()
-        };
+        });
+        continue;
       }
       if (entryStat.isFile()) {
-        const bytes = await readFile(path.join(absolutePath, entry.name));
-        return {
+        resolvedEntries.push({
           name: entry.name,
           path: entryPath,
           type: "file",
           size: entryStat.size,
-          mediaType: detectProjectFileMediaType(bytes, entryPath),
+          mediaType: projectFileMediaTypeFromName(entryPath),
           updatedAt: entryStat.mtime.toISOString()
-        };
+        });
       }
-      return null;
-    }));
+    }
 
     return {
       entries: resolvedEntries
-        .filter((entry): entry is ProjectFileEntry => entry !== null)
         .sort((left, right) => left.path.localeCompare(right.path))
     };
   }
@@ -298,6 +300,23 @@ export function detectProjectFileMediaType(bytes: Uint8Array, filename: string):
   return "text/plain";
 }
 
+function projectFileMediaTypeFromName(filename: string): string {
+  switch (path.posix.extname(filename).toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".webp": return "image/webp";
+    case ".json": return "application/json";
+    case ".csv": return "text/csv";
+    case ".md":
+    case ".markdown": return "text/markdown";
+    case ".txt":
+    case ".log": return "text/plain";
+    default: return "application/octet-stream";
+  }
+}
+
 function startsWith(bytes: Uint8Array, signature: number[]): boolean {
   return signature.every((value, index) => bytes[index] === value);
 }
@@ -329,6 +348,17 @@ async function readOptionalRegularFile(absolutePath: string): Promise<Buffer | n
     return readFile(absolutePath);
   } catch (error) {
     if (isNotFound(error)) return null;
+    throw error;
+  }
+}
+
+async function regularFileExists(absolutePath: string): Promise<boolean> {
+  try {
+    const entry = await lstat(absolutePath);
+    if (!entry.isFile()) throw new ProductError("Path is not a regular file");
+    return true;
+  } catch (error) {
+    if (isNotFound(error)) return false;
     throw error;
   }
 }

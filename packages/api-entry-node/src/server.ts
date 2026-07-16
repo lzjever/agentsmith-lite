@@ -556,9 +556,10 @@ async function routeApi(
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const filePath = requiredSearchParam(url, "path");
+        const overwrite = optionalBooleanSearchParam(url, "overwrite");
         const bytes = await readRawProjectFileBytes(req);
         const written = await services.files.uploadFileWithAccounting(projectRoot, {
-          path: filePath, bytes
+          path: filePath, bytes, overwrite
         }, {
           record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
         });
@@ -1368,6 +1369,13 @@ function requiredSearchParam(url: URL, name: string): string {
     throw new ProductError(`Missing ${name} query parameter`);
   }
   return value;
+}
+
+function optionalBooleanSearchParam(url: URL, name: string): boolean {
+  const value = url.searchParams.get(name);
+  if (value === null || value === "false") return false;
+  if (value === "true") return true;
+  throw new ProductError(`${name} query parameter must be true or false`);
 }
 
 interface OidcTransaction {

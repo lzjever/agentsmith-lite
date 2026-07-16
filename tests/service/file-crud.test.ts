@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -20,6 +20,10 @@ describe("file CRUD service", () => {
       });
       assert.equal(uploaded.path, "files/notes/plan.md");
       assert.deepEqual([...await readFile(path.join(root, "files", "notes", "plan.md"))], [...content]);
+      await assert.rejects(
+        () => service.uploadFile(root, { path: "files/notes/plan.md", bytes: Buffer.from("replacement") }),
+        (error) => productError(error, 409, /already exists/)
+      );
 
       const listed = await service.listFiles(root, "files");
       assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.path, entry.type]), [["notes", "files/notes", "directory"]]);
@@ -47,6 +51,22 @@ describe("file CRUD service", () => {
         () => service.uploadFile(root, { path: "files/too-large.bin", bytes: new Uint8Array(MAX_PROJECT_FILE_BYTES + 1) }),
         (error) => productError(error, 413, /Project file exceeds the .*byte limit/)
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists file metadata without hydrating file contents", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-metadata-"));
+    const filePath = path.join(root, "files", "large-notes.txt");
+    try {
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, "metadata only");
+      await chmod(filePath, 0o000);
+
+      const listed = await new FileService().listFiles(root);
+
+      assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.size, entry.mediaType]), [["large-notes.txt", 13, "text/plain"]]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -186,7 +206,7 @@ describe("file CRUD service", () => {
       await service.uploadFile(root, { path: "files/snapshot.txt", bytes: previous });
 
       let complete = false;
-      const upload = service.uploadFile(root, { path: "files/snapshot.txt", bytes: replacement }).finally(() => {
+      const upload = service.uploadFile(root, { path: "files/snapshot.txt", bytes: replacement, overwrite: true }).finally(() => {
         complete = true;
       });
       while (!complete) {
@@ -207,7 +227,7 @@ describe("file CRUD service", () => {
     try {
       await service.uploadFile(root, { path: "files/locked.txt", bytes: Buffer.from("before") });
       await assert.rejects(
-        () => service.uploadFileWithAccounting(root, { path: "files/locked.txt", bytes: Buffer.from("after") }, {
+        () => service.uploadFileWithAccounting(root, { path: "files/locked.txt", bytes: Buffer.from("after"), overwrite: true }, {
           record: async () => { throw new ProductError("Project project file bytes limit reached", 409); }
         }),
         /project file bytes limit reached/

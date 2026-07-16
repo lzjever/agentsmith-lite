@@ -247,12 +247,13 @@ export const apiClient = {
     return payload as {items:ProjectAuditEvent[];nextCursor:string|null};
   },
   files: (projectId: string, path = "files") => request<{ entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`),
-  async uploadFile(projectId: string, path: string, file: File): Promise<{ path: string; bytes: number }> {
+  async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean } = {}): Promise<{ path: string; bytes: number }> {
     if (!csrfToken) await apiClient.currentIdentity();
-    const response = await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`, {
+    const params = new URLSearchParams({ path, ...(options.overwrite ? { overwrite: "true" } : {}) });
+    const response = await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
       method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream" }, body: file
     });
-    if (!response.ok) throw new ApiError(response.status, (await response.text()) || response.statusText);
+    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.json() as Promise<{ path: string; bytes: number }>;
   },
   createTaskUrlInput: (projectId:string,url:string) => json<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",{url}),
