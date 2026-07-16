@@ -156,6 +156,30 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("closes lifecycle confirmation when streamed capabilities revoke access", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => snapshot(available);
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal, onEvent) => {
+      receive = onEvent;
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel task" }));
+      assert.ok(screen.getByRole("alertdialog", { name: "Cancel task?" }));
+      await waitFor(() => assert.ok(receive));
+      act(() => receive?.({ type: "state", queuedMessages: [], capabilities: { ...available, cancelTask: false } }));
+      assert.equal(screen.queryByRole("alertdialog", { name: "Cancel task?" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Cancel task" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("removes the cancel action when permission is revoked during cancellation", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, cancelTask: apiClient.cancelTask };
     let detailReads = 0;

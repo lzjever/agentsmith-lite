@@ -45,6 +45,12 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   const inputsLoadVersion = useRef(0);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
 
+  const applyCapabilities = useCallback((next: TaskCapabilities) => {
+    setCapabilities(next);
+    if (!next.cancelTask) setCancelOpen(false);
+    if (!next.deleteTask) setDeleteOpen(false);
+  }, []);
+
   const loadTask = useCallback(async (quiet = false) => {
     const version = ++taskLoadVersion.current;
     if (!quiet) setTaskState("loading");
@@ -53,14 +59,14 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
       const detail = await apiClient.taskDetail(taskId);
       if (version !== taskLoadVersion.current) return;
       setTask(detail.task);
-      setCapabilities(detail.capabilities);
+      applyCapabilities(detail.capabilities);
       setTaskState("ready");
     } catch (reason) {
       if (version !== taskLoadVersion.current) return;
       setTaskError(message(reason));
       if (!quiet) setTaskState("error");
     }
-  }, [taskId]);
+  }, [applyCapabilities, taskId]);
 
   const loadArtifacts = useCallback(async (quiet = false) => {
     const version = ++artifactsLoadVersion.current;
@@ -129,6 +135,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   }, [loadArtifacts]);
 
   async function cancelTask() {
+    if (!capabilities?.cancelTask || cancelling) return;
     setCancelling(true);
     try {
       await apiClient.cancelTask(taskId, mutationKeys.key("task-cancel", taskId));
@@ -147,6 +154,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     }
   }
   async function deleteTask() {
+    if (!capabilities?.deleteTask) return;
     try {
       await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
       mutationKeys.complete("task-delete", taskId);
@@ -179,7 +187,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     {finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}
     <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => { setTerminalMounted(false); setMode("conversation"); }}>Conversation</WorkspaceTab>{showTerminal ? <WorkspaceTab active={mode === "terminal"} onClick={() => { setTerminalMounted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</WorkspaceTab> : null}{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => { setTerminalMounted(false); setMode("artifacts"); }} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
     <div className="grid h-[clamp(24rem,calc(100dvh-12rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
-      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} onCapabilities={setCapabilities} onArtifactPublished={handleArtifactPublished} /></div>
+      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} onCapabilities={applyCapabilities} onArtifactPublished={handleArtifactPublished} /></div>
       {terminalMounted ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} /></div> : null}
       {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
