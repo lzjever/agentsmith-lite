@@ -4,7 +4,7 @@ import { ArrowRight, FolderKanban, NotebookTabs, Settings, Users } from "lucide-
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, apiClient, type Project, type Workspace, type WorkspaceMember } from "../../lib/api/client";
+import { ApiError, apiClient, type Project, type Workspace } from "../../lib/api/client";
 import { CreateProjectDialog } from "../projects/CreateProjectDialog";
 import { ProjectsTable } from "../projects/ProjectsTable";
 import { PageHeader } from "../layout/PageHeader";
@@ -17,11 +17,10 @@ import { EmptyState, PageLoading } from "../ui/loading";
 export function WorkspaceOverviewPage({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const [workspace, setWorkspace] = useState<Workspace>();
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const load = useCallback(async () => { setState("loading"); try { const found = (await apiClient.workspaces()).find((item) => item.id === workspaceId); if (!found) throw new ApiError(404, "Workspace not found."); const listed = await apiClient.workspaceMembers(workspaceId); setWorkspace(found); setMembers(listed); setError(""); setState("ready"); } catch (reason) { setError(reason instanceof ApiError ? reason.message : "Workspace could not be loaded."); setState("error"); } }, [workspaceId]);
+  const load = useCallback(async () => { setState("loading"); try { const found = (await apiClient.workspaces()).find((item) => item.id === workspaceId); if (!found) throw new ApiError(404, "Workspace not found."); setWorkspace(found); setError(""); setState("ready"); } catch (reason) { setError(reason instanceof ApiError ? reason.message : "Workspace could not be loaded."); setState("error"); } }, [workspaceId]);
   useEffect(() => { void load(); }, [load]);
   function created(project: Project) {
     setWorkspace((current) => current ? { ...current, projects: [...current.projects, project] } : current);
@@ -32,7 +31,7 @@ export function WorkspaceOverviewPage({ workspaceId }: { workspaceId: string }) 
   const canManage = workspace?.capabilities.canManageMembers === true;
   const canManageSettings = canManage || workspace?.memberRole === "owner";
   const base = `/workspaces/${workspaceId}`;
-  const owner = workspace?.owner ?? members.find((member) => member.userId === workspace?.ownerUserId);
+  const owner = workspace?.owner;
   return <PageLayout header={<PageHeader title={workspace?.name ?? "Workspace overview"} subtitle={workspace ? `Owner: ${memberLabel(owner)} · Your access: ${roleLabel(workspace.memberRole)}` : "Projects, shared context, and membership for this workspace."} actions={canCreate ? <Button onClick={() => setCreateOpen(true)}>New project</Button> : undefined} />}>
     {state === "loading" ? <PageState><PageLoading /></PageState> : null}
     {state === "error" ? <PageState><ErrorState title="Workspace unavailable" message={error} onRetry={() => void load()} /></PageState> : null}
@@ -44,5 +43,5 @@ export function WorkspaceOverviewPage({ workspaceId }: { workspaceId: string }) 
 function QuickLink({ href, icon: Icon, title, detail, action }: { href: string; icon: typeof Users; title: string; detail: string; action: string }) { return <Link href={href} className="group px-4 py-5 text-foreground no-underline hover:bg-surface-low"><Icon className="size-5 text-icon-default"/><h3 className="mt-3 font-medium">{title}</h3><p className="mt-1 text-sm text-secondary">{detail}</p><span className="mt-3 inline-flex items-center gap-1 text-sm text-secondary group-hover:text-foreground">{action}<ArrowRight size={14}/></span></Link>; }
 function formatDate(value: string): string { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value)); }
 function lifecycleLabel(status: Workspace["lifecycleStatus"]): string { const value = status ?? "active"; return value[0]!.toUpperCase() + value.slice(1); }
-function memberLabel(member: Pick<WorkspaceMember, "displayName" | "email" | "userId"> | { displayName: string | null; email: string } | undefined): string { return member?.displayName || member?.email || "Workspace owner"; }
+function memberLabel(member: { displayName: string | null; email: string } | undefined): string { return member?.displayName || member?.email || "Workspace owner"; }
 function roleLabel(role: Workspace["memberRole"]): string { return role ? role[0]!.toUpperCase() + role.slice(1) : "Member"; }
