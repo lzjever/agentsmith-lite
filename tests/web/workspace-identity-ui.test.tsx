@@ -53,10 +53,11 @@ describe("workspace identity UX", () => {
 
   it("uses the workspace list projection for owner and current access summaries", async () => {
     const original = apiClient.workspaces;
-    apiClient.workspaces = async () => [workspace];
+    apiClient.workspaces = async () => [{ ...workspace, lifecycleStatus: "archived" }];
     try {
       const directory = render(<WorkspaceDirectoryPage />);
       await screen.findByText("Owner: Owner Person · Your access: Viewer");
+      assert.ok(screen.getByText("Archived"));
       assert.equal(screen.queryByText("owner_1"), null);
       directory.unmount();
       render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);

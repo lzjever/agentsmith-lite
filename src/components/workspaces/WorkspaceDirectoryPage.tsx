@@ -8,6 +8,7 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { EmptyState, PageLoading } from "../ui/loading";
@@ -46,7 +47,13 @@ export function WorkspaceDirectoryPage() {
 }
 
 function WorkspaceList({ workspaces }: { workspaces: Workspace[] }) {
-  return <div className="divide-y divide-subtle border-y border-subtle">{workspaces.map((workspace) => <Link key={workspace.id} href={`/workspaces/${workspace.id}`} className="group flex items-center justify-between gap-5 px-2 py-5 text-decoration-none transition-colors hover:bg-surface-low"><div className="flex min-w-0 items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-sm bg-surface-high text-icon-default"><FolderKanban size={18} /></span><span className="min-w-0"><strong className="block truncate font-medium text-foreground">{workspace.name}</strong><small className="mt-1 block text-secondary">{workspace.projects.length} {workspace.projects.length === 1 ? "project" : "projects"}</small><small className="mt-1 block truncate text-tertiary">Owner: {workspaceOwnerLabel(workspace)} · Your access: {roleLabel(workspace.memberRole)}</small></span></div><span className="text-sm text-tertiary transition-colors group-hover:text-foreground">Open</span></Link>)}</div>;
+  return <div className="divide-y divide-subtle border-y border-subtle">{workspaces.map((workspace) => <Link key={workspace.id} href={`/workspaces/${workspace.id}`} className="group flex items-center justify-between gap-5 px-2 py-5 text-decoration-none transition-colors hover:bg-surface-low"><div className="flex min-w-0 items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-sm bg-surface-high text-icon-default"><FolderKanban size={18} /></span><span className="min-w-0"><span className="flex min-w-0 items-center gap-2"><strong className="truncate font-medium text-foreground">{workspace.name}</strong><WorkspaceLifecycleBadge workspace={workspace} /></span><small className="mt-1 block text-secondary">{workspace.projects.length} {workspace.projects.length === 1 ? "project" : "projects"}</small><small className="mt-1 block truncate text-tertiary">Owner: {workspaceOwnerLabel(workspace)} · Your access: {roleLabel(workspace.memberRole)}</small></span></div><span className="text-sm text-tertiary transition-colors group-hover:text-foreground">{workspace.lifecycleStatus && workspace.lifecycleStatus !== "active" ? "View" : "Open"}</span></Link>)}</div>;
+}
+
+function WorkspaceLifecycleBadge({ workspace }: { workspace: Workspace }) {
+  const status = workspace.lifecycleStatus ?? "active";
+  if (status === "active") return null;
+  return <Badge className="shrink-0" variant={status === "archived" ? "warning" : "destructive"}>{status[0]!.toUpperCase() + status.slice(1)}</Badge>;
 }
 
 function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
