@@ -20,6 +20,28 @@ const endpoint: Endpoint = { id: "endpoint_1", projectId, name: "Primary", proto
 afterEach(() => cleanup());
 
 describe("project resource pages", () => {
+  it("only saves a changed resource policy and becomes clean after success", async () => {
+    const original = snapshotClient();
+    const updates: ProjectPolicyInput[] = [];
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async (_projectId, input) => {
+      updates.push(input);
+      return { ...policy, ...input, updatedAt: "2026-07-12T00:00:00.000Z" };
+    };
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      const save = await screen.findByRole("button", { name: "Save policy" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      assert.equal(save.disabled, false);
+      fireEvent.click(save);
+      await waitFor(() => assert.equal(updates.length, 1));
+      await waitFor(() => assert.equal(save.disabled, true));
+    } finally { restoreClient(original); }
+  });
+
   it("keeps the newest resource policy refresh", async () => {
     const original = snapshotClient();
     const resolvers: Array<(value: ProjectResourcePolicy) => void> = [];
@@ -69,7 +91,8 @@ describe("project resource pages", () => {
     apiClient.updatePolicy = async () => new Promise((resolve) => { resolveSave = resolve; });
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
-      fireEvent.click(await screen.findByRole("button", { name:"Save policy" }));
+      fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name:"Save policy" }));
       await waitFor(() => assert.ok(resolveSave));
       const refresh = screen.getByRole("button", { name:"Refresh policy" }) as HTMLButtonElement;
       assert.equal(refresh.disabled, true);
@@ -118,7 +141,7 @@ describe("project resource pages", () => {
     apiClient.updatePolicy = async () => { throw new ApiError(403, "forbidden"); };
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
-      await screen.findByRole("button", { name: "Save policy" });
+      fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await screen.findByRole("alert");
       assert.equal(screen.queryByRole("button", { name: "Save policy" }), null);
@@ -161,7 +184,7 @@ describe("project resource pages", () => {
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
       await screen.findByText(/Endpoint windows could not be loaded/);
-      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), false);
+      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), true);
       fireEvent.change(screen.getByRole("spinbutton", { name: "Active tasks" }), { target: { value: "6" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 1));
@@ -172,10 +195,11 @@ describe("project resource pages", () => {
       await waitFor(() => assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "7"));
       assert.equal((screen.getByRole("spinbutton", { name: "Primary Requests limit" }) as HTMLInputElement).value, "9");
       assert.equal((screen.getByRole("combobox", { name: "Primary Requests window" }) as HTMLSelectElement).value, "86400");
-      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), false);
+      assert.equal(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled"), true);
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Primary Requests limit" }), { target: { value: "10" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 2));
-      assert.deepEqual(updates[1]?.endpointWindows, refreshed.endpointWindows);
+      assert.deepEqual(updates[1]?.endpointWindows, [{ ...refreshed.endpointWindows[0]!, limit: 10 }]);
     } finally { restoreClient(original); }
   });
 

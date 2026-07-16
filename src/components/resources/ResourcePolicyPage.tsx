@@ -100,9 +100,10 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     void load();
   }, [load]);
   const canManage = caps?.canManagePolicy === true;
+  const dirty = Boolean(policy && draft && !samePolicyDraft(draft, policyDraft(policy)));
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft || draft.activeTasksLimit === null) return;
+    if (!draft || draft.activeTasksLimit === null || !dirty) return;
     const input: ProjectPolicyInput = { ...draft, activeTasksLimit: draft.activeTasksLimit };
     loadRequest.current += 1;
     setSaving(true);
@@ -324,7 +325,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <div className="flex justify-end">
               <Button
                 type="submit"
-                disabled={saving}
+                disabled={saving || !dirty || draft.activeTasksLimit === null}
               >
                 <Save size={16} />
                 {saving ? "Saving..." : "Save policy"}
@@ -355,6 +356,25 @@ function policyDraft(policy: ProjectResourcePolicy): PolicyDraft {
     projectFileBytesLimit: policy.projectFileBytesLimit,
     endpointWindows: policy.endpointWindows ?? [],
   };
+}
+
+function samePolicyDraft(left: PolicyDraft, right: PolicyDraft): boolean {
+  if (
+    left.activeTasksLimit !== right.activeTasksLimit ||
+    left.providerRequestsLimit !== right.providerRequestsLimit ||
+    left.providerTokensLimit !== right.providerTokensLimit ||
+    left.providerCostLimit !== right.providerCostLimit ||
+    left.projectFileBytesLimit !== right.projectFileBytesLimit
+  ) return false;
+  const ordered = (windows: EndpointWindow[]) => [...windows].sort((a, b) =>
+    a.endpointId.localeCompare(b.endpointId) || a.metric.localeCompare(b.metric),
+  );
+  const leftWindows = ordered(left.endpointWindows);
+  const rightWindows = ordered(right.endpointWindows);
+  return leftWindows.length === rightWindows.length && leftWindows.every((window, index) => {
+    const other = rightWindows[index];
+    return other !== undefined && window.endpointId === other.endpointId && window.metric === other.metric && window.limit === other.limit && window.windowSeconds === other.windowSeconds;
+  });
 }
 
 function numberOrNull(value: string): number | null {
