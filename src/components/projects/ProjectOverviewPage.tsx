@@ -2,7 +2,7 @@
 
 import { ArrowLeft, ArrowRight, Bell, ClipboardList, FileKey, FileText, Gauge, MessageSquare, Server, Settings, SlidersHorizontal, Users, Wrench, type LucideIcon } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type ProjectMember, type ProjectOverview, type ProjectOverviewAction } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -26,22 +26,33 @@ const actionSteps: Record<ProjectOverviewAction, NextStep> = {
 };
 
 export function ProjectOverviewPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  return <ProjectOverviewProjectPage key={`${workspaceId}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
+}
+
+function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  const active = useRef(true);
   const base = `/workspaces/${workspaceId}/projects/${projectId}`;
   const [overview, setOverview] = useState<ProjectOverview>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const load = useCallback(async () => {
     setState("loading");
+    setOverview(undefined);
     try {
-      setOverview(await apiClient.projectOverview(projectId));
+      const projected = await apiClient.projectOverview(projectId);
+      if (!active.current) return;
+      if (projected.project.id !== projectId || projected.project.workspaceId !== workspaceId) throw new ApiError(404, "This project does not belong to this workspace.");
+      setOverview(projected);
       setError("");
       setState("ready");
     } catch (reason) {
+      if (!active.current) return;
       setOverview(undefined);
       setError(reason instanceof ApiError ? reason.message : "Project overview could not be loaded.");
       setState("error");
     }
-  }, [projectId]);
+  }, [projectId, workspaceId]);
   useEffect(() => { void load(); }, [load]);
 
   const steps = overview?.recommendedActions.map((action) => actionSteps[action]) ?? [];

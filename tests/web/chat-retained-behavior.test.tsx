@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatThread } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatThread, type ProjectOverview } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
@@ -97,6 +97,40 @@ describe("retained chat and overview behavior", () => {
       assert.equal(reads, 2);
       assert.ok(screen.getByRole("link",{name:"Open Start a chat"}));
       assert.equal(screen.queryByRole("link",{name:/Configure an endpoint/}),null);
+    } finally {
+      apiClient.projectOverview = original;
+    }
+  });
+
+  it("keeps a late project overview response out of the next project", async () => {
+    const original = apiClient.projectOverview;
+    let finishProjectOne!: (value: ProjectOverview) => void;
+    let projectOneStarted = false;
+    const projectOne = overviewProjection("project_1", "workspace_1", "Owner One");
+    const projectTwo = overviewProjection("project_2", "workspace_2", "Owner Two");
+    apiClient.projectOverview = async (projectId) => projectId === "project_1" ? new Promise((resolve) => { projectOneStarted = true; finishProjectOne = resolve; }) : projectTwo;
+    try {
+      const view = render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
+      await waitFor(() => assert.equal(projectOneStarted, true));
+      view.rerender(<ProjectOverviewPage workspaceId="workspace_2" projectId="project_2" />);
+      await screen.findByText(/Owner: Owner Two/);
+      await act(async () => finishProjectOne(projectOne));
+      assert.ok(screen.getByText(/Owner: Owner Two/));
+      assert.equal(screen.queryByText(/Owner: Owner One/), null);
+      assert.equal(screen.getByRole("link", { name: "Back to workspace" }).getAttribute("href"), "/workspaces/workspace_2");
+    } finally {
+      apiClient.projectOverview = original;
+    }
+  });
+
+  it("rejects a project overview projected for a different workspace", async () => {
+    const original = apiClient.projectOverview;
+    apiClient.projectOverview = async () => overviewProjection("project_1", "workspace_other", "Wrong workspace owner");
+    try {
+      render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
+      await screen.findByText("This project does not belong to this workspace.");
+      assert.equal(screen.queryByRole("link", { name: "Back to workspace" }), null);
+      assert.equal(screen.queryByText(/Wrong workspace owner/), null);
     } finally {
       apiClient.projectOverview = original;
     }
@@ -393,6 +427,10 @@ describe("retained chat and overview behavior", () => {
     }
   });
 });
+
+function overviewProjection(projectId: string, workspaceId: string, ownerName: string): ProjectOverview {
+  return { project: { id: projectId, workspaceId, name: `Project ${projectId}`, lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: readOnly, owner: { displayName: ownerName, email: `${projectId}@example.test` }, memberRole: "viewer", chatReadyEndpointCount: 0, taskReadyEndpointCount: 0, recommendedActions: [] };
+}
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
