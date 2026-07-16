@@ -16,6 +16,11 @@ type LoadStatus = "loading" | "ready" | "error";
 type MessageStatus = "idle" | LoadStatus;
 
 export function ProjectChatPage({ projectId }: { projectId: string }) {
+  return <ProjectChatProjectPage key={projectId} projectId={projectId} />;
+}
+
+function ProjectChatProjectPage({ projectId }: { projectId: string }) {
+  const active = useRef(true);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [endpointsStatus, setEndpointsStatus] = useState<LoadStatus>("loading");
   const [endpointsError, setEndpointsError] = useState("");
@@ -41,19 +46,27 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   const messageLoadVersion = useRef(0);
   const loadedThreadId = useRef("");
 
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+      streamAbort.current?.abort();
+    };
+  }, []);
+
   const loadEndpoints = useCallback(async () => {
     const version = ++endpointLoadVersion.current;
     setEndpointsStatus("loading");
     try {
       const available = await apiClient.endpoints(projectId);
-      if (version !== endpointLoadVersion.current) return;
+      if (!active.current || version !== endpointLoadVersion.current) return;
       setEndpoints(available);
       const compatible = available.filter(isChatCompatibleEndpoint);
       setEndpointId((current) => compatible.some((endpoint) => endpoint.id === current) ? current : (compatible[0]?.id ?? ""));
       setEndpointsError("");
       setEndpointsStatus("ready");
     } catch (reason) {
-      if (version !== endpointLoadVersion.current) return;
+      if (!active.current || version !== endpointLoadVersion.current) return;
       setEndpointsError(message(reason));
       setEndpointsStatus("error");
     }
@@ -64,12 +77,12 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     setCapabilitiesStatus("loading");
     try {
       const projected = await apiClient.projectCapabilities(projectId);
-      if (version !== capabilitiesLoadVersion.current) return;
+      if (!active.current || version !== capabilitiesLoadVersion.current) return;
       setCapabilities(projected);
       setCapabilitiesError("");
       setCapabilitiesStatus("ready");
     } catch (reason) {
-      if (version !== capabilitiesLoadVersion.current) return;
+      if (!active.current || version !== capabilitiesLoadVersion.current) return;
       setCapabilitiesError(message(reason));
       setCapabilitiesStatus("error");
     }
@@ -80,13 +93,13 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     setThreadsStatus("loading");
     try {
       const savedThreads = await apiClient.chatThreads(projectId);
-      if (version !== threadLoadVersion.current) return;
+      if (!active.current || version !== threadLoadVersion.current) return;
       setThreads(savedThreads);
       setThreadId((current) => savedThreads.some((thread) => thread.id === current) ? current : (savedThreads[0]?.id ?? ""));
       setThreadsError("");
       setThreadsStatus("ready");
     } catch (reason) {
-      if (version !== threadLoadVersion.current) return;
+      if (!active.current || version !== threadLoadVersion.current) return;
       setThreadsError(message(reason));
       setThreadsStatus("error");
     }
@@ -106,13 +119,13 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     setMessagesStatus("loading");
     try {
       const saved = await apiClient.chatMessages(projectId, nextThreadId);
-      if (version !== messageLoadVersion.current) return false;
+      if (!active.current || version !== messageLoadVersion.current) return false;
       loadedThreadId.current = nextThreadId;
       setMessages(saved);
       setMessagesStatus("ready");
       return true;
     } catch (reason) {
-      if (version !== messageLoadVersion.current) return false;
+      if (!active.current || version !== messageLoadVersion.current) return false;
       setMessagesError(message(reason));
       setMessagesStatus("error");
       return false;
@@ -156,10 +169,12 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     setActionError("");
     try {
       const created = await apiClient.createChatThread(projectId, endpointId);
+      if (!active.current) return false;
       setThreads((current) => orderedThreads([created, ...current]));
       setThreadId(created.id);
       return true;
     } catch (reason) {
+      if (!active.current) return false;
       return failAction(reason);
     }
   }
@@ -180,9 +195,11 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }) {
     try {
       const saved = await apiClient.updateChatThread(projectId, id, input);
+      if (!active.current) return;
       setThreads((current) => orderedThreads(current.map((thread) => thread.id === id ? saved : thread)));
       setActionError("");
     } catch (reason) {
+      if (!active.current) return;
       failAction(reason);
     }
   }
@@ -190,6 +207,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   async function removeThread(id: string) {
     try {
       await apiClient.deleteChatThread(projectId, id);
+      if (!active.current) return;
       const remaining = threads.filter((thread) => thread.id !== id);
       setThreads(remaining);
       setActionError("");
@@ -206,6 +224,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
       setThreadId(next.id);
       setEndpointId(next.endpointId ?? "");
     } catch (reason) {
+      if (!active.current) return;
       failAction(reason);
     }
   }
@@ -231,11 +250,14 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     try {
       const controller = new AbortController();
       streamAbort.current = controller;
-      await apiClient.sendChatMessage(projectId, threadId, content, afterMessageId, controller.signal, (delta) => appendStreamDelta(threadId, delta, setMessages));
+      await apiClient.sendChatMessage(projectId, threadId, content, afterMessageId, controller.signal, (delta) => { if (active.current) appendStreamDelta(threadId, delta, setMessages); });
+      if (!active.current) return true;
       await loadMessages(threadId);
+      if (!active.current) return true;
       void loadThreads();
       return true;
     } catch (reason) {
+      if (!active.current) return true;
       const stopped = isAbort(reason);
       setMessages((current) => current.filter((item) => item.id !== `stream-${threadId}`));
       await loadMessages(threadId);
@@ -243,16 +265,19 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
       return failAction(reason);
     } finally {
       streamAbort.current = null;
-      setSending(false);
+      if (active.current) setSending(false);
     }
   }
 
   async function editMessage(target: ProjectChatMessage, content: string) {
     try {
       await apiClient.editChatMessage(projectId, threadId, target.id, { content, expectedVersion: target.version });
+      if (!active.current) return;
       await loadMessages(threadId);
+      if (!active.current) return;
       toast.success("Message updated");
     } catch (reason) {
+      if (!active.current) return;
       failAction(reason);
     }
   }
@@ -260,9 +285,12 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   async function deleteMessage(target: ProjectChatMessage) {
     try {
       await apiClient.deleteChatMessage(projectId, threadId, target.id, target.version);
+      if (!active.current) return;
       await loadMessages(threadId);
+      if (!active.current) return;
       toast.success("Message deleted");
     } catch (reason) {
+      if (!active.current) return;
       failAction(reason);
     }
   }
@@ -270,6 +298,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   async function branchMessage(target: ProjectChatMessage) {
     try {
       const branch = await apiClient.branchChatMessage(projectId, threadId, target.id, target.version);
+      if (!active.current) return;
       setThreads((current) => orderedThreads([branch, ...current]));
       ++messageLoadVersion.current;
       setMessages([]);
@@ -280,6 +309,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
       setActionError("");
       toast.success("Conversation branched");
     } catch (reason) {
+      if (!active.current) return;
       failAction(reason);
     }
   }
@@ -291,20 +321,24 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     const controller = new AbortController();
     streamAbort.current = controller;
     try {
-      await apiClient.retryChatMessage(projectId, threadId, target.id, target.version, controller.signal, (delta) => appendStreamDelta(threadId, delta, setMessages));
+      await apiClient.retryChatMessage(projectId, threadId, target.id, target.version, controller.signal, (delta) => { if (active.current) appendStreamDelta(threadId, delta, setMessages); });
+      if (!active.current) return;
       await loadMessages(threadId);
+      if (!active.current) return;
       void loadThreads();
     } catch (reason) {
+      if (!active.current) return;
       setMessages((current) => current.filter((item) => item.id !== `stream-${threadId}`));
       await loadMessages(threadId);
       if (!isAbort(reason)) failAction(reason);
     } finally {
       streamAbort.current = null;
-      setSending(false);
+      if (active.current) setSending(false);
     }
   }
 
   function failAction(reason: unknown): false {
+    if (!active.current) return false;
     const detail = message(reason);
     if (reason instanceof ApiError && reason.status === 403) {
       setCapabilities((current) => current ? { ...current, canSendChat: false } : current);

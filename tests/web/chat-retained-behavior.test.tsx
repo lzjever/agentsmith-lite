@@ -119,6 +119,35 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("aborts and clears a project stream when the user switches projects", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
+    let activeSignal: AbortSignal | undefined;
+    apiClient.endpoints = async (projectId) => projectId === "project_1" ? [endpoint] : [];
+    apiClient.projectCapabilities = async (projectId) => ({ ...readOnly, canSendChat: projectId === "project_1" });
+    apiClient.chatThreads = async (projectId) => projectId === "project_1" ? threads : [];
+    apiClient.chatMessages = async () => [];
+    apiClient.sendChatMessage = async (_projectId, _threadId, _content, _afterMessageId, signal, onDelta) => {
+      activeSignal = signal;
+      onDelta("Project one partial response");
+      return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+    };
+    try {
+      const view = render(<ProjectChatPage projectId="project_1" />);
+      const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      await waitFor(() => assert.equal(composer.disabled, false));
+      fireEvent.change(composer, { target: { value: "Project one question" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await screen.findByText("Project one partial response");
+      await act(async () => { view.rerender(<ProjectChatPage projectId="project_2" />); await Promise.resolve(); });
+      assert.equal(activeSignal?.aborted, true);
+      assert.equal(screen.queryByText("Project one partial response"), null);
+      assert.ok(screen.getByText("No conversation selected"));
+      await screen.findByText("Your project access is read-only.");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the newest endpoints, access, and conversations after overlapping refreshes", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
     const latestEndpoint = { ...endpoint, id: "endpoint_latest", name: "Latest endpoint" };
