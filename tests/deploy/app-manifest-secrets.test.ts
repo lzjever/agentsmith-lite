@@ -21,6 +21,20 @@ function renderAppManifests(input: Parameters<typeof renderAppManifestResources>
 }
 
 describe("app manifest rendering", () => {
+  it("assigns every resource to one deploy phase and keeps deployments behind migration", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: { POSTGRES_APP_URL: "postgresql://app:secret@postgres/agentsmith" }
+    });
+    for (const manifest of manifests) {
+      const phase = manifest.metadata.labels?.["agentsmith-lite.io/deploy-phase"];
+      assert.ok(["base", "migration", "workload"].includes(phase ?? ""));
+      assert.equal(phase, manifest.kind === "Job" ? "migration" : manifest.kind === "Deployment" ? "workload" : "base");
+    }
+  });
+
   it("requires explicit complete OIDC configuration for production manifests", () => {
     const baseInput = {
       namespace: "agentsmith",

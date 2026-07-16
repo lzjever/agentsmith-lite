@@ -4,6 +4,7 @@ import type { AppImageRefs } from "./appImageLock.js";
 
 const MODEL_CA_BUNDLE_PATH = "/etc/agentsmith-lite/model-ca/ca.crt";
 const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
+const DEPLOY_PHASE_LABEL = "agentsmith-lite.io/deploy-phase";
 export const APP_KUBERNETES_SERVICE_NAME = "agentsmith-lite-api";
 export const APP_KUBERNETES_SERVICE_PORT = 80;
 export const APP_KUBERNETES_CONTAINER_PORT = 3000;
@@ -53,7 +54,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   const runnerImage = input.imageRefs?.botifiedRunner ?? input.env.BOTIFIED_RUNNER_IMAGE ?? `agentsmith-lite/botified-runner:${input.imageTag}`;
   const ingress = renderAppIngress(input, parsedPublicBaseUrl, publicBasePath, labels);
 
-  return [
+  const resources: KubernetesResource[] = [
     {
       apiVersion: "v1",
       kind: "ConfigMap",
@@ -296,6 +297,16 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     }
   ];
+  return resources.map((resource) => ({
+    ...resource,
+    metadata: {
+      ...resource.metadata,
+      labels: {
+        ...resource.metadata.labels,
+        [DEPLOY_PHASE_LABEL]: resource.kind === "Job" ? "migration" : resource.kind === "Deployment" ? "workload" : "base"
+      }
+    }
+  }));
 }
 
 function resolveAppDataRoot(env: Record<string, string>): string {

@@ -14,6 +14,7 @@ export const APP_DEPLOY_API_DEPLOYMENT = "agentsmith-lite-api";
 export const APP_DEPLOY_WEB_DEPLOYMENT = "agentsmith-lite-web";
 export const DEFAULT_APP_DEPLOY_NAMESPACE = "agentsmith";
 export const DEFAULT_APP_DEPLOY_TIMEOUT = "300s";
+export const APP_DEPLOY_PHASE_LABEL = "agentsmith-lite.io/deploy-phase";
 
 export function createAppDeployPlan(input: AppDeployPlanInput): KubectlCommand[] {
   const timeout = input.timeout ?? DEFAULT_APP_DEPLOY_TIMEOUT;
@@ -21,11 +22,17 @@ export function createAppDeployPlan(input: AppDeployPlanInput): KubectlCommand[]
 
   return [
     kubectl(globalArgs, ["delete", `job/${APP_DEPLOY_SCHEMA_BOOTSTRAP_JOB}`, "--ignore-not-found"]),
-    kubectl(globalArgs, ["apply", "-f", input.out]),
+    applyPhase(globalArgs, input.out, "base"),
+    applyPhase(globalArgs, input.out, "migration"),
     kubectl(globalArgs, ["wait", "--for=condition=complete", `job/${APP_DEPLOY_SCHEMA_BOOTSTRAP_JOB}`, `--timeout=${timeout}`]),
+    applyPhase(globalArgs, input.out, "workload"),
     kubectl(globalArgs, ["rollout", "status", `deploy/${APP_DEPLOY_API_DEPLOYMENT}`, `--timeout=${timeout}`]),
     kubectl(globalArgs, ["rollout", "status", `deploy/${APP_DEPLOY_WEB_DEPLOYMENT}`, `--timeout=${timeout}`])
   ];
+}
+
+function applyPhase(globalArgs: string[], out: string, phase: "base" | "migration" | "workload"): KubectlCommand {
+  return kubectl(globalArgs, ["apply", "-f", out, "--selector", `${APP_DEPLOY_PHASE_LABEL}=${phase}`]);
 }
 
 export function formatKubectlCommand(command: KubectlCommand): string {
