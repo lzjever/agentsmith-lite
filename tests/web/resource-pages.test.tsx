@@ -153,6 +153,7 @@ describe("project resource pages", () => {
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
+      assert.equal(queries.at(-1)?.resourceId, "alert_1");
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
       assert.ok(await screen.findByRole("option", { name: "chat.message.send" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));

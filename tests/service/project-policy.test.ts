@@ -296,6 +296,24 @@ describe("project resource policy", () => {
     assert.equal(membershipReads, 1);
     assert.deepEqual(events.map((event) => [event.actorId, event.actorDisplayName, event.actorEmail]), [["former_user", null, null],[user.id, "Policy Owner", user.email]]);
   });
+
+  it("filters an exact audit resource before applying pagination", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-audit-resource", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    for (let index = 0; index < 25; index += 1) {
+      await store.appendProjectAuditEvent({ id: `newer_${index}`, projectId: project.id, actorId: null, action: "task.completed", status: "accepted", resourceKind: "task", resourceId: `task_${index}`, createdAt: new Date(Date.UTC(2026, 6, 12, 0, 0, index + 1)).toISOString() });
+    }
+    await store.appendProjectAuditEvent({ id: "target", projectId: project.id, actorId: null, action: "alert.resolve", status: "accepted", resourceKind: "alert", resourceId: "alert_target", createdAt: "2026-07-12T00:00:00.000Z" });
+    await store.appendProjectAuditEvent({ id: "other_alert", projectId: project.id, actorId: null, action: "alert.resolve", status: "accepted", resourceKind: "alert", resourceId: "alert_other", createdAt: "2026-07-12T00:00:01.000Z" });
+
+    const page = await services.policies.audit(user.id, project.id, { limit: 20, resourceKind: "alert", resourceId: "alert_target" });
+
+    assert.deepEqual(page.items.map((event) => event.id), ["target"]);
+    assert.equal(page.nextCursor, null);
+  });
 });
 
 async function sendThreadMessage(services: ReturnType<typeof createApplicationServices>, userId: string, projectId: string, endpointId: string, content: string) {

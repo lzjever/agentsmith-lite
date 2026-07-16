@@ -36,6 +36,9 @@ describe("PATCH project policy", () => {
       assert.equal(auditResponse.status, 200);
       const audit = await auditResponse.json() as {items:Array<{ actorDisplayName: string | null; actorEmail: string | null; actorId: string | null }>};
       assert.deepEqual([audit.items[0]?.actorDisplayName, audit.items[0]?.actorEmail], ["Policy Owner", "admin@agentsmith-lite.local"]);
+      const missingResourceAudit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit?resourceId=missing`, { headers: { cookie } });
+      assert.equal(missingResourceAudit.status, 200);
+      assert.deepEqual((await missingResourceAudit.json() as { items: unknown[] }).items, []);
     } finally {
       await api.close();
       await rm(dataRoot, { recursive: true, force: true });

@@ -130,14 +130,11 @@ export function AuditPage({ projectId }: { projectId: string }) {
         action: action === "all" ? undefined : action,
         status: status === "all" ? undefined : status,
         resourceKind: kind === "all" ? undefined : kind,
+        resourceId: resourceId || undefined,
         from: from ? new Date(from).toISOString() : undefined,
         to: to ? new Date(to).toISOString() : undefined,
       });
-      setItems(
-        resourceId
-          ? page.items.filter((event) => event.resourceId === resourceId)
-          : page.items,
-      );
+      setItems(page.items);
       setNext(page.nextCursor);
       setState("ready");
     } catch {

@@ -84,6 +84,20 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual(await store.listProjectAuditEvents("proj_project_delete"),[]);
   });
 
+  it("filters project audit events by exact resource before pagination", async () => {
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    await store.createUser({ id:"user_audit_resource",email:"audit-resource@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"ws_audit_resource",name:"Audit resource",ownerUserId:"user_audit_resource",createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"proj_audit_resource",workspaceId:"ws_audit_resource",name:"Audit resource",ownerUserId:"user_audit_resource",rootPath:"workspaces/ws_audit_resource/projects/proj_audit_resource",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    await store.appendProjectAuditEvent({id:"audit_resource_target",projectId:"proj_audit_resource",actorId:null,action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:"alert_target",createdAt:timestamp});
+    await store.appendProjectAuditEvent({id:"audit_resource_other",projectId:"proj_audit_resource",actorId:null,action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:"alert_other",createdAt:"2026-07-15T00:00:01.000Z"});
+
+    const page = await store.queryProjectAuditEvents("proj_audit_resource", { limit:1,resourceKind:"alert",resourceId:"alert_target" });
+
+    assert.deepEqual(page.items.map((event) => event.id), ["audit_resource_target"]);
+    assert.equal(page.nextCursor, null);
+  });
+
   it("initializes a new task interaction snapshot with complete history", async () => {
     const timestamp = "2026-07-13T00:00:00.000Z";
     await store.createUser({ id: "user_interaction_sync", email: "interaction-sync@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
