@@ -6,7 +6,7 @@ import React from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMember } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { WorkspaceDirectoryPage } = await import("../../src/components/workspaces/WorkspaceDirectoryPage.js");
 const { WorkspaceProjectsEntryPage } = await import("../../src/components/workspaces/WorkspaceProjectsEntryPage.js");
 const { WorkspaceMembersPage } = await import("../../src/components/workspaces/WorkspaceMembersPage.js");
@@ -18,6 +18,39 @@ const owner: WorkspaceMember = { workspaceId: workspace.id, userId: "owner_1", r
 afterEach(() => cleanup());
 
 describe("workspace identity UX", () => {
+  it("waits for the workspace directory before allowing creation", async () => {
+    const original = apiClient.workspaces;
+    let finishLoad!: (value: Workspace[]) => void;
+    apiClient.workspaces = async () => new Promise((resolve) => { finishLoad = resolve; });
+    try {
+      render(<WorkspaceDirectoryPage />);
+      const create = screen.getByRole("button", { name: "New workspace" }) as HTMLButtonElement;
+      assert.equal(create.disabled, true);
+      await act(async () => finishLoad([workspace]));
+      await screen.findByText("Workspace");
+      assert.equal(create.disabled, false);
+    } finally { apiClient.workspaces = original; }
+  });
+
+  it("ignores a late project directory load after switching workspaces", async () => {
+    const original = apiClient.workspaces;
+    const secondProject = { id: "project_2", workspaceId: "workspace_2", name: "Second project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
+    const second = { ...workspace, id: "workspace_2", name: "Second workspace", owner: { displayName: "Second Owner", email: "second@example.test" }, projects: [secondProject] };
+    let finishFirst!: (value: Workspace[]) => void;
+    let reads = 0;
+    apiClient.workspaces = async () => ++reads === 1 ? new Promise((resolve) => { finishFirst = resolve; }) : [second];
+    try {
+      const view = render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      await waitFor(() => assert.equal(reads, 1));
+      view.rerender(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId="workspace_2" /></AppRouterContext.Provider>);
+      await screen.findAllByText("Second project");
+      await act(async () => finishFirst([workspace]));
+      assert.ok(screen.getAllByText("Second project").length > 0);
+      assert.equal(screen.queryByText("Workspace"), null);
+      assert.ok(screen.getByText("Owner: Second Owner · Your access: Viewer"));
+    } finally { apiClient.workspaces = original; }
+  });
+
   it("uses the workspace list projection for owner and current access summaries", async () => {
     const original = apiClient.workspaces;
     apiClient.workspaces = async () => [workspace];
@@ -139,6 +172,30 @@ describe("workspace identity UX", () => {
       fireEvent.change(screen.getByLabelText("Project name"), { target: { value: created.name } });
       fireEvent.click(screen.getByRole("button", { name: "Create project" }));
       await waitFor(() => assert.deepEqual(pushed, [`/workspaces/${workspace.id}/projects/${created.id}/overview`]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("does not enter a project created for a workspace the user has left", async () => {
+    const original = { workspaces: apiClient.workspaces, createProject: apiClient.createProject };
+    const pushed: string[] = [];
+    const first = { ...workspace, capabilities: { canCreateProject: true, canManageMembers: true } };
+    const second = { ...first, id: "workspace_2", name: "Second workspace", projects: [] };
+    const created = { id: "project_late", workspaceId: workspace.id, name: "Late project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
+    let finishCreate!: (value: typeof created) => void;
+    let createStarted = false;
+    apiClient.workspaces = async () => [first, second];
+    apiClient.createProject = async () => { createStarted = true; return new Promise((resolve) => { finishCreate = resolve; }); };
+    try {
+      const view = render(<AppRouterContext.Provider value={router(pushed)}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
+      fireEvent.click(await within(screen.getByTestId("page-layout__header")).findByRole("button", { name: "New project" }));
+      fireEvent.change(screen.getByLabelText("Project name"), { target: { value: created.name } });
+      fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+      await waitFor(() => assert.equal(createStarted, true));
+      view.rerender(<AppRouterContext.Provider value={router(pushed)}><WorkspaceProjectsEntryPage workspaceId={second.id} /></AppRouterContext.Provider>);
+      await screen.findByRole("heading", { name: second.name });
+      await act(async () => finishCreate(created));
+      assert.deepEqual(pushed, []);
+      assert.ok(screen.getByRole("heading", { name: second.name }));
     } finally { Object.assign(apiClient, original); }
   });
 

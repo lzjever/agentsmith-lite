@@ -36,7 +36,7 @@ export function WorkspaceDirectoryPage() {
 
   useEffect(() => { void load(); }, []);
 
-  return <PageLayout header={<PageHeader title="Workspaces" subtitle="Choose a workspace to continue into its projects." actions={<Button onClick={() => setCreateOpen(true)}><Plus size={16} />New workspace</Button>} />}>
+  return <PageLayout header={<PageHeader title="Workspaces" subtitle="Choose a workspace to continue into its projects." actions={<Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New workspace</Button>} />}>
     {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
     {state === "error" ? <WorkspaceError message={error} onRetry={load} /> : null}
     {state === "ready" && workspaces.length === 0 ? <WorkspaceEmpty onCreate={() => setCreateOpen(true)} /> : null}

@@ -3,7 +3,7 @@
 import { ArrowRight, FolderKanban, NotebookTabs, Settings, Users } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace } from "../../lib/api/client";
 import { CreateProjectDialog } from "../projects/CreateProjectDialog";
 import { ProjectsTable } from "../projects/ProjectsTable";
@@ -15,14 +15,21 @@ import { ErrorState } from "../ui/error-state";
 import { EmptyState, PageLoading } from "../ui/loading";
 
 export function WorkspaceOverviewPage({ workspaceId }: { workspaceId: string }) {
+  return <WorkspaceOverviewScope key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function WorkspaceOverviewScope({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
+  const active = useRef(true);
   const [workspace, setWorkspace] = useState<Workspace>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const load = useCallback(async () => { setState("loading"); try { const found = (await apiClient.workspaces()).find((item) => item.id === workspaceId); if (!found) throw new ApiError(404, "Workspace not found."); setWorkspace(found); setError(""); setState("ready"); } catch (reason) { setError(reason instanceof ApiError ? reason.message : "Workspace could not be loaded."); setState("error"); } }, [workspaceId]);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const load = useCallback(async () => { setState("loading"); setWorkspace(undefined); try { const found = (await apiClient.workspaces()).find((item) => item.id === workspaceId); if (!active.current) return; if (!found) throw new ApiError(404, "Workspace not found."); setWorkspace(found); setError(""); setState("ready"); } catch (reason) { if (!active.current) return; setError(reason instanceof ApiError ? reason.message : "Workspace could not be loaded."); setState("error"); } }, [workspaceId]);
   useEffect(() => { void load(); }, [load]);
   function created(project: Project) {
+    if (!active.current) return;
     setWorkspace((current) => current ? { ...current, projects: [...current.projects, project] } : current);
     setCreateOpen(false);
     router.push(`/workspaces/${workspaceId}/projects/${project.id}/overview`);

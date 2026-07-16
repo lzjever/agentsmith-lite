@@ -3,7 +3,7 @@
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
 import { CreateProjectDialog } from "../projects/CreateProjectDialog";
 import { ProjectsTable } from "../projects/ProjectsTable";
@@ -17,7 +17,12 @@ import { EmptyState, PageLoading } from "../ui/loading";
 type LoadState = "loading" | "ready" | "error";
 
 export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: string }) {
+  return <WorkspaceProjectsScope key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
+  const active = useRef(true);
   const [workspace, setWorkspace] = useState<Workspace>();
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
@@ -25,15 +30,19 @@ export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: strin
   const [pinBusyId, setPinBusyId] = useState<string | null>(null);
   const [pinError, setPinError] = useState<{ projectId:string;pinned:boolean;message:string } | null>(null);
 
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   async function load() {
     setState("loading");
     setError("");
+    setWorkspace(undefined);
     try {
       const found = (await apiClient.workspaces()).find((item) => item.id === workspaceId);
+      if (!active.current) return;
       if (!found) throw new ApiError(404, "Workspace not found.");
       setWorkspace(found);
       setState("ready");
     } catch (reason) {
+      if (!active.current) return;
       setError(reason instanceof ApiError ? reason.message : "Projects could not be loaded.");
       setState("error");
     }
@@ -41,11 +50,12 @@ export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: strin
 
   useEffect(() => { void load(); }, [workspaceId]);
   function created(project: Project) {
+    if (!active.current) return;
     setWorkspace((current) => current ? { ...current, projects: [...current.projects, project] } : current);
     setCreateOpen(false);
     router.push(`/workspaces/${workspaceId}/projects/${project.id}/overview`);
   }
-  async function togglePin(projectId:string,desired?:boolean){const project=workspace?.projects.find((item)=>item.id===projectId);if(!project||pinBusyId)return;const pinned=desired??!project.pinnedAt;setPinBusyId(projectId);setPinError(null);try{const saved=await apiClient.setProjectPinned(projectId,pinned);setWorkspace((current)=>current?{...current,projects:current.projects.map((item)=>item.id===projectId?{...item,pinnedAt:saved.pinnedAt??null}:item)}:current)}catch(reason){setPinError({projectId,pinned,message:reason instanceof Error?reason.message:"Project pin could not be updated."})}finally{setPinBusyId(null)}}
+  async function togglePin(projectId:string,desired?:boolean){const project=workspace?.projects.find((item)=>item.id===projectId);if(!project||pinBusyId)return;const pinned=desired??!project.pinnedAt;setPinBusyId(projectId);setPinError(null);try{const saved=await apiClient.setProjectPinned(projectId,pinned);if(!active.current)return;setWorkspace((current)=>current?{...current,projects:current.projects.map((item)=>item.id===projectId?{...item,pinnedAt:saved.pinnedAt??null}:item)}:current)}catch(reason){if(!active.current)return;setPinError({projectId,pinned,message:reason instanceof Error?reason.message:"Project pin could not be updated."})}finally{if(active.current)setPinBusyId(null)}}
 
   const canCreateProject = workspace?.capabilities.canCreateProject === true;
   return <PageLayout header={<PageHeader title={workspace?.name ?? "Projects"} subtitle={workspace ? `Owner: ${workspace.owner?.displayName || workspace.owner?.email || "Workspace owner"} · Your access: ${roleLabel(workspace.memberRole)}` : "Projects keep endpoints, members, files, and tasks together."} actions={canCreateProject ? <Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New project</Button> : undefined} />}>

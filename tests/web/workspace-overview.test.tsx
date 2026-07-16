@@ -6,7 +6,7 @@ import React from "react";
 import { apiClient, type Workspace } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { act, cleanup, render, screen, waitFor } = await import("@testing-library/react");
 const { WorkspaceOverviewPage } = await import("../../src/components/workspaces/WorkspaceOverviewPage.js");
 const { ShellNavigation } = await import("../../src/components/app-shell/Sidebar.js");
 const { TooltipProvider } = await import("../../src/components/ui/tooltip.js");
@@ -15,6 +15,24 @@ const workspace: Workspace = { id: "ws_1", name: "Design systems", ownerUserId: 
 afterEach(() => cleanup());
 
 describe("workspace overview", () => {
+  it("ignores a late overview load after switching workspaces", async () => {
+    const original = apiClient.workspaces;
+    const second = { ...workspace, id: "ws_2", name: "Second workspace", owner: { displayName: "Second Owner", email: "second@example.test" }, projects: [] };
+    let finishFirst!: (value: Workspace[]) => void;
+    let reads = 0;
+    apiClient.workspaces = async () => ++reads === 1 ? new Promise((resolve) => { finishFirst = resolve; }) : [second];
+    try {
+      const view = render(<AppRouterContext.Provider value={router()}><WorkspaceOverviewPage workspaceId="ws_1" /></AppRouterContext.Provider>);
+      await waitFor(() => assert.equal(reads, 1));
+      view.rerender(<AppRouterContext.Provider value={router()}><WorkspaceOverviewPage workspaceId="ws_2" /></AppRouterContext.Provider>);
+      await screen.findAllByRole("heading", { name: "Second workspace" });
+      await act(async () => finishFirst([workspace]));
+      assert.ok(screen.getAllByRole("heading", { name: "Second workspace" }).length > 0);
+      assert.equal(screen.queryByText("Design systems"), null);
+      assert.ok(screen.getByText("Second Owner"));
+    } finally { apiClient.workspaces = original; }
+  });
+
   it("renders the workspace projection when the separate member directory is unavailable", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers }; apiClient.workspaces = async () => [workspace]; apiClient.workspaceMembers = async () => { throw new Error("Member directory unavailable"); };
     try { render(<AppRouterContext.Provider value={router()}><WorkspaceOverviewPage workspaceId={workspace.id} /></AppRouterContext.Provider>); await screen.findAllByRole("heading", { name: workspace.name }); assert.ok(screen.getByText("View workspace")); assert.ok(screen.getByText("Alex Owner")); assert.ok(screen.getByText("alex@example.test")); assert.ok(screen.getAllByText("Archived").length >= 2); assert.equal(screen.queryByText("owner_1"), null); assert.ok(screen.getByRole("link", { name: /Open context/ })); assert.ok(screen.getByRole("link", { name: /View members/ })); assert.ok(screen.getByRole("link", { name: /Open settings/ })); assert.equal(screen.queryByRole("button", { name: "New project" }), null); assert.equal(screen.queryByText("Project overview"), null); } finally { apiClient.workspaces = original.workspaces; apiClient.workspaceMembers = original.workspaceMembers; }
