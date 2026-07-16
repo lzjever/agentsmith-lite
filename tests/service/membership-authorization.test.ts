@@ -29,20 +29,23 @@ describe("project membership authorization", () => {
     );
 
     await assert.rejects(
-      () => services.memberships.addMember(owner.user.id, project.id, { email: "member@example.test" }, "member"),
+      () => services.memberships.addMember(owner.user.id, project.id, member.user.id, "member"),
       (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
     assert.equal(await store.findProjectMembership(project.id, member.user.id), null);
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "member@example.test" }, "member");
-    await services.memberships.addMember(owner.user.id, project.id, { email: "member@example.test" }, "member");
+    await services.memberships.addMember(owner.user.id, project.id, member.user.id, "member");
+    await assert.rejects(() => services.memberships.addMember(owner.user.id, project.id, member.user.id, "viewer"), status(409));
+    assert.equal((await store.findProjectMembership(project.id, member.user.id))?.role, "member");
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "viewer@example.test" }, "viewer");
-    await services.memberships.addMember(owner.user.id, project.id, { issuer, subject: "viewer" }, "viewer");
+    await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
     await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer");
     await services.memberships.removeMember(owner.user.id, project.id, viewer.user.id);
 
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.actorId, event.resourceId, event.status]), [
       ["membership.add", owner.user.id, member.user.id, "rejected"],
       ["membership.add", owner.user.id, member.user.id, "accepted"],
+      ["membership.add", owner.user.id, member.user.id, "rejected"],
       ["membership.add", owner.user.id, viewer.user.id, "accepted"],
       ["membership.change", owner.user.id, member.user.id, "accepted"],
       ["membership.remove", owner.user.id, viewer.user.id, "accepted"]
@@ -72,7 +75,7 @@ describe("project membership authorization", () => {
     ]);
   });
 
-  it("resolves only existing verified identities and keeps missing resources distinct", async () => {
+  it("rejects stable IDs that are not workspace members and keeps missing resources distinct", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
     const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "owner", email: "owner@example.test", emailVerified: true });
@@ -90,16 +93,16 @@ describe("project membership authorization", () => {
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
 
     await assert.rejects(
-      () => services.memberships.addMember(owner.user.id, project.id, { email: "legacy@example.test" }, "viewer"),
-      (error: unknown) => error instanceof ProductError && error.statusCode === 404
+      () => services.memberships.addMember(owner.user.id, project.id, "user_unverified", "viewer"),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
     await assert.rejects(
-      () => services.memberships.addMember(owner.user.id, project.id, { email: "missing@example.test" }, "viewer"),
-      (error: unknown) => error instanceof ProductError && error.statusCode === 404
+      () => services.memberships.addMember(owner.user.id, project.id, "user_missing", "viewer"),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.resourceId, event.status]), [
-      ["membership.add", null, "rejected"],
-      ["membership.add", null, "rejected"]
+      ["membership.add", "user_unverified", "rejected"],
+      ["membership.add", "user_missing", "rejected"]
     ]);
     await assert.rejects(
       () => services.authorization.requireProject(owner.user.id, "proj_missing"),
@@ -107,3 +110,5 @@ describe("project membership authorization", () => {
     );
   });
 });
+
+function status(code: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === code; }

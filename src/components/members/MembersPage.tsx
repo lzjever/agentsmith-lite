@@ -1,8 +1,9 @@
 "use client";
 
-import { Plus, Users, X } from "lucide-react";
+import Link from "next/link";
+import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, apiClient, type MemberRole, type ProjectCapabilities, type ProjectMember } from "../../lib/api/client";
+import { ApiError, apiClient, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -17,22 +18,142 @@ import { toast } from "../ui/toast";
 import { memberIdentityLabel, memberMatchesQuery, removeMemberById } from "./members-page-utils";
 import { MembersTable } from "./MembersTable";
 
-export function MembersPage({ projectId }: { projectId: string }) {
-  const [members, setMembers] = useState<ProjectMember[]>([]); const [capabilities, setCapabilities] = useState<ProjectCapabilities>(); const [state, setState] = useState<"loading" | "ready" | "error">("loading"); const [error, setError] = useState(""); const [query, setQuery] = useState(""); const [roleFilter, setRoleFilter] = useState<"all" | MemberRole>("all"); const [selected, setSelected] = useState<ProjectMember>();
-  const [inviteOpen, setInviteOpen] = useState(false); const [email, setEmail] = useState(""); const [role, setRole] = useState<Exclude<MemberRole, "owner">>("member"); const [removing, setRemoving] = useState<ProjectMember>(); const [busyUserId, setBusyUserId] = useState<string>(); const [inviteError, setInviteError] = useState(""); const [roleError, setRoleError] = useState<{ userId: string; message: string }>();
-  const load = useCallback(async () => { setState("loading"); setError(""); try { const [listed, projected] = await Promise.all([apiClient.members(projectId), apiClient.projectCapabilities(projectId)]); setMembers(listed); setCapabilities(projected); setState("ready"); } catch (reason) { setError(message(reason)); setState("error"); } }, [projectId]);
+export function MembersPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  const [members, setMembers] = useState<ProjectMember[]>([]);
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
+  const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [candidateState, setCandidateState] = useState<"loading" | "ready" | "error">("loading");
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"all" | MemberRole>("all");
+  const [selected, setSelected] = useState<ProjectMember>();
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [candidateUserId, setCandidateUserId] = useState("");
+  const [role, setRole] = useState<Exclude<MemberRole, "owner">>("member");
+  const [removing, setRemoving] = useState<ProjectMember>();
+  const [busyUserId, setBusyUserId] = useState<string>();
+  const [inviteError, setInviteError] = useState("");
+  const [roleError, setRoleError] = useState<{ userId: string; message: string }>();
+
+  const loadCandidates = useCallback(async () => {
+    setCandidateState("loading");
+    try {
+      setWorkspaceMembers(await apiClient.workspaceMembers(workspaceId));
+      setCandidateState("ready");
+    } catch {
+      setCandidateState("error");
+    }
+  }, [workspaceId]);
+
+  const refreshMembers = useCallback(async () => {
+    const [listed, projected] = await Promise.all([apiClient.members(projectId), apiClient.projectCapabilities(projectId)]);
+    setMembers(listed);
+    setCapabilities(projected);
+  }, [projectId]);
+
+  const load = useCallback(async () => {
+    setState("loading");
+    setError("");
+    const candidates = loadCandidates();
+    try {
+      await refreshMembers();
+      setState("ready");
+    } catch (reason) {
+      setError(message(reason));
+      setState("error");
+    }
+    await candidates;
+  }, [loadCandidates, refreshMembers]);
+
   useEffect(() => { void load(); }, [load]);
-  const canManage = capabilities?.canManageMembers === true; const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
-  function denied(reason: unknown) { if (reason instanceof ApiError && reason.status === 403) setCapabilities((current) => current ? { ...current, canManageMembers: false } : current); return message(reason); }
-  async function addMember(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!canManage) return; setBusyUserId("new"); setInviteError(""); try { await apiClient.addMember(projectId, email.trim(), role); await load(); setInviteOpen(false); setEmail(""); setRole("member"); toast.success("Member added"); } catch (reason) { setInviteError(denied(reason)); } finally { setBusyUserId(undefined); } }
-  async function changeRole(member: ProjectMember, nextRole: Exclude<MemberRole, "owner">) { if (!canManage) return; setBusyUserId(member.userId); setRoleError(undefined); try { await apiClient.changeMember(projectId, member.userId, nextRole); await load(); toast.success("Member role updated"); } catch (reason) { setRoleError({ userId: member.userId, message: denied(reason) }); } finally { setBusyUserId(undefined); } }
-  async function removeMember() { if (!removing || !canManage) return; setBusyUserId(removing.userId); try { await apiClient.removeMember(projectId, removing.userId); setMembers((items) => removeMemberById(items, removing.userId)); setRemoving(undefined); toast.success("Member removed"); } catch (reason) { throw new Error(denied(reason)); } finally { setBusyUserId(undefined); } }
-  return <PageLayout header={<PageHeader title="Members" subtitle="People with access to this project and the role they hold." actions={canManage ? <Button onClick={() => { setInviteError(""); setInviteOpen(true); }}><Plus size={16} />Add member</Button> : undefined} />}>
-    {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}{state === "error" ? <PageState state="error"><ErrorState title="Members unavailable" message={error} onRetry={() => void load()} /></PageState> : null}{state === "ready" && members.length === 0 ? <PageState state="empty"><EmptyState icon={Users} title="No project members" description={canManage ? "Add an existing Lite identity to share this project." : "An administrator can add collaborators to this project."} {...(canManage ? { action: { label: "Add member", onClick: () => { setInviteError(""); setInviteOpen(true); } } } : {})} /></PageState> : null}
-    {state === "ready" && members.length > 0 ? <section className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><label className="relative min-w-[15rem] flex-1 sm:max-w-sm"><span className="sr-only">Search members</span><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by identity" /></label><Select value={roleFilter} onValueChange={(value) => setRoleFilter(value as typeof roleFilter)}><SelectTrigger className="h-9 w-36" aria-label="Member role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All roles</SelectItem><SelectItem value="owner">Owner</SelectItem><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select>{!canManage ? <p className="text-sm text-secondary">Your project access is read-only.</p> : null}</div>{filtered.length === 0 ? <PageState state="empty"><div className="space-y-2"><h2 className="type-title">No members match these filters</h2><Button variant="quiet" onClick={() => { setQuery(""); setRoleFilter("all"); }}>Clear filters</Button></div></PageState> : <MembersTable members={filtered} canManage={canManage} busyUserId={busyUserId} roleError={roleError} onDismissRoleError={() => setRoleError(undefined)} onChangeRole={(member, nextRole) => void changeRole(member, nextRole)} onRemove={setRemoving} onView={setSelected} />}</section> : null}
-    <Dialog open={inviteOpen} onOpenChange={(open) => { setInviteOpen(open); if (!open) setInviteError(""); }}><DialogContent><form onSubmit={addMember}><DialogHeader title="Add member" description="Grant an existing Lite identity access to this project." />{inviteError ? <div className="mx-5 mt-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{inviteError}</span><Button variant="quiet" size="icon" aria-label="Dismiss member error" onClick={() => setInviteError("")}><X size={15} /></Button></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Email<Input autoFocus required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="person@example.com" /></label><label className="grid gap-2 text-sm text-primary">Role<Select value={role} onValueChange={(value) => setRole(value as Exclude<MemberRole, "owner">)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select></label></div><DialogFooter><Button variant="quiet" onClick={() => setInviteOpen(false)} disabled={busyUserId === "new"}>Cancel</Button><Button type="submit" disabled={!canManage || busyUserId === "new"}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></form></DialogContent></Dialog>
+
+  const canManage = capabilities?.canManageMembers === true;
+  const memberIds = useMemo(() => new Set(members.map((member) => member.userId)), [members]);
+  const eligible = useMemo(() => workspaceMembers.filter((member) => !memberIds.has(member.userId)), [memberIds, workspaceMembers]);
+  const canAdd = canManage && candidateState === "ready" && eligible.length > 0;
+  const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
+
+  function denied(reason: unknown) {
+    if (reason instanceof ApiError && reason.status === 403) setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
+    return message(reason);
+  }
+
+  function openInvite() {
+    setInviteError("");
+    setCandidateUserId(eligible[0]?.userId ?? "");
+    setInviteOpen(true);
+  }
+
+  async function addMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canAdd || !candidateUserId) return;
+    const candidate = eligible.find((member) => member.userId === candidateUserId);
+    if (!candidate) return;
+    setBusyUserId("new");
+    setInviteError("");
+    try {
+      const added = await apiClient.addMember(projectId, candidateUserId, role);
+      setMembers((current) => [...current.filter((member) => member.userId !== added.userId), { ...added, displayName: candidate.displayName, email: candidate.email }]);
+      setInviteOpen(false);
+      setCandidateUserId("");
+      setRole("member");
+      toast.success("Member added");
+    } catch (reason) {
+      setInviteError(denied(reason));
+      await Promise.allSettled([refreshMembers(), loadCandidates()]);
+    } finally {
+      setBusyUserId(undefined);
+    }
+  }
+
+  async function changeRole(member: ProjectMember, nextRole: Exclude<MemberRole, "owner">) {
+    if (!canManage) return;
+    setBusyUserId(member.userId);
+    setRoleError(undefined);
+    try {
+      const updated = await apiClient.changeMember(projectId, member.userId, nextRole);
+      setMembers((current) => current.map((item) => item.userId === updated.userId ? { ...item, ...updated } : item));
+      toast.success("Member role updated");
+    } catch (reason) {
+      setRoleError({ userId: member.userId, message: denied(reason) });
+    } finally {
+      setBusyUserId(undefined);
+    }
+  }
+
+  async function removeMember() {
+    if (!removing || !canManage) return;
+    setBusyUserId(removing.userId);
+    try {
+      await apiClient.removeMember(projectId, removing.userId);
+      setMembers((items) => removeMemberById(items, removing.userId));
+      setRemoving(undefined);
+      toast.success("Member removed");
+      void loadCandidates();
+    } catch (reason) {
+      throw new Error(denied(reason));
+    } finally {
+      setBusyUserId(undefined);
+    }
+  }
+
+  const workspaceMembersHref = `/workspaces/${workspaceId}/members`;
+  return <PageLayout header={<PageHeader title="Members" subtitle="People with access to this project and the role they hold." actions={canAdd ? <Button onClick={openInvite}><Plus size={16} />Add member</Button> : undefined} />}>
+    {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
+    {state === "error" ? <PageState state="error"><ErrorState title="Members unavailable" message={error} onRetry={() => void load()} /></PageState> : null}
+    {state === "ready" && members.length === 0 ? <PageState state="empty"><EmptyState icon={Users} title="No project members" description="Project access begins with a workspace member." {...(canAdd ? { action: { label: "Add member", onClick: openInvite } } : {})} /></PageState> : null}
+    {state === "ready" && members.length > 0 ? <section className="space-y-4">
+      {canManage && candidateState === "error" ? <div className="flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>Workspace members could not be loaded. Existing project access is still available.</span><span className="flex items-center gap-2"><Button variant="quiet" size="sm" onClick={() => void loadCandidates()}><RefreshCw size={14} />Retry</Button><Link className="text-sm underline underline-offset-4" href={workspaceMembersHref}>Manage workspace members</Link></span></div> : null}
+      {canManage && candidateState === "ready" && eligible.length === 0 ? <p className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-3 text-sm text-secondary"><span>All workspace members already have project access.</span><Link className="text-foreground underline underline-offset-4" href={workspaceMembersHref}>Manage workspace members</Link></p> : null}
+      <div className="flex flex-wrap items-center justify-between gap-3"><label className="relative min-w-[15rem] flex-1 sm:max-w-sm"><span className="sr-only">Search members</span><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by identity" /></label><Select value={roleFilter} onValueChange={(value) => setRoleFilter(value as typeof roleFilter)}><SelectTrigger className="h-9 w-36" aria-label="Member role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All roles</SelectItem><SelectItem value="owner">Owner</SelectItem><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select>{!canManage ? <p className="text-sm text-secondary">Your project access is read-only.</p> : null}</div>
+      {filtered.length === 0 ? <PageState state="empty"><div className="space-y-2"><h2 className="type-title">No members match these filters</h2><Button variant="quiet" onClick={() => { setQuery(""); setRoleFilter("all"); }}>Clear filters</Button></div></PageState> : <MembersTable members={filtered} canManage={canManage} busyUserId={busyUserId} roleError={roleError} onDismissRoleError={() => setRoleError(undefined)} onChangeRole={(member, nextRole) => void changeRole(member, nextRole)} onRemove={setRemoving} onView={setSelected} />}
+    </section> : null}
+    <Dialog open={inviteOpen} onOpenChange={(open) => { if (busyUserId !== "new") setInviteOpen(open); if (!open) setInviteError(""); }}><DialogContent><form onSubmit={addMember}><DialogHeader title="Add member" description="Choose someone who already belongs to this workspace." />{inviteError ? <div className="mx-5 mt-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{inviteError}</span><Button variant="quiet" size="icon" aria-label="Dismiss member error" onClick={() => setInviteError("")}><X size={15} /></Button></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Workspace member<Select value={candidateUserId} onValueChange={setCandidateUserId} disabled={busyUserId === "new"}><SelectTrigger aria-label="Workspace member"><SelectValue placeholder="Select a workspace member" /></SelectTrigger><SelectContent>{eligible.map((member) => <SelectItem value={member.userId} key={member.userId}>{workspaceMemberLabel(member)}</SelectItem>)}</SelectContent></Select></label><label className="grid gap-2 text-sm text-primary">Role<Select value={role} onValueChange={(value) => setRole(value as Exclude<MemberRole, "owner">)} disabled={busyUserId === "new"}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent></Select></label></div><DialogFooter><Button type="button" variant="quiet" onClick={() => setInviteOpen(false)} disabled={busyUserId === "new"}>Cancel</Button><Button type="submit" disabled={!canAdd || !candidateUserId || busyUserId === "new"}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></form></DialogContent></Dialog>
     <ConfirmationDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(undefined)} title="Remove member" description={removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : ""} confirmText={busyUserId === removing?.userId ? "Removing" : "Remove member"} confirmDisabled={!canManage || busyUserId === removing?.userId} onConfirm={removeMember} errorContext="Member could not be removed" />
     <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)}><DialogContent>{selected ? <><DialogHeader title="Member details" description="Project membership identity." /><dl className="grid gap-4 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]"><dt className="text-secondary">Name</dt><dd className="break-all text-foreground">{memberIdentityLabel(selected)}</dd><dt className="text-secondary">Email</dt><dd className="break-all text-foreground">{selected.email}</dd><dt className="text-secondary">Role</dt><dd className="text-foreground">{selected.role}</dd><dt className="text-secondary">Joined</dt><dd className="text-foreground">{new Date(selected.createdAt).toLocaleString("en-US")}</dd><dt className="text-secondary">Updated</dt><dd className="text-foreground">{new Date(selected.updatedAt).toLocaleString("en-US")}</dd></dl></> : null}</DialogContent></Dialog>
   </PageLayout>;
 }
+
+function workspaceMemberLabel(member: WorkspaceMember) { return member.displayName || member.email || member.userId; }
 function message(error: unknown) { return error instanceof ApiError ? error.message : "The member request could not be completed."; }

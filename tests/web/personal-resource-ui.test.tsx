@@ -22,7 +22,7 @@ describe("personal and resource UI", () => {
     apiClient.members = async () => members;
     apiClient.projectCapabilities = async () => capabilities;
     try {
-      render(<MembersPage projectId="project_1" />);
+      render(<MembersPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findAllByText("Viewer Person");
       fireEvent.change(screen.getByRole("textbox", { name: "Search members" }), { target: { value: "viewer@example.test" } });
       assert.ok(screen.getAllByText("Viewer Person").length > 0);

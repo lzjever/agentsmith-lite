@@ -185,10 +185,10 @@ export const apiClient = {
   unarchiveProject:(projectId:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/unarchive`,"POST",newIdempotencyKey("project-unarchive")),
   deleteProject: (projectId: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}`, "DELETE", newIdempotencyKey("project-delete")),
   members: (projectId: string) => request<ProjectMember[]>(`/projects/${encodeURIComponent(projectId)}/members`),
-  addMember: (projectId: string, email: string, role: Exclude<MemberRole, "owner">) =>
-    json<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", { email, role }),
+  addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">) =>
+    json<Omit<ProjectMember, "displayName" | "email">>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", { userId, role }),
   changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">) =>
-    json<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", { userId, role }),
+    json<Omit<ProjectMember, "displayName" | "email">>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", { userId, role }),
   removeMember: (projectId: string, userId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", { userId }),
   transferProjectOwner:(projectId:string,userId:string)=>jsonIdempotent<{transferred:true}>(`/projects/${encodeURIComponent(projectId)}/members/transfer-owner`,"POST",newIdempotencyKey("project-owner-transfer"),{userId}),
   credentials: (projectId: string) => request<ProjectCredential[]>(`/projects/${encodeURIComponent(projectId)}/credentials`),

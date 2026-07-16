@@ -40,7 +40,7 @@ describe("project chat threads API", () => {
     endpointId = (await requestJson("POST", `/api/v1/projects/${projectId}/endpoints`, endpointInput("E1", credential.id))).id;
     otherEndpointId = (await requestJson("POST", `/api/v1/projects/${otherProjectId}/endpoints`, endpointInput("E2", otherCredential.id))).id;
     await requestJson("POST", `/api/v1/workspaces/${workspace.id}/members`, { email: "viewer@example.test", role: "member" });
-    await requestJson("POST", `/api/v1/projects/${projectId}/members`, { email: "viewer@example.test", role: "viewer" });
+    await requestJson("POST", `/api/v1/projects/${projectId}/members`, { userId: "viewer_1", role: "viewer" });
   });
 
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });

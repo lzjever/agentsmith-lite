@@ -19,9 +19,9 @@ describe("context service", () => {
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: admin.user.email }, "admin");
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: viewer.user.email }, "viewer");
-    await services.memberships.addMember(owner.user.id, project.id, { email: admin.user.email }, "admin");
-    await services.memberships.addMember(owner.user.id, project.id, { email: member.user.email }, "member");
-    await services.memberships.addMember(owner.user.id, project.id, { email: viewer.user.email }, "viewer");
+    await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
+    await services.memberships.addMember(owner.user.id, project.id, member.user.id, "member");
+    await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
 
     await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_shared", contextKey: "shared.rules", content: "Use concise replies.", contentType: "markdown" });
     assert.equal((await services.contexts.list(member.user.id, { workspaceId: workspace.id, scope: "workspace_shared" })).items[0]?.contextKey, "shared.rules");
@@ -62,7 +62,7 @@ describe("context service", () => {
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
-    await services.memberships.addMember(owner.user.id, project.id, { email: member.user.email }, "member");
+    await services.memberships.addMember(owner.user.id, project.id, member.user.id, "member");
     await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_shared", contextKey: "style", content: "workspace shared", contentType: "text" });
     await services.contexts.upsert(member.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "style", content: "workspace personal", contentType: "text" });
     await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, projectId: project.id, scope: "project_shared", contextKey: "style", content: "project shared", contentType: "text" });

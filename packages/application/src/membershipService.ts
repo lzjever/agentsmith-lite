@@ -1,14 +1,8 @@
-import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembership, ProjectMembershipView, StoredUser } from "../../contracts/src/api.js";
+import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembership, ProjectMembershipView } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
-
-export interface ProjectMemberIdentity {
-  email?: string;
-  issuer?: string;
-  subject?: string;
-}
 
 export class MembershipService {
   constructor(
@@ -21,15 +15,14 @@ export class MembershipService {
     return this.store.listProjectMemberships(projectId);
   }
 
-  async addMember(actorUserId: string, projectId: string, identity: ProjectMemberIdentity, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
+  async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembership> {
     let memberId: string | null = null;
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
-      const user = await this.findVerifiedIdentity(identity);
-      memberId = user.id;
-      await this.requireNotOwner(projectId, user.id);
+      memberId = requireUserId(userId);
+      await this.requireNewMember(projectId, memberId);
       const timestamp = nowIso();
-      const membership = await this.store.upsertProjectMembershipForWorkspaceMember({ projectId, userId: user.id, role, createdAt: timestamp, updatedAt: timestamp });
+      const membership = await this.store.upsertProjectMembershipForWorkspaceMember({ projectId, userId: memberId, role, createdAt: timestamp, updatedAt: timestamp });
       if (!membership) {
         throw new ProductError("User must be a workspace member before joining a project", 409);
       }
@@ -92,21 +85,12 @@ export class MembershipService {
     }
   }
 
-  private async findVerifiedIdentity(identity: ProjectMemberIdentity): Promise<StoredUser> {
-    const email = identity.email?.trim().toLowerCase();
-    const issuer = identity.issuer?.trim();
-    const subject = identity.subject?.trim();
-    const byEmail = email ? await this.store.findVerifiedUserByEmail(email) : null;
-    const bySubject = issuer && subject ? await this.store.findUserByOidcSubject(issuer, subject) : null;
-    if ((email && (issuer || subject)) || (!email && !(issuer && subject))) {
-      throw new ProductError("Specify either a verified email or an OIDC issuer and subject");
+  private async requireNewMember(projectId: string, userId: string): Promise<void> {
+    if (await this.store.findProjectMembership(projectId, userId)) {
+      throw new ProductError("Project membership already exists", 409);
     }
-    const user = byEmail ?? bySubject;
-    if (!user || !user.emailVerified) {
-      throw new NotFoundError("Verified identity not found");
-    }
-    return user;
   }
+
 }
 
 type MembershipAuditAction = Extract<ProjectAuditAction, `membership.${string}`>;

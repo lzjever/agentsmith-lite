@@ -12,7 +12,7 @@ describe("profile and settings services", () => {
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Old workspace" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Old project" });
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: admin.user.email }, "member");
-    await services.memberships.addMember(owner.user.id, project.id, { email: admin.user.email }, "admin");
+    await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
 
     const profile = await services.profile.updateProfile(owner.user.id, { displayName: "Owner", timezone: "UTC" });
     assert.equal(profile.user.email, "owner@example.test");

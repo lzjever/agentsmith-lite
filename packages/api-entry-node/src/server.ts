@@ -405,7 +405,7 @@ async function routeApi(
     const workspaceId = segments[3];
     if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
     if (!segments[5] && method === "GET") return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId));
-    if (!segments[5] && method === "POST") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asProjectMemberIdentity(body), asWorkspaceMembershipRole(body.role))); }
+    if (!segments[5] && method === "POST") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asWorkspaceMemberIdentity(body), asWorkspaceMembershipRole(body.role))); }
     if (method === "PATCH") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role))); }
     if (method === "DELETE") { const body = await readJson(req); await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId)); return sendJson(res, 200, { deleted: true }); }
   }
@@ -442,7 +442,7 @@ async function routeApi(
         return sendJson(res, 200, await services.memberships.addMember(
           user.id,
           projectId,
-          asProjectMemberIdentity(body),
+          asUserId(body.userId),
           asProjectMembershipRole(body.role)
         ));
       }
@@ -1334,7 +1334,7 @@ function asContextContentType(value: unknown): ContextContentType {
   throw new ProductError("Invalid context content type");
 }
 
-function asProjectMemberIdentity(body: Record<string, unknown>): { email?: string; issuer?: string; subject?: string } {
+function asWorkspaceMemberIdentity(body: Record<string, unknown>): { email?: string; issuer?: string; subject?: string } {
   return {
     ...(typeof body.email === "string" ? { email: body.email } : {}),
     ...(typeof body.issuer === "string" ? { issuer: body.issuer } : {}),

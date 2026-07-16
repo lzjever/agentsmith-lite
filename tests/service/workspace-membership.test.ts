@@ -18,11 +18,13 @@ describe("workspace memberships", () => {
     assert.deepEqual([ownerWorkspace?.owner, ownerWorkspace?.memberRole], [{ displayName: "Owner display", email: owner.user.email }, "owner"]);
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:admin.user.email},"admin");
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"member");
+    await assert.rejects(()=>services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"viewer"),status(409));
+    assert.equal((await store.findWorkspaceMembership(workspace.id,member.user.id))?.role,"member");
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:viewer.user.email},"viewer");
     const firstProject=await services.workspaces.createProject(owner.user.id,workspace.id,{name:"First project"});
     const secondProject=await services.workspaces.createProject(owner.user.id,workspace.id,{name:"Second project"});
-    await services.memberships.addMember(owner.user.id,firstProject.id,{email:member.user.email},"member");
-    await services.memberships.addMember(owner.user.id,secondProject.id,{email:member.user.email},"viewer");
+    await services.memberships.addMember(owner.user.id,firstProject.id,member.user.id,"member");
+    await services.memberships.addMember(owner.user.id,secondProject.id,member.user.id,"viewer");
     assert.deepEqual((await services.workspaceMemberships.list(owner.user.id,workspace.id)).find((entry)=>entry.userId===owner.user.id)?.displayName,"Owner display");
     const memberWorkspace = (await services.workspaces.listWorkspaces(member.user.id))[0];
     assert.equal(memberWorkspace?.id,workspace.id);

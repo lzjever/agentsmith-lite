@@ -67,7 +67,7 @@ describe("v1 project membership API", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it("uses identity lookup only to add members and stable user IDs to mutate them", async () => {
+  it("uses workspace identity lookup and stable user IDs for project membership", async () => {
     const denied = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/endpoints`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });
@@ -80,7 +80,7 @@ describe("v1 project membership API", () => {
     }
 
     const outsideWorkspace = await request("POST", `/api/v1/projects/${projectId}/members`, {
-      email: "MEMBER@example.test",
+      userId: "user_member",
       role: "viewer"
     });
     assert.equal(outsideWorkspace.response.status, 409);
@@ -90,7 +90,7 @@ describe("v1 project membership API", () => {
       role: "viewer"
     });
     const created = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
-      email: "MEMBER@example.test",
+      userId: "user_member",
       role: "viewer"
     });
     assert.deepEqual(created, {
@@ -156,8 +156,7 @@ describe("v1 project membership API", () => {
       role: "viewer"
     });
     const oidcMember = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
-      issuer: "https://keycloak.example.test/realms/agentsmith",
-      subject: "member-subject",
+      userId: "user_oidc_member",
       role: "viewer"
     });
     assert.equal(oidcMember.userId, "user_oidc_member");
@@ -192,13 +191,8 @@ describe("v1 project membership API", () => {
     });
     assert.equal(revoked.status, 403);
 
-    const ambiguous = await request("POST", `/api/v1/projects/${projectId}/members`, {
-      email: "member@example.test",
-      issuer: "https://keycloak.example.test/realms/agentsmith",
-      subject: "member-subject",
-      role: "viewer"
-    });
-    assert.equal(ambiguous.response.status, 400);
+    const missingUserId = await request("POST", `/api/v1/projects/${projectId}/members`, { role: "viewer" });
+    assert.equal(missingUserId.response.status, 400);
   });
 
   async function requestJson(method: string, pathname: string, body?: unknown): Promise<any> {
