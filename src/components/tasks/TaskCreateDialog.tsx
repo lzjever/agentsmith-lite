@@ -40,10 +40,14 @@ export function TaskCreateDialog({
   const [error, setError] = useState("");
   const uploadInput = useRef<HTMLInputElement>(null);
   const wasOpen = useRef(false);
+  const browserPathRef = useRef(PROJECT_FILES_ROOT);
+  const browserLoadVersion = useRef(0);
 
   useEffect(() => {
     if (!open) {
       wasOpen.current = false;
+      browserLoadVersion.current += 1;
+      setBrowserLoading(false);
       return;
     }
     if (wasOpen.current) return;
@@ -51,6 +55,9 @@ export function TaskCreateDialog({
     setTitle("");
     setPrompt("");
     setInputPaths([]);
+    browserPathRef.current = PROJECT_FILES_ROOT;
+    browserLoadVersion.current += 1;
+    setBrowserLoading(false);
     setBrowserPath(PROJECT_FILES_ROOT);
     setBrowserEntries(sortFileEntries(projectFiles));
     setUrlInput("");
@@ -63,29 +70,36 @@ export function TaskCreateDialog({
   }, [endpoints, open]);
 
   useEffect(() => {
-    if (open && browserPath === PROJECT_FILES_ROOT) setBrowserEntries(sortFileEntries(projectFiles));
+    if (open && browserPathRef.current === PROJECT_FILES_ROOT) setBrowserEntries(sortFileEntries(projectFiles));
   }, [browserPath, open, projectFiles]);
 
   async function navigate(path: string) {
     if (!projectId) return;
+    browserPathRef.current = path;
+    const version = ++browserLoadVersion.current;
+    setBrowserPath(path);
     setBrowserLoading(true);
     setError("");
     try {
-      setBrowserEntries(sortFileEntries((await apiClient.files(projectId, path)).entries));
-      setBrowserPath(path);
+      const loaded = await apiClient.files(projectId, path);
+      if (version !== browserLoadVersion.current || browserPathRef.current !== path) return;
+      setBrowserEntries(sortFileEntries(loaded.entries));
     } catch (reason) {
-      setError(errorMessage(reason, "Project files could not be loaded."));
-    } finally { setBrowserLoading(false); }
+      if (version === browserLoadVersion.current && browserPathRef.current === path) setError(errorMessage(reason, "Project files could not be loaded."));
+    } finally {
+      if (version === browserLoadVersion.current && browserPathRef.current === path) setBrowserLoading(false);
+    }
   }
 
   async function upload(file: File) {
     if (!projectId) return;
+    const uploadPath = browserPathRef.current;
     setUploading(true);
     setError("");
     try {
-      const written = await apiClient.uploadFile(projectId, `${browserPath}/${file.name}`, file);
+      const written = await apiClient.uploadFile(projectId, `${uploadPath}/${file.name}`, file);
       setInputPaths((current) => current.includes(written.path) ? current : [...current, written.path]);
-      await navigate(browserPath);
+      if (browserPathRef.current === uploadPath) await navigate(uploadPath);
     } catch (reason) {
       setError(errorMessage(reason, "The file could not be uploaded."));
     } finally { setUploading(false); }

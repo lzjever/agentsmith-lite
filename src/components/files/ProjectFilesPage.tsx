@@ -34,13 +34,19 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [query,setQuery]=useState(""); const [preview,setPreview]=useState<{kind:"text"|"image";value:string;name:string}|null>(null); const [dropReady,setDropReady]=useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const currentPath = useRef(path);
+  const loadVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestedPath = path;
+    if (currentPath.current !== requestedPath) return;
+    const version = ++loadVersion.current;
     setState("loading");
     setMessage("");
     setCapabilities(undefined);
     try {
-      const [filesResult, capabilitiesResult] = await Promise.allSettled([apiClient.files(projectId, path), apiClient.projectCapabilities(projectId)]);
+      const [filesResult, capabilitiesResult] = await Promise.allSettled([apiClient.files(projectId, requestedPath), apiClient.projectCapabilities(projectId)]);
+      if (version !== loadVersion.current || currentPath.current !== requestedPath) return;
       if (filesResult.status === "rejected") throw filesResult.reason;
       setEntries(sortFileEntries(filesResult.value.entries));
       setSelected((current) => filesResult.value.entries.find((entry) => entry.path === current?.path));
@@ -48,6 +54,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       else setMessage("File permissions could not be loaded. Files are read-only until refreshed.");
       setState("ready");
     } catch (error) {
+      if (version !== loadVersion.current || currentPath.current !== requestedPath) return;
       setMessage(errorMessage(error, "Files could not be loaded."));
       setState("error");
     }
@@ -58,6 +65,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
   }, [load]);
 
   function navigate(nextPath: string) {
+    currentPath.current = nextPath;
     setSelected(undefined);
     setMobileDetailsOpen(false);
     setPath(nextPath);

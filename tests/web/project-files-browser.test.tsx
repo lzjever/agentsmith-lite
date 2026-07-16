@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { DeleteFileDialog, ProjectFilesPage } = await import("../../src/components/files/ProjectFilesPage.js");
 
 const file: ProjectFile = { name: "brief.txt", path: "files/brief.txt", type: "file", size: 12, updatedAt: "2026-07-11T00:00:00.000Z" };
@@ -109,6 +109,35 @@ describe("project files browser", () => {
       await screen.findByText("reports");
       fireEvent.click(screen.getByRole("button", { name: "reports" }));
       await screen.findByRole("heading", { name: "This folder is empty" });
+    } finally { restoreClient(original); }
+  });
+
+  it("ignores a stale folder response after the user returns to the root", async () => {
+    const original = snapshotClient();
+    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
+    const stale: ProjectFile = { ...file, name: "stale.txt", path: "files/reports/stale.txt" };
+    let rootReads = 0;
+    let folderStarted = false;
+    let resolveFolder!: (value: { entries: ProjectFile[] }) => void;
+    const folderResponse = new Promise<{ entries: ProjectFile[] }>((resolve) => { resolveFolder = resolve; });
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async (_projectId, path) => {
+      if (path === folder.path) {
+        folderStarted = true;
+        return folderResponse;
+      }
+      rootReads += 1;
+      return { entries: rootReads === 1 ? [folder] : [file] };
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "reports" }));
+      await waitFor(() => assert.equal(folderStarted, true));
+      fireEvent.click(screen.getByRole("button", { name: "files" }));
+      await screen.findByText("brief.txt");
+      await act(async () => { resolveFolder({ entries: [stale] }); });
+      assert.ok(screen.getByText("brief.txt"));
+      assert.equal(screen.queryByText("stale.txt"), null);
     } finally { restoreClient(original); }
   });
 

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { after, afterEach, describe, it } from "node:test";
 import React from "react";
-import type { Endpoint, Task } from "../../src/lib/api/client.js";
+import { apiClient, type Endpoint, type ProjectFile, type Task } from "../../src/lib/api/client.js";
 
 const dom = installDom();
-const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen } = await import("@testing-library/react");
 const { TaskCreateDialog } = await import("../../src/components/tasks/TaskCreateDialog.js");
 const { TaskList } = await import("../../src/components/tasks/TaskList.js");
 
@@ -58,6 +58,47 @@ describe("task list controls", () => {
 
     assert.equal((screen.getByRole("textbox", { name: "Task prompt" }) as HTMLTextAreaElement).value, "Keep this draft");
     assert.ok(screen.getByRole("checkbox", { name: "Attach brief.md" }));
+  });
+
+  it("keeps task input browsing on the latest selected folder", async () => {
+    const originalFiles = apiClient.files;
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    const folder = { name: "reports", path: "files/reports", type: "directory" as const, updatedAt: "x" };
+    let resolveFolder!: (value: { entries: ProjectFile[] }) => void;
+    const pendingFolder = new Promise<{ entries: ProjectFile[] }>((resolve) => { resolveFolder = resolve; });
+    apiClient.files = async (_projectId, path) => path === folder.path ? pendingFolder : { entries: [{ name: "brief.md", path: "files/brief.md", type: "file", size: 12, mediaType: "text/markdown", updatedAt: "x" }] };
+    try {
+      render(<TaskCreateDialog projectId="project_1" endpoints={[endpoint]} projectFiles={[folder]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async () => undefined} />);
+      fireEvent.click(screen.getByRole("button", { name: "reports" }));
+      fireEvent.click(await screen.findByRole("button", { name: "files" }));
+      await screen.findByRole("checkbox", { name: "Attach brief.md" });
+      await act(async () => { resolveFolder({ entries: [{ name: "stale.txt", path: "files/reports/stale.txt", type: "file", updatedAt: "x" }] }); });
+      assert.ok(screen.getByRole("checkbox", { name: "Attach brief.md" }));
+      assert.equal(screen.queryByRole("checkbox", { name: "Attach stale.txt" }), null);
+    } finally {
+      apiClient.files = originalFiles;
+    }
+  });
+
+  it("resets a pending task input navigation when the dialog is reopened", async () => {
+    const originalFiles = apiClient.files;
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    const folder = { name: "reports", path: "files/reports", type: "directory" as const, updatedAt: "x" };
+    let resolveFolder!: (value: { entries: ProjectFile[] }) => void;
+    apiClient.files = async () => new Promise<{ entries: ProjectFile[] }>((resolve) => { resolveFolder = resolve; });
+    const props = { projectId: "project_1", endpoints: [endpoint], projectFiles: [folder], projectFilesLoading: false, saving: false, onClose: () => undefined, onCreate: async () => undefined };
+    try {
+      const view = render(<TaskCreateDialog {...props} open />);
+      fireEvent.click(screen.getByRole("button", { name: "reports" }));
+      await screen.findByText("Loading project files...");
+      view.rerender(<TaskCreateDialog {...props} open={false} />);
+      view.rerender(<TaskCreateDialog {...props} open />);
+      assert.ok(await screen.findByRole("button", { name: "reports" }));
+      assert.equal(screen.queryByText("Loading project files..."), null);
+      await act(async () => { resolveFolder({ entries: [] }); });
+    } finally {
+      apiClient.files = originalFiles;
+    }
   });
 });
 
