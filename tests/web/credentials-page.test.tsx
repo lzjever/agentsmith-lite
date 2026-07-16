@@ -10,6 +10,24 @@ const { CredentialsPage } = await import("../../src/components/credentials/Crede
 afterEach(()=>cleanup());
 
 describe("CredentialsPage",()=>{
+  it("ignores credentials loaded for a project that is no longer active", async () => {
+    const original = { credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities };
+    let finishOldLoad!: (value: typeof credential[]) => void;
+    let oldLoadStarted = false;
+    const second = { ...credential, id: "credential_2", projectId: "project_2", name: "Project Two Key" };
+    apiClient.credentials = async (projectId) => projectId === "project_1" ? new Promise((resolve) => { oldLoadStarted = true; finishOldLoad = resolve; }) : [second];
+    apiClient.projectCapabilities = async () => manager;
+    try {
+      const view = render(<CredentialsPage projectId="project_1" />);
+      await waitFor(() => assert.equal(oldLoadStarted, true));
+      view.rerender(<CredentialsPage projectId="project_2" />);
+      await screen.findByText("Project Two Key");
+      await act(async () => finishOldLoad([credential]));
+      assert.ok(screen.getByText("Project Two Key"));
+      assert.equal(screen.queryByText("DeepSeek"), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps credential metadata readable for viewers and reserves mutations for managers",async()=>{
     const original={credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};
     apiClient.credentials=async()=>[credential]; apiClient.projectCapabilities=async()=>viewer;
