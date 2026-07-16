@@ -87,7 +87,12 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
 
   function denied(reason: unknown) {
-    if (reason instanceof ApiError && reason.status === 403) setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
+    if (reason instanceof ApiError && reason.status === 403) {
+      setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
+      setCapabilitiesError("Member management permission changed. Members are now read-only.");
+      setInviteOpen(false);
+      setRemoving(undefined);
+    }
     return message(reason);
   }
 

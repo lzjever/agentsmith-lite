@@ -70,6 +70,24 @@ describe("project member eligibility", () => {
     } finally { restoreClient(original); }
   });
 
+  it("closes member mutations when management permission is revoked", async () => {
+    const original = snapshotClient();
+    apiClient.members = async () => [owner];
+    apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.addMember = async () => { throw new ApiError(403, "Forbidden"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Workspace member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Candidate Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+      await screen.findByText("Member management permission changed. Members are now read-only.");
+      assert.equal(screen.queryByRole("dialog", { name: "Add member" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Add member" }), null);
+    } finally { restoreClient(original); }
+  });
+
   it("explains when every workspace member already has project access", async () => {
     const original = snapshotClient();
     apiClient.members = async () => [owner];
