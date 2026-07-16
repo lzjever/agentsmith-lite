@@ -23,14 +23,28 @@ const { Terminal } = await import("@xterm/xterm");
 mock.method(Terminal.prototype, "loadAddon", () => undefined);
 mock.method(Terminal.prototype, "open", () => undefined);
 mock.method(Terminal.prototype, "focus", () => undefined);
+mock.method(Terminal.prototype, "clear", () => undefined);
 mock.method(Terminal.prototype, "writeln", () => undefined);
 mock.method(Terminal.prototype, "dispose", () => undefined);
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { TaskDetailPage } = await import("../../src/components/tasks/TaskDetailPage.js");
+const { TaskTerminalPanel } = await import("../../src/components/tasks/TaskTerminalPanel.js");
 
 afterEach(() => { cleanup(); sockets.length = 0; });
 
 describe("TaskDetailPage terminal occupancy", () => {
+  it("reconnects while a newly created sandbox is still starting", async () => {
+    render(<TaskTerminalPanel taskId="task_starting" />);
+    await waitFor(() => assert.equal(sockets.length, 1));
+
+    act(() => { sockets[0]?.onerror?.(); sockets[0]?.onclose?.(); });
+    await waitFor(() => assert.equal(sockets.length, 2), { timeout: 2_000 });
+    act(() => sockets[1]?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ op: "ready" }) })));
+
+    assert.ok(await screen.findByText("ready"));
+    assert.equal(screen.queryByRole("button", { name: "Reconnect terminal" }), null);
+  });
+
   it("keeps the owner's terminal mounted across occupancy and terminal-state updates until the user leaves", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
