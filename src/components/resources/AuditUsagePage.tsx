@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardList, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
@@ -35,22 +35,26 @@ export function UsagePage({ projectId }: { projectId: string }) {
   const [state, setState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
+  const requestRevision = useRef(0);
   const load = useCallback(async () => {
+    const revision = ++requestRevision.current;
     setState("loading");
     try {
-      setUsage(
-        await apiClient.usage(
-          projectId,
-          endpointId === "all" ? undefined : endpointId,
-        ),
+      const loaded = await apiClient.usage(
+        projectId,
+        endpointId === "all" ? undefined : endpointId,
       );
+      if (revision !== requestRevision.current) return;
+      setUsage(loaded);
       setState("ready");
     } catch {
+      if (revision !== requestRevision.current) return;
       setState("error");
     }
   }, [projectId, endpointId]);
 
   useEffect(() => {
+    requestRevision.current += 1;
     const requested = browserQuery().get("endpointId");
     setEndpointId(requested || "all");
     setQueryProjectId(projectId);
@@ -119,9 +123,11 @@ export function AuditPage({ projectId }: { projectId: string }) {
     "loading",
   );
   const [selected, setSelected] = useState<ProjectAuditEvent | null>(null);
+  const requestRevision = useRef(0);
   const cursor = cursors.at(-1);
 
   const load = useCallback(async () => {
+    const revision = ++requestRevision.current;
     setState("loading");
     try {
       const page = await apiClient.audit(projectId, {
@@ -134,15 +140,18 @@ export function AuditPage({ projectId }: { projectId: string }) {
         from: from ? new Date(from).toISOString() : undefined,
         to: to ? new Date(to).toISOString() : undefined,
       });
+      if (revision !== requestRevision.current) return;
       setItems(page.items);
       setNext(page.nextCursor);
       setState("ready");
     } catch {
+      if (revision !== requestRevision.current) return;
       setState("error");
     }
   }, [projectId, cursor, action, status, kind, resourceId, from, to]);
 
   useEffect(() => {
+    requestRevision.current += 1;
     const query = browserQuery();
     const requestedAction = query.get("action");
     const requestedKind = query.get("resourceKind");

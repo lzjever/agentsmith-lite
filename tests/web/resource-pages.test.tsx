@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectAlert, type ProjectAuditEvent, type ProjectCapabilities, type ProjectPolicyInput, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageOverview } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { ResourcePolicyPage } = await import("../../src/components/resources/ResourcePolicyPage.js");
 const { AlertsPage } = await import("../../src/components/resources/AlertsPage.js");
 const { AuditPage, UsagePage } = await import("../../src/components/resources/AuditUsagePage.js");
@@ -176,6 +176,31 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("keeps the latest usage refresh when an older request finishes last", async () => {
+    const original = snapshotClient();
+    let secondaryReads = 0;
+    let resolveOlder!: (value: ProjectUsageOverview) => void;
+    const withRequests = (requests: number): ProjectUsageOverview => ({ ...usageOverview, selectedEndpointId: "endpoint_2", daily: usageOverview.daily.map((day, index) => ({ ...day, requests: index === 29 ? requests : 0 })), trendTotals: { ...usageOverview.trendTotals, requests } });
+    apiClient.usage = async (_projectId, endpointId) => {
+      if (!endpointId) return usageOverview;
+      secondaryReads += 1;
+      if (secondaryReads === 1) return new Promise((resolve) => { resolveOlder = resolve; });
+      return withRequests(22);
+    };
+    try {
+      render(<UsagePage projectId={projectId} />);
+      await screen.findByText("Project limits");
+      fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
+      await waitFor(() => assert.equal(secondaryReads, 1));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh usage" }));
+      await screen.findByText("22");
+      await act(async () => { resolveOlder(withRequests(11)); await Promise.resolve(); });
+      assert.ok(screen.getByText("22"));
+      assert.equal(screen.queryByText("11"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("filters audit events, opens a safe detail view, and never renders unsupported sensitive event fields", async () => {
     const original = snapshotClient();
     const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.resolve", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_1", createdAt: policy.createdAt, payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
@@ -198,6 +223,30 @@ describe("project resource pages", () => {
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
+  });
+
+  it("keeps the latest audit refresh when an older page finishes last", async () => {
+    const original = snapshotClient();
+    const auditEvent = (id: string, action: string): ProjectAuditEvent => ({ id, projectId, actorId: "user_1", action, status: "accepted", resourceKind: "alert", resourceId: id, createdAt: policy.createdAt } as ProjectAuditEvent);
+    let reads = 0;
+    let resolveOlder!: (value: { items: ProjectAuditEvent[]; nextCursor: string | null }) => void;
+    apiClient.audit = async () => {
+      reads += 1;
+      if (reads === 1) return { items: [auditEvent("initial", "alert.acknowledge")], nextCursor: null };
+      if (reads === 2) return new Promise((resolve) => { resolveOlder = resolve; });
+      return { items: [auditEvent("latest", "alert.resolve")], nextCursor: null };
+    };
+    try {
+      render(<AuditPage projectId={projectId} />);
+      await screen.findByText("alert.acknowledge");
+      fireEvent.click(screen.getByRole("button", { name: "Refresh audit" }));
+      await waitFor(() => assert.equal(reads, 2));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh audit" }));
+      await screen.findByText("alert.resolve");
+      await act(async () => { resolveOlder({ items: [auditEvent("older", "alert.dismiss")], nextCursor: null }); await Promise.resolve(); });
+      assert.ok(screen.getByText("alert.resolve"));
+      assert.equal(screen.queryByText("alert.dismiss"), null);
+    } finally { restoreClient(original); }
   });
 
   it("uses project alert history for the Notifications tab and only allows projected managers to resolve it", async () => {
