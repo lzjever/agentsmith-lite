@@ -55,12 +55,33 @@ describe("FetchOpenAICompatibleClient", () => {
     assert.equal(seenUrl, "/chat/completions");
   });
 
-  it("validates OpenAI-compatible credentials through the models endpoint without returning provider content", async () => {
-    let seenUrl = "";
-    const baseUrl = await serve(async (req, res) => { seenUrl = req.url ?? ""; sendJson(res, 200, { data: [] }); });
+  it("validates the configured model through Chat Completions without returning provider content", async () => {
+    let seen: { url: string; body: unknown } | undefined;
+    const baseUrl = await serve(async (req, res) => { seen = { url: req.url ?? "", body: JSON.parse(await readBody(req)) as unknown }; sendJson(res, 200, { choices: [{ message: { content: "ok" } }] }); });
     const result = await new FetchOpenAICompatibleClient().validateEndpoint!(endpointFixture({ baseUrl }), "sk-test-secret");
     assert.deepEqual(result, { status: "healthy" });
-    assert.equal(seenUrl, "/models");
+    assert.equal(seen?.url, "/chat/completions");
+    assert.deepEqual(seen?.body, { model: "gpt-compatible", messages: [{ role: "user", content: "Reply with OK." }], max_tokens: 1, stream: false });
+  });
+
+  it("does not report malformed Chat Completions output as healthy", async () => {
+    const baseUrl = await serve(async (_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("not json"); });
+    const result = await new FetchOpenAICompatibleClient().validateEndpoint!(endpointFixture({ baseUrl }), "sk-test-secret");
+    assert.deepEqual(result, { status: "unavailable", errorCategory: "upstream" });
+  });
+
+  it("blocks private provider targets unless operations explicitly allow the hostname", async () => {
+    let calls = 0;
+    const providerFetch: typeof fetch = async (_url, init) => { calls += 1; assert.equal(init?.redirect, "error"); return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } }); };
+    const endpoint = endpointFixture({ baseUrl: "https://provider.internal/v1" });
+    const resolvePrivate = async () => [{ address: "10.20.30.40", family: 4 as const }];
+
+    await assert.rejects(() => new FetchOpenAICompatibleClient(providerFetch, { resolve: resolvePrivate }).completeChat(endpoint, [{ role: "user", content: "hi" }], { apiKey: "secret" }), /provider host is not allowed/);
+    assert.equal(calls, 0);
+
+    const response = await new FetchOpenAICompatibleClient(providerFetch, { privateHosts: ["provider.internal"], resolve: resolvePrivate }).completeChat(endpoint, [{ role: "user", content: "hi" }], { apiKey: "secret" });
+    assert.equal(response.message.content, "ok");
+    assert.equal(calls, 1);
   });
 
   it("discovers a bounded, de-duplicated provider model list without creating a catalog", async () => {
@@ -69,6 +90,14 @@ describe("FetchOpenAICompatibleClient", () => {
     const result = await new FetchOpenAICompatibleClient().discoverModels!({ baseUrl, credentialId: "credential_1", requestTimeoutSecs: 30 }, "sk-test-secret");
 
     assert.deepEqual(result, { models: ["a-model", "z-model"], health: { status: "healthy", checkedAt: null, errorCategory: null } });
+  });
+
+  it("does not report malformed model discovery output as healthy", async () => {
+    const baseUrl = await serve(async (_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("not json"); });
+
+    const result = await new FetchOpenAICompatibleClient().discoverModels!({ baseUrl, credentialId: "credential_1", requestTimeoutSecs: 30 }, "sk-test-secret");
+
+    assert.deepEqual(result, { models: [], health: { status: "unavailable", checkedAt: null, errorCategory: "upstream" } });
   });
 
   it("returns a sanitized health category for rejected validation without reading a provider body", async () => {

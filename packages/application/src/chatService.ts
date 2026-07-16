@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatResponse, ProjectChatMessage, ProjectChatThread } from "../../contracts/src/api.js";
+import type { ChatMessage, ChatResponse, ModelEndpoint, ProjectChatMessage, ProjectChatThread } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
@@ -14,6 +14,10 @@ import { ContextService } from "./contextService.js";
 export interface ProjectChatSendResult {
   message: ProjectChatMessage;
   endpointSnapshot: ChatResponse["endpointSnapshot"];
+}
+
+function requireChatEndpoint(endpoint: ModelEndpoint): void {
+  if (!endpoint.capabilities.includes("text")) throw new ProductError("Chat endpoint must support the text capability", 409);
 }
 
 export class ChatService {
@@ -38,7 +42,7 @@ export class ChatService {
   }
 
   async createThread(userId: string, projectId: string, endpointId: string): Promise<ProjectChatThread> {
-    await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireNonEmptyString(endpointId, "chat.endpointId"));
+    requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireNonEmptyString(endpointId, "chat.endpointId")));
     const timestamp = nowIso();
     const thread = await this.store.createProjectChatThread({ id: newId("chat"), projectId, endpointId, title: null, pinnedAt: null, starredAt: null, deletedAt: null, createdAt: timestamp, updatedAt: timestamp });
     await this.policies.recordOperation(projectId, userId, "chat.thread.create", "accepted", thread.id);
@@ -75,6 +79,7 @@ export class ChatService {
     const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
     const text = requireNonEmptyString(content, "chat.content");
     const endpoint = await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireThreadEndpointId(thread));
+    requireChatEndpoint(endpoint);
     const credential = await this.credentials.resolve(projectId, endpoint.credentialId);
     if (normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl) !== credential.baseUrl) {
       throw new ProductError("Endpoint baseUrl does not match the credential binding", 400);
@@ -111,7 +116,7 @@ export class ChatService {
   async retryMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(value:string)=>void):Promise<ProjectChatSendResult>{
     const thread=await this.requireThreadForUser(userId,projectId,threadId,"write");await this.recoverPendingResponses(threadId);const history=await this.store.listProjectChatMessages(threadId);const target=requireMessage(history,messageId,expectedVersion);
     if(target.role!=="user"||!(["failed","stopped"] as const).includes(target.deliveryStatus as "failed"|"stopped"))throw new ProductError("Only a failed or stopped user message can be retried",409);if(history.at(-1)?.id!==target.id)throw new ProductError("Only the latest message can be retried",409);
-    const endpoint=await this.endpointService.requireCredentialEndpointForUser(userId,projectId,requireThreadEndpointId(thread));const credential=await this.credentials.resolve(projectId,endpoint.credentialId);if(normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl)!==credential.baseUrl)throw new ProductError("Endpoint baseUrl does not match the credential binding",400);
+    const endpoint=await this.endpointService.requireCredentialEndpointForUser(userId,projectId,requireThreadEndpointId(thread));requireChatEndpoint(endpoint);const credential=await this.credentials.resolve(projectId,endpoint.credentialId);if(normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl)!==credential.baseUrl)throw new ProductError("Endpoint baseUrl does not match the credential binding",400);
     const context=await this.contexts.resolveForAgent(userId,projectId);const input=[...(context?[{role:"user" as const,content:context}]:[]),...history.map(({role,content})=>({role,content}))];
     let responseStaged=false;await this.store.updateProjectChatMessageDelivery(target.id,"pending",nowIso());await this.policies.recordOperation(projectId,userId,"chat.message.retry","accepted",target.id);
     try{const response=await this.client.streamChat({endpoint,settlementEndpointId:endpoint.id,apiKey:credential.apiKey,actorId:userId,...(signal?{signal}:{}),onDelta},input);const timestamp=nowIso();const assistant:ProjectChatMessage={id:newId("chatmsg"),threadId,sequence:target.sequence+1,version:1,deliveryStatus:"completed",role:"assistant",content:response.message.content,createdAt:timestamp,updatedAt:timestamp};if(!await this.store.stageProjectChatResponse(target.id,assistant))throw new Error("Chat response could not be staged");responseStaged=true;const finalized=await this.store.finalizeProjectChatResponse(target.id);if(!finalized)throw new Error("Chat response could not be finalized");await this.store.touchProjectChatThread(threadId,timestamp);return{message:finalized,endpointSnapshot:response.endpointSnapshot};}

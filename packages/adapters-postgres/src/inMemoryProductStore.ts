@@ -413,7 +413,7 @@ export class InMemoryProductStore implements ProductStore {
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }
   async findProjectCredential(id:string): Promise<StoredProjectCredential | null> { return clone(this.credentials.get(id) ?? null); }
   async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
-  async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v)); return publicCredential(v); }
+  async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v));for(const [id,endpoint] of this.endpoints){if(endpoint.credentialId===v.id)this.endpoints.set(id,clone({...endpoint,health:{status:"unknown",checkedAt:null,errorCategory:null},updatedAt:v.updatedAt}))}return publicCredential(v); }
   async deleteProjectCredential(id:string): Promise<boolean> { return this.credentials.delete(id); }
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { return []; }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); const credential=this.credentials.get(credentialId); if(!endpoint||endpoint.credentialId||!credential||credential.projectId!==endpoint.projectId) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
@@ -443,7 +443,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async deleteEndpoint(id: string): Promise<DeleteEndpointResult> {
     if (!this.endpoints.has(id)) return "not_found";
-    if ([...this.tasks.values()].some((task) => task.endpointId === id)) return "referenced_by_tasks";
+    if ([...this.tasks.values()].some((task) => task.endpointId === id && !task.deletedAt)) return "referenced_by_tasks";
 
     for (const [threadId, thread] of this.chatThreads) {
       if (thread.endpointId === id) this.chatThreads.set(threadId, clone({ ...thread, endpointId: null }));

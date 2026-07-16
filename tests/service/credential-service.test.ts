@@ -22,12 +22,17 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   assert.deepEqual(Object.keys(credential).sort(), ["baseUrl", "createdAt", "fingerprint", "id", "lastRotatedAt", "name", "projectId", "type", "updatedAt", "version"]);
   assert.deepEqual((await services.credentials.list(user.id, project.id)).map((item) => item.id), [credential.id]);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "first-secret");
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Endpoint", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  assert.equal(endpoint.health?.status, "healthy");
+
   const rotated = await services.credentials.rotate(user.id, project.id, credential.id, { secret: "second-secret" });
   assert.equal(rotated.version, 2);
   assert.notEqual(rotated.fingerprint, credential.fingerprint);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "second-secret");
+  assert.equal((await services.endpoints.requireEndpointForProject(project.id, endpoint.id)).health?.status, "unknown");
+  await assert.rejects(() => services.endpoints.requireCredentialEndpointForUser(user.id, project.id, endpoint.id), /Recheck it before use/);
+  assert.equal((await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id)).health?.status, "healthy");
 
-  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Endpoint", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
   assert.equal(endpoint.credentialId, credential.id);
   await assert.rejects(() => services.credentials.remove(user.id, project.id, credential.id));
   await services.endpoints.deleteEndpoint(user.id, project.id, endpoint.id);

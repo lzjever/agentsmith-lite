@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
-import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import type { ChatMessage, ChatResponse, CreateEndpointInput, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
@@ -99,6 +99,23 @@ describe("ChatService", () => {
       ProductError
     );
     assert.equal(clientCalls.length, 0);
+  });
+
+  it("enforces text capability at the chat service boundary", async () => {
+    const calls: unknown[] = [];
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient(calls) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const imageOnly = await createCredentialEndpoint(services, user.id, project.id, { capabilities: ["image"] });
+    await assert.rejects(() => services.chat.createThread(user.id, project.id, imageOnly.id), /text capability/);
+
+    const text = await createCredentialEndpoint(services, user.id, project.id);
+    const thread = await services.chat.createThread(user.id, project.id, text.id);
+    await store.updateEndpoint({ ...text, capabilities: ["image"], updatedAt: new Date().toISOString() });
+    await assert.rejects(() => services.chat.sendMessage(user.id, project.id, thread.id, "hello"), /text capability/);
+    assert.equal(calls.length, 0);
   });
 
   it("records a deduplicated provider failure alert without storing chat content", async () => {
@@ -263,7 +280,7 @@ describe("ChatService", () => {
   });
 });
 
-function endpointInput(overrides: Partial<ReturnType<typeof endpointInputBase>> = {}) {
+function endpointInput(overrides: Partial<CreateEndpointInput> = {}) {
   return {
     ...endpointInputBase(),
     ...overrides
@@ -275,7 +292,7 @@ async function sendThreadMessage(services: ReturnType<typeof createApplicationSe
   return services.chat.sendMessage(userId, projectId, thread.id, content);
 }
 
-function endpointInputBase() {
+function endpointInputBase(): CreateEndpointInput {
   return {
     name: "OpenAI-compatible",
     protocol: "openai_chat_completions" as const,
@@ -287,7 +304,7 @@ function endpointInputBase() {
   };
 }
 
-async function createCredentialEndpoint(services: ReturnType<typeof createApplicationServices>, userId: string, projectId: string, overrides: Partial<ReturnType<typeof endpointInputBase>> = {}) {
+async function createCredentialEndpoint(services: ReturnType<typeof createApplicationServices>, userId: string, projectId: string, overrides: Partial<CreateEndpointInput> = {}) {
   const input = endpointInput(overrides);
   const credential = await services.credentials.create(userId, projectId, { name: "Provider", baseUrl: input.baseUrl, secret: "sk-resolved" });
   return services.endpoints.createEndpoint(userId, projectId, { ...input, credentialId: credential.id });

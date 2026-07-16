@@ -13,6 +13,7 @@ import {
 import { createCredentialCrypto } from "../../application/src/credentialCrypto.js";
 import { createOpenIdConnectClient } from "./oidcClient.js";
 import { createApiServer } from "./server.js";
+import { FetchOpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 
 const MODEL_CA_BUNDLE_PATH = "/etc/agentsmith-lite/model-ca/ca.crt";
 const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
@@ -41,6 +42,7 @@ const liveSandboxMaxLifetimeMs = liveSandboxEnabled
   ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS")
   : undefined;
 const oidcClient = await createOpenIdConnectClient(authConfig.oidc);
+const privateProviderHosts = (process.env.AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
 
 const server = await createApiServer({
   port,
@@ -48,6 +50,7 @@ const server = await createApiServer({
   dataRoot,
   sessionSecret,
   credentialCrypto,
+  providerClient: new FetchOpenAICompatibleClient(fetch, { privateHosts: privateProviderHosts }),
   ...(process.env.APP_PUBLIC_BASE_URL ? { publicBaseUrl: process.env.APP_PUBLIC_BASE_URL } : {}),
   oidcClient,
   namespace: process.env.KUBE_NAMESPACE ?? "agentsmith",

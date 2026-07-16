@@ -75,6 +75,11 @@ describe("endpoint deletion", () => {
 
     assert.equal((await store.findEndpoint(endpoint.id))?.id, endpoint.id);
     assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, endpoint.id);
+
+    assert.ok(await store.softDeleteTask("task_endpoint_reference", "2026-07-12T12:01:00.000Z"));
+    await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
+    assert.equal(await store.findEndpoint(endpoint.id), null);
+    assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, null);
   });
 });
 

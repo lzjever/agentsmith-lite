@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { BlockList } from "node:net";
 import type { ChatMessage, ChatResponse, DiscoverEndpointModelsInput, EndpointHealthErrorCategory, EndpointModelDiscovery, ModelEndpoint } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 
@@ -18,17 +20,29 @@ export interface OpenAICompatibleClient {
 
 
 export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
-  constructor(private readonly providerFetch: typeof fetch = fetch) {}
+  constructor(private readonly providerFetch: typeof fetch = fetch, private readonly networkPolicy?: ProviderNetworkPolicy) {
+    networkPolicy?.privateHosts?.forEach(normalizeConfiguredProviderHost);
+  }
 
   async validateEndpoint(endpoint: ModelEndpoint, apiKey: string): Promise<{ status: "healthy" } | { status: "unavailable"; errorCategory: EndpointHealthErrorCategory }> {
-    const discovery = await this.discoverModels({ baseUrl: endpoint.baseUrl, credentialId: endpoint.credentialId, requestTimeoutSecs: endpoint.requestTimeoutSecs }, apiKey);
-    return discovery.health.status === "healthy" ? { status: "healthy" } : { status: "unavailable", errorCategory: discovery.health.errorCategory ?? "unknown" };
+    try {
+      const response = await this.requestProvider(chatCompletionsUrl(endpoint.baseUrl), endpoint.requestTimeoutSecs, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: endpoint.model, messages: [{ role: "user", content: "Reply with OK." }], max_tokens: 1, stream: false }) });
+      let body: unknown;
+      try { body = await response.json(); } catch { throw providerError("OpenAI-compatible provider returned malformed JSON", 502, "upstream"); }
+      try { parseAssistantContent(body); } catch { throw providerError("OpenAI-compatible provider returned a malformed chat response", 502, "upstream"); }
+      return { status: "healthy" };
+    } catch (error) {
+      return { status: "unavailable", errorCategory: providerErrorCategory(error) };
+    }
   }
   async discoverModels(input: DiscoverEndpointModelsInput, apiKey: string): Promise<EndpointModelDiscovery> {
     try {
       const response = await this.requestProvider(modelsUrl(input.baseUrl), input.requestTimeoutSecs, { headers: { authorization: `Bearer ${apiKey}` } });
       let body: unknown;
-      try { body = await response.json(); } catch { return { models: [], health: { status: "healthy", checkedAt: null, errorCategory: null } }; }
+      try { body = await response.json(); } catch { throw providerError("OpenAI-compatible provider returned malformed model discovery JSON", 502, "upstream"); }
+      if (!body || typeof body !== "object" || !Array.isArray((body as { data?: unknown }).data)) {
+        throw providerError("OpenAI-compatible provider returned a malformed model discovery response", 502, "upstream");
+      }
       return { models: modelIds(body), health: { status: "healthy", checkedAt: null, errorCategory: null } };
     } catch (error) {
       return { models: [], health: { status: "unavailable", checkedAt: null, errorCategory: providerErrorCategory(error) } };
@@ -74,12 +88,13 @@ export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
   }
 
   private async requestProvider(url: string, timeoutSecs: number, init: RequestInit, externalSignal?: AbortSignal): Promise<Response> {
+    if (this.networkPolicy) await assertProviderTargetAllowed(url, this.networkPolicy);
     const controller = new AbortController();
     const onExternalAbort = () => controller.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller.abort(), timeoutSecs * 1000);
     try {
-      const response = await this.providerFetch(url, { ...init, signal: controller.signal });
+      const response = await this.providerFetch(url, { ...init, redirect: "error", signal: controller.signal });
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
         throw providerStatusError(response.status);
@@ -93,6 +108,43 @@ export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
       externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
+}
+
+export interface ProviderNetworkPolicy {
+  privateHosts?: readonly string[];
+  resolve?: (hostname: string) => Promise<readonly { address: string; family: 4 | 6 }[]>;
+}
+
+const nonPublicAddresses = createNonPublicAddressList();
+
+async function assertProviderTargetAllowed(url: string, policy: ProviderNetworkPolicy): Promise<void> {
+  const hostname = normalizeHostname(new URL(url).hostname);
+  const allowed = new Set((policy.privateHosts ?? []).map(normalizeConfiguredProviderHost));
+  if (allowed.has(hostname)) return;
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) throw disallowedProviderHost();
+  let addresses: readonly { address: string; family: 4 | 6 }[];
+  try { addresses = await (policy.resolve ?? resolveProviderHost)(hostname); } catch { throw disallowedProviderHost(); }
+  if (addresses.length === 0 || addresses.some(({ address, family }) => nonPublicAddresses.check(address, family === 4 ? "ipv4" : "ipv6"))) throw disallowedProviderHost();
+}
+
+async function resolveProviderHost(hostname: string): Promise<readonly { address: string; family: 4 | 6 }[]> {
+  const resolved = await lookup(hostname, { all: true, verbatim: true });
+  return resolved.map(({ address, family }) => ({ address, family: family as 4 | 6 }));
+}
+
+function normalizeConfiguredProviderHost(value: string): string {
+  const normalized = normalizeHostname(value.trim());
+  if (!normalized || normalized.includes("/") || normalized.includes(":")) throw new Error("AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS must contain comma-separated hostnames or IPv4 addresses without ports");
+  return normalized;
+}
+
+function normalizeHostname(value: string): string { return value.toLowerCase().replace(/\.$/, ""); }
+function disallowedProviderHost(): ProductError { return providerError("OpenAI-compatible provider host is not allowed", 502, "network"); }
+function createNonPublicAddressList(): BlockList {
+  const list = new BlockList();
+  for (const [network, prefix] of [["0.0.0.0",8],["10.0.0.0",8],["100.64.0.0",10],["127.0.0.0",8],["169.254.0.0",16],["172.16.0.0",12],["192.0.0.0",24],["192.0.2.0",24],["192.168.0.0",16],["198.18.0.0",15],["198.51.100.0",24],["203.0.113.0",24],["224.0.0.0",4],["240.0.0.0",4]] as const) list.addSubnet(network, prefix, "ipv4");
+  for (const [network, prefix] of [["::",128],["::1",128],["fc00::",7],["fe80::",10],["ff00::",8],["2001:db8::",32]] as const) list.addSubnet(network, prefix, "ipv6");
+  return list;
 }
 
 function providerStatusError(status: number): ProductError {

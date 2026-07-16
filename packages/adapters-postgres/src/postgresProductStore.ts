@@ -475,7 +475,14 @@ export class PostgresProductStore implements ProductStore {
   }
   async findProjectCredential(id: string): Promise<StoredProjectCredential | null> { const rows=await this.queryRows<ProjectCredentialRow>("select * from project_credentials where id=$1",[id]); return rows[0] ? mapStoredCredential(rows[0]) : null; }
   async listProjectCredentials(projectId: string): Promise<ProjectCredential[]> { const rows=await this.queryRows<ProjectCredentialRow>("select * from project_credentials where project_id=$1 order by created_at,id",[projectId]); return rows.map(mapCredential); }
-  async updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const rows=await this.queryRows<ProjectCredentialRow>(`update project_credentials set name=$2,base_url=$3,key_id=$4,nonce=$5,ciphertext=$6,auth_tag=$7,fingerprint=$8,version=$9,last_rotated_at=$10,updated_at=$11 where id=$1 and project_id=$12 and version=$13 returning *`,[value.id,value.name,value.baseUrl,value.keyId,value.nonce,value.ciphertext,value.authTag,value.fingerprint,value.version,value.lastRotatedAt,value.updatedAt,value.projectId,expectedVersion]); if(rows[0])return mapCredential(rows[0]); return (await this.queryRows<{present:boolean}>("select true as present from project_credentials where id=$1",[value.id]))[0]?.present ? "version_conflict" : "not_found"; }
+  async updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict"> {
+    return transaction(this.pool, async (client) => {
+      const rows=(await client.query<ProjectCredentialRow>(`update project_credentials set name=$2,base_url=$3,key_id=$4,nonce=$5,ciphertext=$6,auth_tag=$7,fingerprint=$8,version=$9,last_rotated_at=$10,updated_at=$11 where id=$1 and project_id=$12 and version=$13 returning *`,[value.id,value.name,value.baseUrl,value.keyId,value.nonce,value.ciphertext,value.authTag,value.fingerprint,value.version,value.lastRotatedAt,value.updatedAt,value.projectId,expectedVersion])).rows;
+      if (!rows[0]) return (await client.query<{present:boolean}>("select true as present from project_credentials where id=$1",[value.id])).rows[0]?.present ? "version_conflict" : "not_found";
+      await client.query("update model_endpoints set health_status='unknown',health_checked_at=null,health_error_category=null,updated_at=$2 where credential_id=$1",[value.id,value.updatedAt]);
+      return mapCredential(rows[0]);
+    });
+  }
   async deleteProjectCredential(id: string): Promise<boolean> { const result=await this.pool.query("delete from project_credentials where id=$1",[id]); return result.rowCount===1; }
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { const rows=await this.queryRows<{id:string;project_id:string;base_url:string;api_key_secret_ref:string}>("select id,project_id,base_url,api_key_secret_ref from model_endpoints where credential_id is null and api_key_secret_ref is not null"); return rows.map((row)=>({endpointId:row.id,projectId:row.project_id,baseUrl:row.base_url,secretRef:row.api_key_secret_ref})); }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const result=await this.pool.query("update model_endpoints e set credential_id=$2, api_key_secret_ref=null from project_credentials c where e.id=$1 and e.credential_id is null and c.id=$2 and c.project_id=e.project_id",[endpointId,credentialId]); return result.rowCount===1; }
@@ -541,7 +548,7 @@ export class PostgresProductStore implements ProductStore {
       if (endpoint.rowCount !== 1) return "not_found";
 
       const task = await client.query(
-        "select 1 from agent_tasks where endpoint_id = $1 limit 1",
+        "select 1 from agent_tasks where endpoint_id = $1 and deleted_at is null limit 1",
         [id]
       );
       if (task.rowCount) return "referenced_by_tasks";
