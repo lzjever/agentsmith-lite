@@ -116,5 +116,25 @@ describe("endpoint management", () => it("edits and discovers models with the cr
     apiClient.recheckEndpoint = original.recheckEndpoint;
   }
 }));
+describe("endpoint model discovery", () => it("ignores models discovered for connection details that have since changed", async () => {
+  const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels };
+  let resolveDiscovery!: (value: Awaited<ReturnType<typeof apiClient.discoverEndpointModels>>) => void;
+  apiClient.endpoints = async () => [endpoint];
+  apiClient.credentials = async () => [credential];
+  apiClient.projectCapabilities = async () => manager;
+  apiClient.discoverEndpointModels = async () => new Promise((resolve) => { resolveDiscovery = resolve; });
+  try {
+    render(<EndpointsPage projectId="project_1" />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
+    await screen.findByRole("dialog", { name: "Edit endpoint" });
+    fireEvent.click(screen.getByRole("button", { name: "Discover models" }));
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://other.example.test/v1" } });
+    resolveDiscovery({ models: ["model-from-old-connection"], health: { status: "healthy", checkedAt: "2026-07-12T00:00:00.000Z", errorCategory: null } });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: "Discover models" }).textContent?.includes("Checking"), false));
+    assert.equal(screen.queryByRole("combobox", { name: "Discovered models" }), null);
+  } finally {
+    Object.assign(apiClient, original);
+  }
+}));
 const credential={id:"credential_1",projectId:"project_1",name:"Provider",type:"api_key" as const,baseUrl:"https://api.example.test/v1",fingerprint:"fingerprint",version:1,createdAt:"x",lastRotatedAt:null,updatedAt:"x"}; const manager={...viewer,canManageEndpoints:true};
 function installDom(){const dom=new JSDOM("<!doctype html><html><body></body></html>",{url:"http://localhost"});Object.assign(globalThis,{window:dom.window,self:dom.window,document:dom.window.document,Element:dom.window.Element,HTMLElement:dom.window.HTMLElement,HTMLInputElement:dom.window.HTMLInputElement,HTMLFormElement:dom.window.HTMLFormElement,Node:dom.window.Node,NodeFilter:dom.window.NodeFilter,DocumentFragment:dom.window.DocumentFragment,Event:dom.window.Event,CustomEvent:dom.window.CustomEvent,MutationObserver:dom.window.MutationObserver,getComputedStyle:dom.window.getComputedStyle,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,"navigator",{configurable:true,value:dom.window.navigator});Object.assign(dom.window,{PointerEvent:dom.window.MouseEvent});Object.assign(dom.window.HTMLElement.prototype,{scrollIntoView(){}});if(!("ResizeObserver" in globalThis))Object.assign(globalThis,{ResizeObserver:class{observe(){}unobserve(){}disconnect(){}}});}

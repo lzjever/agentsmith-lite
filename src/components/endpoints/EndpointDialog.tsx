@@ -240,6 +240,7 @@ export function EndpointDialog({
               disabled={
                 !canSubmit ||
                 saving ||
+                discovering ||
                 !input.credentialId ||
                 input.capabilities.length === 0
               }
