@@ -52,6 +52,26 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("keeps a successful member addition when the following directory refresh fails", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
+    const member: WorkspaceMember = { workspaceId: workspace.id, userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp };
+    let memberReads = 0;
+    let additions = 0;
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => { memberReads += 1; if (memberReads > 1) throw new ApiError(503, "Member directory unavailable."); return [owner]; };
+    apiClient.addWorkspaceMember = async () => { additions += 1; return member; };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Email" }), { target: { value: member.email } });
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+      await screen.findByText("Member Person");
+      assert.equal(additions, 1);
+      assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("persists a project pin through the product API", async () => {
     const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
     const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", pinnedAt: null, taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };

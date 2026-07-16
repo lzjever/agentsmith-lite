@@ -29,14 +29,18 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   const [selected, setSelected] = useState<WorkspaceMember>();
   const [memberToRemove, setMemberToRemove] = useState<WorkspaceMember>();
 
-  const refresh = useCallback(async () => {
-    const [workspaces, listed] = await Promise.all([apiClient.workspaces(), apiClient.workspaceMembers(workspaceId)]);
+  const refreshWorkspace = useCallback(async () => {
+    const workspaces = await apiClient.workspaces();
     const found = workspaces.find((item) => item.id === workspaceId);
     if (!found) throw new ApiError(404, "Workspace not found.");
     setWorkspace(found);
+  }, [workspaceId]);
+
+  const refresh = useCallback(async () => {
+    const [, listed] = await Promise.all([refreshWorkspace(), apiClient.workspaceMembers(workspaceId)]);
     setMembers(listed);
     setState("ready");
-  }, [workspaceId]);
+  }, [refreshWorkspace, workspaceId]);
 
   const load = useCallback(async () => {
     setState("loading");
@@ -67,11 +71,12 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setBusyUserId("new");
     setMutationError(undefined);
     try {
-      await apiClient.addWorkspaceMember(workspaceId, email.trim(), role);
-      await refresh();
+      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role);
+      setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
       setOpen(false);
       setEmail("");
       setRole("member");
+      void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       await recoverMutation(reason, () => void add());
     } finally {
@@ -84,8 +89,9 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setBusyUserId(member.userId);
     setMutationError(undefined);
     try {
-      await apiClient.changeWorkspaceMember(workspaceId, member.userId, next);
-      await refresh();
+      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next);
+      setMembers((current) => current.map((item) => item.userId === changed.userId ? changed : item));
+      void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       await recoverMutation(reason, () => void change(member, next));
     } finally {
@@ -99,7 +105,8 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     setMutationError(undefined);
     try {
       await apiClient.removeWorkspaceMember(workspaceId, member.userId);
-      await refresh();
+      setMembers((current) => current.filter((item) => item.userId !== member.userId));
+      void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       await recoverMutation(reason, () => void remove(member));
       throw reason;
