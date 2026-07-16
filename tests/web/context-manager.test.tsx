@@ -85,6 +85,21 @@ describe("context manager", () => {
     } finally { apiClient.contexts = original.contexts; apiClient.saveContext = original.saveContext; }
   });
 
+  it("fails closed when context write permission is revoked", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = { id: "ctx_denied", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    apiClient.contexts = async () => ({ items: [entry], canWrite: true });
+    apiClient.saveContext = async () => { throw new ApiError(403, "Forbidden"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+      await screen.findByText("Context write permission changed. This scope is now read-only.");
+      assert.equal(screen.queryByRole("button", { name: "Save" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
+      assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).disabled, true);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a successful context save when a later list read would fail", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     const entry = { id: "ctx_1", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };

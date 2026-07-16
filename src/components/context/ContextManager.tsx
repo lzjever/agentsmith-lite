@@ -62,6 +62,14 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
 
   function select(entry: ContextEntry) { setConflict(false); setError(""); setSelectedKey(entry.contextKey); setContextKey(entry.contextKey); setContent(entry.content); setContentType(entry.contentType); }
   function create() { setConflict(false); setError(""); setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); }
+  function revokeWriteAccess(reason: unknown) {
+    if (!(reason instanceof ApiError) || reason.status !== 403) return false;
+    setResult((current) => current ? { ...current, canWrite: false } : current);
+    setDeleteOpen(false);
+    setConflict(false);
+    setError("Context write permission changed. This scope is now read-only.");
+    return true;
+  }
   async function save() {
     if (!result?.canWrite || !contextKey.trim() || saving) return;
     setSaving(true);
@@ -76,7 +84,7 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
         return { ...current, items };
       });
       setSelectedKey(saved.contextKey); setConflict(false); setError(""); toast.success("Context saved");
-    } catch (reason) { const nextConflict = reason instanceof ApiError && reason.status === 409; setConflict(nextConflict); setError(message(reason)); toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { setSaving(false); }
+    } catch (reason) { const accessRevoked = revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.status === 409; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason)); } toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { setSaving(false); }
   }
   async function remove() {
     if (!result?.canWrite || !selected || deleting) return;
@@ -85,7 +93,7 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
       await apiClient.deleteContext({ workspaceId, scope, contextKey: selected.contextKey, ...(projectScope && projectId ? { projectId } : {}) });
       const remaining = result.items.filter((entry) => entry.id !== selected.id);
       setResult({ ...result, items: remaining }); setSelectedKey(remaining[0]?.contextKey); setDeleteOpen(false); setError(""); toast.success("Context deleted");
-    } catch (reason) { setError(message(reason)); toast.error("Context could not be deleted"); } finally { setDeleting(false); }
+    } catch (reason) { if (!revokeWriteAccess(reason)) setError(message(reason)); toast.error("Context could not be deleted"); } finally { setDeleting(false); }
   }
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Context" subtitle="Saved instructions and reference data for this workspace and project." />}>
