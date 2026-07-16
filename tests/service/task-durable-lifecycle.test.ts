@@ -110,6 +110,19 @@ describe("durable task lifecycle", () => {
     assert.deepEqual(await setup.store.listTasksForProject(setup.projectId), []);
   });
 
+  it("rejects a missing endpoint credential before task persistence", async () => {
+    const setup = await createSetup(false);
+    const configured = await setup.store.findEndpoint(setup.endpointId);
+    assert.ok(configured);
+    const endpoint = await setup.store.createEndpoint({ ...configured, id: "endpoint_missing_credential", credentialId: "", updatedAt: new Date().toISOString() });
+
+    await assert.rejects(
+      () => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: endpoint.id, prompt: "must fail before creating a task" }, "create-missing-credential"),
+      (error: unknown) => error instanceof Error && /Credential not found/.test(error.message)
+    );
+    assert.deepEqual(await setup.store.listTasksForProject(setup.projectId), []);
+  });
+
   it("persists a retry precondition failure across later task state changes", async () => {
     const setup = await createSetup(true);
     const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "not terminal" }, "create-retry-source");

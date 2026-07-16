@@ -2,7 +2,6 @@ import type { ChatMessage, ChatResponse, ModelEndpoint, ProjectChatMessage, Proj
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
-import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { EndpointService } from "./endpointService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
@@ -81,9 +80,6 @@ export class ChatService {
     const endpoint = await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireThreadEndpointId(thread));
     requireChatEndpoint(endpoint);
     const credential = await this.credentials.resolve(projectId, endpoint.credentialId);
-    if (normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl) !== credential.baseUrl) {
-      throw new ProductError("Endpoint baseUrl does not match the credential binding", 400);
-    }
     await this.recoverPendingResponses(thread.id);
     const history = await this.store.listProjectChatMessages(thread.id);
     requireCurrentHistory(history, afterMessageId);
@@ -116,7 +112,7 @@ export class ChatService {
   async retryMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(value:string)=>void):Promise<ProjectChatSendResult>{
     const thread=await this.requireThreadForUser(userId,projectId,threadId,"write");await this.recoverPendingResponses(threadId);const history=await this.store.listProjectChatMessages(threadId);const target=requireMessage(history,messageId,expectedVersion);
     if(target.role!=="user"||!(["failed","stopped"] as const).includes(target.deliveryStatus as "failed"|"stopped"))throw new ProductError("Only a failed or stopped user message can be retried",409);if(history.at(-1)?.id!==target.id)throw new ProductError("Only the latest message can be retried",409);
-    const endpoint=await this.endpointService.requireCredentialEndpointForUser(userId,projectId,requireThreadEndpointId(thread));requireChatEndpoint(endpoint);const credential=await this.credentials.resolve(projectId,endpoint.credentialId);if(normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl)!==credential.baseUrl)throw new ProductError("Endpoint baseUrl does not match the credential binding",400);
+    const endpoint=await this.endpointService.requireCredentialEndpointForUser(userId,projectId,requireThreadEndpointId(thread));requireChatEndpoint(endpoint);const credential=await this.credentials.resolve(projectId,endpoint.credentialId);
     const context=await this.contexts.resolveForAgent(userId,projectId);const input=[...(context?[{role:"user" as const,content:context}]:[]),...history.map(({role,content})=>({role,content}))];
     let responseStaged=false;await this.store.updateProjectChatMessageDelivery(target.id,"pending",nowIso());await this.policies.recordOperation(projectId,userId,"chat.message.retry","accepted",target.id);
     try{const response=await this.client.streamChat({endpoint,settlementEndpointId:endpoint.id,apiKey:credential.apiKey,actorId:userId,...(signal?{signal}:{}),onDelta},input);const timestamp=nowIso();const assistant:ProjectChatMessage={id:newId("chatmsg"),threadId,sequence:target.sequence+1,version:1,deliveryStatus:"completed",role:"assistant",content:response.message.content,createdAt:timestamp,updatedAt:timestamp};if(!await this.store.stageProjectChatResponse(target.id,assistant))throw new Error("Chat response could not be staged");responseStaged=true;const finalized=await this.store.finalizeProjectChatResponse(target.id);if(!finalized)throw new Error("Chat response could not be finalized");await this.store.touchProjectChatThread(threadId,timestamp);return{message:finalized,endpointSnapshot:response.endpointSnapshot};}

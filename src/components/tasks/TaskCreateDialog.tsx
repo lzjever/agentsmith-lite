@@ -39,18 +39,32 @@ export function TaskCreateDialog({
   const [addingUrl, setAddingUrl] = useState(false);
   const [error, setError] = useState("");
   const uploadInput = useRef<HTMLInputElement>(null);
+  const wasOpen = useRef(false);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpen.current = false;
+      return;
+    }
+    if (wasOpen.current) return;
+    wasOpen.current = true;
     setTitle("");
     setPrompt("");
-    setEndpointId((current) => endpoints.some((endpoint) => endpoint.id === current) ? current : (endpoints[0]?.id ?? ""));
     setInputPaths([]);
     setBrowserPath(PROJECT_FILES_ROOT);
     setBrowserEntries(sortFileEntries(projectFiles));
     setUrlInput("");
     setError("");
   }, [endpoints, open, projectFiles]);
+
+  useEffect(() => {
+    if (!open) return;
+    setEndpointId((current) => endpoints.some((endpoint) => endpoint.id === current) ? current : (endpoints[0]?.id ?? ""));
+  }, [endpoints, open]);
+
+  useEffect(() => {
+    if (open && browserPath === PROJECT_FILES_ROOT) setBrowserEntries(sortFileEntries(projectFiles));
+  }, [browserPath, open, projectFiles]);
 
   async function navigate(path: string) {
     if (!projectId) return;

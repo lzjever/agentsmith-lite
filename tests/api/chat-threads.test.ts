@@ -11,6 +11,7 @@ import type { OpenAICompatibleClient } from "../../packages/openai-compatible-cl
 let streamChatImpl: OpenAICompatibleClient["streamChat"] | undefined;
 
 describe("project chat threads API", () => {
+  const store = createLocalInMemoryProductStore();
   let api: RunningApiServer;
   let root = "";
   let cookie = "";
@@ -24,7 +25,6 @@ describe("project chat threads API", () => {
 
   before(async () => {
     root = await mkdtemp(path.join(tmpdir(), "asl-chat-threads-"));
-    const store = createLocalInMemoryProductStore();
     api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password", store, providerClient: fakeClient() });
     await store.createUser({ id: "viewer_1", email: "viewer@example.test", emailVerified: true, passwordHash: "external:oidc", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
     await store.createSession({ id: "viewer_session", userId: "viewer_1", csrfToken: viewerCsrf, createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2999-01-01T00:00:00.000Z" });
@@ -46,8 +46,15 @@ describe("project chat threads API", () => {
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
 
   it("projects endpoint task eligibility and preserves thread history order", async () => {
+    const configured = await store.findEndpoint(endpointId);
+    assert.ok(configured);
+    const missingCredential = await store.createEndpoint({ ...configured, id: "endpoint_missing_credential", credentialId: "" });
     const endpoints = await requestJson("GET", `/api/v1/projects/${projectId}/endpoints`, undefined);
-    assert.equal(endpoints[0]?.taskEligible, true);
+    assert.equal(endpoints.find((endpoint: { id: string }) => endpoint.id === endpointId)?.taskEligible, true);
+    const missingCredentialProjection = endpoints.find((endpoint: { id: string }) => endpoint.id === missingCredential.id);
+    assert.equal(missingCredentialProjection?.hasCredentialRef, false);
+    assert.equal(missingCredentialProjection?.taskEligible, false);
+    await store.deleteEndpoint(missingCredential.id);
     const first = await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId });
     const second = await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId });
     await sendMessage(first.id, "first");

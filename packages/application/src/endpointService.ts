@@ -166,6 +166,7 @@ export class EndpointService {
     if (endpoint.health?.status !== "healthy") {
       throw new ProductError("Endpoint is unavailable. Recheck it before use.", 409);
     }
+    await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
     return endpoint;
   }
 

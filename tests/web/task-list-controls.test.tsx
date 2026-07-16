@@ -47,6 +47,18 @@ describe("task list controls", () => {
     assert.deepEqual(submitted?.inputPaths, ["files/brief.md"]);
     assert.equal((screen.getByRole("textbox", { name: "Task prompt" }) as HTMLTextAreaElement).value, "Generate notes");
   });
+
+  it("preserves the task draft when project files finish loading", async () => {
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    const dialog = <TaskCreateDialog endpoints={[endpoint]} projectFiles={[]} projectFilesLoading open saving={false} onClose={() => undefined} onCreate={async () => undefined} />;
+    const view = render(dialog);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Keep this draft" } });
+    view.rerender(<TaskCreateDialog endpoints={[endpoint]} projectFiles={[{ name: "brief.md", path: "files/brief.md", type: "file", size: 12, mediaType: "text/markdown", updatedAt: "x" }]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async () => undefined} />);
+
+    assert.equal((screen.getByRole("textbox", { name: "Task prompt" }) as HTMLTextAreaElement).value, "Keep this draft");
+    assert.ok(screen.getByRole("checkbox", { name: "Attach brief.md" }));
+  });
 });
 
 function task(index: number, prompt: string): Task {

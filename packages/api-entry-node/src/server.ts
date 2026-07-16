@@ -1229,7 +1229,7 @@ function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {
     requestTimeoutSecs: endpoint.requestTimeoutSecs,
     ...(endpoint.health ? { health: endpoint.health } : {}),
     hasCredentialRef: endpoint.credentialId.length > 0,
-    taskEligible: endpoint.health?.status === "healthy" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls"),
+    taskEligible: endpoint.credentialId.length > 0 && endpoint.health?.status === "healthy" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls"),
     createdAt: endpoint.createdAt,
     updatedAt: endpoint.updatedAt
   };
