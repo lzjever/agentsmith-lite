@@ -87,7 +87,7 @@ export interface Project {
 
 export interface ProjectResourcePolicy {
   projectId: string;
-  activeTasksLimit: number | null;
+  activeTasksLimit: number;
   providerRequestsLimit: number | null;
   providerTokensLimit: number | null;
   providerCostLimit: number | null;
@@ -200,7 +200,7 @@ export interface ProjectAuditQuery { cursor?: string; limit?: number; action?: P
 export interface ProjectAuditPage { items: ProjectAuditEventView[]; nextCursor: string | null; }
 
 export interface UpdateProjectResourcePolicyInput {
-  activeTasksLimit?: number | null;
+  activeTasksLimit?: number;
   providerRequestsLimit?: number | null;
   providerTokensLimit?: number | null;
   providerCostLimit?: number | null;

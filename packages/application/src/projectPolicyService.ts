@@ -214,6 +214,7 @@ function providerReservationLimits(policy:ProjectResourcePolicy,usage:ProjectRes
 }
 function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind { return action.startsWith("credential.") ? "credential" : action.startsWith("endpoint.") ? "endpoint" : action.startsWith("membership.") ? "member" : action.startsWith("alert.") ? "alert" : action === "provider.request" ? "provider" : action.startsWith("task.") ? "task" : action === "artifact.project" ? "artifact" : action === "sandbox.failed" ? "sandbox" : action === "file.quota" ? "file_quota" : action.startsWith("file.") ? "file" : "project"; }
 function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdateProjectResourcePolicyInput {
+  if (input.activeTasksLimit === null) throw new ProductError("Project active tasks limit cannot be unlimited");
   if(input.endpointWindows){const seen=new Set<string>();for(const window of input.endpointWindows){const key=`${window.endpointId}:${window.metric}`;if(seen.has(key))throw new ProductError("Endpoint policy windows must be unique");seen.add(key);if(!window.endpointId||!["providerRequests","providerTokens","providerCost"].includes(window.metric)||!Number.isFinite(window.limit)||window.limit<0||!Number.isInteger(window.windowSeconds)||window.windowSeconds<60||window.windowSeconds>2592000)throw new ProductError("Endpoint policy window is invalid")}}
   for (const [key, value] of Object.entries(input)) {
     if(key==="endpointWindows")continue;

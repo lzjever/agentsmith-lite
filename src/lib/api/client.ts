@@ -73,7 +73,7 @@ export interface ContextEntry { id: string; workspaceId: string; projectId: stri
 export interface ContextList { items: ContextEntry[]; canWrite: boolean; }
 export interface ProjectResourcePolicy {
   projectId: string;
-  activeTasksLimit: number | null;
+  activeTasksLimit: number;
   providerRequestsLimit: number | null;
   providerTokensLimit: number | null;
   providerCostLimit: number | null;
@@ -103,7 +103,7 @@ export interface ProjectAlertRule { id: string; projectId: string;name?:string; 
 export interface UserNotification { id: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditEvent["resourceKind"] | null; resourceId: string | null; linkPath: string | null; readAt: string | null; createdAt: string; }
 export interface ProjectAuditEvent { id: string; projectId: string; actorId: string | null; actorDisplayName: string | null; actorEmail: string | null; action: ProjectAuditAction; status: "accepted" | "rejected"; resourceKind: ProjectAuditResourceKind; resourceId: string | null;detail?:Record<string,string|number>; createdAt: string; }
 export interface ProjectPolicyInput {
-  activeTasksLimit?: number | null;
+  activeTasksLimit?: number;
   providerRequestsLimit?: number | null;
   providerTokensLimit?: number | null;
   providerCostLimit?: number | null;
@@ -181,7 +181,7 @@ export const apiClient = {
   transferWorkspaceOwner:(workspaceId:string,userId:string)=>jsonIdempotent<{transferred:true}>(`/workspaces/${encodeURIComponent(workspaceId)}/members/transfer-owner`,"POST",newIdempotencyKey("workspace-owner-transfer"),{userId}),
   projectCapabilities: (projectId: string) => request<ProjectCapabilities>(`/projects/${encodeURIComponent(projectId)}/capabilities`),
   projectSettings: (projectId: string) => request<ProjectSettings>(`/projects/${encodeURIComponent(projectId)}/settings`),
-  updateProjectSettings: (projectId: string, input: { name?: string; taskConcurrencyLimit?: number }) => jsonIdempotent<ProjectSettings>(`/projects/${encodeURIComponent(projectId)}/settings`, "PATCH", newIdempotencyKey("project-settings"), input),
+  updateProjectSettings: (projectId: string, input: { name?: string }) => jsonIdempotent<ProjectSettings>(`/projects/${encodeURIComponent(projectId)}/settings`, "PATCH", newIdempotencyKey("project-settings"), input),
   archiveProject:(projectId:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/archive`,"POST",newIdempotencyKey("project-archive")),
   unarchiveProject:(projectId:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/unarchive`,"POST",newIdempotencyKey("project-unarchive")),
   deleteProject: (projectId: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}`, "DELETE", newIdempotencyKey("project-delete")),

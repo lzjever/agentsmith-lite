@@ -44,6 +44,20 @@ describe("settings deletion", () => {
     }
   });
 
+  it("keeps a deletion continuation available after the page reloads in deleting state", async () => {
+    const original = { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity };
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.projectSettings = async () => ({ ...projectSettings, project: { ...projectSettings.project, lifecycleStatus: "deleting" } });
+    apiClient.workspaceSettings = async () => ({ ...workspaceSettings, workspace: { ...workspaceSettings.workspace, lifecycleStatus: "deleting" } });
+    try {
+      const project = render(<AppRouterContext.Provider value={router([])}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      assert.ok(await screen.findByRole("button", { name: "Continue project deletion" }));
+      project.unmount();
+      render(<AppRouterContext.Provider value={router([])}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      assert.ok(await screen.findByRole("button", { name: "Continue workspace deletion" }));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("does not expose deletion to a non-owner and returns to workspaces after workspace deletion", async () => {
     const original = { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, deleteWorkspace: apiClient.deleteWorkspace };
     const pushed: string[] = [];

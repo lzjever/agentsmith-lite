@@ -429,7 +429,7 @@ async function routeApi(
     }
     if (segments[4] === "settings") {
       if (method === "GET") return sendJson(res, 200, await services.settings.project(user.id, projectId));
-      if (method === "PATCH") {const body=await readJson(req);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,body);await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
+      if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,body);await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
       if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.archive",requireIdempotencyKey(req),"project.archive",()=>services.settings.archiveProject(user.id,projectId)));
       if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId)));
     }
@@ -1572,6 +1572,11 @@ function asPolicyInput(body: Record<string, unknown>): import("../../contracts/s
   for (const field of fields) {
     const value = body[field];
     if (value === undefined) continue;
+    if (field === "activeTasksLimit") {
+      if (typeof value !== "number") throw new ProductError("activeTasksLimit must be a number");
+      input.activeTasksLimit = value;
+      continue;
+    }
     if (value !== null && typeof value !== "number") throw new ProductError(`${field} must be a number or null`);
     input[field] = value;
   }

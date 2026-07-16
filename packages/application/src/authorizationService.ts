@@ -29,6 +29,7 @@ export class AuthorizationService {
     if (permission !== "view" && project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") {
       throw new ProductError(project.lifecycleStatus === "deleting" ? "Project is being deleted" : "Project is archived", 409);
     }
+    if (permission !== "view") await this.requireProjectWorkspaceActive(project);
     return project;
   }
 
@@ -37,7 +38,9 @@ export class AuthorizationService {
     const membership = await this.store.findProjectMembership(project.id, userId);
     const canManage = membership?.role === "owner" || membership?.role === "admin";
     const canWrite = membership?.role === "owner" || membership?.role === "admin" || membership?.role === "member";
-    if (project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") {
+    const workspace = await this.store.findWorkspace(project.workspaceId);
+    if (!workspace) throw new NotFoundError("Workspace not found");
+    if ((project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") || (workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active")) {
       return {
         canManageEndpoints: false,
         canManageMembers: false,
@@ -82,5 +85,13 @@ export class AuthorizationService {
     const canManage = membership?.role === "owner" || membership?.role === "admin";
     const active = workspace.lifecycleStatus === undefined || workspace.lifecycleStatus === "active";
     return { canCreateProject: canManage && active, canManageMembers: canManage && active };
+  }
+
+  async requireProjectWorkspaceActive(project: Project): Promise<void> {
+    const workspace = await this.store.findWorkspace(project.workspaceId);
+    if (!workspace) throw new NotFoundError("Workspace not found");
+    if (workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active") {
+      throw new ProductError(workspace.lifecycleStatus === "deleting" ? "Workspace is being deleted" : "Workspace is archived", 409);
+    }
   }
 }

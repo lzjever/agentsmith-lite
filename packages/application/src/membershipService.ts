@@ -73,7 +73,7 @@ export class MembershipService {
       throw error;
     }
   }
-  async transferOwner(actorUserId:string,projectId:string,targetUserId:string):Promise<void>{const project=await this.authorization.requireProject(actorUserId,projectId,"view");if(project.ownerUserId!==actorUserId)throw new ProductError("Project owner access required",403);const target=requireUserId(targetUserId);if(!(await this.store.transferProjectOwner(projectId,actorUserId,target,nowIso())))throw new ProductError("Target must be a different existing project member",409)}
+  async transferOwner(actorUserId:string,projectId:string,targetUserId:string):Promise<void>{const project=await this.authorization.requireProject(actorUserId,projectId,"admin");if(project.ownerUserId!==actorUserId)throw new ProductError("Project owner access required",403);const target=requireUserId(targetUserId);if(!(await this.store.transferProjectOwner(projectId,actorUserId,target,nowIso())))throw new ProductError("Target must be a different existing project member",409)}
 
   private async audit(projectId: string, actorId: string, action: MembershipAuditAction, resourceId: string | null, status: "accepted" | "rejected"): Promise<void> {
     await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind: "member", resourceId, createdAt: nowIso() });

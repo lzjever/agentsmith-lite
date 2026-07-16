@@ -30,6 +30,8 @@ describe("PATCH project policy", () => {
       assert.equal(policy.providerRequestsLimit, null);
       assert.equal(policy.providerCostLimit, 3.5);
       assert.equal(policy.providerTokensLimit, null);
+      const invalidActiveLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf }, body: JSON.stringify({ activeTasksLimit: null }) });
+      assert.equal(invalidActiveLimit.status, 400);
       const auditResponse = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit`, { headers: { cookie } });
       assert.equal(auditResponse.status, 200);
       const audit = await auditResponse.json() as {items:Array<{ actorDisplayName: string | null; actorEmail: string | null; actorId: string | null }>};

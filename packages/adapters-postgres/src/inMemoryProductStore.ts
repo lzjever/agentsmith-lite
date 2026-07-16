@@ -315,7 +315,12 @@ export class InMemoryProductStore implements ProductStore {
     const policy = this.policies.get(projectId);
     if (!policy) return null;
     const updated = { ...policy, ...input, updatedAt };
-    this.policies.set(projectId, clone(updated)); return clone(updated);
+    this.policies.set(projectId, clone(updated));
+    if (input.activeTasksLimit !== undefined && input.activeTasksLimit !== null) {
+      const project = this.projects.get(projectId);
+      if (project) this.projects.set(projectId, clone({ ...project, taskConcurrencyLimit: input.activeTasksLimit, updatedAt }));
+    }
+    return clone(updated);
   }
   async findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null> { return clone(this.usage.get(projectId) ?? null); }
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> { this.usage.set(usage.projectId, clone(usage)); return clone(usage); }

@@ -19,14 +19,14 @@ import { PageLoading } from "../ui/loading";
 import { toast } from "../ui/toast";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
-type PolicyDraft = Required<ProjectPolicyInput>;
+type PolicyDraft = Omit<Required<ProjectPolicyInput>, "activeTasksLimit"> & { activeTasksLimit: number | null };
 
 const limits = [
-  { key: "activeTasksLimit", label: "Active tasks", step: "1" },
-  { key: "providerRequestsLimit", label: "Provider requests", step: "1" },
-  { key: "providerTokensLimit", label: "Provider tokens", step: "1" },
-  { key: "providerCostLimit", label: "Provider cost", step: "any" },
-  { key: "projectFileBytesLimit", label: "Project file storage", step: "1" },
+  { key: "activeTasksLimit", label: "Active tasks", step: "1", required: true },
+  { key: "providerRequestsLimit", label: "Provider requests", step: "1", required: false },
+  { key: "providerTokensLimit", label: "Provider tokens", step: "1", required: false },
+  { key: "providerCostLimit", label: "Provider cost", step: "any", required: false },
+  { key: "projectFileBytesLimit", label: "Project file storage", step: "1", required: false },
 ] as const;
 const endpointMetrics = [
   { value: "providerRequests", label: "Requests", step: "1" },
@@ -87,8 +87,8 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   const canManage = caps?.canManagePolicy === true;
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft || endpointState !== "ready") return;
-    const input: ProjectPolicyInput = { ...draft };
+    if (!draft || draft.activeTasksLimit === null || endpointState !== "ready") return;
+    const input: ProjectPolicyInput = { ...draft, activeTasksLimit: draft.activeTasksLimit };
     setSaving(true);
     setError("");
     try {
@@ -173,8 +173,9 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
                       type="number"
                       min="0"
                       step={limit.step}
+                      required={limit.required}
                       value={draft[limit.key] ?? ""}
-                      placeholder="Unlimited"
+                      placeholder={limit.required ? "Required" : "Unlimited"}
                       onChange={(event) =>
                         setDraft((current) =>
                           current
@@ -187,7 +188,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
                       }
                     />
                   ) : (
-                    <strong>{policy[limit.key] ?? "Unlimited"}</strong>
+                    <strong>{policy[limit.key] ?? (limit.required ? "Not configured" : "Unlimited")}</strong>
                   )}
                 </label>
               ))}

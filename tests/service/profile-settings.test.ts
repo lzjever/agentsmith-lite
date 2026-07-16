@@ -21,8 +21,30 @@ describe("profile and settings services", () => {
     assert.equal("oidcSubject" in profile.user, false);
     assert.deepEqual(profile.preferences.displayName, "Owner");
     assert.equal((await services.settings.updateWorkspace(owner.user.id, workspace.id, { name: "New workspace" })).workspace.name, "New workspace");
-    assert.equal((await services.settings.updateProject(admin.user.id, project.id, { name: "New project", taskConcurrencyLimit: 3 })).project.taskConcurrencyLimit, 3);
+    assert.equal((await services.settings.updateProject(admin.user.id, project.id, { name: "New project" })).project.name, "New project");
     await assert.rejects(() => services.settings.updateWorkspace(admin.user.id, workspace.id, { name: "No" }), (error: unknown) => error instanceof ProductError && error.statusCode === 403);
+  });
+
+  it("keeps archived workspace projects readable but rejects every project write capability", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl-archived-workspace", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "owner-archived", email: "owner-archived@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+
+    await services.settings.archiveWorkspace(owner.user.id, workspace.id);
+
+    assert.equal((await services.workspaces.requireProjectForUser(owner.user.id, project.id, "view")).id, project.id);
+    await assert.rejects(() => services.workspaces.requireProjectForUser(owner.user.id, project.id, "write"), /Workspace is archived/);
+    assert.deepEqual(await services.workspaces.projectCapabilities(owner.user.id, project.id), {
+      canManageEndpoints: false,
+      canManageMembers: false,
+      canManagePolicy: false,
+      canWriteFiles: false,
+      canCreateTasks: false,
+      canCancelTasks: false,
+      canSendChat: false
+    });
+    assert.equal((await services.settings.project(owner.user.id, project.id)).capabilities.canManageSettings, false);
   });
 
   it("serializes lifecycle mutations, replays completed responses, and records one safe audit event", async () => {

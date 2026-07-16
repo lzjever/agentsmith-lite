@@ -45,6 +45,8 @@ describe("profile and settings pages", () => {
       await screen.findByRole("link", { name: "Manage members" });
       fireEvent.click(screen.getByRole("button", { name: "Save project" }));
       await waitFor(() => assert.equal(updates.length, 2));
+      assert.deepEqual(updates[1], { name: "Project" });
+      assert.equal(screen.queryByRole("spinbutton", { name: "Task concurrency" }), null);
     } finally {
       apiClient.profile = original.profile;
       apiClient.updateProfile = original.updateProfile;
@@ -61,6 +63,20 @@ describe("profile and settings pages", () => {
     apiClient.members=async()=>[{projectId:"project_1",userId:"user_1",role:"owner",createdAt:"x",updatedAt:"x"},{projectId:"project_1",userId:"user_2",role:"member",createdAt:"x",updatedAt:"x"}];
     apiClient.unarchiveProject=async()=>({...settings.project,ownerUserId:"user_1",lifecycleStatus:"active"});
     try { render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1"/></AppRouterContext.Provider>); await screen.findByRole("status"); assert.equal((screen.getByRole("textbox",{name:"Project name"}) as HTMLInputElement).disabled,true); assert.ok(screen.getByRole("button",{name:"Unarchive project"})); assert.ok(screen.getByRole("combobox",{name:"New project owner"})); } finally {apiClient.projectSettings=original.projectSettings;apiClient.currentIdentity=original.currentIdentity;apiClient.members=original.members;apiClient.unarchiveProject=original.unarchiveProject;}
+  });
+
+  it("reports an ownership candidate load failure instead of claiming there are no members", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members };
+    apiClient.projectSettings = async () => ({ ...settings, project: { ...settings.project, ownerUserId: "user_1" } });
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.members = async () => { throw new Error("network unavailable"); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const alert = await screen.findByRole("alert");
+      assert.match(alert.textContent ?? "", /Project members could not be loaded/);
+      assert.equal(screen.queryByText("There are no other project members eligible to become owner."), null);
+      assert.ok(screen.getByRole("button", { name: "Retry member loading" }));
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("preserves the project return path on the single profile page", async () => {

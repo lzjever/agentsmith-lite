@@ -3,7 +3,7 @@ import type { Project, ProjectAuditAction, Workspace } from "../../contracts/src
 import { ForbiddenError, NotFoundError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { ProductError } from "../../domain/src/errors.js";
-import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
+import { requireNonEmptyString } from "../../domain/src/validation.js";
 import type { ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 
@@ -13,7 +13,7 @@ export class SettingsService {
   async workspace(userId: string, workspaceId: string) {
     const workspace = await this.authorization.requireWorkspace(userId, workspaceId);
     const member = await this.store.findWorkspaceMembership(workspaceId, userId);
-    return { workspace, capabilities: { canManageSettings: member?.role === "owner" || member?.role === "admin" } };
+    return { workspace, capabilities: { canManageSettings: workspace.lifecycleStatus !== "archived" && workspace.lifecycleStatus !== "deleting" && (member?.role === "owner" || member?.role === "admin") } };
   }
   async updateWorkspace(userId: string, workspaceId: string, input: { name?: unknown }) {
     const workspace = await this.requireWorkspaceAdmin(userId, workspaceId);
@@ -26,12 +26,11 @@ export class SettingsService {
     const capabilities = await this.projectCapabilities(userId, projectId);
     return { project, capabilities };
   }
-  async updateProject(userId: string, projectId: string, input: { name?: unknown; taskConcurrencyLimit?: unknown }) {
+  async updateProject(userId: string, projectId: string, input: { name?: unknown }) {
     const project = await this.authorization.requireProject(userId, projectId, "admin");
     const updated = await this.store.updateProject({
       ...project,
       name: input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name"),
-      taskConcurrencyLimit: input.taskConcurrencyLimit === undefined ? project.taskConcurrencyLimit : requirePositiveInteger(input.taskConcurrencyLimit, "project.taskConcurrencyLimit", project.taskConcurrencyLimit),
       updatedAt: nowIso()
     });
     if (!updated) throw new NotFoundError("Project not found");
@@ -40,7 +39,7 @@ export class SettingsService {
   async archiveWorkspace(userId:string,workspaceId:string){const workspace=await this.requireWorkspaceAdmin(userId,workspaceId);return this.requireWorkspaceState(await this.store.setWorkspaceLifecycleStatus(workspace.id,"archived",nowIso()))}
   async unarchiveWorkspace(userId:string,workspaceId:string){const workspace=await this.requireWorkspaceOwner(userId,workspaceId);return this.requireWorkspaceState(await this.store.setWorkspaceLifecycleStatus(workspace.id,"active",nowIso()))}
   async archiveProject(userId:string,projectId:string){const project=await this.authorization.requireProject(userId,projectId,"admin");return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"archived",nowIso()))}
-  async unarchiveProject(userId:string,projectId:string){const project=await this.requireProjectOwner(userId,projectId);return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"active",nowIso()))}
+  async unarchiveProject(userId:string,projectId:string){const project=await this.requireProjectOwner(userId,projectId);await this.authorization.requireProjectWorkspaceActive(project);return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"active",nowIso()))}
   async runIdempotentMutation<T>(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>,key:string,request:unknown,resourceId:string,run:()=>Promise<T>):Promise<T>{
     const timestamp=nowIso();const requestHash=canonicalRequestHash(request);const claimToken=newId("idempotency_claim");
     const begun=await this.store.beginTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,resourceId,claimToken,now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+30_000).toISOString()});
@@ -80,8 +79,7 @@ export class SettingsService {
   private requireWorkspaceState(value:Workspace|null){if(!value)throw new NotFoundError("Workspace not found");return value}
   private requireProjectState(value:Project|null){if(!value)throw new NotFoundError("Project not found");return value}
   private async projectCapabilities(userId: string, projectId: string) {
-    const member = await this.store.findProjectMembership(projectId, userId);
-    return { canManageSettings: member?.role === "owner" || member?.role === "admin" };
+    return { canManageSettings: (await this.authorization.projectCapabilities(userId, projectId)).canManagePolicy };
   }
 }
 

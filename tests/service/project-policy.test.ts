@@ -26,6 +26,20 @@ describe("project resource policy", () => {
     });
   });
 
+  it("uses resource policy as the only mutable active-task limit", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-canonical-limit", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 2 });
+
+    const policy = await services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 4 });
+
+    assert.equal(policy.activeTasksLimit, 4);
+    assert.equal((await store.findProject(project.id))?.taskConcurrencyLimit, 4);
+    await assert.rejects(() => services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: null } as never), /cannot be unlimited/);
+  });
+
   it("atomically reserves active task capacity under concurrent requests", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-concurrency", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
