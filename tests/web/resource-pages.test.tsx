@@ -184,6 +184,27 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("revokes alert management when a rule mutation is forbidden", async () => {
+    const original = snapshotClient();
+    const rule = { id: "rule_denied", projectId, alertType: "task_failure" as const, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
+    apiClient.alerts = async () => [];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.alertRules = async () => [rule];
+    apiClient.endpoints = async () => [];
+    apiClient.updateAlertRule = async () => { throw new ApiError(403, "Forbidden"); };
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      const rulesTab = await screen.findByRole("tab", { name: "Rules" });
+      fireEvent.mouseDown(rulesTab, { button: 0 });
+      fireEvent.click(rulesTab);
+      fireEvent.click(await screen.findByRole("button", { name: "Enabled" }));
+      await screen.findByText("Alert management permission changed. Alerts and rules are now read-only.");
+      assert.equal(screen.queryByRole("button", { name: "Add rule" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Enabled" }), null);
+      assert.ok(screen.getByText("Read-only"));
+    } finally { restoreClient(original); }
+  });
+
   it("renders API-computed limits and trends, and refetches for the selected endpoint", async () => {
     const original = snapshotClient();
     const usageCalls: Array<string | undefined> = [];
@@ -329,7 +350,7 @@ describe("project resource pages", () => {
 
 const alertTypes: ProjectAlert["type"][] = ["active_tasks_limit", "provider_requests_limit", "provider_tokens_limit", "provider_cost_limit", "project_file_bytes_limit", "endpoint_failure", "provider_failure", "task_failure", "sandbox_failure"];
 
-function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules }; }
+function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules, updateAlertRule: apiClient.updateAlertRule }; }
 function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

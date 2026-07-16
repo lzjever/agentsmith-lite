@@ -158,16 +158,19 @@ export function AlertsPage({ projectId }: { projectId: string }) {
       current.map((item) => (item.id === saved.id ? saved : item)),
     );
   }
+  function revokeAccess() {
+    setCapabilities((current) =>
+      current ? { ...current, canManagePolicy: false } : current,
+    );
+    setCapabilitiesError("Alert management permission changed. Alerts and rules are now read-only.");
+    setRetry(null);
+    setDismiss(null);
+    setError("");
+  }
   function forbidden(cause: unknown) {
     const accessDenied = cause instanceof ApiError && cause.status === 403;
     if (accessDenied) {
-      setCapabilities((current) =>
-        current ? { ...current, canManagePolicy: false } : current,
-      );
-      setCapabilitiesError("Alert management permission changed. Alerts and rules are now read-only.");
-      setRetry(null);
-      setDismiss(null);
-      setError("");
+      revokeAccess();
     } else {
       setError(
         cause instanceof Error ? cause.message : "Alert could not be updated.",
@@ -236,7 +239,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
             />
           </TabsContent>
           <TabsContent value="rules">
-            <AlertRulesPanel projectId={projectId} canManage={canManage} />
+            <AlertRulesPanel projectId={projectId} canManage={canManage} onAccessDenied={revokeAccess} />
           </TabsContent>
         </Tabs>
       ) : null}
