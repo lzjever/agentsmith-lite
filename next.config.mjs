@@ -7,6 +7,9 @@ const nextConfig = {
   output: "standalone",
   distDir: process.env.AGENTSMITH_NEXT_DIST_DIR || ".next",
   basePath: publicBasePath === "/" ? "" : publicBasePath,
+  experimental: {
+    cpus: 1
+  },
   env: {
     NEXT_PUBLIC_API_BASE_PATH: `${publicBasePath === "/" ? "" : publicBasePath}/api/v1`
   }
