@@ -74,6 +74,18 @@ test("confirmation dialog keeps focus in an accessible alert dialog and settles 
   await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
 });
 
+test("confirmation dialog keeps a rejected action and its recovery context together", async () => {
+  render(<ConfirmationDialog title="Delete credential?" confirmText="Delete" trigger={<button>Open delete</button>} errorContext="Credential could not be deleted" onConfirm={async () => { throw new Error("Endpoints still reference it"); }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Open delete" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  const alert = await screen.findByRole("alert");
+  assert.equal(alert.textContent, "Credential could not be deleted: Endpoints still reference it");
+  assert.ok(screen.getByRole("alertdialog", { name: "Delete credential?" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open delete" }));
+  assert.equal(screen.queryByRole("alert"), null);
+});
+
 test("toast container stays within 390px viewport gutters and announces feedback", async () => {
   render(<ToastContainer />);
   await act(async () => toast.success("Endpoint saved", 10_000));
