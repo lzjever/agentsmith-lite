@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { CredentialsPage } = await import("../../src/components/credentials/CredentialsPage.js");
 afterEach(()=>cleanup());
 
@@ -34,6 +34,16 @@ describe("CredentialsPage",()=>{
     const original={credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};
     apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>{throw new ApiError(503,"Permissions unavailable");};
     try{render(<CredentialsPage projectId="project_1"/>);await screen.findByText("DeepSeek");assert.match(screen.getByRole("alert").textContent??"",/read-only until refreshed/i);assert.equal(screen.queryByRole("button",{name:/New credential/}),null);assert.equal(screen.queryByRole("button",{name:/Rotate/}),null);assert.ok(screen.getByText("fingerprint"));}finally{apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}
+  });
+  it("becomes read-only when credential management permission is revoked during a mutation",async()=>{
+    const original={credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createCredential:apiClient.createCredential};
+    apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;apiClient.createCredential=async()=>{throw new ApiError(403,"Credential management permission was revoked.");};
+    try{render(<CredentialsPage projectId="project_1"/>);fireEvent.click(await screen.findByRole("button",{name:"New credential"}));const dialog=await screen.findByRole("dialog",{name:"New credential"});fireEvent.change(within(dialog).getByRole("textbox",{name:"Name"}),{target:{value:"New key"}});fireEvent.change(within(dialog).getByRole("textbox",{name:"Base URL"}),{target:{value:"https://api.example.test/v1"}});fireEvent.change(within(dialog).getByLabelText("API key"),{target:{value:"secret-value"}});await act(async()=>{fireEvent.click(within(dialog).getByRole("button",{name:"Create credential"}));await new Promise(resolve=>setTimeout(resolve,0));});assert.equal(screen.queryByRole("dialog",{name:"New credential"}),null);assert.equal(screen.queryByRole("button",{name:"New credential"}),null);assert.equal(screen.queryByRole("button",{name:/Rotate/}),null);}finally{Object.assign(apiClient,original);}
+  });
+  it("keeps delete confirmation open when the credential is still in use",async()=>{
+    const original={credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,deleteCredential:apiClient.deleteCredential};let attempts=0;
+    apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;apiClient.deleteCredential=async()=>{attempts+=1;throw new ApiError(409,"Credential is used by endpoint DeepSeek.");};
+    try{render(<CredentialsPage projectId="project_1"/>);fireEvent.click(await screen.findByRole("button",{name:"Delete DeepSeek"}));const dialog=await screen.findByRole("alertdialog",{name:"Delete DeepSeek"});await act(async()=>{fireEvent.click(within(dialog).getByRole("button",{name:"Delete credential"}));await new Promise(resolve=>setTimeout(resolve,0));});assert.equal(attempts,1);assert.ok(screen.getByRole("alertdialog",{name:"Delete DeepSeek"}));}finally{Object.assign(apiClient,original);}
   });
 });
 
