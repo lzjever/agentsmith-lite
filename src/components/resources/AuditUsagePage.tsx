@@ -195,7 +195,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
       header={
         <PageHeader
           title="Audit"
-          subtitle="Exact project operation metadata with allowlisted detail."
+          subtitle="Review project activity by actor, resource, and result."
           actions={
             <Button
               variant="quiet"
@@ -391,7 +391,7 @@ function DetailDialog({
           <>
             <DialogHeader
               title="Audit event detail"
-              description="Only allowlisted operation fields are available."
+              description="Event metadata for this project activity."
             />
             <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
               <DT label="Timestamp" value={formatDate(event.createdAt)} />

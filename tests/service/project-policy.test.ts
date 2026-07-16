@@ -270,6 +270,29 @@ describe("project resource policy", () => {
     );
   });
 
+  it("recovers quota alerts when a policy change restores capacity", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-alert-recovery", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+    await store.createEndpoint(endpoint);
+    await services.policies.updatePolicy(user.id, project.id, {
+      activeTasksLimit: 0,
+      endpointWindows: [{ endpointId: endpoint.id, metric: "providerTokens", limit: 4095, windowSeconds: 3600 }]
+    });
+    await assert.rejects(() => services.policies.reserveTask(project.id, user.id, "task-blocked"));
+    await assert.rejects(() => services.policies.reserveProvider(project.id, user.id, endpoint.id));
+
+    await services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 1, endpointWindows: [] });
+
+    assert.deepEqual(
+      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.type === "active_tasks_limit" || alert.type === "provider_tokens_limit").map((alert) => [alert.type, alert.status]).sort(),
+      [["active_tasks_limit", "resolved"], ["provider_tokens_limit", "resolved"]]
+    );
+  });
+
   it("patches nullable limits without replacing concurrent policy fields", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-patch", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");

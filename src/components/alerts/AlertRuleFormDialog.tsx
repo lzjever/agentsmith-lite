@@ -30,7 +30,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, e
   onOpenChange: (open: boolean) => void; onChange: (value: AlertRuleFormValue) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return <Dialog open={open} onOpenChange={(next) => !saving && onOpenChange(next)}><DialogContent><form onSubmit={onSubmit}>
-    <DialogHeader title={editing ? "Edit alert rule" : "Create alert rule"} description="Evaluate one allowlisted project or endpoint metric and notify in product." />
+    <DialogHeader title={editing ? "Edit alert rule" : "Create alert rule"} description="Monitor one project or endpoint metric and notify project administrators." />
     <div className="grid gap-4 px-5 py-5">
       {error ? <p role="alert" className="rounded-sm border border-error/40 bg-error/5 px-3 py-2 text-sm text-error">{error}</p> : null}
       <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>

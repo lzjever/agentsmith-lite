@@ -111,13 +111,13 @@ export async function recoverProjectAlerts(
   store: ProductStore,
   projectId: string,
   type: ProjectAlertType,
-  endpointId?: string,
+  endpointId?: string | null,
   configuredOnly = false,
 ): Promise<void> {
   const timestamp = nowIso();
   const rules = new Map((await store.listProjectAlertRules(projectId)).map((rule) => [rule.id, rule]));
   for (const alert of await store.listActiveProjectAlerts(projectId)) {
-    if (alert.type !== type || (endpointId !== undefined && alert.endpointId !== null && alert.endpointId !== endpointId)) continue;
+    if (alert.type !== type || (endpointId !== undefined && (alert.endpointId ?? null) !== endpointId)) continue;
     const rule = alert.ruleId ? rules.get(alert.ruleId) : undefined;
     if (configuredOnly && !alert.ruleId) continue;
     if (rule && ruleStillOwnsAlert(rule, alert) && matchesAlertRule(rule, await measureAlertRule(store, rule, timestamp))) continue;

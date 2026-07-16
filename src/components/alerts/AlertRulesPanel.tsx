@@ -11,7 +11,7 @@ import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormV
 const initialType = alertRuleTypes[0]!;
 const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
 
-export function AlertRulesPanel({ projectId, canManage, onAccessDenied }: { projectId: string; canManage: boolean; onAccessDenied?: () => void }) {
+export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstancesChanged }: { projectId: string; canManage: boolean; onAccessDenied?: () => void; onInstancesChanged?: () => Promise<void> }) {
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
@@ -88,6 +88,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied }: { proj
         : await apiClient.createAlertRule(projectId, value);
       if (!mounted.current) return;
       setRules((current) => editing ? current.map((rule) => rule.id === saved.id ? saved : rule) : [...current, saved]);
+      await onInstancesChanged?.();
+      if (!mounted.current) return;
       setDialogOpen(false);
       toast.success(editing ? "Alert rule updated." : "Alert rule created.");
     } catch (reason) {
@@ -107,6 +109,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied }: { proj
       const saved = await apiClient.updateAlertRule(projectId, rule.id, { enabled: !rule.enabled });
       if (!mounted.current) return;
       setRules((current) => current.map((item) => item.id === rule.id ? saved : item));
+      await onInstancesChanged?.();
+      if (!mounted.current) return;
       toast.success(saved.enabled ? "Alert rule enabled." : "Alert rule disabled.");
     } catch (reason) {
       if (!mounted.current) return;
@@ -124,6 +128,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied }: { proj
       await apiClient.deleteAlertRule(projectId, removing.id);
       if (!mounted.current) return;
       setRules((current) => current.filter((item) => item.id !== removing.id));
+      await onInstancesChanged?.();
+      if (!mounted.current) return;
       setRemoving(null);
       toast.success("Alert rule deleted.");
     } catch (error) {
@@ -137,7 +143,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied }: { proj
 
   return <section className="mt-8 border-t border-subtle pt-6" aria-label="Alert rules">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <div><h2 className="type-title">Alert rules</h2><p className="mt-1 text-sm text-secondary">Rules evaluated by the project service.</p></div>
+      <div><h2 className="type-title">Alert rules</h2><p className="mt-1 text-sm text-secondary">Choose when project administrators should be notified.</p></div>
       {canManage ? <Button onClick={openCreate}><Plus size={16} />Add rule</Button> : <span className="text-sm text-secondary">Read-only</span>}
     </div>
     {state === "loading" ? <p className="mt-4 text-sm text-secondary">Loading alert rules...</p> : null}

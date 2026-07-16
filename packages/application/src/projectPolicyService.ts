@@ -80,9 +80,11 @@ export class ProjectPolicyService {
   }
   async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput): Promise<ProjectResourcePolicy> {
     let result: ProjectResourcePolicy;
+    let previous!: ProjectResourcePolicy;
     try {
       await this.authorization.requireProject(userId, projectId, "admin");
       const updated = validatePolicyInput(input);
+      previous = await this.requirePolicy(projectId);
       if(updated.endpointWindows){const endpoints=await this.store.listEndpointsForProject(projectId);const endpointIds=new Set(endpoints.map(endpoint=>endpoint.id));if(updated.endpointWindows.some(window=>!endpointIds.has(window.endpointId)))throw new ProductError("Endpoint policy window endpoint not found",404)}
       if (Object.keys(updated).length === 0) throw new ProductError("Project policy update requires at least one limit");
       const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nowIso()); if (!patched) throw new ProductError("Project policy not found", 404);
@@ -92,6 +94,7 @@ export class ProjectPolicyService {
       throw error;
     }
     await this.auditEvent(projectId, userId, "policy.update", "accepted", projectId);
+    await this.recoverChangedPolicyAlerts(previous, result);
     return result;
   }
   async reserveTask(projectId: string, actorId: string, taskId: string): Promise<void> { await this.change(projectId, actorId, "task.create", taskId, { activeTasks: 1 }, "active_tasks_limit"); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); }
@@ -124,8 +127,12 @@ export class ProjectPolicyService {
     const projectLimits = providerReservationLimits(policy, usage, reservation);
     const endpointLimits = await this.endpointReservationLimits(policy, projectId, actorId, endpointId, reservation, reservedAt);
     const limits = [...projectLimits, ...endpointLimits].filter((limit, index, values) => values.indexOf(limit) === index);
-    const alertTypes: ProjectAlertType[] = limits.length ? limits : ["provider_requests_limit"];
-    await Promise.all(alertTypes.map((limit) => this.openAlert(projectId, limit, endpointId)));
+    const alertScopes = [
+      ...projectLimits.map((limit) => ({ limit, endpointId: null })),
+      ...endpointLimits.map((limit) => ({ limit, endpointId })),
+      ...(!limits.length ? [{ limit: "provider_requests_limit" as const, endpointId }] : []),
+    ].filter((value, index, values) => values.findIndex((candidate) => candidate.limit === value.limit && candidate.endpointId === value.endpointId) === index);
+    await Promise.all(alertScopes.map(({ limit, endpointId: scopeEndpointId }) => this.openAlert(projectId, limit, scopeEndpointId)));
     await this.auditEvent(projectId, actorId, "provider.request", "rejected", endpointId);
     const reason = projectLimits[0] ?? endpointLimits[0] ?? "provider_requests_limit";
     const scope = projectLimits.length ? "Project" : endpointLimits.length ? "Endpoint rolling" : "Project";
@@ -140,8 +147,8 @@ export class ProjectPolicyService {
     for (const type of types) {
       await evaluateProjectAlertRules(this.store, settled.usage.projectId, type, settled.endpointId ? { endpointId: settled.endpointId } : {});
       if (type === "provider_requests_limit") continue;
-      if (settled.exceededLimits.includes(type)) await this.openAlert(settled.usage.projectId, type, settled.endpointId);
-      else await recoverProjectAlerts(this.store, settled.usage.projectId, type);
+      if (settled.exceededLimits.includes(type)) await this.openAlert(settled.usage.projectId, type, null);
+      else await recoverProjectAlerts(this.store, settled.usage.projectId, type, null);
     }
   }
   async markProviderUnknown(id: string): Promise<void> { await this.store.markProjectProviderSettlementUnknown(id, nowIso()); }
@@ -167,6 +174,25 @@ export class ProjectPolicyService {
   async refreshFileAlerts(projectId: string): Promise<void> { await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit"); }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
+  private async recoverChangedPolicyAlerts(previous: ProjectResourcePolicy, updated: ProjectResourcePolicy): Promise<void> {
+    const usage = await this.usage(updated.projectId);
+    const limits: Array<{ before: number | null; after: number | null; current: number; next: number; type: Limit }> = [
+      { before: previous.activeTasksLimit, after: updated.activeTasksLimit, current: usage.activeTasks, next: 1, type: "active_tasks_limit" },
+      { before: previous.providerRequestsLimit, after: updated.providerRequestsLimit, current: usage.providerRequests, next: 1, type: "provider_requests_limit" },
+      { before: previous.providerTokensLimit, after: updated.providerTokensLimit, current: usage.providerTokens, next: providerReservationBudget.tokens, type: "provider_tokens_limit" },
+      { before: previous.providerCostLimit, after: updated.providerCostLimit, current: usage.providerCost, next: providerReservationBudget.cost, type: "provider_cost_limit" },
+      { before: previous.projectFileBytesLimit, after: updated.projectFileBytesLimit, current: usage.projectFileBytes, next: 1, type: "project_file_bytes_limit" },
+    ];
+    for (const limit of limits) {
+      if (limit.before === limit.after || (limit.after !== null && limit.current + limit.next > limit.after)) continue;
+      await recoverProjectAlerts(this.store, updated.projectId, limit.type, null);
+    }
+    for (const window of previous.endpointWindows ?? []) {
+      const current = (updated.endpointWindows ?? []).find((candidate) => candidate.endpointId === window.endpointId && candidate.metric === window.metric);
+      if (current?.limit === window.limit && current.windowSeconds === window.windowSeconds) continue;
+      await recoverProjectAlerts(this.store, updated.projectId, providerMetricLimit(window.metric), window.endpointId);
+    }
+  }
   private async endpointReservationLimits(policy: ProjectResourcePolicy, projectId: string, actorId: string | null, endpointId: string | null, reservation: Readonly<{ tokens: number; cost: number }>, measuredAt: string): Promise<Limit[]> {
     if (endpointId === null) return [];
     const limits: Limit[] = [];
@@ -181,7 +207,7 @@ export class ProjectPolicyService {
       });
       const requested = window.metric === "providerRequests" ? 1 : window.metric === "providerTokens" ? reservation.tokens : reservation.cost;
       if (measured.current + requested <= window.limit) continue;
-      limits.push(window.metric === "providerRequests" ? "provider_requests_limit" : window.metric === "providerTokens" ? "provider_tokens_limit" : "provider_cost_limit");
+      limits.push(providerMetricLimit(window.metric));
     }
     return limits;
   }
@@ -235,6 +261,7 @@ function providerReservationLimits(policy:ProjectResourcePolicy,usage:ProjectRes
     policy.providerCostLimit!==null&&usage.providerCost+reservation.cost>policy.providerCostLimit?"provider_cost_limit":null
   ].filter((limit):limit is Limit=>limit!==null);
 }
+function providerMetricLimit(metric: "providerRequests" | "providerTokens" | "providerCost"): Limit { return metric === "providerRequests" ? "provider_requests_limit" : metric === "providerTokens" ? "provider_tokens_limit" : "provider_cost_limit"; }
 function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind { return action.startsWith("credential.") ? "credential" : action.startsWith("endpoint.") ? "endpoint" : action.startsWith("membership.") ? "member" : action.startsWith("alert.") ? "alert" : action === "provider.request" ? "provider" : action.startsWith("task.") ? "task" : action === "artifact.project" ? "artifact" : action === "sandbox.failed" ? "sandbox" : action === "file.quota" ? "file_quota" : action.startsWith("file.") ? "file" : "project"; }
 function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdateProjectResourcePolicyInput {
   if (input.activeTasksLimit === null) throw new ProductError("Project active tasks limit cannot be unlimited");

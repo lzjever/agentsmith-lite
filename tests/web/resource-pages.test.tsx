@@ -297,6 +297,28 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("refreshes alert instances after a rule mutation evaluates on the server", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_from_rule", projectId, type: "active_tasks_limit", status: "active", deliveryStatus: "delivered", ruleId: "rule_created", metric: "active_tasks", metricValue: 0, threshold: 0, endpointId: null, acknowledgedAt: null, acknowledgedBy: null, silencedUntil: null, createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    let alertReads = 0;
+    apiClient.alerts = async () => (++alertReads === 1 ? [] : [alert]);
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.alertRules = async () => [];
+    apiClient.endpoints = async () => [];
+    apiClient.createAlertRule = async (_projectId, input) => ({ id: "rule_created", projectId, name: input.name, alertType: input.alertType, metric: "active_tasks", condition: "greater_than_or_equal", threshold: input.threshold, windowSeconds: null, scope: { kind: "project" }, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt });
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      const rulesTab = await screen.findByRole("tab", { name: "Rules" });
+      fireEvent.mouseDown(rulesTab, { button: 0 });
+      fireEvent.click(rulesTab);
+      fireEvent.click(await screen.findByRole("button", { name: "Add rule" }));
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Threshold" }), { target: { value: "0" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+      await screen.findByRole("tab", { name: "Instances (1)" });
+      assert.equal(alertReads, 2);
+    } finally { restoreClient(original); }
+  });
+
   it("renders API-computed limits and trends, and refetches for the selected endpoint", async () => {
     const original = snapshotClient();
     const usageCalls: Array<string | undefined> = [];
@@ -365,7 +387,7 @@ describe("project resource pages", () => {
       const row = await screen.findByRole("button", { name: /alert.resolve/ });
       fireEvent.click(row);
       await screen.findByRole("heading", { name: "Audit event detail" });
-      assert.ok(screen.getByText("Only allowlisted operation fields are available."));
+      assert.ok(screen.getByText("Event metadata for this project activity."));
       assert.ok(screen.getAllByText("Ada Admin").length > 0);
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
@@ -462,7 +484,7 @@ describe("project resource pages", () => {
 
 const alertTypes: ProjectAlert["type"][] = ["active_tasks_limit", "provider_requests_limit", "provider_tokens_limit", "provider_cost_limit", "project_file_bytes_limit", "endpoint_failure", "provider_failure", "task_failure", "sandbox_failure"];
 
-function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules, updateAlertRule: apiClient.updateAlertRule }; }
+function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule }; }
 function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

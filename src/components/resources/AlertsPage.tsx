@@ -101,6 +101,17 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     }
     setState("ready");
   }, [projectId]);
+  const refreshInstances = useCallback(async () => {
+    const request = ++loadRequest.current;
+    try {
+      const loaded = await apiClient.alerts(projectId);
+      if (!mounted.current || request !== loadRequest.current) return;
+      setAlerts(loaded);
+    } catch (cause) {
+      if (!mounted.current || request !== loadRequest.current) return;
+      setError(cause instanceof Error ? cause.message : "Alert instances could not be refreshed.");
+    }
+  }, [projectId]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -205,7 +216,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
       header={
         <PageHeader
           title="Alerts"
-          subtitle="Project alert rules and evaluated in-product instances."
+          subtitle="Monitor project activity and resource limits with in-app notifications."
           actions={
             <Button
               variant="quiet"
@@ -260,7 +271,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
             />
           </TabsContent>
           <TabsContent value="rules">
-            <AlertRulesPanel projectId={projectId} canManage={canManage} onAccessDenied={revokeAccess} />
+            <AlertRulesPanel projectId={projectId} canManage={canManage} onAccessDenied={revokeAccess} onInstancesChanged={refreshInstances} />
           </TabsContent>
         </Tabs>
       ) : null}
