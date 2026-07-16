@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ApiError, apiClient } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, SESSION_EXPIRED_EVENT } from "../../src/lib/api/client.js";
 
 describe("settings deletion API client", () => {
   it("sends scoped delete requests with CSRF and preserves API error messages", async () => {
@@ -33,6 +33,24 @@ describe("settings deletion API client", () => {
       await assert.rejects(apiClient.projectSettings("project_1"), (error: unknown) => error instanceof ApiError && error.status === 503 && error.message === "Runtime is temporarily unavailable.");
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("notifies the shell when an API request finds an expired session", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const browserEvents = new EventTarget();
+    let expirations = 0;
+    browserEvents.addEventListener(SESSION_EXPIRED_EVENT, () => { expirations += 1; });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: browserEvents });
+    globalThis.fetch = async () => Response.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+      await assert.rejects(apiClient.workspaces(), (error: unknown) => error instanceof ApiError && error.status === 401);
+      assert.equal(expirations, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+      else delete (globalThis as { window?: unknown }).window;
     }
   });
 });

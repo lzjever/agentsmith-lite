@@ -11,6 +11,8 @@ export class ApiError extends Error {
   }
 }
 
+export const SESSION_EXPIRED_EVENT = "agentsmith:session-expired";
+
 export interface CurrentUser { id: string; email: string; displayName?: string; pictureUrl?: string; }
 export type Profile = ProfileResponse;
 export interface SettingsCapabilities { canManageSettings: boolean; }
@@ -125,6 +127,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set("content-type", "application/json");
   }
   const response = await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 401) {
+    csrfToken = undefined;
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+  }
   if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
   return response.json() as Promise<T>;
 }

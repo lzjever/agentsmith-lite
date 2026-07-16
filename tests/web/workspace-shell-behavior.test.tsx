@@ -145,6 +145,27 @@ describe("workspace and shell interactions", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("returns an expired session to OIDC sign in without losing the current route", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    window.history.replaceState({}, "", "/workspaces/ws_1/projects/proj_1/tasks?status=running#latest");
+    try {
+      const view = renderShell(<p>Active task content</p>, "/workspaces/ws_1/projects/proj_1/tasks", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      await waitFor(() => assert.ok(document.body.textContent?.includes("Active task content")));
+
+      act(() => window.dispatchEvent(new Event("agentsmith:session-expired")));
+
+      const signIn = await view.findByRole("link", { name: "Sign in" });
+      assert.equal(document.body.textContent?.includes("Active task content"), false);
+      assert.equal(signIn.getAttribute("href"), "/api/v1/auth/oidc/start?returnTo=%2Fworkspaces%2Fws_1%2Fprojects%2Fproj_1%2Ftasks%3Fstatus%3Drunning%23latest");
+    } finally {
+      Object.assign(apiClient, original);
+      window.history.replaceState({}, "", "/");
+    }
+  });
+
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
     const tasks = view.getByRole("link", { name: "Tasks" });
