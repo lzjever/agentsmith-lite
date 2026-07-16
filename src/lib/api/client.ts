@@ -161,7 +161,7 @@ export const apiClient = {
     csrfToken = identity.csrfToken;
     return { user: identity.user };
   },
-  logout: () => json<{ loggedOut: true }>("/auth/logout", "POST"),
+  logout: () => json<{ loggedOut: true; redirectUrl: string }>("/auth/logout", "POST"),
   notifications: (unreadOnly = false) => request<UserNotification[]>(`/notifications${unreadOnly ? "?unread=true" : ""}`),
   markNotificationRead: (notificationId: string) => json<UserNotification>(`/notifications/${encodeURIComponent(notificationId)}/read`, "PATCH"),
   markAllNotificationsRead: () => json<UserNotification[]>("/notifications/read", "PATCH"),

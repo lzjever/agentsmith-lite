@@ -20,9 +20,14 @@ export interface OidcCallbackInput {
   nonce?: string | undefined;
 }
 
+export interface OidcEndSessionInput {
+  postLogoutRedirectUri: string;
+}
+
 export interface OidcClientAdapter {
   createAuthorizationRequest(input: OidcAuthorizationRequestInput): Promise<OidcAuthorizationRequest>;
   completeAuthorizationCallback(input: OidcCallbackInput): Promise<ExternalPrincipal>;
+  createEndSessionUrl(input: OidcEndSessionInput): string;
 }
 
 export interface CreateOpenIdConnectClientInput {
@@ -101,6 +106,12 @@ class OpenIdConnectClient implements OidcClientAdapter {
       emailVerified: claims.email_verified === true,
       ...(typeof claims.picture === "string" && claims.picture.trim() ? { pictureUrl: claims.picture.trim() } : {})
     };
+  }
+
+  createEndSessionUrl(input: OidcEndSessionInput): string {
+    return oidc.buildEndSessionUrl(this.config, {
+      post_logout_redirect_uri: input.postLogoutRedirectUri
+    }).toString();
   }
 }
 

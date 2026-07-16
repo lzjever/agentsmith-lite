@@ -25,7 +25,7 @@ try {
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request(); const pathname = new URL(request.url()).pathname;
     if (pathname.endsWith("/me")) return route.fulfill({ json: { user: { id: "owner_1", email: "owner@example.test" }, csrfToken: "csrf" } });
-    if (pathname.endsWith("/auth/logout")) { signedOut = true; return route.fulfill({ json: { loggedOut: true } }); }
+    if (pathname.endsWith("/auth/logout")) { signedOut = true; return route.fulfill({ json: { loggedOut: true, redirectUrl: "/app/" } }); }
     if (pathname.endsWith("/workspaces")) {
       if (workspaceMode === "error") return route.fulfill({ status: 500, body: "workspace unavailable" });
       if (request.method() === "POST") { const body = request.postDataJSON(); const workspace = { id: "workspace_2", name: body.name, capabilities: { canCreateProject: true }, createdAt: project.createdAt, updatedAt: project.updatedAt, projects: [] }; workspaces = [...workspaces, workspace]; return route.fulfill({ json: workspace }); }

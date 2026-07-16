@@ -331,9 +331,12 @@ async function routeApi(
   }
 
   if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
+    const redirectUrl = auth.authMode === "oidc" && auth.oidcClient
+      ? auth.oidcClient.createEndSessionUrl({ postLogoutRedirectUri: appHomeUrl(req, auth.publicBaseUrl, auth.appBasePath) })
+      : appHomePath(auth.appBasePath);
     await services.auth.logout(sessionId);
     res.setHeader("set-cookie", [serializeAuthCookie("asl_session", "", sessionCookiePath(auth.appBasePath), 0, auth.secureCookies)]);
-    return sendJson(res, 200, { loggedOut: true });
+    return sendJson(res, 200, { loggedOut: true, redirectUrl });
   }
 
   if (method === "GET" && url.pathname === "/api/v1/dashboard") {
@@ -1014,6 +1017,14 @@ function oidcTransactionCookiePath(appBasePath: string): string {
 
 function appHomePath(appBasePath: string): string {
   return appBasePath ? `${appBasePath}/` : "/";
+}
+
+function appHomeUrl(req: IncomingMessage, publicBaseUrl: string | undefined, appBasePath: string): string {
+  const url = new URL(publicBaseUrl?.trim() || requestOrigin(req));
+  url.pathname = appHomePath(appBasePath);
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function contentDispositionFilename(input: string): string {

@@ -154,8 +154,13 @@ describe("api OIDC auth", () => {
       }
     });
     assert.equal(logout.status, 200);
+    assert.deepEqual(await logout.json(), {
+      loggedOut: true,
+      redirectUrl: "https://idp.example.test/logout?client_id=agentsmith-lite&post_logout_redirect_uri=https%3A%2F%2Fagentsmith.example.test%2Fapp%2F"
+    });
     assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
     assert.match(logout.headers.get("set-cookie") ?? "", /Path=\/app/);
+    assert.equal(oidcCalls.at(-1)?.postLogoutRedirectUri, "https://agentsmith.example.test/app/");
 
     const oldSession = await fetch(baseUrl + apiPath("/api/v1/me"), {
       headers: { cookie: login.sessionCookie }
@@ -303,6 +308,13 @@ function fakeOidcClient(calls: Array<Record<string, string | undefined>>, princi
       const principal = principals.shift();
       assert.ok(principal, "fake OIDC principal is required");
       return principal;
+    },
+    createEndSessionUrl(input) {
+      calls.push({ postLogoutRedirectUri: input.postLogoutRedirectUri });
+      return `https://idp.example.test/logout?${new URLSearchParams({
+        client_id: "agentsmith-lite",
+        post_logout_redirect_uri: input.postLogoutRedirectUri
+      })}`;
     }
   };
 }

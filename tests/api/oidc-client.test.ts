@@ -18,6 +18,7 @@ describe("OIDC client backchannel fetch", () => {
           issuer: issuerUrl,
           authorization_endpoint: `${issuerUrl}/protocol/openid-connect/auth`,
           token_endpoint: `${issuerUrl}/protocol/openid-connect/token`,
+          end_session_endpoint: `${issuerUrl}/protocol/openid-connect/logout`,
           jwks_uri: `${issuerUrl}/protocol/openid-connect/certs`,
           response_types_supported: ["code"],
           subject_types_supported: ["public"],
@@ -47,6 +48,13 @@ describe("OIDC client backchannel fetch", () => {
       assert.equal(authorizationUrl.searchParams.get("client_id"), "agentsmith-lite");
       assert.equal(authorizationUrl.searchParams.get("redirect_uri"), "https://agentsmith.example.test/auth/oidc/callback");
       assert.doesNotMatch(request.authorizationUrl, /keycloak\.keycloak\.svc\.cluster\.local/);
+
+      const endSessionUrl = new URL(client.createEndSessionUrl({
+        postLogoutRedirectUri: "https://agentsmith.example.test/app/"
+      }));
+      assert.equal(endSessionUrl.origin + endSessionUrl.pathname, `${issuerUrl}/protocol/openid-connect/logout`);
+      assert.equal(endSessionUrl.searchParams.get("client_id"), "agentsmith-lite");
+      assert.equal(endSessionUrl.searchParams.get("post_logout_redirect_uri"), "https://agentsmith.example.test/app/");
     } finally {
       globalThis.fetch = originalFetch;
     }
