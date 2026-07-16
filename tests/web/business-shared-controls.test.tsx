@@ -81,6 +81,25 @@ describe("business shared controls", () => {
     } finally { restoreClient(original); }
   });
 
+  it("keeps the workspace name stable while saving and adopts the saved server value", async () => {
+    const original = snapshotClient();
+    let finishSave!: (value: WorkspaceSettings) => void;
+    apiClient.workspaceSettings = async () => workspaceSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.workspaceMembers = async () => [];
+    apiClient.updateWorkspaceSettings = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Workspace name" }) as HTMLInputElement;
+      fireEvent.change(name, { target: { value: "  Renamed workspace  " } });
+      fireEvent.click(screen.getByRole("button", { name: "Save workspace" }));
+      await waitFor(() => assert.equal(name.disabled, true));
+      await act(async () => finishSave({ ...workspaceSettings, workspace: { ...workspaceSettings.workspace, name: "Renamed workspace" } }));
+      assert.equal(name.value, "Renamed workspace");
+      assert.equal(name.disabled, false);
+    } finally { restoreClient(original); }
+  });
+
   it("shows an explicit empty state when ownership has no eligible recipient", async () => {
     const original = snapshotClient();
     apiClient.projectSettings = async () => projectSettings;
@@ -125,7 +144,7 @@ function EndpointHarness({ saving = false, onChange }: { saving?: boolean; onCha
   return <EndpointDialog open input={input} editing={false} saving={saving} discovering={false} models={[]} canSubmit error="" credentials={credentials} onDiscoverModels={() => undefined} onDismissError={() => undefined} onOpenChange={() => undefined} onChange={(value) => { setInput(value); onChange(value); }} onSubmit={(event) => event.preventDefault()} />;
 }
 
-function snapshotClient() { return { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, transferProjectOwner: apiClient.transferProjectOwner, transferWorkspaceOwner: apiClient.transferWorkspaceOwner, archiveWorkspace: apiClient.archiveWorkspace }; }
+function snapshotClient() { return { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, updateWorkspaceSettings: apiClient.updateWorkspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, transferProjectOwner: apiClient.transferProjectOwner, transferWorkspaceOwner: apiClient.transferWorkspaceOwner, archiveWorkspace: apiClient.archiveWorkspace }; }
 function restoreClient(value: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, value); }
 function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
 
