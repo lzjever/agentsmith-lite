@@ -39,6 +39,7 @@ describe("project chat threads API", () => {
     const otherCredential = await requestJson("POST", `/api/v1/projects/${otherProjectId}/credentials`, { name: "E2 credential", baseUrl: "https://models.example.test/v1", secret: "sk-test-key" });
     endpointId = (await requestJson("POST", `/api/v1/projects/${projectId}/endpoints`, endpointInput("E1", credential.id))).id;
     otherEndpointId = (await requestJson("POST", `/api/v1/projects/${otherProjectId}/endpoints`, endpointInput("E2", otherCredential.id))).id;
+    await requestJson("POST", `/api/v1/workspaces/${workspace.id}/members`, { email: "viewer@example.test", role: "member" });
     await requestJson("POST", `/api/v1/projects/${projectId}/members`, { email: "viewer@example.test", role: "viewer" });
   });
 

@@ -43,7 +43,8 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
     try {
       const available = await apiClient.endpoints(projectId);
       setEndpoints(available);
-      setEndpointId((current) => available.some((endpoint) => endpoint.id === current) ? current : (available[0]?.id ?? ""));
+      const compatible = available.filter(isChatCompatibleEndpoint);
+      setEndpointId((current) => compatible.some((endpoint) => endpoint.id === current) ? current : (compatible[0]?.id ?? ""));
       setEndpointsError("");
       setEndpointsStatus("ready");
     } catch (reason) {
@@ -114,6 +115,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
   useEffect(() => { messageEnd.current?.scrollIntoView({ block: "end" }); }, [messages, sending]);
 
   const selectedThread = threads.find((thread) => thread.id === threadId);
+  const compatibleEndpoints = endpoints.filter(isChatCompatibleEndpoint);
   const selectedEndpointId = selectedThread ? selectedThread.endpointId : endpointId;
   const endpoint = endpoints.find((item) => item.id === selectedEndpointId);
   const canSend = capabilitiesStatus === "ready" && capabilities?.canSendChat === true;
@@ -349,7 +351,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
         <div ref={messageEnd} />
         {sending ? <Button variant="danger" className="m-3 w-fit" onClick={stop}>Stop</Button> : null}
         <ChatComposer
-          endpoints={endpoints}
+          endpoints={compatibleEndpoints}
           endpointId={endpointId}
           hasThread={Boolean(selectedThread)}
           fixedEndpoint={selectedThread ? endpoint : undefined}
@@ -376,7 +378,7 @@ export function ProjectChatPage({ projectId }: { projectId: string }) {
       {capabilitiesStatus === "ready" && !canSend ? <Notice>Your project access is read-only.</Notice> : null}
       {endpointsStatus === "loading" ? <Notice>Loading compatible endpoints...</Notice> : null}
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
-      {endpointsStatus === "ready" && endpoints.length === 0 ? <Notice>Add a compatible endpoint before starting a conversation.</Notice> : null}
+      {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation.</Notice> : null}
       {actionError ? <Notice error>{actionError}</Notice> : null}
     </div>
   </PageLayout>;
@@ -390,4 +392,5 @@ function message(error: unknown): string { return error instanceof ApiError ? er
 function isAbort(error: unknown): boolean { return error instanceof DOMException ? error.name === "AbortError" : error instanceof Error && error.name === "AbortError"; }
 function orderedThreads(threads: ProjectChatThread[]): ProjectChatThread[] { return [...threads].sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || right.updatedAt.localeCompare(left.updatedAt)); }
 function latestConfirmedMessageId(messages: ProjectChatMessage[]): string | null { return messages.filter((item) => !item.id.startsWith("pending-") && !item.id.startsWith("stream-")).reduce<ProjectChatMessage | undefined>((latest, item) => !latest || item.sequence > latest.sequence ? item : latest, undefined)?.id ?? null; }
+function isChatCompatibleEndpoint(endpoint: Endpoint): boolean { return endpoint.hasCredentialRef && endpoint.health?.status === "healthy" && endpoint.capabilities.includes("text"); }
 function appendStreamDelta(threadId: string, delta: string, setMessages: Dispatch<SetStateAction<ProjectChatMessage[]>>) { setMessages((current) => { const last = current.at(-1); const timestamp = new Date().toISOString(); return last?.id === `stream-${threadId}` ? [...current.slice(0, -1), { ...last, content: last.content + delta }] : [...current, { id: `stream-${threadId}`, threadId, sequence: (last?.sequence ?? 0) + 1, version: 0, deliveryStatus: "pending", role: "assistant", content: delta, createdAt: timestamp, updatedAt: timestamp }]; }); }

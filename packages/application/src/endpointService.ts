@@ -163,6 +163,9 @@ export class EndpointService {
   async requireCredentialEndpointForUser(userId: string, projectId: string, endpointId: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "write");
     const endpoint = await this.requireEndpointForProject(projectId, endpointId);
+    if (endpoint.health?.status !== "healthy") {
+      throw new ProductError("Endpoint is unavailable. Recheck it before use.", 409);
+    }
     return endpoint;
   }
 

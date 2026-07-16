@@ -32,7 +32,7 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.equal(discovery.health.status, "healthy");
     assert.doesNotMatch(JSON.stringify(discovery), /never-return-this|credentialId/);
 
-    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model-a", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 }, cookie, csrfToken);
+    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model-a", credentialId: credential.id, capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30 }, cookie, csrfToken);
     assert.equal(endpoint.health.status, "healthy");
     assert.equal(endpoint.credentialId, credential.id);
     assert.doesNotMatch(JSON.stringify(endpoint), /never-return-this|ciphertext|authTag|nonce|keyId/);
@@ -45,6 +45,14 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.equal(unavailable.health.errorCategory, "auth");
     assert.equal(unavailable.credentialId, credential.id);
     assert.doesNotMatch(JSON.stringify(unavailable), /never-return-this|ciphertext|authTag|nonce|keyId/);
+    const listedUnavailable = await getJson(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, cookie);
+    assert.equal(listedUnavailable[0]?.taskEligible, false);
+    const blockedThread = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/chat/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken },
+      body: JSON.stringify({ endpointId: endpoint.id })
+    });
+    assert.equal(blockedThread.status, 409);
 
     available = true;
     const recovered = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, undefined, cookie, csrfToken);
@@ -62,6 +70,12 @@ async function post(base: string, pathname: string, body: unknown): Promise<Resp
 
 async function json(base: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> {
   const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  if (response.status !== 200) assert.fail(await response.text());
+  return response.json();
+}
+
+async function getJson(base: string, pathname: string, cookie: string): Promise<any> {
+  const response = await fetch(base + pathname, { headers: { cookie } });
   if (response.status !== 200) assert.fail(await response.text());
   return response.json();
 }

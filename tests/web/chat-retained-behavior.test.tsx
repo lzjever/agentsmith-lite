@@ -13,7 +13,7 @@ const { ProjectChatPage } = await import("../../src/components/chat/ProjectChatP
 
 afterEach(() => cleanup());
 
-const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "DeepSeek chat", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "deepseek-chat", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: false, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "DeepSeek chat", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "deepseek-chat", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, health: { status: "healthy", checkedAt: "2026-07-11T00:00:00.000Z", errorCategory: null }, hasCredentialRef: true, taskEligible: false, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
 const threads: ProjectChatThread[] = [{ id: "chat_1", projectId: "project_1", endpointId: endpoint.id, title: "Product Q&A", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
 const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
 
@@ -113,6 +113,23 @@ describe("retained chat and overview behavior", () => {
       apiClient.projectSettings = original.projectSettings;
       apiClient.members = original.members;
       apiClient.currentIdentity = original.currentIdentity;
+    }
+  });
+
+  it("does not offer an unavailable endpoint for a new conversation", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads };
+    apiClient.endpoints = async () => [{ ...endpoint, health: { status: "unavailable", checkedAt: endpoint.updatedAt, errorCategory: "auth" } }];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Add or repair a compatible endpoint before starting a conversation.");
+      assert.equal(screen.getByRole("button", { name: "Start conversation" }).hasAttribute("disabled"), true);
+      assert.equal(screen.queryByText("DeepSeek chat (deepseek-chat)"), null);
+    } finally {
+      apiClient.endpoints = original.endpoints;
+      apiClient.projectCapabilities = original.projectCapabilities;
+      apiClient.chatThreads = original.chatThreads;
     }
   });
 
