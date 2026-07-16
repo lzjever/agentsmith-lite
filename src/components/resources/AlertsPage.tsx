@@ -12,7 +12,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   apiClient,
@@ -51,6 +51,7 @@ const labels: Record<ProjectAlert["type"], string> = {
 };
 
 export function AlertsPage({ projectId }: { projectId: string }) {
+  const loadRequest = useRef(0);
   const [alerts, setAlerts] = useState<ProjectAlert[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -64,6 +65,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
   } | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setState("loading");
     setError("");
     setCapabilities(undefined);
@@ -72,6 +74,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
       apiClient.alerts(projectId),
       apiClient.projectCapabilities(projectId),
     ]);
+    if (request !== loadRequest.current) return;
     if (alertsResult.status === "rejected") {
       setError(
         alertsResult.reason instanceof Error ? alertsResult.reason.message : "Alerts could not be loaded.",
@@ -103,6 +106,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
     status: "resolved" | "dismissed",
   ) {
     if (!canManage) return;
+    loadRequest.current += 1;
     setBusyId(alert.id);
     try {
       const saved = await apiClient.transitionAlert(
@@ -124,6 +128,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
   }
   async function instance(alert: ProjectAlert, action: "ack" | "silence") {
     if (!canManage) return;
+    loadRequest.current += 1;
     setBusyId(alert.id);
     setRetry(null);
     try {

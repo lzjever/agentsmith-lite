@@ -152,6 +152,25 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("keeps the newest alert refresh", async () => {
+    const original = snapshotClient();
+    const active: ProjectAlert = { id: "alert_refresh", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    const resolvers: Array<(value: ProjectAlert[]) => void> = [];
+    apiClient.alerts = async () => new Promise((resolve) => resolvers.push(resolve));
+    apiClient.projectCapabilities = async () => capabilities;
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      await waitFor(() => assert.equal(resolvers.length, 1));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh alerts" }));
+      await waitFor(() => assert.equal(resolvers.length, 2));
+      await act(async () => resolvers[1]!([{ ...active, status: "resolved", resolvedAt: policy.updatedAt }]));
+      await screen.findByText("resolved");
+      await act(async () => resolvers[0]!([active]));
+      assert.ok(screen.getByText("resolved"));
+      assert.equal(screen.queryByText("active"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps alert instances readable but disables actions when permissions cannot be loaded", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
