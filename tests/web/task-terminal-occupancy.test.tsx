@@ -58,7 +58,8 @@ describe("TaskDetailPage terminal occupancy", () => {
       act(() => { for (const event of stateEvents("terminal", occupied)) receive?.(event); });
       assert.equal(screen.getByRole("region", { name: "Task terminal" }), ownerTerminal);
       assert.equal(sockets.length, 1);
-      assert.ok(screen.getByText(new RegExp(`terminal.*${task.id}`)));
+      assert.ok(screen.getByText(`Active · ${task.id}`));
+      assert.ok(screen.getByText("Task run is complete"));
 
       fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
       await waitFor(() => assert.equal(screen.queryByRole("tab", { name: "Terminal" }), null));
@@ -106,6 +107,29 @@ describe("TaskDetailPage terminal occupancy", () => {
       assert.ok(screen.getByText("Task inputs unavailable"));
       assert.ok(screen.getByText("Artifact storage unavailable"));
       assert.ok(screen.getByText("Input snapshot unavailable"));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("keeps the terminal result visible while explaining delayed artifact recovery", async () => {
+    const original = { task: apiClient.task, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const delayed: Task = { ...task, status:"completed", terminalReason:"completed", artifactProjectionStatus:"failed", artifactProjectionError:"Artifact storage is temporarily unavailable", cleanupStatus:"pending" };
+    apiClient.task = async () => delayed;
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => ({ ...snapshot({ ...available, sendMessage:false, cancelTask:false, openTerminal:false }), runState:"finalizing" });
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+
+      await screen.findByText(`Completed · ${task.id}`);
+      assert.ok(screen.getByText("Artifact publishing delayed"));
+      assert.ok(screen.getByText("Artifact storage is temporarily unavailable"));
+      assert.ok(screen.getByText(/retry automatically/i));
+      assert.ok(screen.getByText("Artifacts are not fully available yet."));
     } finally {
       Object.assign(apiClient, original);
     }

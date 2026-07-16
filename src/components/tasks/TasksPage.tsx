@@ -11,7 +11,7 @@ import { Button } from "../ui/button";
 import { toast } from "../ui/toast";
 import { TaskCreateDialog } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
-import { taskCompatibleEndpoints } from "./task-ui";
+import { taskCompatibleEndpoints, taskNeedsRefresh } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
@@ -105,7 +105,7 @@ export function TasksPageContent({ workspaceId, projectId, navigate }: { workspa
     return () => { active = false; };
   }, [dialogOpen, projectId]);
   useEffect(() => {
-    if (!page.items.some((task) => ["queued", "starting", "running", "stopping"].includes(task.status))) return;
+    if (!page.items.some(taskNeedsRefresh)) return;
     const timer = window.setInterval(() => void load(true), 5_000);
     return () => window.clearInterval(timer);
   }, [load, page.items]);

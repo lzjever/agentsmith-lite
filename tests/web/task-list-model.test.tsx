@@ -3,6 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
 import type { Task } from "../../src/lib/api/client.js";
+import { taskFinalizationPresentation, taskNeedsRefresh } from "../../src/components/tasks/task-ui.js";
 
 installDom();
 const { cleanup, render, screen } = await import("@testing-library/react");
@@ -17,6 +18,36 @@ describe("task list model", () => {
     render(<TaskList page={{ items: [task("task_1"), task("task_2", "task_1")], total: 2, nextCursor: null }} basePath="/workspaces/workspace_1/projects/project_1/tasks" query={{ archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 }} pageIndex={0} onQueryChange={() => undefined} onNext={() => undefined} onPrevious={() => undefined} />);
     assert.ok(screen.getByText("Successor of task_1"));
     assert.equal(screen.queryByText(/events/i), null);
+  });
+
+  it("keeps the task result primary while showing delayed finalization", () => {
+    const delayed: Task = {
+      ...task("task_1"),
+      terminalReason: "completed",
+      artifactProjectionStatus: "failed",
+      artifactProjectionError: "Artifact storage is temporarily unavailable",
+      cleanupStatus: "pending"
+    };
+
+    render(<TaskList page={{ items: [delayed], total: 1, nextCursor: null }} basePath="/workspaces/workspace_1/projects/project_1/tasks" query={{ archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 }} pageIndex={0} onQueryChange={() => undefined} onNext={() => undefined} onPrevious={() => undefined} />);
+
+    assert.ok(screen.getByText("Completed"));
+    assert.ok(screen.getByText("Finalization needs attention"));
+  });
+
+  it("refreshes through cleanup recovery and stops after app-owned resources are removed", () => {
+    const delayed: Task = { ...task("task_1"), terminalReason:"completed", artifactProjectionStatus:"drained", cleanupStatus:"failed", cleanupError:"Sandbox deletion is temporarily unavailable" };
+    const completed: Task = { ...delayed, cleanupStatus:"completed", cleanupError:null };
+
+    assert.deepEqual(taskFinalizationPresentation(delayed), {
+      label:"Sandbox cleanup delayed",
+      description:"App-owned sandbox resources are not yet confirmed removed. AgentSmith will retry automatically.",
+      error:"Sandbox deletion is temporarily unavailable",
+      tone:"warning"
+    });
+    assert.equal(taskNeedsRefresh(delayed), true);
+    assert.equal(taskFinalizationPresentation(completed), null);
+    assert.equal(taskNeedsRefresh(completed), false);
   });
 });
 

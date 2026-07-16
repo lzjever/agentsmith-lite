@@ -1,9 +1,9 @@
 "use client";
 
-import { ArrowLeft, RefreshCw, TerminalSquare, Trash2, X } from "lucide-react";
+import { ArrowLeft, CircleAlert, Loader2, RefreshCw, TerminalSquare, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import type { TaskCapabilities, TaskInteractionSnapshot } from "../../lib/api/client";
+import type { TaskCapabilities } from "../../lib/api/client";
 import { apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -16,6 +16,7 @@ import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskInputsPanel } from "./TaskInputsPanel";
 import { TaskTerminalPanel } from "./TaskTerminalPanel";
 import { useTaskMutationKeys } from "./task-mutation-key";
+import { taskFinalizationPresentation, taskNeedsRefresh, taskResultLabel, type TaskFinalizationPresentation } from "./task-ui";
 
 type WorkspaceMode = "conversation" | "terminal" | "artifacts";
 type LoadState = "loading" | "ready" | "error";
@@ -26,7 +27,6 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
   const [inputs, setInputs] = useState<TaskInput[]>([]);
   const [capabilities, setCapabilities] = useState<TaskCapabilities>();
-  const [runState, setRunState] = useState<TaskInteractionSnapshot["runState"]>();
   const [taskState, setTaskState] = useState<LoadState>("loading");
   const [artifactsState, setArtifactsState] = useState<LoadState>("loading");
   const [inputsState, setInputsState] = useState<LoadState>("loading");
@@ -49,14 +49,14 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
       setTaskState("ready");
     } catch (reason) {
       setTaskError(message(reason));
-      setTaskState("error");
+      if (!quiet) setTaskState("error");
     }
   }, [taskId]);
 
-  const loadArtifacts = useCallback(async () => {
+  const loadArtifacts = useCallback(async (quiet = false) => {
     setRefreshingArtifacts(true);
     setArtifactsError("");
-    setArtifactsState("loading");
+    if (!quiet) setArtifactsState("loading");
     try {
       setArtifacts(await apiClient.taskArtifacts(taskId));
       setArtifactsState("ready");
@@ -89,6 +89,15 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   useEffect(() => {
     if (!artifactsOnly) void loadInputs();
   }, [artifactsOnly, loadInputs]);
+  useEffect(() => {
+    if (!task || !taskNeedsRefresh(task)) return;
+    const finalizing = taskFinalizationPresentation(task) !== null;
+    const timer = window.setInterval(() => {
+      void loadTask(true);
+      if (artifactsOnly || finalizing) void loadArtifacts(true);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [artifactsOnly, loadArtifacts, loadTask, task]);
 
   function refresh() {
     void loadTask(true);
@@ -99,7 +108,7 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
     }
   }
   const handleArtifactPublished = useCallback(() => {
-    void loadArtifacts();
+    void loadArtifacts(true);
   }, [loadArtifacts]);
 
   async function cancelTask() {
@@ -123,18 +132,21 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   if (taskState === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{taskError}</p><Button className="mt-4" onClick={() => void loadTask()}>Try again</Button></div></PageState></PageLayout>;
   if (!task) return null;
 
-  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${runState?.replaceAll("_", " ") ?? task.status.replaceAll("_", " ")} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
-  const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
+  const finalization = taskFinalizationPresentation(task);
+  const artifactEmptyMessage = task.artifactProjectionStatus === "failed" || task.artifactProjectionStatus === "pending" || task.artifactProjectionStatus === "draining" ? "Artifacts are not fully available yet." : null;
+  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskResultLabel(task)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
+  const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} {...(artifactEmptyMessage ? { emptyMessage:artifactEmptyMessage } : {})} onRetry={loadArtifacts} />;
 
-  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link><section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;
+  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;
 
-  const showArtifacts = artifactsState !== "ready" || artifacts.length > 0;
+  const showArtifacts = artifactsState !== "ready" || artifacts.length > 0 || artifactEmptyMessage !== null;
   const showTerminal = capabilities?.openTerminal || mode === "terminal";
   return <PageLayout header={header} contentWidth="full">
     <Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>
+    {finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}
     <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</WorkspaceTab>{showTerminal ? <WorkspaceTab active={mode === "terminal"} onClick={() => setMode("terminal")}><TerminalSquare size={14} />Terminal</WorkspaceTab> : null}{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => setMode("artifacts")} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
     <div className="grid h-[clamp(24rem,calc(100dvh-12rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
-      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} onCapabilities={setCapabilities} onRunState={setRunState} onArtifactPublished={handleArtifactPublished} /></div>
+      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} onCapabilities={setCapabilities} onArtifactPublished={handleArtifactPublished} /></div>
       {showTerminal ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} /></div> : null}
       {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
@@ -144,10 +156,16 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   </PageLayout>;
 }
 
-function ArtifactsSection({ taskId, artifacts, state, error, refreshing, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; onRetry: () => Promise<void> }) {
+function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMessage, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; emptyMessage?: string; onRetry: () => Promise<void> }) {
   if (state === "loading" && artifacts.length === 0) return <p className="py-6 text-center text-sm text-secondary">Loading artifacts...</p>;
   if (state === "error" && artifacts.length === 0) return <SectionError title="Artifacts unavailable" message={error} onRetry={onRetry} />;
-  return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRetry} refreshing={refreshing} /></>;
+  return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRetry} refreshing={refreshing} {...(emptyMessage ? { emptyMessage } : {})} /></>;
+}
+
+function TaskFinalizationNotice({ presentation }: { presentation: TaskFinalizationPresentation }) {
+  const warning = presentation.tone === "warning";
+  const Icon = warning ? CircleAlert : Loader2;
+  return <div className={`flex items-start gap-3 border px-4 py-3 ${warning ? "border-warning/30 bg-warning/10" : "border-border bg-surface-low"}`} role={warning ? "alert" : "status"}><Icon className={`mt-0.5 size-4 shrink-0 ${warning ? "text-warning" : "animate-spin text-icon-default"}`} /><div className="min-w-0"><p className="text-sm font-medium text-foreground">{presentation.label}</p><p className="mt-1 text-sm text-secondary">{presentation.description}</p>{presentation.error ? <p className="mt-2 break-words font-mono text-xs text-warning">{presentation.error}</p> : null}</div></div>;
 }
 
 function InputsSection({ taskId, inputs, selectedPaths, state, error, onRetry }: { taskId: string; inputs: TaskInput[]; selectedPaths: string[]; state: LoadState; error: string; onRetry: () => Promise<void> }) {
