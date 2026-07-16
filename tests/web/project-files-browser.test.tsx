@@ -157,6 +157,31 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("does not apply a completed delete after switching projects", async () => {
+    const original = snapshotClient();
+    const secondFile: ProjectFile = { ...file, name: "second.txt", path: "files/second.txt" };
+    let finishDelete: (() => void) | undefined;
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async (requestedProjectId) => ({ entries: requestedProjectId === "project_1" ? [file] : [secondFile] });
+    apiClient.deleteFile = async () => new Promise((resolve) => { finishDelete = () => resolve({ deleted: true }); });
+    try {
+      const view = render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
+      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
+      assert.ok(confirm);
+      fireEvent.click(confirm);
+      await waitFor(() => assert.ok(finishDelete));
+
+      view.rerender(<ProjectFilesPage projectId="project_2" />);
+      await screen.findByText("second.txt");
+      await act(async () => finishDelete!());
+      assert.ok(screen.getByText("second.txt"));
+      assert.equal(screen.queryByText("brief.txt"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("uses retry and a nested-folder empty state", async () => {
     const original = snapshotClient();
     let attempts = 0;

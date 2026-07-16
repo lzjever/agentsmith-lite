@@ -20,6 +20,11 @@ const previewTextTypes = new Set(["text/plain", "text/csv", "text/markdown", "ap
 const maxPreviewBytes = 512_000;
 
 export function ProjectFilesPage({ projectId }: { projectId: string }) {
+  return <ProjectFiles key={projectId} projectId={projectId} />;
+}
+
+function ProjectFiles({ projectId }: { projectId: string }) {
+  const mounted = useRef(true);
   const [path, setPath] = useState(PROJECT_FILES_ROOT);
   const [entries, setEntries] = useState<ProjectFile[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
@@ -46,7 +51,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setCapabilities(undefined);
     try {
       const [filesResult, capabilitiesResult] = await Promise.allSettled([apiClient.files(projectId, requestedPath), apiClient.projectCapabilities(projectId)]);
-      if (version !== loadVersion.current || currentPath.current !== requestedPath) return;
+      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return;
       if (filesResult.status === "rejected") throw filesResult.reason;
       setEntries(sortFileEntries(filesResult.value.entries));
       setSelected((current) => filesResult.value.entries.find((entry) => entry.path === current?.path));
@@ -54,12 +59,18 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       else setMessage("File permissions could not be loaded. Files are read-only until refreshed.");
       setState("ready");
     } catch (error) {
-      if (version !== loadVersion.current || currentPath.current !== requestedPath) return;
+      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return;
       setMessage(errorMessage(error, "Files could not be loaded."));
       setState("error");
     }
   }, [path, projectId]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => {
     void load();
   }, [load]);
@@ -92,6 +103,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setMessage("");
     try {
       const written = await apiClient.uploadFile(projectId, childFilePath(uploadPath, file.name), file, { overwrite });
+      if (!mounted.current) return;
       const entry: ProjectFile = {
         name: written.path.slice(written.path.lastIndexOf("/") + 1),
         path: written.path,
@@ -107,6 +119,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       if (overwrite) setReplaceTarget(undefined);
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
+      if (!mounted.current) return;
       if (revokeWriteAccess(error)) return;
       if (!overwrite && error instanceof ApiError && error.status === 409) {
         setReplaceTarget({ file, path: uploadPath });
@@ -116,7 +129,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
         setUploadFailure({ file, path: uploadPath, message: errorMessage(error, "File could not be uploaded.") });
       }
     } finally {
-      setUploading(false);
+      if (mounted.current) setUploading(false);
     }
   }
 
@@ -126,7 +139,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     if (file) void upload(file);
   }
   useEffect(()=>()=>{if(preview?.kind==="image")URL.revokeObjectURL(preview.value);},[preview]);
-  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const response=await fetch(apiClient.fileDownloadUrl(projectId,entry.path),{credentials:"same-origin"});if(!response.ok)throw new Error();const blob=await response.blob();if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){setPreview({kind:"text",value:(await blob.text()).slice(0,16_000),name:entry.name});return;}throw new Error();}catch{toast.error("Preview is unavailable for this file.");}}
+  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const response=await fetch(apiClient.fileDownloadUrl(projectId,entry.path),{credentials:"same-origin"});if(!response.ok)throw new Error();const blob=await response.blob();if(!mounted.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current)return;setPreview({kind:"text",value,name:entry.name});return;}throw new Error();}catch{if(mounted.current)toast.error("Preview is unavailable for this file.");}}
 
   async function removeSelectedFile() {
     if (!deleteTarget) return;
@@ -134,15 +147,17 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setMessage("");
     try {
       await apiClient.deleteFile(projectId, deleteTarget.path);
+      if (!mounted.current) return;
       setDeleteTarget(undefined);
       setSelected((current) => current?.path === deleteTarget.path ? undefined : current);
       setEntries((current) => current.filter((entry) => entry.path !== deleteTarget.path));
       toast.success("File deleted");
     } catch (error) {
+      if (!mounted.current) return;
       if (revokeWriteAccess(error)) return;
       throw new Error(errorMessage(error, "File could not be deleted."));
     } finally {
-      setDeleting(false);
+      if (mounted.current) setDeleting(false);
     }
   }
 
