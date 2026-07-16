@@ -88,6 +88,9 @@ describe("business shared controls", () => {
     apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
     apiClient.workspaceMembers = async () => [];
     apiClient.updateWorkspaceSettings = async () => new Promise((resolve) => { finishSave = resolve; });
+    let directoryChanges = 0;
+    const changed = () => { directoryChanges += 1; };
+    window.addEventListener("agentsmith:directory-changed", changed);
     try {
       render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
       const name = await screen.findByRole("textbox", { name: "Workspace name" }) as HTMLInputElement;
@@ -97,7 +100,8 @@ describe("business shared controls", () => {
       await act(async () => finishSave({ ...workspaceSettings, workspace: { ...workspaceSettings.workspace, name: "Renamed workspace" } }));
       assert.equal(name.value, "Renamed workspace");
       assert.equal(name.disabled, false);
-    } finally { restoreClient(original); }
+      assert.equal(directoryChanges, 1);
+    } finally { window.removeEventListener("agentsmith:directory-changed", changed); restoreClient(original); }
   });
 
   it("shows an explicit empty state when ownership has no eligible recipient", async () => {

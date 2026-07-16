@@ -183,6 +183,24 @@ describe("workspace and shell interactions", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("refreshes the shell directory after settings change", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    let directory = [workspace];
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => directory;
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<p>Project settings</p>, "/workspaces/ws_1/projects/proj_1/settings", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      await view.findByText("Current project");
+
+      directory = [{ ...workspace, projects: [{ ...workspace.projects[0]!, name: "Renamed project" }, workspace.projects[1]!] }];
+      act(() => window.dispatchEvent(new Event("agentsmith:directory-changed")));
+
+      await view.findByText("Renamed project");
+      assert.equal(view.queryByText("Current project"), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
     const tasks = view.getByRole("link", { name: "Tasks" });

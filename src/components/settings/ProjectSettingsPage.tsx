@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2, Users } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
+import { ApiError, apiClient, notifyDirectoryChanged, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -35,7 +35,6 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [deleteName, setDeleteName] = useState("");
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [members,setMembers]=useState<ProjectMember[]>([]);const [memberState,setMemberState]=useState<"loading"|"ready"|"error">("loading");const [ownerTarget,setOwnerTarget]=useState("");const [ownerOpen,setOwnerOpen]=useState(false);const [lifecycleBusy,setLifecycleBusy]=useState(false);
   const loadMembers = useCallback(async () => {
     const request = ++memberRequest.current;
@@ -86,6 +85,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       if (!mounted.current) return;
       setData(saved);
       setProjectName(saved.project.name);
+      notifyDirectoryChanged();
       toast.success("Project settings saved.");
     } catch (reason) {
       if (!mounted.current) return;
@@ -103,18 +103,18 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const canArchive=data?.capabilities.canManageSettings===true&&isActive;
   const canRestore=isOwner&&archived;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);if(!mounted.current)return;setData({...data,project});toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
+  async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);if(!mounted.current)return;setData({...data,project});notifyDirectoryChanged();toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data)return;
     await apiClient.transferProjectOwner(projectId,ownerTarget);
     if(!mounted.current)return;
     setData({...data,project:{...data.project,ownerUserId:ownerTarget}});
+    notifyDirectoryChanged();
     setOwnerOpen(false);
     setOwnerTarget("");
     toast.success("Project ownership transferred.");
   }
   async function deleteProject() {
-    setDeleteError(null);
     setDeleteBusy(true);
     try {
       await apiClient.deleteProject(projectId);
@@ -123,8 +123,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       router.push(`/workspaces/${workspaceId}`);
     } catch (error) {
       if (!mounted.current) return;
-      setDeleteError(deletionMessage(error));
-      throw error;
+      throw new Error(deletionMessage(error));
     } finally {
       if (mounted.current) setDeleteBusy(false);
     }
@@ -134,7 +133,6 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     setDeleteOpen(open);
     if (!open) {
       setDeleteName("");
-      setDeleteError(null);
     }
   }
 
@@ -152,7 +150,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       {isOwner?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Transfer ownership</h2><p className="mt-1 text-sm text-secondary">Choose an existing project member as the new owner.</p>{memberState==="loading"?<p className="mt-4 text-sm text-secondary" role="status">Loading eligible project members...</p>:null}{memberState==="error"?<div className="mt-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">Project members could not be loaded.</span><Button variant="quiet" size="sm" aria-label="Retry member loading" onClick={()=>void loadMembers()}><RefreshCw size={14}/>Retry</Button></div>:null}{memberState==="ready"&&ownerCandidates.length === 0 ? <p className="mt-4 text-sm text-secondary" role="status">There are no other project members eligible to become owner.</p> : null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><div className="grid w-64 gap-2"><Label htmlFor="project-owner-target">New project owner</Label><Select value={ownerTarget} onValueChange={setOwnerTarget} disabled={!isActive}><SelectTrigger id="project-owner-target"><SelectValue placeholder="Select a member" /></SelectTrigger><SelectContent>{ownerCandidates.map(member=><SelectItem key={member.userId} value={member.userId}>{memberLabel(member)}</SelectItem>)}</SelectContent></Select></div><Button variant="outline" disabled={!ownerTarget||!isActive} onClick={()=>setOwnerOpen(true)}>Transfer ownership</Button></div>:null}</section>:null}
       {isOwner?<ConfirmationDialog open={ownerOpen} onOpenChange={setOwnerOpen} title="Transfer project ownership" description="The current owner becomes an administrator." confirmText="Transfer ownership" variant="default" confirmDisabled={!ownerTarget} onConfirm={transferOwner}/>:null}
       {canDelete ? <section className="mt-8 border-t border-danger/40 pt-6" aria-label="Danger zone"><h2 className="type-title">{lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"}</h2><p className="mt-1 text-sm text-secondary">{lifecycleStatus==="deleting"?"Previous cleanup did not finish. Continue deleting the remaining project-owned data.":"This permanently removes this project and its project-owned data."}</p><Button className="mt-4" variant="destructive-primary" aria-label={lifecycleStatus==="deleting"?"Continue project deletion":"Open project deletion confirmation"} onClick={() => setDialogOpen(true)}><Trash2 size={16} />{lifecycleStatus==="deleting"?"Continue deletion":"Delete project"}</Button></section> : null}
-      {canDelete ? <ConfirmationDialog open={deleteOpen} onOpenChange={setDialogOpen} title={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"} description={<><span>Type <strong className="text-foreground">{data.project.name}</strong> to permanently delete this project.</span><label className="mt-4 grid gap-2"><span className="text-xs font-medium text-foreground">Project name</span><Input aria-label="Project name confirmation" value={deleteName} onChange={(event) => setDeleteName(event.target.value)} autoComplete="off" />{deleteError ? <span role="alert" className="text-danger">{deleteError} Try again when cleanup is available.</span> : null}</label></>} confirmText={deleteBusy ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} confirmDisabled={deleteBusy || deleteName !== data.project.name} onConfirm={deleteProject} errorContext="Project could not be deleted" /> : null}
+      {canDelete ? <ConfirmationDialog open={deleteOpen} onOpenChange={setDialogOpen} title={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"} description={<><span>Type <strong className="text-foreground">{data.project.name}</strong> to permanently delete this project.</span><label className="mt-4 grid gap-2"><span className="text-xs font-medium text-foreground">Project name</span><Input aria-label="Project name confirmation" value={deleteName} onChange={(event) => setDeleteName(event.target.value)} autoComplete="off" /></label></>} confirmText={deleteBusy ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} confirmDisabled={deleteBusy || deleteName !== data.project.name} onConfirm={deleteProject} errorContext="Project could not be deleted" /> : null}
     </> : null}
   </PageLayout>;
 }

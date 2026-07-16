@@ -62,6 +62,9 @@ describe("profile and settings pages", () => {
     apiClient.projectSettings = async () => settings;
     apiClient.currentIdentity = async () => ({ user: profile.user });
     apiClient.updateProjectSettings = async () => new Promise((resolve) => { finishSave = resolve; });
+    let directoryChanges = 0;
+    const changed = () => { directoryChanges += 1; };
+    window.addEventListener("agentsmith:directory-changed", changed);
     try {
       render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
       const name = await screen.findByRole("textbox", { name: "Project name" }) as HTMLInputElement;
@@ -71,7 +74,8 @@ describe("profile and settings pages", () => {
       await act(async () => finishSave({ ...settings, project: { ...settings.project, name: "Renamed project" } }));
       assert.equal(name.value, "Renamed project");
       assert.equal(name.disabled, false);
-    } finally { Object.assign(apiClient, original); }
+      assert.equal(directoryChanges, 1);
+    } finally { window.removeEventListener("agentsmith:directory-changed", changed); Object.assign(apiClient, original); }
   });
 
   it("keeps profile fields stable while saving and adopts saved server values", async () => {

@@ -4,7 +4,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
+import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
 import { PageLoading } from "../ui/loading";
@@ -71,10 +71,13 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
       setUser(undefined);
       setStatus("login");
     };
+    const refreshDirectory = () => { void loadDirectory(); };
     window.addEventListener(SESSION_EXPIRED_EVENT, expireSession);
+    window.addEventListener(DIRECTORY_CHANGED_EVENT, refreshDirectory);
     return () => {
       mounted.current = false;
       window.removeEventListener(SESSION_EXPIRED_EVENT, expireSession);
+      window.removeEventListener(DIRECTORY_CHANGED_EVENT, refreshDirectory);
     };
   }, []);
   useEffect(() => {

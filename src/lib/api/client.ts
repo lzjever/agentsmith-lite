@@ -12,6 +12,11 @@ export class ApiError extends Error {
 }
 
 export const SESSION_EXPIRED_EVENT = "agentsmith:session-expired";
+export const DIRECTORY_CHANGED_EVENT = "agentsmith:directory-changed";
+
+export function notifyDirectoryChanged(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(DIRECTORY_CHANGED_EVENT));
+}
 
 export interface CurrentUser { id: string; email: string; displayName?: string; pictureUrl?: string; }
 export type Profile = ProfileResponse;
