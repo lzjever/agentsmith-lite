@@ -2,7 +2,7 @@
 
 import { ArrowLeft, CircleAlert, Loader2, RefreshCw, TerminalSquare, Trash2, X } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskCapabilities } from "../../lib/api/client";
 import { apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
@@ -40,44 +40,58 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const taskLoadVersion = useRef(0);
+  const artifactsLoadVersion = useRef(0);
+  const inputsLoadVersion = useRef(0);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
 
   const loadTask = useCallback(async (quiet = false) => {
+    const version = ++taskLoadVersion.current;
     if (!quiet) setTaskState("loading");
     setTaskError("");
     try {
       const detail = await apiClient.taskDetail(taskId);
+      if (version !== taskLoadVersion.current) return;
       setTask(detail.task);
       setCapabilities(detail.capabilities);
       setTaskState("ready");
     } catch (reason) {
+      if (version !== taskLoadVersion.current) return;
       setTaskError(message(reason));
       if (!quiet) setTaskState("error");
     }
   }, [taskId]);
 
   const loadArtifacts = useCallback(async (quiet = false) => {
+    const version = ++artifactsLoadVersion.current;
     setRefreshingArtifacts(true);
     setArtifactsError("");
     if (!quiet) setArtifactsState("loading");
     try {
-      setArtifacts(await apiClient.taskArtifacts(taskId));
+      const loaded = await apiClient.taskArtifacts(taskId);
+      if (version !== artifactsLoadVersion.current) return;
+      setArtifacts(loaded);
       setArtifactsState("ready");
     } catch (reason) {
+      if (version !== artifactsLoadVersion.current) return;
       setArtifactsError(message(reason));
       setArtifactsState("error");
     } finally {
-      setRefreshingArtifacts(false);
+      if (version === artifactsLoadVersion.current) setRefreshingArtifacts(false);
     }
   }, [taskId]);
 
   const loadInputs = useCallback(async () => {
+    const version = ++inputsLoadVersion.current;
     setInputsError("");
     setInputsState("loading");
     try {
-      setInputs(await apiClient.taskInputs(taskId));
+      const loaded = await apiClient.taskInputs(taskId);
+      if (version !== inputsLoadVersion.current) return;
+      setInputs(loaded);
       setInputsState("ready");
     } catch (reason) {
+      if (version !== inputsLoadVersion.current) return;
       setInputsError(message(reason));
       setInputsState("error");
     }

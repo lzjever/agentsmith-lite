@@ -93,6 +93,33 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("keeps the latest task state when an older refresh finishes last", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts };
+    const completed: Task = { ...task, status: "completed", terminalReason: "completed", artifactProjectionStatus: "complete", cleanupStatus: "complete", updatedAt: "2026-07-14T00:02:00.000Z" };
+    let reads = 0;
+    let resolveOlder!: (value: { task: Task; capabilities: TaskCapabilities }) => void;
+    apiClient.taskDetail = async () => {
+      reads += 1;
+      if (reads === 1) return { task, capabilities: available };
+      if (reads === 2) return new Promise((resolve) => { resolveOlder = resolve; });
+      return { task: completed, capabilities: { ...available, cancelTask: false, openTerminal: false } };
+    };
+    apiClient.taskArtifacts = async () => [];
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
+      await screen.findByText(`Active · ${task.id}`);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh task" }));
+      await waitFor(() => assert.equal(reads, 2));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh task" }));
+      await screen.findByText(`Completed · ${task.id}`);
+      await act(async () => { resolveOlder({ task, capabilities: available }); await Promise.resolve(); });
+      assert.ok(screen.getByText(`Completed · ${task.id}`));
+      assert.equal(screen.queryByText(`Active · ${task.id}`), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps conversation readable when artifact and input panels fail", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     apiClient.taskDetail = async () => ({ task, capabilities: available });
