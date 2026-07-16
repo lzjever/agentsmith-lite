@@ -72,6 +72,26 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("serializes workspace membership mutations", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
+    const first: WorkspaceMember = { ...owner, userId: "member_1", role: "member", displayName: "First member", email: "first@example.test" };
+    const second: WorkspaceMember = { ...owner, userId: "member_2", role: "viewer", displayName: "Second member", email: "second@example.test" };
+    let changes = 0;
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner, first, second];
+    apiClient.changeWorkspaceMember = async () => { changes += 1; return new Promise(() => undefined); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("combobox", { name: "Role for First member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      await waitFor(() => assert.equal(changes, 1));
+      assert.equal((screen.getByRole("button", { name: "Add member" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("combobox", { name: "Role for First member" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("combobox", { name: "Role for Second member" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("button", { name: "Remove Second member" }) as HTMLButtonElement).disabled, true);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("persists a project pin through the product API", async () => {
     const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
     const project = { id: "project_1", workspaceId: workspace.id, name: "Pinned project", pinnedAt: null, taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };

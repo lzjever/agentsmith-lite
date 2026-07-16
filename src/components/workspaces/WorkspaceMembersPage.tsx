@@ -55,6 +55,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   useEffect(() => { void load(); }, [load]);
 
   const canManage = workspace?.capabilities.canManageMembers === true;
+  const mutationBusy = busyUserId !== undefined;
   const filtered = useMemo(() => members.filter((member) => `${member.displayName ?? ""} ${member.email} ${member.role}`.toLowerCase().includes(query.trim().toLowerCase())), [members, query]);
 
   async function recoverMutation(reason: unknown, retry: () => void) {
@@ -67,7 +68,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   }
 
   async function add() {
-    if (!canManage || !email.trim()) return;
+    if (!canManage || mutationBusy || !email.trim()) return;
     setBusyUserId("new");
     setMutationError(undefined);
     try {
@@ -85,7 +86,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   }
 
   async function change(member: WorkspaceMember, next: Exclude<WorkspaceMemberRole, "owner">) {
-    if (!canManage) return;
+    if (!canManage || mutationBusy) return;
     setBusyUserId(member.userId);
     setMutationError(undefined);
     try {
@@ -100,7 +101,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
   }
 
   async function remove(member: WorkspaceMember) {
-    if (!canManage) return;
+    if (!canManage || mutationBusy) return;
     setBusyUserId(member.userId);
     setMutationError(undefined);
     try {
@@ -115,18 +116,18 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  return <PageLayout header={<PageHeader title="Workspace members" subtitle="People with access to this workspace." actions={canManage ? <Button onClick={() => { setMutationError(undefined); setOpen(true); }}><Plus size={16} />Add member</Button> : undefined} />}>
+  return <PageLayout header={<PageHeader title="Workspace members" subtitle="People with access to this workspace." actions={canManage ? <Button disabled={mutationBusy} onClick={() => { setMutationError(undefined); setOpen(true); }}><Plus size={16} />Add member</Button> : undefined} />}>
     {state === "loading" ? <PageState>Loading workspace members...</PageState> : null}
     {state === "error" ? <PageState state="error"><ErrorState title="Workspace members unavailable" message="The workspace members could not be loaded." onRetry={() => void load()} /></PageState> : null}
     {state === "ready" ? <section className="space-y-4" aria-label="Workspace members">
       {mutationError && !open ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}
       <label className="relative block max-w-sm"><span className="sr-only">Search workspace members</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search members" /></label>
-      {filtered.length === 0 ? <PageState state="empty">No workspace members match this search.</PageState> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={busyUserId === member.userId} onChange={change} onRemove={setMemberToRemove} onView={setSelected} />)}</div>}
+      {filtered.length === 0 ? <PageState state="empty">No workspace members match this search.</PageState> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={mutationBusy} onChange={change} onRemove={setMemberToRemove} onView={setSelected} />)}</div>}
       {!canManage ? <p className="text-sm text-secondary">Your workspace access is read-only.</p> : null}
     </section> : null}
-    <Dialog open={open} onOpenChange={(next) => { if (busyUserId !== "new") setOpen(next); }}><DialogContent><DialogHeader title="Add workspace member" description="Grant an existing identity access to this workspace." />{mutationError ? <div className="px-5 pt-4"><MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Email<Input value={email} onChange={(event) => setEmail(event.target.value)} type="email" /></label><Select value={role} onValueChange={(value) => setRole(value as Exclude<WorkspaceMemberRole, "owner">)}><SelectTrigger aria-label="Workspace member role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select></div><DialogFooter><Button variant="quiet" onClick={() => setOpen(false)} disabled={busyUserId === "new"}>Cancel</Button><Button disabled={!email.trim() || !canManage || busyUserId === "new"} onClick={() => void add()}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={open} onOpenChange={(next) => { if (!mutationBusy) setOpen(next); }}><DialogContent><DialogHeader title="Add workspace member" description="Grant an existing identity access to this workspace." />{mutationError ? <div className="px-5 pt-4"><MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /></div> : null}<div className="grid gap-4 px-5 py-5"><label className="grid gap-2 text-sm text-primary">Email<Input value={email} onChange={(event) => setEmail(event.target.value)} type="email" disabled={mutationBusy} /></label><Select value={role} disabled={mutationBusy} onValueChange={(value) => setRole(value as Exclude<WorkspaceMemberRole, "owner">)}><SelectTrigger aria-label="Workspace member role"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select></div><DialogFooter><Button variant="quiet" onClick={() => setOpen(false)} disabled={mutationBusy}>Cancel</Button><Button disabled={!email.trim() || !canManage || mutationBusy} onClick={() => void add()}>{busyUserId === "new" ? "Adding..." : "Add member"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(selected)} onOpenChange={(next) => !next && setSelected(undefined)}><DialogContent>{selected ? <><DialogHeader title="Member details" description="Workspace membership identity." /><dl className="grid gap-4 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]"><dt className="text-secondary">Name</dt><dd className="break-all text-foreground">{memberLabel(selected)}</dd><dt className="text-secondary">Email</dt><dd className="break-all text-foreground">{selected.email}</dd><dt className="text-secondary">Role</dt><dd>{selected.role}</dd><dt className="text-secondary">Joined</dt><dd>{new Date(selected.createdAt).toLocaleString("en-US")}</dd></dl></> : null}</DialogContent></Dialog>
-    <ConfirmationDialog open={Boolean(memberToRemove)} onOpenChange={(next) => !next && setMemberToRemove(undefined)} title="Remove workspace member" description={memberToRemove ? `Remove ${memberLabel(memberToRemove)} from this workspace? They will lose access to its projects.` : undefined} confirmText="Remove member" onConfirm={() => memberToRemove ? remove(memberToRemove) : undefined} errorContext="Workspace member could not be removed" />
+    <ConfirmationDialog open={Boolean(memberToRemove)} onOpenChange={(next) => !next && setMemberToRemove(undefined)} title="Remove workspace member" description={memberToRemove ? `Remove ${memberLabel(memberToRemove)} from this workspace? They will lose access to its projects.` : undefined} confirmText="Remove member" confirmDisabled={mutationBusy} onConfirm={() => memberToRemove ? remove(memberToRemove) : undefined} errorContext="Workspace member could not be removed" />
   </PageLayout>;
 }
 
