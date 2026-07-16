@@ -13,6 +13,7 @@ import type {
   KubernetesResource,
   ModelEndpoint,
   TaskCapabilities,
+  TaskDetailProjection,
   TaskHistoryStatus,
   TaskInteractionItem,
   TaskInteractionSnapshot,
@@ -477,6 +478,11 @@ export class TaskService {
 
   async getTask(userId: string, taskId: string): Promise<AgentTask> {
     return publicTask(await this.requireTaskForUser(userId, taskId, "view"));
+  }
+
+  async getTaskDetail(userId: string, taskId: string): Promise<TaskDetailProjection> {
+    const task = await this.requireTaskForUser(userId, taskId, "view");
+    return { task: publicTask(task), capabilities: await this.taskCapabilities(userId, task) };
   }
 
   async getTaskSummary(userId: string, taskId: string): Promise<TaskSummary> {

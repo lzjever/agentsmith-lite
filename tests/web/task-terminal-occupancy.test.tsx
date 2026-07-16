@@ -32,9 +32,9 @@ afterEach(() => { cleanup(); sockets.length = 0; });
 
 describe("TaskDetailPage terminal occupancy", () => {
   it("keeps the owner's terminal mounted across occupancy and terminal-state updates until the user leaves", async () => {
-    const original = { task: apiClient.task, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
-    apiClient.task = async () => task;
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [];
     apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
@@ -46,10 +46,12 @@ describe("TaskDetailPage terminal occupancy", () => {
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
       const terminalTab = await screen.findByRole("tab", { name: "Terminal" });
-      const ownerTerminal = screen.getByRole("region", { name: "Task terminal" });
-      await waitFor(() => assert.equal(sockets.length, 1));
+      assert.equal(screen.queryByRole("region", { name: "Task terminal" }), null);
+      assert.equal(sockets.length, 0);
 
       fireEvent.click(terminalTab);
+      const ownerTerminal = screen.getByRole("region", { name: "Task terminal" });
+      await waitFor(() => assert.equal(sockets.length, 1));
 
       act(() => { for (const event of stateEvents("running", occupied)) receive?.(event); });
       assert.equal(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected"), "true");
@@ -72,11 +74,11 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("loads the artifacts-only view without touching broken conversation APIs", async () => {
-    const original = { task: apiClient.task, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
     let interactionReads = 0;
     let inputReads = 0;
     const artifact: TaskArtifact = { id: "artifact_1", taskId: task.id, fileId: "file_1", name: "result.txt", bytes: 12, mediaType: "text/plain", createdAt: "2026-07-14T00:01:00.000Z" };
-    apiClient.task = async () => task;
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [artifact];
     apiClient.taskInputs = async () => { inputReads += 1; throw new Error("Inputs unavailable"); };
     apiClient.getTaskInteractions = async () => { interactionReads += 1; throw new Error("Conversation unavailable"); };
@@ -92,8 +94,8 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("keeps conversation readable when artifact and input panels fail", async () => {
-    const original = { task: apiClient.task, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
-    apiClient.task = async () => task;
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => { throw new Error("Artifact storage unavailable"); };
     apiClient.taskInputs = async () => { throw new Error("Input snapshot unavailable"); };
     apiClient.getTaskInteractions = async () => snapshot(available);
@@ -112,10 +114,25 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("keeps task lifecycle controls available when conversation loading fails", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      await screen.findByText("Conversation could not be loaded.");
+      assert.ok(screen.getByRole("button", { name: "Cancel task" }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the terminal result visible while explaining delayed artifact recovery", async () => {
-    const original = { task: apiClient.task, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const delayed: Task = { ...task, status:"completed", terminalReason:"completed", artifactProjectionStatus:"failed", artifactProjectionError:"Artifact storage is temporarily unavailable", cleanupStatus:"pending" };
-    apiClient.task = async () => delayed;
+    apiClient.taskDetail = async () => ({ task: delayed, capabilities: { ...available, sendMessage: false, cancelTask: false, openTerminal: false } });
     apiClient.taskArtifacts = async () => [];
     apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => ({ ...snapshot({ ...available, sendMessage:false, cancelTask:false, openTerminal:false }), runState:"finalizing" });

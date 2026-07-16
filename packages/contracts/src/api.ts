@@ -532,6 +532,11 @@ export interface TaskCapabilities {
   deleteTask: boolean;
 }
 
+export interface TaskDetailProjection {
+  task: AgentTask;
+  capabilities: TaskCapabilities;
+}
+
 export type TaskRunState = "idle" | "starting" | "running" | "reconnecting" | "aborting" | "finalizing" | "terminal";
 export type TaskRuntimeReachability = "unknown" | "reachable" | "unreachable";
 export type TaskHistoryStatus = "complete" | "gap";

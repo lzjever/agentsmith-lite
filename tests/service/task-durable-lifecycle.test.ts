@@ -76,6 +76,9 @@ describe("durable task lifecycle", () => {
     assert.ok(await setup.store.jsonDocs.get("sandbox_runtime_state", task.id));
     assert.ok(await setup.store.sandboxRuns.get(task.runId));
     assert.equal(setup.botified.posts.length, 0);
+    const detail = await setup.services.tasks.getTaskDetail(setup.userId, task.id);
+    assert.equal(detail.task.id, task.id);
+    assert.equal(detail.capabilities.cancelTask, true);
   });
 
   it("attributes task provider usage to the task creator", async () => {

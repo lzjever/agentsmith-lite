@@ -52,6 +52,7 @@ export interface Task {
   sandbox: { namespace: string; resources: Array<{ apiVersion: string; kind: string; metadata: { name: string; namespace?: string } }> };
   createdAt: string; updatedAt: string;
 }
+export interface TaskDetail { task: Task; capabilities: TaskCapabilities; }
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
 export interface TaskInput { path: string; name: string; bytes: number; sha256: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
@@ -276,6 +277,7 @@ export const apiClient = {
   },
   createTask: (projectId: string, input: { prompt: string; endpointId: string; title?: string; inputPaths?: string[] }, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
   task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
+  taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
   taskInputs: (taskId: string) => request<TaskInput[]>(`/tasks/${encodeURIComponent(taskId)}/inputs`),
   taskInputDownloadUrl: (taskId: string, path: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/inputs/download?path=${encodeURIComponent(path)}`,
   taskTerminalWebSocketUrl: (taskId:string) => {

@@ -618,6 +618,7 @@ async function routeApi(
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "tasks" && segments[3]) {
     const taskId = segments[3];
     if (!segments[4] && method === "GET") return sendJson(res,200,await services.tasks.getTask(user.id,taskId));
+    if (segments[4] === "detail" && method === "GET") return sendJson(res,200,await services.tasks.getTaskDetail(user.id,taskId));
     if (!segments[4] && method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
     if (!segments[4] && method === "DELETE") return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));
     if (segments[4] === "summary" && method === "GET") return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId));
@@ -950,7 +951,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/files(?:\/(?:download|url-note))?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 

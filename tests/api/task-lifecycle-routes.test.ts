@@ -48,6 +48,10 @@ describe("task lifecycle API routes", () => {
     const replay = await json("POST", `/api/v1/projects/${projectId}/tasks`, { title: "First", prompt: "first", endpointId }, "create-1");
     assert.equal(replay.id, first.id);
     assert.equal(first.terminalReason, "not_executed");
+    const detail = await json("GET", `/api/v1/tasks/${first.id}/detail`);
+    assert.equal(detail.task.id, first.id);
+    assert.equal(detail.capabilities.deleteTask, true);
+    assert.equal(detail.capabilities.cancelTask, false);
     const mismatch = await request("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "changed", title: "First" }, "create-1");
     assert.equal(mismatch.status, 409);
 
