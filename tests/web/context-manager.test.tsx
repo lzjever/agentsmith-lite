@@ -70,6 +70,22 @@ describe("context manager", () => {
     } finally { apiClient.contexts = original.contexts; apiClient.deleteContext = original.deleteContext; }
   });
 
+  it("keeps delete confirmation open when context deletion fails", async () => {
+    const original = { contexts: apiClient.contexts, deleteContext: apiClient.deleteContext };
+    const entry = { id: "ctx_delete", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "keep", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    apiClient.contexts = async () => ({ items: [entry], canWrite: true });
+    apiClient.deleteContext = async () => { throw new ApiError(409, "Context is still in use."); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete context entry" });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete entry" })); await Promise.resolve(); });
+      assert.ok(screen.getByRole("alertdialog", { name: "Delete context entry" }));
+      assert.ok(screen.getByText("project.rules"));
+      assert.equal(dialog.isConnected, true);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("sends rename versions and offers recovery for a stale write", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     let loads = 0;

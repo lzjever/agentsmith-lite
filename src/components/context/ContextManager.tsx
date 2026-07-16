@@ -93,7 +93,12 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
       await apiClient.deleteContext({ workspaceId, scope, contextKey: selected.contextKey, ...(projectScope && projectId ? { projectId } : {}) });
       const remaining = result.items.filter((entry) => entry.id !== selected.id);
       setResult({ ...result, items: remaining }); setSelectedKey(remaining[0]?.contextKey); setDeleteOpen(false); setError(""); toast.success("Context deleted");
-    } catch (reason) { if (!revokeWriteAccess(reason)) setError(message(reason)); toast.error("Context could not be deleted"); } finally { setDeleting(false); }
+    } catch (reason) {
+      if (revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
+      const detail = message(reason);
+      setError(detail);
+      throw new Error(detail);
+    } finally { setDeleting(false); }
   }
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Context" subtitle="Saved instructions and reference data for this workspace and project." />}>
