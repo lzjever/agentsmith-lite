@@ -18,12 +18,14 @@ describe("deletion lifecycle", () => {
     await mkdir(path.join(root, second.rootPath), { recursive: true });
     await writeFile(path.join(root, first.rootPath, "only-first.txt"), "x");
     await writeFile(path.join(root, second.rootPath, "only-second.txt"), "x");
+    await store.appendProjectAuditEvent({id:"audit_proj_1",projectId:first.id,actorId:"owner",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:first.id,createdAt:"2026-01-01T00:00:00.000Z"});
     const tasks = { async stopTasksForProjectDeletion() {} } as never;
     const deletion = new DeletionService(store, tasks, root);
 
     await deletion.deleteProject("owner", first.id);
 
     assert.equal(await store.findProject(first.id), null);
+    assert.deepEqual(await store.listProjectAuditEvents(first.id), []);
     await assert.rejects(access(path.join(root, first.rootPath, "only-first.txt")));
     await access(path.join(root, second.rootPath, "only-second.txt"));
   });

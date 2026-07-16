@@ -3,11 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { createTestApiServer as createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("profile and settings API", () => {
+  const store = createLocalInMemoryProductStore();
   let api: RunningApiServer; let root = ""; let cookie = ""; let csrf = ""; let workspaceId = ""; let projectId = "";
-  before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password" }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
+  before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password", store }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
   it("projects a public profile and applies idempotent settings and lifecycle mutations", async () => {
     const profile = await json("GET", "/api/v1/me/profile");
@@ -34,6 +36,25 @@ describe("profile and settings API", () => {
     const audit = await json("GET", `/api/v1/projects/${projectId}/audit`);
     const archiveEvents = audit.items.filter((event: { action: string }) => event.action === "project.archive");
     assert.deepEqual(archiveEvents.map((event: { status: string; detail?: unknown }) => ({ status: event.status, detail: event.detail })), [{ status: "accepted", detail: {} }]);
+
+    const appendAudit = store.appendProjectAuditEvent.bind(store);
+    store.appendProjectAuditEvent = async (event) => {
+      if (event.action === "project.delete" && !(await store.findProject(event.projectId))) throw new Error("audit project FK violation");
+      await appendAudit(event);
+    };
+    const deleted = await json("DELETE", `/api/v1/projects/${projectId}`, undefined, "project-delete");
+    assert.deepEqual(deleted, { deleted: true });
+    assert.equal(await store.findProject(projectId), null);
+    assert.deepEqual(await store.listProjectAuditEvents(projectId), []);
+    assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}`, undefined, "project-delete"), { deleted: true });
+
+    const failingProjectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Deletion failure" })).id;
+    const deleteProject = store.deleteProjectDependenciesAndProject.bind(store);
+    store.deleteProjectDependenciesAndProject = async (id) => id === failingProjectId ? false : deleteProject(id);
+    const failed = await call("DELETE", `/api/v1/projects/${failingProjectId}`, undefined, "project-delete-failure");
+    assert.equal(failed.response.status, 409);
+    assert.deepEqual(failed.body, { error: "Project deletion is still pending" });
+    assert.equal((await store.findProject(failingProjectId))?.lifecycleStatus, "deleting");
   });
   async function call(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const response = await fetch(`${api.baseUrl}${pathname}`, { method, headers: { ...(cookie ? { cookie, "x-csrf-token": csrf } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }), ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { response, body: await response.json() as any }; }
   async function json(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const result = await call(method, pathname, body, idempotencyKey); assert.equal(result.response.status, 200); return result.body; }

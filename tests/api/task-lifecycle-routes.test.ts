@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("task lifecycle API routes", () => {
   const store = createLocalInMemoryProductStore();

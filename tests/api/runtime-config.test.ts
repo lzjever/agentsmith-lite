@@ -16,7 +16,7 @@ import {
   requireOidcRuntimeConfig
 } from "../../packages/api-entry-node/src/runtimeConfig.js";
 import { randomBytes } from "node:crypto";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer } from "../../packages/api-entry-node/src/server.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../packages/domain/src/sandboxDefaults.js";
 
 describe("runtime config", () => {
@@ -39,7 +39,7 @@ describe("runtime config", () => {
 
   it("listens on the configured pod interface", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "agentsmith-api-bind-"));
-    const server = await createApiServer({
+    const server = await createTestApiServer({
       port: 0,
       host: parseApiBindAddress("0.0.0.0"),
       dataRoot,
@@ -54,45 +54,44 @@ describe("runtime config", () => {
     }
   });
 
-  it("parses builtin admin and OIDC auth modes while keeping empty values on the builtin default", () => {
-    assert.equal(parseAuthMode(undefined), "builtin_admin");
-    assert.equal(parseAuthMode(""), "builtin_admin");
-    assert.equal(parseAuthMode("   "), "builtin_admin");
-    assert.equal(parseAuthMode("builtin_admin"), "builtin_admin");
-    assert.equal(parseAuthMode(" builtin_admin "), "builtin_admin");
+  it("accepts only explicit OIDC auth mode in production runtime config", () => {
     assert.equal(parseAuthMode("oidc"), "oidc");
     assert.equal(parseAuthMode(" oidc "), "oidc");
 
-    for (const value of ["OIDC", "keycloak", "false", "0"]) {
+    for (const value of [undefined, "", "   ", "builtin_admin", "OIDC", "keycloak", "false", "0"]) {
       assert.throws(
         () => parseAuthMode(value),
-        /AUTH_MODE must be empty, builtin_admin, or oidc/
+        /AUTH_MODE must be explicitly set to oidc/
       );
     }
   });
 
-  it("requires shaped non-empty OIDC runtime config only when AUTH_MODE=oidc", () => {
-    assert.deepEqual(parseRuntimeAuthConfig({}), { mode: "builtin_admin" });
+  it("requires explicit complete OIDC configuration for the production runtime", () => {
+    assert.throws(() => parseRuntimeAuthConfig({}), /AUTH_MODE/);
+    assert.throws(
+      () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin" }),
+      /AUTH_MODE/
+    );
+    assert.throws(
+      () => parseRuntimeAuthConfig({ AUTH_MODE: "oidc" }),
+      /OIDC_ISSUER_URL/
+    );
     assert.deepEqual(parseRuntimeAuthConfig({
-      AUTH_MODE: "builtin_admin",
-      OIDC_ISSUER_URL: "",
-      OIDC_CLIENT_ID: "",
-      OIDC_CLIENT_SECRET: "",
-      OIDC_BACKCHANNEL_BASE_URL: ""
-    }), { mode: "builtin_admin" });
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      OIDC_CLIENT_SECRET: "client-secret"
+    }), {
+      mode: "oidc",
+      oidc: {
+        issuerUrl: "https://keycloak.example.test/realms/agentsmith",
+        clientId: "agentsmith-lite",
+        clientSecret: "client-secret"
+      }
+    });
+  });
 
-    for (const key of [
-      "OIDC_ISSUER_URL",
-      "OIDC_BACKCHANNEL_BASE_URL",
-      "OIDC_CLIENT_ID",
-      "OIDC_CLIENT_SECRET"
-    ]) {
-      assert.throws(
-        () => parseRuntimeAuthConfig({ AUTH_MODE: "builtin_admin", [key]: "DO_NOT_PRINT_OIDC_VALUE" }),
-        new RegExp(`${key} must be empty when AUTH_MODE=builtin_admin`)
-      );
-    }
-
+  it("requires shaped non-empty OIDC runtime config when AUTH_MODE=oidc", () => {
     assert.deepEqual(parseRuntimeAuthConfig({
       AUTH_MODE: "oidc",
       OIDC_ISSUER_URL: " https://keycloak.example.test/realms/agentsmith ",

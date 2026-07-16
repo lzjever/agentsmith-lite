@@ -4,7 +4,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";

@@ -33,8 +33,7 @@ const appSecretKeys = new Set([
 
 const productSecretKeys = new Set([
   "POSTGRES_APP_URL",
-  "APP_SESSION_SECRET",
-  "BUILTIN_ADMIN_INITIAL_PASSWORD"
+  "APP_SESSION_SECRET"
 ]);
 
 const oidcCoreSubstrateEnvKeys = [
@@ -43,8 +42,6 @@ const oidcCoreSubstrateEnvKeys = [
   "OIDC_CLIENT_ID"
 ];
 const oidcCoreSubstrateEnvKeySet = new Set(oidcCoreSubstrateEnvKeys);
-
-const oidcRuntimeEnvKeys = oidcCoreSubstrateEnvKeys;
 
 const generatedSubstrateOnlyKeys = new Set([
   "SUBSTRATE_SCHEMA_VERSION",
@@ -242,9 +239,6 @@ function classifyAuthMetadataKey(key, kind, value) {
     if (kind === "env" && value.trim() === "oidc") {
       return "allow";
     }
-    if (kind === "env" && (value.trim() === "" || value.trim() === "builtin_admin")) {
-      return "ignore";
-    }
     return "invalid-auth-mode";
   }
   if (key === "OIDC_CLIENT_SECRET") {
@@ -272,30 +266,17 @@ function classifyAuthMetadataKey(key, kind, value) {
 }
 
 function validateAuthContract(env, secrets) {
-  const authMode = env.AUTH_MODE?.trim() || "builtin_admin";
-  if (authMode !== "builtin_admin" && authMode !== "oidc") {
-    throw new EnvContractError("AUTH_MODE must be builtin_admin or oidc");
+  if (env.AUTH_MODE?.trim() !== "oidc") {
+    throw new EnvContractError("AUTH_MODE must be explicitly set to oidc in substrate env");
   }
 
-  if (authMode === "oidc") {
-    for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
-      if (!env[key]?.trim()) {
-        throw new EnvContractError(`${key} is required in substrate env when AUTH_MODE=oidc`);
-      }
-    }
-    if (!secrets.OIDC_CLIENT_SECRET?.trim()) {
-      throw new EnvContractError("OIDC_CLIENT_SECRET is required in substrate secrets when AUTH_MODE=oidc");
-    }
-    return;
-  }
-
-  for (const key of oidcRuntimeEnvKeys) {
-    if (env[key]?.trim()) {
-      throw new EnvContractError(`${key} must be empty when AUTH_MODE=builtin_admin`);
+  for (const key of ["OIDC_ISSUER_URL", "OIDC_CLIENT_ID"]) {
+    if (!env[key]?.trim()) {
+      throw new EnvContractError(`${key} is required in substrate env when AUTH_MODE=oidc`);
     }
   }
-  if (secrets.OIDC_CLIENT_SECRET?.trim()) {
-    throw new EnvContractError("OIDC_CLIENT_SECRET must be empty in substrate secrets when AUTH_MODE=builtin_admin");
+  if (!secrets.OIDC_CLIENT_SECRET?.trim()) {
+    throw new EnvContractError("OIDC_CLIENT_SECRET is required in substrate secrets when AUTH_MODE=oidc");
   }
 }
 
@@ -345,7 +326,7 @@ function formatKeyError(disposition, key, file, lineNumber) {
     case "product-secret-in-app-secrets":
       return `product secret key ${key} must come from substrate secrets at ${location}`;
     case "invalid-auth-mode":
-      return `auth key ${key} must be set in substrate env as empty, builtin_admin, or oidc at ${location}`;
+      return `auth key ${key} must be set to oidc in substrate env at ${location}`;
     case "oidc-secret-in-env":
       return `secret key ${key} is not allowed in env at ${location}`;
     case "oidc-core-metadata-in-app-env":

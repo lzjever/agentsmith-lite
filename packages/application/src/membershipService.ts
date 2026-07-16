@@ -29,7 +29,10 @@ export class MembershipService {
       memberId = user.id;
       await this.requireNotOwner(projectId, user.id);
       const timestamp = nowIso();
-      const membership = await this.store.upsertProjectMembership({ projectId, userId: user.id, role, createdAt: timestamp, updatedAt: timestamp });
+      const membership = await this.store.upsertProjectMembershipForWorkspaceMember({ projectId, userId: user.id, role, createdAt: timestamp, updatedAt: timestamp });
+      if (!membership) {
+        throw new ProductError("User must be a workspace member before joining a project", 409);
+      }
       await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
       return membership;
     } catch (error) {

@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("v1 project membership API", () => {
   let api: RunningApiServer;
   let dataRoot = "";
   let cookie = "";
   let csrfToken = "";
+  let workspaceId = "";
   let projectId = "";
   let ownerUserId = "";
   const memberSession = "member-session";
@@ -55,6 +56,7 @@ describe("v1 project membership API", () => {
     cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrfToken = (login.body as { csrfToken: string }).csrfToken;
     const workspace = await requestJson("POST", "/api/v1/workspaces", { name: "Membership workspace" });
+    workspaceId = workspace.id;
     const project = await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Membership project" });
     projectId = project.id;
     ownerUserId = project.ownerUserId;
@@ -77,6 +79,16 @@ describe("v1 project membership API", () => {
       assert.equal(response.status, 403, `${resource} requires project membership`);
     }
 
+    const outsideWorkspace = await request("POST", `/api/v1/projects/${projectId}/members`, {
+      email: "MEMBER@example.test",
+      role: "viewer"
+    });
+    assert.equal(outsideWorkspace.response.status, 409);
+
+    await requestJson("POST", `/api/v1/workspaces/${workspaceId}/members`, {
+      email: "MEMBER@example.test",
+      role: "viewer"
+    });
     const created = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
       email: "MEMBER@example.test",
       role: "viewer"
@@ -138,6 +150,11 @@ describe("v1 project membership API", () => {
     });
     assert.equal(missing.response.status, 404);
 
+    await requestJson("POST", `/api/v1/workspaces/${workspaceId}/members`, {
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "member-subject",
+      role: "viewer"
+    });
     const oidcMember = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
       issuer: "https://keycloak.example.test/realms/agentsmith",
       subject: "member-subject",
@@ -166,6 +183,14 @@ describe("v1 project membership API", () => {
     assert.equal(ownerUpdate.response.status, 409);
     const ownerDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId });
     assert.equal(ownerDelete.response.status, 409);
+    const workspaceOwnerDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: ownerUserId });
+    assert.equal(workspaceOwnerDelete.response.status, 409);
+
+    await requestJson("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: "user_member" });
+    const revoked = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/endpoints`, {
+      headers: { cookie: `asl_session=${memberSession}` }
+    });
+    assert.equal(revoked.status, 403);
 
     const ambiguous = await request("POST", `/api/v1/projects/${projectId}/members`, {
       email: "member@example.test",

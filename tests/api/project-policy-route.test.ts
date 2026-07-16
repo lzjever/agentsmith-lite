@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("PATCH project policy", () => {
   it("accepts nullable limits and preserves limits omitted from the patch", async () => {

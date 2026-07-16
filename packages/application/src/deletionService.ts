@@ -10,11 +10,12 @@ import { TaskService } from "./taskService.js";
 export class DeletionService {
   constructor(private readonly store: ProductStore, private readonly tasks: TaskService, private readonly dataRoot: string) {}
 
-  async deleteProject(userId: string, projectId: string): Promise<void> {
+  async deleteProject(userId: string, projectId: string): Promise<{ deleted: true }> {
     const project = await this.requireProjectOwner(userId, projectId);
     const deleting = await this.store.beginProjectDeletion(project.id, nowIso());
     if (!deleting) throw new NotFoundError("Project not found");
     await this.finishProject(deleting);
+    return { deleted: true };
   }
 
   async deleteWorkspace(userId: string, workspaceId: string): Promise<void> {
@@ -34,10 +35,10 @@ export class DeletionService {
     const root = this.projectRoot(project);
     await withProjectFileLock(root, async () => {
       await this.tasks.stopTasksForProjectDeletion(project.id);
+      await rm(root, { recursive: true, force: true, maxRetries: 2 });
       if (!(await this.store.deleteProjectDependenciesAndProject(project.id))) {
         throw new ProductError("Project deletion is still pending", 409);
       }
-      await rm(root, { recursive: true, force: true, maxRetries: 2 });
     });
   }
 

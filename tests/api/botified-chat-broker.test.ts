@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { FetchOpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 import type {

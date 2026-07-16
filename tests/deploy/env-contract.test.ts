@@ -6,17 +6,42 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 describe("deploy env contract", () => {
+  it("requires explicit OIDC auth for the production environment contract", () => {
+    const missing = runContract(["export"]);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /AUTH_MODE/);
+
+    const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-production-auth-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    writeFileSync(envFile, "AUTH_MODE=builtin_admin\n");
+    const builtin = runContract(["export", "--env", envFile]);
+    assert.notEqual(builtin.status, 0);
+    assert.match(builtin.stderr, /AUTH_MODE/);
+  });
+
   it("accepts credential encryption keys only from the app secrets overlay", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-env-contract-credential-key-"));
+    const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
     const appSecretsFile = path.join(tempDir, "app.secrets.env");
+    writeFileSync(envFile, [
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+      "OIDC_CLIENT_ID=agentsmith-lite"
+    ].join("\n") + "\n");
+    writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
     writeFileSync(appSecretsFile, [
       "APP_CREDENTIAL_ENCRYPTION_KEY=credential-key",
       "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS=previous-key"
     ].join("\n") + "\n");
 
-    const allowed = runContract(["export", "--app-secrets", appSecretsFile]);
+    const allowed = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-secrets", appSecretsFile]);
     assert.equal(allowed.status, 0, allowed.stderr);
     assert.deepEqual(readAssignments(allowed.stdout), {
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      OIDC_CLIENT_SECRET: "oidc-client-secret",
       APP_CREDENTIAL_ENCRYPTION_KEY: "credential-key",
       APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: "previous-key"
     });
@@ -57,9 +82,12 @@ describe("deploy env contract", () => {
       APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
       APP_INGRESS_CLASS: "nginx",
       APP_TLS_SECRET_NAME: "agentsmith-lite-tls",
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
       POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
       APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
-      BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret-from-substrate"
+      OIDC_CLIENT_SECRET: "oidc-client-secret"
     });
     assert.doesNotMatch(result.stdout, /KUBERNETES_SKIP_K3S/);
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
@@ -167,28 +195,28 @@ describe("deploy env contract", () => {
         name: "builtin with non-empty OIDC issuer URL",
         envContents: "AUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=DO_NOT_PRINT_OIDC_ISSUER_URL\n",
         secretsContents: "OIDC_CLIENT_SECRET=\n",
-        error: /OIDC_ISSUER_URL/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
       },
       {
         name: "builtin with non-empty OIDC backchannel URL",
         envContents: "AUTH_MODE=builtin_admin\nOIDC_BACKCHANNEL_BASE_URL=DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL\n",
         secretsContents: "OIDC_CLIENT_SECRET=\n",
-        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
       {
         name: "builtin with non-empty OIDC client ID",
         envContents: "AUTH_MODE=builtin_admin\nOIDC_CLIENT_ID=DO_NOT_PRINT_OIDC_CLIENT_ID\n",
         secretsContents: "OIDC_CLIENT_SECRET=\n",
-        error: /OIDC_CLIENT_ID/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_ID/
       },
       {
         name: "builtin with non-empty OIDC client secret",
         envContents: "AUTH_MODE=builtin_admin\nOIDC_ISSUER_URL=\nOIDC_CLIENT_ID=\n",
         secretsContents: "OIDC_CLIENT_SECRET=DO_NOT_PRINT_OIDC_CLIENT_SECRET\n",
-        error: /OIDC_CLIENT_SECRET/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_CLIENT_SECRET/
       },
       {
@@ -283,6 +311,9 @@ describe("deploy env contract", () => {
         "export KUBE_NAMESPACE='agentsmith-preview'",
         "APP_PUBLIC_BASE_URL=\"https://agentsmith.example.test/app\"",
         "JUICEFS_PVC_NAME=\"agentsmith-lite-files\"",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
         "S3_ACCESS_KEY=DO_NOT_PRINT_S3_ACCESS",
         "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META",
         ""
@@ -294,6 +325,7 @@ describe("deploy env contract", () => {
         "# product secrets",
         "POSTGRES_APP_URL='postgresql://app:secret@db/agentsmith'",
         "export APP_SESSION_SECRET=\"app-session-secret-at-least-32-chars\"",
+        "OIDC_CLIENT_SECRET=oidc-client-secret",
         "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET",
         "JUICEFS_ACCESS_KEY=DO_NOT_PRINT_JUICEFS_ACCESS",
         ""
@@ -325,8 +357,12 @@ describe("deploy env contract", () => {
       KUBE_NAMESPACE: "agentsmith-preview",
       APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/app",
       JUICEFS_PVC_NAME: "agentsmith-lite-files",
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
       POSTGRES_APP_URL: "postgresql://app:secret@db/agentsmith",
       APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
+      OIDC_CLIENT_SECRET: "oidc-client-secret",
       BOTIFIED_RUNNER_IMAGE: "registry.example.test/agentsmith/botified-runner:release",
       AGENTSMITH_LITE_DATA_DIR: "/agentsmith-lite-data",
       AGENTSMITH_LITE_SANDBOX_MODE: "live",
@@ -396,12 +432,20 @@ describe("deploy env contract", () => {
 
     for (const candidate of cases) {
       const tempDir = mkdtempSync(path.join(tmpdir(), `agentsmith-lite-env-contract-${candidate.name.replace(/\s+/g, "-")}-`));
+      const envFile = path.join(tempDir, "substrate.env");
+      const secretsFile = path.join(tempDir, "substrate.secrets.env");
       const overlayFile = path.join(tempDir, candidate.file);
+      writeFileSync(envFile, [
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite"
+      ].join("\n") + "\n");
+      writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
       writeFileSync(overlayFile, candidate.contents);
 
       const result = candidate.file === "app.env"
-        ? runContract(["export", "--app-env", overlayFile])
-        : runContract(["export", "--app-secrets", overlayFile]);
+        ? runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", overlayFile])
+        : runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-secrets", overlayFile]);
 
       assert.notEqual(result.status, 0, candidate.name);
       assert.match(result.stderr, candidate.error, candidate.name);
@@ -502,9 +546,9 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_REGION=DO_NOT_PRINT_S3_REGION",
       "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
       "S3_FORCE_PATH_STYLE=DO_NOT_PRINT_S3_FORCE_PATH_STYLE",
-      "AUTH_MODE=builtin_admin",
-      "OIDC_ISSUER_URL=",
-      "OIDC_CLIENT_ID=",
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+      "OIDC_CLIENT_ID=agentsmith-lite",
       "JUICEFS_VOLUME_NAME=DO_NOT_PRINT_JUICEFS_VOLUME_NAME",
       "JUICEFS_BUCKET=DO_NOT_PRINT_JUICEFS_BUCKET",
       "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
@@ -529,8 +573,7 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_ACCESS_KEY=DO_NOT_PRINT_S3_ACCESS_KEY",
       "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
       "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
-      "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
-      "OIDC_CLIENT_SECRET=",
+      "OIDC_CLIENT_SECRET=oidc-client-secret",
       ""
     ].join("\n")
   );

@@ -30,6 +30,7 @@ import type {
   PostgresJsonDocStore,
   PostgresLeaseStore,
   PersistedSandboxRunState,
+  SandboxRunCleanupClaimInput,
   LegacyExternalIdentityBinding,
   ProductStore,
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
@@ -223,7 +224,7 @@ export class PostgresProductStore implements ProductStore {
   async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return (await this.queryRows<WorkspaceMembershipRow>("select wm.*, u.email, p.display_name from workspace_memberships wm join users u on u.id=wm.user_id left join user_profile_preferences p on p.user_id=u.id where wm.workspace_id=$1 order by wm.created_at,wm.user_id",[workspaceId])).map(mapWorkspaceMembershipView)}
   async upsertWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership>{const rows=await this.queryRows<WorkspaceMembershipRow>("insert into workspace_memberships (workspace_id,user_id,role,created_at,updated_at) values ($1,$2,$3,$4,$5) on conflict (workspace_id,user_id) do update set role=excluded.role,updated_at=excluded.updated_at returning *",[value.workspaceId,value.userId,value.role,value.createdAt,value.updatedAt]);return mapWorkspaceMembership(rows[0]!)}
   async updateWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership|null>{const rows=await this.queryRows<WorkspaceMembershipRow>("update workspace_memberships set role=$3,updated_at=$4 where workspace_id=$1 and user_id=$2 returning *",[value.workspaceId,value.userId,value.role,value.updatedAt]);return rows[0]?mapWorkspaceMembership(rows[0]):null}
-  async deleteWorkspaceMembership(workspaceId:string,userId:string):Promise<boolean>{return (await this.pool.query("delete from workspace_memberships where workspace_id=$1 and user_id=$2",[workspaceId,userId])).rowCount===1}
+  async revokeWorkspaceMembership(workspaceId:string,userId:string):Promise<"revoked"|"not_found"|"owner">{return transaction(this.pool,async(client)=>{const membership=await client.query<{role:string}>("select role from workspace_memberships where workspace_id=$1 and user_id=$2 for update",[workspaceId,userId]);if(!membership.rows[0])return "not_found";if(membership.rows[0].role==="owner")return "owner";const owned=await client.query("select p.id from projects p join project_memberships pm on pm.project_id=p.id where p.workspace_id=$1 and pm.user_id=$2 and (p.owner_user_id=$2 or pm.role='owner') for update of p,pm",[workspaceId,userId]);if(owned.rowCount)return "owner";await client.query("delete from project_memberships pm using projects p where pm.project_id=p.id and p.workspace_id=$1 and pm.user_id=$2",[workspaceId,userId]);const deleted=await client.query("delete from workspace_memberships where workspace_id=$1 and user_id=$2 and role<>'owner'",[workspaceId,userId]);return deleted.rowCount===1?"revoked":"not_found"})}
 
   async createProject(project: Project): Promise<Project> {
     await transaction(this.pool, async (client) => {
@@ -282,7 +283,7 @@ export class PostgresProductStore implements ProductStore {
   async beginProjectDeletion(id:string,updatedAt:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status='deleting',updated_at=$2 where id=$1 returning *",[id,updatedAt]);return rows[0]?mapProject(rows[0]):null}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status=$2,updated_at=$3 where id=$1 and lifecycle_status <> 'deleting' returning *",[id,status,updatedAt]);return rows[0]?mapProject(rows[0]):null}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string):Promise<Project|null>{return transaction(this.pool,async(client)=>{if(fromUserId===toUserId)return null;const target=await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2 for update",[projectId,toUserId]);if(!target.rowCount)return null;const project=await client.query<ProjectRow>("update projects set owner_user_id=$3,updated_at=$4 where id=$1 and owner_user_id=$2 and lifecycle_status='active' returning *",[projectId,fromUserId,toUserId,updatedAt]);if(!project.rows[0])return null;await client.query("update project_memberships set role='admin',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,fromUserId,updatedAt]);await client.query("update project_memberships set role='owner',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,toUserId,updatedAt]);return mapProject(project.rows[0])})}
-  async deleteProjectDependenciesAndProject(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const project=await client.query<ProjectRow>("select * from projects where id=$1 and lifecycle_status='deleting' for update",[id]);if(!project.rows[0])return false;const active=await client.query("select 1 from agent_tasks where project_id=$1 and status in ('queued','starting','running','stopping') limit 1",[id]);if(active.rowCount)return false;const taskIds=(await client.query<{id:string;run_id:string}>("select id,run_id from agent_tasks where project_id=$1",[id])).rows;for(const task of taskIds){await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)",[task.id,task.run_id])}await client.query("delete from task_messages where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_task_artifacts where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_tasks where project_id=$1",[id]);await client.query("delete from project_chat_messages where thread_id in (select id from project_chat_threads where project_id=$1)",[id]);await client.query("delete from project_chat_threads where project_id=$1",[id]);await client.query("delete from project_provider_settlements where project_id=$1",[id]);await client.query("delete from project_alerts where project_id=$1",[id]);await client.query("delete from project_alert_rules where project_id=$1",[id]);await client.query("delete from project_context_entries where project_id=$1",[id]);await client.query("delete from project_memberships where project_id=$1",[id]);await client.query("delete from project_resource_usage where project_id=$1",[id]);await client.query("delete from project_resource_policies where project_id=$1",[id]);await client.query("delete from model_endpoints where project_id=$1",[id]);await client.query("delete from project_credentials where project_id=$1",[id]);return (await client.query("delete from projects where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
+  async deleteProjectDependenciesAndProject(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const project=await client.query<ProjectRow>("select * from projects where id=$1 and lifecycle_status='deleting' for update",[id]);if(!project.rows[0])return false;const active=await client.query("select 1 from agent_tasks where project_id=$1 and status in ('queued','starting','running','stopping') limit 1",[id]);if(active.rowCount)return false;const taskIds=(await client.query<{id:string;run_id:string}>("select id,run_id from agent_tasks where project_id=$1",[id])).rows;for(const task of taskIds){await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)",[task.id,task.run_id])}await client.query("delete from task_messages where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_task_artifacts where task_id in (select id from agent_tasks where project_id=$1)",[id]);await client.query("delete from agent_tasks where project_id=$1",[id]);await client.query("delete from project_chat_messages where thread_id in (select id from project_chat_threads where project_id=$1)",[id]);await client.query("delete from project_chat_threads where project_id=$1",[id]);await client.query("delete from project_provider_settlements where project_id=$1",[id]);await client.query("delete from project_alerts where project_id=$1",[id]);await client.query("delete from project_alert_rules where project_id=$1",[id]);await client.query("delete from project_context_entries where project_id=$1",[id]);await client.query("delete from project_audit_events where project_id=$1",[id]);await client.query("delete from project_memberships where project_id=$1",[id]);await client.query("delete from project_resource_usage where project_id=$1",[id]);await client.query("delete from project_resource_policies where project_id=$1",[id]);await client.query("delete from model_endpoints where project_id=$1",[id]);await client.query("delete from project_credentials where project_id=$1",[id]);return (await client.query("delete from projects where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
   async createProjectContextEntry(v: ProjectContextEntry): Promise<ProjectContextEntry> { const rows=await this.queryRows<ContextRow>(`insert into project_context_entries (id,workspace_id,project_id,owner_user_id,scope,context_key,content,name,user_id,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$6,$4,$8,$9,$10) returning *`,[v.id,v.workspaceId,v.projectId,v.ownerUserId,v.scope,v.contextKey,v.content,v.version,v.createdAt,v.updatedAt]); return mapContext(rows[0]!); }
   async updateProjectContextEntry(v: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null> { const rows=await this.queryRows<ContextRow>(`update project_context_entries set context_key=$2,content=$3,version=$4,updated_at=$5 where id=$1 and version=$6 and workspace_id=$7 and project_id is not distinct from $8 and scope=$9 and owner_user_id is not distinct from $10 returning *`,[v.id,v.contextKey,v.content,v.version,v.updatedAt,expectedVersion,v.workspaceId,v.projectId,v.scope,v.ownerUserId]); return rows[0]?mapContext(rows[0]):null; }
   async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null): Promise<ProjectContextEntry[]> { const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 order by context_key',[workspaceId,projectId,scope,ownerUserId]);return rows.map(mapContext); }
@@ -327,6 +328,15 @@ export class PostgresProductStore implements ProductStore {
       [membership.projectId, membership.userId, membership.role, membership.createdAt, membership.updatedAt]
     );
     return mapProjectMembership(result.rows[0]!);
+  }
+
+  async upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null> {
+    return transaction(this.pool,async(client)=>{
+      const eligible=await client.query("select 1 from projects p join workspace_memberships wm on wm.workspace_id=p.workspace_id and wm.user_id=$2 where p.id=$1 for update of wm",[membership.projectId,membership.userId]);
+      if(!eligible.rowCount)return null;
+      const result=await client.query<ProjectMembershipRow>(`insert into project_memberships (project_id,user_id,role,created_at,updated_at) values ($1,$2,$3,$4,$5) on conflict (project_id,user_id) do update set role=excluded.role,updated_at=excluded.updated_at returning *`,[membership.projectId,membership.userId,membership.role,membership.createdAt,membership.updatedAt]);
+      return mapProjectMembership(result.rows[0]!);
+    });
   }
 
   async updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null> {
@@ -1023,6 +1033,39 @@ class PostgresSandboxRunStoreImpl {
        order by id`
     );
     return result.rows.map((row: { document: unknown }) => sandboxRunFromDocument(asRecord(row.document)));
+  }
+
+  async claimForCleanup(input: SandboxRunCleanupClaimInput): Promise<PersistedSandboxRunState | null> {
+    const result = await this.pool.query(
+      `update postgres_json_docs
+       set document = document || jsonb_build_object(
+         'phase', case
+           when coalesce(document->>'phase', '') = 'expired'
+             or nullif(document->>'expiresAt', '')::timestamptz <= $3::timestamptz
+             or nullif(document->>'idleExpiresAt', '')::timestamptz <= $3::timestamptz
+           then 'expired'
+           else 'stopping'
+         end,
+         'cleanupStatus', 'deleting',
+         'fencingToken', $2 + 1,
+         'updatedAt', $3
+       ), updated_at = now()
+       where collection = 'sandbox_run_state'
+         and id = $1
+         and (document->>'fencingToken')::bigint = $2
+         and coalesce(document->>'cleanupStatus', '') <> 'cleaned'
+         and coalesce(document->>'phase', '') <> 'cleaned'
+         and (
+           coalesce(document->>'cleanupStatus', '') in ('cleanup_requested', 'deleting')
+           or coalesce(document->>'phase', '') in ('stopping', 'expired')
+           or nullif(document->>'expiresAt', '')::timestamptz <= $3::timestamptz
+           or nullif(document->>'idleExpiresAt', '')::timestamptz <= $3::timestamptz
+         )
+       returning document`,
+      [input.runId, input.expectedFencingToken, input.claimedAt]
+    );
+    const document = result.rows[0]?.document as unknown;
+    return document ? sandboxRunFromDocument(asRecord(document)) : null;
   }
 
   async updateWithFencing(

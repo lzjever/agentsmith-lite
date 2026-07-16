@@ -28,6 +28,7 @@ import type {
   PostgresJsonDocStore,
   PostgresLeaseStore,
   PersistedSandboxRunState,
+  SandboxRunCleanupClaimInput,
   LegacyExternalIdentityBinding,
   ProductStore,
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
@@ -207,7 +208,15 @@ export class InMemoryProductStore implements ProductStore {
   async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return [...this.workspaceMemberships.values()].filter((member)=>member.workspaceId===workspaceId).map((member)=>this.workspaceMembershipView(member))}
   async upsertWorkspaceMembership(value:WorkspaceMembership){this.workspaceMemberships.set(workspaceMembershipKey(value.workspaceId,value.userId),clone(value));return clone(value)}
   async updateWorkspaceMembership(value:WorkspaceMembership){const key=workspaceMembershipKey(value.workspaceId,value.userId);if(!this.workspaceMemberships.has(key))return null;this.workspaceMemberships.set(key,clone(value));return clone(value)}
-  async deleteWorkspaceMembership(workspaceId:string,userId:string){return this.workspaceMemberships.delete(workspaceMembershipKey(workspaceId,userId))}
+  async revokeWorkspaceMembership(workspaceId:string,userId:string){
+    const key=workspaceMembershipKey(workspaceId,userId);const membership=this.workspaceMemberships.get(key);
+    if(!membership)return "not_found" as const;
+    const ownsProject=[...this.projects.values()].some((project)=>project.workspaceId===workspaceId&&(project.ownerUserId===userId||this.memberships.get(membershipKey(project.id,userId))?.role==="owner"));
+    if(membership.role==="owner"||ownsProject)return "owner" as const;
+    for(const [projectMembershipKey,projectMembership] of this.memberships){const project=this.projects.get(projectMembership.projectId);if(project?.workspaceId===workspaceId&&projectMembership.userId===userId)this.memberships.delete(projectMembershipKey);}
+    this.workspaceMemberships.delete(key);
+    return "revoked" as const;
+  }
 
   async createProject(project: Project): Promise<Project> {
     this.projects.set(project.id, clone(project));
@@ -252,7 +261,7 @@ export class InMemoryProductStore implements ProductStore {
   async beginProjectDeletion(id:string,updatedAt:string){const value=this.projects.get(id);if(!value)return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string){const project=this.projects.get(projectId),target=this.memberships.get(membershipKey(projectId,toUserId));if(!project||project.ownerUserId!==fromUserId||fromUserId===toUserId||!target||project.lifecycleStatus!==undefined&&project.lifecycleStatus!=="active")return null;const from=this.memberships.get(membershipKey(projectId,fromUserId));if(!from)return null;this.memberships.set(membershipKey(projectId,fromUserId),clone({...from,role:"admin",updatedAt}));this.memberships.set(membershipKey(projectId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...project,ownerUserId:toUserId,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
-  async deleteProjectDependenciesAndProject(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id&&isActiveTaskStatus(task.status)))return false; for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);} this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId))); this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId))); this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId))); for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key); for(const [key,value] of this.memberships)if(value.projectId===id)this.memberships.delete(key); for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key); for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key); for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key); this.policies.delete(id);this.usage.delete(id);return this.projects.delete(id)}
+  async deleteProjectDependenciesAndProject(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id&&isActiveTaskStatus(task.status)))return false; for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);} this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId))); this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId))); this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId))); this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id)); for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key); for(const [key,value] of this.memberships)if(value.projectId===id)this.memberships.delete(key); for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key); for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key); for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key); this.policies.delete(id);this.usage.delete(id);return this.projects.delete(id)}
 
   async listProjectsForUser(userId: string): Promise<Project[]> {
     return [...this.projects.values()]
@@ -274,6 +283,12 @@ export class InMemoryProductStore implements ProductStore {
     const stored = existing ? { ...existing, role: membership.role, updatedAt: membership.updatedAt } : membership;
     this.memberships.set(key, clone(stored));
     return clone(stored);
+  }
+
+  async upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null> {
+    const project=this.projects.get(membership.projectId);
+    if(!project||!this.workspaceMemberships.has(workspaceMembershipKey(project.workspaceId,membership.userId)))return null;
+    return this.upsertProjectMembership(membership);
   }
 
   async updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null> {
@@ -1107,6 +1122,8 @@ class InMemoryJsonDocStore implements PostgresJsonDocStore {
 }
 
 class InMemorySandboxRunStore {
+  private mutationTail: Promise<void> = Promise.resolve();
+
   constructor(private readonly jsonDocs: PostgresJsonDocStore) {}
 
   async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
@@ -1131,17 +1148,68 @@ class InMemorySandboxRunStore {
     return (await this.list()).filter((run) => run.cleanupStatus !== "cleaned" && run.phase !== "cleaned");
   }
 
+  async claimForCleanup(input: SandboxRunCleanupClaimInput): Promise<PersistedSandboxRunState | null> {
+    return this.serializeMutation(async () => {
+      const current = await this.get(input.runId);
+      if (
+        !current ||
+        current.fencingToken !== input.expectedFencingToken ||
+        !sandboxRunCleanupEligible(current, input.claimedAt)
+      ) {
+        return null;
+      }
+      const expired = sandboxRunExpired(current, input.claimedAt);
+      return this.put({
+        ...current,
+        phase: expired ? "expired" : "stopping",
+        cleanupStatus: "deleting",
+        fencingToken: current.fencingToken + 1,
+        updatedAt: input.claimedAt
+      });
+    });
+  }
+
   async updateWithFencing(
     runId: string,
     expectedFencingToken: number,
     run: PersistedSandboxRunState
   ): Promise<PersistedSandboxRunState | null> {
-    const current = await this.get(runId);
-    if (!current || current.fencingToken !== expectedFencingToken) {
-      return null;
-    }
-    return this.put(run);
+    return this.serializeMutation(async () => {
+      const current = await this.get(runId);
+      if (!current || current.fencingToken !== expectedFencingToken) {
+        return null;
+      }
+      return this.put(run);
+    });
   }
+
+  private async serializeMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail;
+    let release!: () => void;
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await mutation();
+    } finally {
+      release();
+    }
+  }
+}
+
+function sandboxRunCleanupEligible(run: PersistedSandboxRunState, claimedAt: string): boolean {
+  if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") return false;
+  return run.cleanupStatus === "cleanup_requested" ||
+    run.cleanupStatus === "deleting" ||
+    run.phase === "stopping" ||
+    run.phase === "expired" ||
+    sandboxRunExpired(run, claimedAt);
+}
+
+function sandboxRunExpired(run: PersistedSandboxRunState, claimedAt: string): boolean {
+  const now = Date.parse(claimedAt);
+  return [run.expiresAt, run.idleExpiresAt].some((deadline) =>
+    typeof deadline === "string" && Date.parse(deadline) <= now
+  );
 }
 
 class InMemoryLeaseStore implements PostgresLeaseStore {

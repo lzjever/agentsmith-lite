@@ -43,6 +43,47 @@ postgresDescribe("postgres product store", () => {
     await store.close();
   });
 
+  it("atomically enforces workspace and project membership consistency", async () => {
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    await store.createUser({ id:"user_membership_owner",email:"membership-owner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createUser({ id:"user_membership_target",email:"membership-target@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"ws_membership",name:"Membership",ownerUserId:"user_membership_owner",createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"proj_membership_one",workspaceId:"ws_membership",name:"One",ownerUserId:"user_membership_owner",rootPath:"workspaces/ws_membership/projects/proj_membership_one",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"proj_membership_two",workspaceId:"ws_membership",name:"Two",ownerUserId:"user_membership_owner",rootPath:"workspaces/ws_membership/projects/proj_membership_two",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    const membership = {projectId:"proj_membership_one",userId:"user_membership_target",role:"member" as const,createdAt:timestamp,updatedAt:timestamp};
+
+    assert.equal(await store.upsertProjectMembershipForWorkspaceMember(membership),null);
+    await store.upsertWorkspaceMembership({workspaceId:"ws_membership",userId:"user_membership_target",role:"member",createdAt:timestamp,updatedAt:timestamp});
+    assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");
+    await store.upsertProjectMembershipForWorkspaceMember({...membership,projectId:"proj_membership_two",role:"viewer"});
+
+    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_owner"),"owner");
+    assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_owner"))?.role,"owner");
+    assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_owner"))?.role,"owner");
+    assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_owner","user_membership_target",timestamp));
+    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_target"),"owner");
+    assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_target"))?.role,"member");
+    assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_target"))?.role,"member");
+    assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_target","user_membership_owner",timestamp));
+    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_target"),"revoked");
+    assert.equal(await store.findWorkspaceMembership("ws_membership","user_membership_target"),null);
+    assert.equal(await store.findProjectMembership("proj_membership_one","user_membership_target"),null);
+    assert.equal(await store.findProjectMembership("proj_membership_two","user_membership_target"),null);
+  });
+
+  it("removes project-scoped audit events with a physically deleted project", async () => {
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    await store.createUser({ id:"user_project_delete",email:"project-delete@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"ws_project_delete",name:"Delete",ownerUserId:"user_project_delete",createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"proj_project_delete",workspaceId:"ws_project_delete",name:"Delete",ownerUserId:"user_project_delete",rootPath:"workspaces/ws_project_delete/projects/proj_project_delete",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    await store.appendProjectAuditEvent({id:"audit_project_delete",projectId:"proj_project_delete",actorId:"user_project_delete",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:"proj_project_delete",createdAt:timestamp});
+    await store.beginProjectDeletion("proj_project_delete",timestamp);
+
+    assert.equal(await store.deleteProjectDependenciesAndProject("proj_project_delete"),true);
+    assert.equal(await store.findProject("proj_project_delete"),null);
+    assert.deepEqual(await store.listProjectAuditEvents("proj_project_delete"),[]);
+  });
+
   it("initializes a new task interaction snapshot with complete history", async () => {
     const timestamp = "2026-07-13T00:00:00.000Z";
     await store.createUser({ id: "user_interaction_sync", email: "interaction-sync@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });

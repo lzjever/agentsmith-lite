@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("notification API", () => {
   it("lists, reads, and dismisses only the signed-in user's alert notification", async () => {

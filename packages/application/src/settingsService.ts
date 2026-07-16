@@ -49,7 +49,7 @@ export class SettingsService {
     if(begun.kind==="replay"){if(begun.responseStatus>=400){const body=begun.responseBody as {error?:unknown};throw new ProductError(typeof body?.error==="string"?body.error:"Settings operation failed",begun.responseStatus);}return begun.responseBody as T;}
     try{const response=await run();if(!await this.store.completeTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt:nowIso()}))throw new ProductError("Idempotent settings operation lost its claim",409);return response;}catch(error){const productError=error instanceof ProductError?error:new ProductError("Settings operation failed",500);await this.store.completeTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:productError.statusCode,responseBody:{error:productError.message},updatedAt:nowIso()});throw productError;}
   }
-  async runIdempotentProjectLifecycleMutation<T>(actorId:string,projectId:string,operation:Extract<TaskIdempotencyOperation,`project.${"archive"|"unarchive"|"delete"}`>,key:string,action:ProjectLifecycleAuditAction,run:()=>Promise<T>):Promise<T>{
+  async runIdempotentProjectLifecycleMutation<T>(actorId:string,projectId:string,operation:Extract<TaskIdempotencyOperation,`project.${"archive"|"unarchive"}`>,key:string,action:ProjectLifecycleAuditAction,run:()=>Promise<T>):Promise<T>{
     return this.runIdempotentMutation(actorId,projectId,operation,key,{projectId},projectId,async()=>{
       let mutationCompleted=false;
       try {
@@ -61,6 +61,12 @@ export class SettingsService {
         if(!mutationCompleted)await this.auditProjectLifecycle(projectId,actorId,action,"rejected");
         throw error;
       }
+    });
+  }
+  async runIdempotentProjectDeletion(actorId:string,projectId:string,key:string,run:()=>Promise<{deleted:true}>):Promise<{deleted:true}>{
+    return this.runIdempotentMutation(actorId,projectId,"project.delete",key,{projectId},projectId,async()=>{
+      try{return await run();}
+      catch(error){if(await this.store.findProject(projectId))await this.auditProjectLifecycle(projectId,actorId,"project.delete","rejected");throw error;}
     });
   }
   async auditProjectLifecycle(projectId:string,actorId:string,action:ProjectAuditAction,status:"accepted"|"rejected"="accepted"){await this.store.appendProjectAuditEvent({id:newId("audit"),projectId,actorId,action,status,resourceKind:"project",resourceId:projectId,detail:{},createdAt:nowIso()});}
@@ -81,4 +87,4 @@ export class SettingsService {
 
 function canonicalRequestHash(value:unknown):string{return createHash("sha256").update(canonicalJson(value),"utf8").digest("base64url")}
 function canonicalJson(value:unknown):string{if(value===null||typeof value==="string"||typeof value==="boolean")return JSON.stringify(value);if(typeof value==="number"){if(!Number.isFinite(value))throw new ProductError("Settings request contains a non-finite number",400);return JSON.stringify(value)}if(Array.isArray(value))return`[${value.map(canonicalJson).join(",")}]`;if(typeof value==="object"){const record=value as Record<string,unknown>;return`{${Object.keys(record).sort().filter((key)=>record[key]!==undefined).map((key)=>`${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`}throw new ProductError("Settings request cannot be canonically hashed",400)}
-type ProjectLifecycleAuditAction = Extract<ProjectAuditAction, "project.archive" | "project.unarchive" | "project.delete">;
+type ProjectLifecycleAuditAction = Extract<ProjectAuditAction, "project.archive" | "project.unarchive">;

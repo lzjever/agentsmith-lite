@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer as createRawApiServer, type ApiServerOptions, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createRawApiServer, type TestApiServerOptions as ApiServerOptions, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 import {
   type BotifiedAbortResult,
   type BotifiedDeliveryMessageInput,

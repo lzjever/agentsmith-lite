@@ -262,11 +262,18 @@ export interface PersistedSandboxRunState {
   updatedAt: string;
 }
 
+export interface SandboxRunCleanupClaimInput {
+  runId: string;
+  expectedFencingToken: number;
+  claimedAt: string;
+}
+
 export interface SandboxRunStore {
   put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState>;
   get(runId: string): Promise<PersistedSandboxRunState | null>;
   list(): Promise<PersistedSandboxRunState[]>;
   listActive(): Promise<PersistedSandboxRunState[]>;
+  claimForCleanup(input: SandboxRunCleanupClaimInput): Promise<PersistedSandboxRunState | null>;
   updateWithFencing(
     runId: string,
     expectedFencingToken: number,
@@ -343,7 +350,7 @@ export interface ProductStore {
   listWorkspaceMemberships(workspaceId: string): Promise<WorkspaceMembershipView[]>;
   upsertWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
-  deleteWorkspaceMembership(workspaceId: string, userId: string): Promise<boolean>;
+  revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<"revoked" | "not_found" | "owner">;
 
   createProject(project: Project): Promise<Project>;
   listProjectsForWorkspace(workspaceId: string): Promise<Project[]>;
@@ -365,6 +372,7 @@ export interface ProductStore {
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
   listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]>;
   upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership>;
+  upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null>;
   updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null>;
   deleteProjectMembership(projectId: string, userId: string): Promise<boolean>;
   createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy>;

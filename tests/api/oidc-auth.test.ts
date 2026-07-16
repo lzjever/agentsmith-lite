@@ -20,8 +20,6 @@ describe("api OIDC auth", () => {
     const api = await createApiServer({
       port: 0,
       dataRoot,
-      authMode: "oidc",
-      builtinAdminPassword: "builtin-password-must-not-work",
       sessionSecret: "oidc-session-secret-at-least-32-chars",
       publicBaseUrl: "https://agentsmith.example.test/app//",
       oidcClient: fakeOidcClient(oidcCalls, oidcPrincipals),
@@ -268,8 +266,6 @@ describe("OIDC cookie transport", () => {
     const api = await createApiServer({
       port: 0,
       dataRoot,
-      authMode: "oidc",
-      builtinAdminPassword: "builtin-password-must-not-work",
       sessionSecret: "oidc-session-secret-at-least-32-chars",
       publicBaseUrl: "http://agentsmith.example.test",
       oidcClient: fakeOidcClient([], [])

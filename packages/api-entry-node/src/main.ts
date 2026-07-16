@@ -20,7 +20,6 @@ const DEFAULT_MODEL_CA_CONFIG_KEY = "ca.crt";
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const host = parseApiBindAddress(process.env.APP_BIND_ADDRESS);
 const dataRoot = process.env.AGENTSMITH_LITE_DATA_DIR ?? path.resolve(".data");
-const builtinAdminPassword = process.env.BUILTIN_ADMIN_INITIAL_PASSWORD ?? "admin-password";
 const sessionSecret = process.env.APP_SESSION_SECRET ?? "dev-session-secret";
 const credentialCrypto = createCredentialCrypto(requireCredentialEncryptionConfig(process.env));
 const authConfig = parseRuntimeAuthConfig(process.env);
@@ -41,20 +40,16 @@ const liveSandboxIdleTimeoutMs = liveSandboxEnabled
 const liveSandboxMaxLifetimeMs = liveSandboxEnabled
   ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS")
   : undefined;
-const oidcClient = authConfig.mode === "oidc" && authConfig.oidc
-  ? await createOpenIdConnectClient(authConfig.oidc)
-  : undefined;
+const oidcClient = await createOpenIdConnectClient(authConfig.oidc);
 
 const server = await createApiServer({
   port,
   host,
   dataRoot,
-  authMode: authConfig.mode,
-  builtinAdminPassword,
   sessionSecret,
   credentialCrypto,
   ...(process.env.APP_PUBLIC_BASE_URL ? { publicBaseUrl: process.env.APP_PUBLIC_BASE_URL } : {}),
-  ...(oidcClient ? { oidcClient } : {}),
+  oidcClient,
   namespace: process.env.KUBE_NAMESPACE ?? "agentsmith",
   pvcName: process.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files",
   botifiedRunnerImage: process.env.BOTIFIED_RUNNER_IMAGE ?? "agentsmith-lite/botified-runner:dev",

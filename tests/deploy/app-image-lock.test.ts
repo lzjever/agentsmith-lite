@@ -14,8 +14,13 @@ describe("deploy app images.lock", () => {
     const input = {
       namespace: "agentsmith",
       imageTag: "dev",
-      env: { APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/" },
-      secrets: {},
+      env: {
+        APP_PUBLIC_BASE_URL: "https://agentsmith.example.test/",
+        AUTH_MODE: "oidc",
+        OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+        OIDC_CLIENT_ID: "agentsmith-lite"
+      },
+      secrets: { OIDC_CLIENT_SECRET: "oidc-client-secret" },
       imageRefs: {
         app: appDigestRef,
         botifiedRunner: runnerDigestRef
@@ -67,14 +72,15 @@ describe("deploy app images.lock", () => {
     for (const candidate of cases) {
       const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-image-lock-invalid-"));
       const envFile = path.join(tempDir, "substrate.env");
+      const secretsFile = path.join(tempDir, "substrate.secrets.env");
       const lockFile = path.join(tempDir, "images.lock");
       const outDir = path.join(tempDir, "manifests");
-      writeRenderEnv(envFile, "https://agentsmith.example.test/");
+      writeRenderEnv(envFile, secretsFile, "https://agentsmith.example.test/");
       writeFileSync(lockFile, candidate.lock);
 
       const result = spawnSync(
         "bash",
-        ["scripts/deploy/render.sh", "--env", envFile, "--images-lock", lockFile, "--out", outDir, "--tag", "dev"],
+        ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--images-lock", lockFile, "--out", outDir, "--tag", "dev"],
         {
           cwd: process.cwd(),
           encoding: "utf8"
@@ -89,14 +95,15 @@ describe("deploy app images.lock", () => {
   it("render.sh --images-lock writes digest-pinned manifests without dev image tags", () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-image-lock-render-"));
     const envFile = path.join(tempDir, "substrate.env");
+    const secretsFile = path.join(tempDir, "substrate.secrets.env");
     const lockFile = path.join(tempDir, "images.lock");
     const outDir = path.join(tempDir, "manifests");
-    writeRenderEnv(envFile, "https://agentsmith.example.test/app");
+    writeRenderEnv(envFile, secretsFile, "https://agentsmith.example.test/app");
     writeFileSync(lockFile, `${appDigestRef}\n${runnerDigestRef}\n`);
 
     const result = spawnSync(
       "bash",
-      ["scripts/deploy/render.sh", "--env", envFile, "--images-lock", lockFile, "--out", outDir, "--tag", "dev"],
+      ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--images-lock", lockFile, "--out", outDir, "--tag", "dev"],
       {
         cwd: process.cwd(),
         encoding: "utf8"
@@ -126,10 +133,13 @@ describe("deploy app images.lock", () => {
         "APP_PUBLIC_BASE_URL=\"https://agentsmith.example.com/app\"",
         "export APP_INGRESS_CLASS='nginx'",
         "APP_TLS_SECRET_NAME=\"agentsmith-lite-tls\"",
+        "AUTH_MODE=oidc",
+        "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+        "OIDC_CLIENT_ID=agentsmith-lite",
         ""
       ].join("\n")
     );
-    writeFileSync(secretsFile, "export POSTGRES_APP_URL='postgres://app'\nAPP_SESSION_SECRET=\"app-session-secret-at-least-32-chars\"\n");
+    writeFileSync(secretsFile, "export POSTGRES_APP_URL='postgres://app'\nAPP_SESSION_SECRET=\"app-session-secret-at-least-32-chars\"\nOIDC_CLIENT_SECRET=oidc-client-secret\n");
 
     const result = spawnSync("bash", ["scripts/deploy/render.sh", "--env", envFile, "--secrets", secretsFile, "--out", outDir, "--tag", "dev"], {
       cwd: process.cwd(),
@@ -205,10 +215,10 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https:\/\/models\.example\.test\/v1"/);
     assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-overlay-model-key"/);
     assert.match(manifest, /POSTGRES_APP_URL: "postgresql:\/\/app:secret@db\/agentsmith"/);
-    assert.doesNotMatch(manifest, /AUTH_MODE/);
-    assert.doesNotMatch(manifest, /OIDC_CLIENT_SECRET/);
-    assert.doesNotMatch(manifest, /OIDC_ISSUER_URL/);
-    assert.doesNotMatch(manifest, /OIDC_CLIENT_ID/);
+    assert.match(manifest, /AUTH_MODE: "oidc"/);
+    assert.match(manifest, /OIDC_CLIENT_SECRET: "oidc-client-secret"/);
+    assert.match(manifest, /OIDC_ISSUER_URL: "https:\/\/keycloak\.example\.test\/realms\/agentsmith"/);
+    assert.match(manifest, /OIDC_CLIENT_ID: "agentsmith-lite"/);
     assert.doesNotMatch(manifest + result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
 
@@ -233,8 +243,15 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function writeRenderEnv(envFile: string, publicBaseUrl: string): void {
-  writeFileSync(envFile, `KUBE_NAMESPACE=agentsmith\nAPP_PUBLIC_BASE_URL=${publicBaseUrl}\n`);
+function writeRenderEnv(envFile: string, secretsFile: string, publicBaseUrl: string): void {
+  writeFileSync(envFile, [
+    "KUBE_NAMESPACE=agentsmith",
+    `APP_PUBLIC_BASE_URL=${publicBaseUrl}`,
+    "AUTH_MODE=oidc",
+    "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+    "OIDC_CLIENT_ID=agentsmith-lite"
+  ].join("\n") + "\n");
+  writeFileSync(secretsFile, "OIDC_CLIENT_SECRET=oidc-client-secret\n");
 }
 
 function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): void {
@@ -249,9 +266,9 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_REGION=DO_NOT_PRINT_S3_REGION",
       "S3_BUCKET=DO_NOT_PRINT_S3_BUCKET",
       "S3_FORCE_PATH_STYLE=DO_NOT_PRINT_S3_FORCE_PATH_STYLE",
-      "AUTH_MODE=builtin_admin",
-      "OIDC_ISSUER_URL=",
-      "OIDC_CLIENT_ID=",
+      "AUTH_MODE=oidc",
+      "OIDC_ISSUER_URL=https://keycloak.example.test/realms/agentsmith",
+      "OIDC_CLIENT_ID=agentsmith-lite",
       "JUICEFS_VOLUME_NAME=DO_NOT_PRINT_JUICEFS_VOLUME_NAME",
       "JUICEFS_BUCKET=DO_NOT_PRINT_JUICEFS_BUCKET",
       "JUICEFS_SECRET_NAME=DO_NOT_PRINT_JUICEFS_SECRET_NAME",
@@ -276,8 +293,7 @@ function writeGeneratedSubstrateFiles(envFile: string, secretsFile: string): voi
       "S3_ACCESS_KEY=DO_NOT_PRINT_S3_ACCESS_KEY",
       "S3_SECRET_KEY=DO_NOT_PRINT_S3_SECRET_KEY",
       "JUICEFS_META_URL=DO_NOT_PRINT_JUICEFS_META_URL",
-      "BUILTIN_ADMIN_INITIAL_PASSWORD=admin-secret-from-substrate",
-      "OIDC_CLIENT_SECRET=",
+      "OIDC_CLIENT_SECRET=oidc-client-secret",
       ""
     ].join("\n")
   );

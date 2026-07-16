@@ -19,16 +19,13 @@ import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
 import { FetchOpenAICompatibleClient, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
-import type { AuthMode } from "./runtimeConfig.js";
 import type { OidcClientAdapter } from "./oidcClient.js";
 import { WebSocket, WebSocketServer } from "ws";
 
-export interface ApiServerOptions {
+interface CommonApiServerOptions {
   port: number;
   host?: string;
   dataRoot: string;
-  authMode?: AuthMode;
-  builtinAdminPassword: string;
   sessionSecret?: string;
   credentialCrypto?: CredentialCrypto;
   publicBaseUrl?: string;
@@ -54,6 +51,14 @@ export interface ApiServerOptions {
   store?: ProductStore;
 }
 
+export interface ApiServerOptions extends CommonApiServerOptions {
+  oidcClient: OidcClientAdapter;
+}
+
+export interface TestApiServerOptions extends CommonApiServerOptions {
+  builtinAdminPassword: string;
+}
+
 export interface RunningApiServer {
   baseUrl: string;
   listenAddress: string;
@@ -61,10 +66,31 @@ export interface RunningApiServer {
 }
 
 export async function createApiServer(options: ApiServerOptions): Promise<RunningApiServer> {
-  const authMode = options.authMode ?? "builtin_admin";
-  if (authMode === "oidc" && !options.oidcClient) {
-    throw new Error("OIDC client is required when AUTH_MODE=oidc");
+  if (!options.oidcClient) {
+    throw new Error("OIDC client is required for the production API server");
   }
+  return startApiServer({
+    ...options,
+    authMode: "oidc",
+    builtinAdminPassword: ""
+  });
+}
+
+export async function createTestApiServer(options: TestApiServerOptions): Promise<RunningApiServer> {
+  return startApiServer({
+    ...options,
+    authMode: "builtin_admin"
+  });
+}
+
+interface ResolvedApiServerOptions extends CommonApiServerOptions {
+  authMode: "builtin_admin" | "oidc";
+  builtinAdminPassword: string;
+  oidcClient?: OidcClientAdapter;
+}
+
+async function startApiServer(options: ResolvedApiServerOptions): Promise<RunningApiServer> {
+  const authMode = options.authMode;
   if (options.liveSandbox && !process.env.POSTGRES_APP_URL?.trim()) {
     throw new Error("POSTGRES_APP_URL is required when AGENTSMITH_LITE_SANDBOX_MODE=live");
   }
@@ -185,7 +211,7 @@ export async function createApiServer(options: ApiServerOptions): Promise<Runnin
 type Services = ReturnType<typeof createApplicationServices>;
 
 interface AuthRouteContext {
-  authMode: AuthMode;
+  authMode: "builtin_admin" | "oidc";
   bootstrapPassword: string;
   sessionSecret: string;
   appBasePath: string;
@@ -394,7 +420,7 @@ async function routeApi(
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "projects" && segments[3]) {
     const projectId = segments[3];
     if (segments.length === 4 && method === "DELETE") {
-      const result=await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.delete",requireIdempotencyKey(req),"project.delete",async()=>{await services.deletion.deleteProject(user.id,projectId);return{deleted:true as const}});
+      const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),()=>services.deletion.deleteProject(user.id,projectId));
       return sendJson(res, 200, result);
     }
     if (segments[4] === "capabilities" && method === "GET") {

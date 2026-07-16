@@ -4,14 +4,13 @@ import {
   type CredentialEncryptionConfig
 } from "../../application/src/credentialCrypto.js";
 
-export type AuthMode = "builtin_admin" | "oidc";
 export type SandboxMode = "dry-run" | "live";
 
 export const DEFAULT_API_BIND_ADDRESS = "127.0.0.1";
 
 export interface RuntimeAuthConfig {
-  mode: AuthMode;
-  oidc?: OidcRuntimeConfig;
+  mode: "oidc";
+  oidc: OidcRuntimeConfig;
 }
 
 export interface OidcRuntimeConfig {
@@ -27,34 +26,17 @@ export function requireCredentialEncryptionConfig(env: Record<string, string | u
   return parseCredentialEncryptionConfig(env);
 }
 
-const oidcRuntimeKeys = [
-  "OIDC_ISSUER_URL",
-  "OIDC_BACKCHANNEL_BASE_URL",
-  "OIDC_CLIENT_ID",
-  "OIDC_CLIENT_SECRET"
-] as const;
-
-export function parseAuthMode(value: string | undefined): AuthMode {
+export function parseAuthMode(value: string | undefined): "oidc" {
   const trimmed = value?.trim();
-  if (!trimmed) {
-    return "builtin_admin";
-  }
-  if (trimmed === "builtin_admin") {
-    return "builtin_admin";
-  }
   if (trimmed === "oidc") {
     return "oidc";
   }
-  throw new Error("AUTH_MODE must be empty, builtin_admin, or oidc");
+  throw new Error("AUTH_MODE must be explicitly set to oidc in production runtime");
 }
 
 export function parseRuntimeAuthConfig(env: Record<string, string | undefined>): RuntimeAuthConfig {
   const mode = parseAuthMode(env.AUTH_MODE);
-  if (mode === "oidc") {
-    return { mode, oidc: requireOidcRuntimeConfig(env) };
-  }
-  rejectOidcRuntimeConfigForBuiltinAuth(env);
-  return { mode };
+  return { mode, oidc: requireOidcRuntimeConfig(env) };
 }
 
 export function requireOidcRuntimeConfig(env: Record<string, string | undefined>): OidcRuntimeConfig {
@@ -156,12 +138,4 @@ function parseHttpUrl(value: string, name: string): string {
     throw new Error(`${name} must be an http or https URL when AUTH_MODE=oidc`);
   }
   return parsed.toString().replace(/\/$/, "");
-}
-
-function rejectOidcRuntimeConfigForBuiltinAuth(env: Record<string, string | undefined>): void {
-  for (const key of oidcRuntimeKeys) {
-    if (env[key]?.trim()) {
-      throw new Error(`${key} must be empty when AUTH_MODE=builtin_admin`);
-    }
-  }
 }

@@ -28,13 +28,20 @@ describe("project membership authorization", () => {
       (error: unknown) => error instanceof ProductError && error.statusCode === 403
     );
 
-    await services.memberships.addMember(owner.user.id, project.id, { email: "member@example.test" }, "member");
+    await assert.rejects(
+      () => services.memberships.addMember(owner.user.id, project.id, { email: "member@example.test" }, "member"),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 409
+    );
+    assert.equal(await store.findProjectMembership(project.id, member.user.id), null);
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "member@example.test" }, "member");
+    await services.memberships.addMember(owner.user.id, project.id, { email: "member@example.test" }, "member");
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "viewer@example.test" }, "viewer");
     await services.memberships.addMember(owner.user.id, project.id, { issuer, subject: "viewer" }, "viewer");
     await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer");
     await services.memberships.removeMember(owner.user.id, project.id, viewer.user.id);
 
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.actorId, event.resourceId, event.status]), [
+      ["membership.add", owner.user.id, member.user.id, "rejected"],
       ["membership.add", owner.user.id, member.user.id, "accepted"],
       ["membership.add", owner.user.id, viewer.user.id, "accepted"],
       ["membership.change", owner.user.id, member.user.id, "accepted"],

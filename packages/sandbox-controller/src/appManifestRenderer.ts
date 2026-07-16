@@ -456,25 +456,12 @@ function resolveAuthConfig(input: AppManifestInput): {
     throw new Error("secret key OIDC_CLIENT_SECRET is not allowed in app ConfigMap");
   }
 
-  const authMode = input.env.AUTH_MODE?.trim() || "builtin_admin";
-  if (authMode !== "builtin_admin" && authMode !== "oidc") {
-    throw new Error("AUTH_MODE must be builtin_admin or oidc in app manifests");
+  const authMode = input.env.AUTH_MODE?.trim();
+  if (authMode !== "oidc") {
+    throw new Error("AUTH_MODE must be explicitly set to oidc in app manifests");
   }
 
   const baseSecretKeys = new Set(["POSTGRES_APP_URL", "APP_SESSION_SECRET"]);
-  if (authMode === "builtin_admin") {
-    for (const key of oidcConfigKeys) {
-      if (input.env[key]?.trim()) {
-        throw new Error(`${key} must be empty when AUTH_MODE=builtin_admin`);
-      }
-    }
-    if (input.secrets.OIDC_CLIENT_SECRET?.trim()) {
-      throw new Error("OIDC_CLIENT_SECRET must be empty when AUTH_MODE=builtin_admin");
-    }
-    baseSecretKeys.add("BUILTIN_ADMIN_INITIAL_PASSWORD");
-    return { configMapData: {}, secretKeys: baseSecretKeys };
-  }
-
   const issuerUrl = requireAuthConfig(input.env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL");
   const backchannelBaseUrl = optionalAuthConfig(input.env.OIDC_BACKCHANNEL_BASE_URL);
   const clientId = requireAuthConfig(input.env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID");

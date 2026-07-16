@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { createApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 
 test("usage overview returns project limits and server-filtered settled endpoint trends", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-usage-api-"));

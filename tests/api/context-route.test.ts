@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import { createTestApiServer as createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 
 describe("context API", () => {
   let api: RunningApiServer;

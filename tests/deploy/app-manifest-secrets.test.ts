@@ -6,11 +6,66 @@ import { renderAppManifests as renderAppManifestResources } from "../../packages
 function renderAppManifests(input: Parameters<typeof renderAppManifestResources>[0]) {
   return renderAppManifestResources({
     ...input,
-    env: { APP_PUBLIC_BASE_URL: "http://localhost:3000", ...input.env }
+    env: {
+      APP_PUBLIC_BASE_URL: "http://localhost:3000",
+      AUTH_MODE: "oidc",
+      OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+      OIDC_CLIENT_ID: "agentsmith-lite",
+      ...input.env
+    },
+    secrets: {
+      OIDC_CLIENT_SECRET: "oidc-client-secret",
+      ...input.secrets
+    }
   });
 }
 
 describe("app manifest rendering", () => {
+  it("requires explicit complete OIDC configuration for production manifests", () => {
+    const baseInput = {
+      namespace: "agentsmith",
+      imageTag: "dev",
+      secrets: {}
+    };
+
+    assert.throws(
+      () => renderAppManifestResources({ ...baseInput, env: { APP_PUBLIC_BASE_URL: "https://agentsmith.example.test" } }),
+      /AUTH_MODE/
+    );
+    assert.throws(
+      () => renderAppManifestResources({
+        ...baseInput,
+        env: { APP_PUBLIC_BASE_URL: "https://agentsmith.example.test", AUTH_MODE: "builtin_admin" }
+      }),
+      /AUTH_MODE/
+    );
+    assert.throws(
+      () => renderAppManifestResources({
+        ...baseInput,
+        env: {
+          APP_PUBLIC_BASE_URL: "https://agentsmith.example.test",
+          AUTH_MODE: "oidc",
+          OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+          OIDC_CLIENT_ID: "agentsmith-lite"
+        }
+      }),
+      /OIDC_CLIENT_SECRET/
+    );
+
+    const manifests = renderAppManifestResources({
+      ...baseInput,
+      env: {
+        APP_PUBLIC_BASE_URL: "https://agentsmith.example.test",
+        AUTH_MODE: "oidc",
+        OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+        OIDC_CLIENT_ID: "agentsmith-lite"
+      },
+      secrets: { OIDC_CLIENT_SECRET: "client-secret" }
+    });
+    const config = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
+    assert.equal((config?.data as Record<string, string> | undefined)?.AUTH_MODE, "oidc");
+  });
+
   it("puts credential encryption keys only in the API application Secret", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -164,7 +219,16 @@ describe("app manifest rendering", () => {
 
   it("requires APP_PUBLIC_BASE_URL", () => {
     assert.throws(
-      () => renderAppManifestResources({ namespace: "agentsmith", imageTag: "dev", env: {}, secrets: {} }),
+      () => renderAppManifestResources({
+        namespace: "agentsmith",
+        imageTag: "dev",
+        env: {
+          AUTH_MODE: "oidc",
+          OIDC_ISSUER_URL: "https://keycloak.example.test/realms/agentsmith",
+          OIDC_CLIENT_ID: "agentsmith-lite"
+        },
+        secrets: { OIDC_CLIENT_SECRET: "oidc-client-secret" }
+      }),
       /APP_PUBLIC_BASE_URL is required/
     );
   });
@@ -411,7 +475,7 @@ describe("app manifest rendering", () => {
           OIDC_ISSUER_URL: "DO_NOT_PRINT_OIDC_ISSUER_URL"
         },
         secrets: {},
-        error: /OIDC_ISSUER_URL/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_ISSUER_URL/
       },
       {
@@ -421,7 +485,7 @@ describe("app manifest rendering", () => {
           OIDC_BACKCHANNEL_BASE_URL: "DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL"
         },
         secrets: {},
-        error: /OIDC_BACKCHANNEL_BASE_URL/,
+        error: /AUTH_MODE/,
         leakedValue: /DO_NOT_PRINT_OIDC_BACKCHANNEL_BASE_URL/
       },
     ];
@@ -429,10 +493,10 @@ describe("app manifest rendering", () => {
     for (const candidate of cases) {
       assert.throws(
         () =>
-          renderAppManifests({
+          renderAppManifestResources({
             namespace: "agentsmith",
             imageTag: "dev",
-            env: candidate.env,
+            env: { APP_PUBLIC_BASE_URL: "https://agentsmith.example.test", ...candidate.env },
             secrets: candidate.secrets
           }),
         (error: unknown) => {
@@ -547,7 +611,7 @@ describe("app manifest rendering", () => {
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, undefined);
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "agentsmith-lite/botified-runner:dev");
-    assert.equal(configMapData?.AUTH_MODE, undefined);
+    assert.equal(configMapData?.AUTH_MODE, "oidc");
     assert.ok(
       role.rules.some(
         (rule) =>

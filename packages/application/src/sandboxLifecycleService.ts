@@ -225,10 +225,18 @@ export class SandboxLifecycleService {
       result.actionSummary.push(...cleanupReconcilePlan.actions.map(actionSummary));
     }
     const lifecycleCandidates = cleanupReconcilePlan.actions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
-    const lifecycleGate = await this.prepareTaskLifecycleBeforeRuntimeCleanup(lifecycleCandidates, preparedRuns.activeRuns);
+    const cleanupClaims = await this.claimRunsBeforeDestructiveCleanup(lifecycleCandidates, preparedRuns.activeRuns);
+    for (const runId of cleanupClaims.rejectedRunIds) blockedRunIds.add(runId);
+    const claimedOrOrphanActions = lifecycleCandidates.filter((action) =>
+      cleanupClaims.claimedRuns.has(reconcileActionRunId(action)) || cleanupClaims.orphanRunIds.has(reconcileActionRunId(action))
+    );
+    const lifecycleGate = await this.prepareTaskLifecycleBeforeRuntimeCleanup(
+      claimedOrOrphanActions,
+      [...cleanupClaims.claimedRuns.values()]
+    );
     result.errors.push(...lifecycleGate.errors);
     for (const runId of lifecycleGate.blockedRunIds) blockedRunIds.add(runId);
-    let cleanupActions = cleanupReconcilePlan.actions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
+    let cleanupActions = claimedOrOrphanActions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
     const artifactProjection = await this.projectArtifactsBeforeRuntimeCleanup(cleanupActions);
     result.errors.push(...artifactProjection.errors);
     for (const runId of artifactProjection.blockedRunIds) blockedRunIds.add(runId);
@@ -236,11 +244,16 @@ export class SandboxLifecycleService {
     const mutations = await this.applyCleanupActions(this.config.port, cleanupActions);
     result.errors.push(...mutations.errors);
     for (const runId of mutations.blockedRunIds) blockedRunIds.add(runId);
+    await this.releaseBlockedCleanupClaims(cleanupClaims.claimedRuns, blockedRunIds);
 
     const refreshed = await this.observe(input);
     result.errors.push(...refreshed.errors);
     result.observedResourceCounts = resourceCounts(refreshed.resources);
     if (refreshed.errors.length > 0) {
+      await this.releaseBlockedCleanupClaims(
+        cleanupClaims.claimedRuns,
+        new Set(cleanupClaims.claimedRuns.keys())
+      );
       return result;
     }
     const finalRuns = await this.loadRuns(input);
@@ -257,19 +270,14 @@ export class SandboxLifecycleService {
         continue;
       }
       if (action.reason === "cleanup_complete") {
-        const claimed = await this.claimRunForRuntimeCleanup(action.run);
-        if (!claimed) {
-          result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before runtime cleanup could be claimed`);
-          continue;
-        }
-        const cleanupError = await this.removeRuntimeCleanupCandidates(claimed);
+        const cleanupError = await this.removeRuntimeCleanupCandidates(action.run);
         if (cleanupError) {
           result.errors.push(cleanupError.message);
-          await this.persistCleanupFailure(claimed, cleanupError.target, cleanupError.message);
+          await this.persistCleanupFailure(action.run, cleanupError.target, cleanupError.message);
           blockedRunIds.add(action.run.runId);
           continue;
         }
-        const transition = await this.persistRunTransition(action.run, claimed);
+        const transition = await this.persistRunTransition(action.run);
         if (transition) {
           result.storedRunIds.push(transition.stored.runId);
         } else {
@@ -467,6 +475,51 @@ export class SandboxLifecycleService {
     return { blockedRunIds, errors };
   }
 
+  private async claimRunsBeforeDestructiveCleanup(
+    actions: SandboxReconcileAction[],
+    runs: PersistedSandboxRunState[]
+  ): Promise<{
+    claimedRuns: Map<string, PersistedSandboxRunState>;
+    rejectedRunIds: Set<string>;
+    orphanRunIds: Set<string>;
+  }> {
+    const claimedRuns = new Map<string, PersistedSandboxRunState>();
+    const rejectedRunIds = new Set<string>();
+    const runsById = new Map(runs.map((run) => [run.runId, run]));
+    const candidateRunIds = runtimeCleanupRunIds(actions);
+    const orphanRunIds = new Set([...candidateRunIds].filter((runId) => !runsById.has(runId)));
+    const claimedAt = (this.config.now?.() ?? new Date()).toISOString();
+    for (const runId of candidateRunIds) {
+      const run = runsById.get(runId);
+      if (!run) continue;
+      const claimed = await this.store.sandboxRuns.claimForCleanup({
+        runId,
+        expectedFencingToken: run.fencingToken,
+        claimedAt
+      });
+      if (claimed) claimedRuns.set(runId, claimed);
+      else rejectedRunIds.add(runId);
+    }
+    return { claimedRuns, rejectedRunIds, orphanRunIds };
+  }
+
+  private async releaseBlockedCleanupClaims(
+    claimedRuns: Map<string, PersistedSandboxRunState>,
+    blockedRunIds: Set<string>
+  ): Promise<void> {
+    const updatedAt = (this.config.now?.() ?? new Date()).toISOString();
+    for (const runId of blockedRunIds) {
+      const claimed = claimedRuns.get(runId);
+      if (!claimed) continue;
+      await this.store.sandboxRuns.updateWithFencing(runId, claimed.fencingToken, {
+        ...claimed,
+        cleanupStatus: "cleanup_requested",
+        fencingToken: claimed.fencingToken + 1,
+        updatedAt
+      });
+    }
+  }
+
   private async deleteTargetGoneOrTerminatingAfterFreshObserves(
     port: SandboxLifecycleKubernetesPort,
     action: Extract<SandboxReconcileAction, { type: "delete_resource" }>
@@ -508,18 +561,6 @@ export class SandboxLifecycleService {
       updatedAt: now
     });
     return stored ? { previous: current, stored } : null;
-  }
-
-  private async claimRunForRuntimeCleanup(run: SandboxRunState): Promise<PersistedSandboxRunState | null> {
-    const nowDate = this.config.now?.() ?? new Date();
-    const now = nowDate.toISOString();
-    return this.store.sandboxRuns.updateWithFencing(run.runId, run.fencingToken, {
-      ...(run as PersistedSandboxRunState),
-      phase: runWasExpired(run, nowDate) ? "expired" : "stopping",
-      cleanupStatus: "deleting",
-      fencingToken: run.fencingToken + 1,
-      updatedAt: now
-    });
   }
 
   private async persistTerminalFailureTransitions(
