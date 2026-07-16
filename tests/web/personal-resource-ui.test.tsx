@@ -71,6 +71,23 @@ describe("personal and resource UI", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("does not navigate after a pending notification read leaves the page", async () => {
+    const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
+    const pushed: string[] = [];
+    let finishRead: ((value: UserNotification) => void) | undefined;
+    const linked = { ...notification, linkPath: "/workspaces/workspace_1/projects/project_1/tasks/task_1" };
+    apiClient.notifications = async () => [linked];
+    apiClient.markNotificationRead = async () => new Promise((resolve) => { finishRead = resolve; });
+    try {
+      const view = render(<AppRouterContext.Provider value={router(pushed)}><NotificationsPage /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("link", { name: "Task finished" }));
+      await waitFor(() => assert.ok(finishRead));
+      view.unmount();
+      await act(async () => finishRead!({ ...linked, readAt: "2026-07-12T00:01:00.000Z" }));
+      assert.deepEqual(pushed, []);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows safe notification context in the global bell", async () => {
     const original = apiClient.notifications;
     apiClient.notifications = async () => [notification];
