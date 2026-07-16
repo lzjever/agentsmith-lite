@@ -7,6 +7,33 @@ installDom(); const {act,cleanup,fireEvent,render,screen,waitFor}=await import("
 const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText(/1 endpoint configured · 1 configured/);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 describe("endpoint dependencies", () => {
+  it("closes project-scoped actions and ignores an old save after switching projects", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, updateEndpoint: apiClient.updateEndpoint };
+    let finishSave!: (value: Endpoint) => void;
+    let saves = 0;
+    apiClient.endpoints = async (projectId) => projectId === "project_1" ? [endpoint] : [];
+    apiClient.credentials = async (projectId) => [{ ...credential, projectId }];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.updateEndpoint = async () => { saves += 1; return new Promise((resolve) => { finishSave = resolve; }); };
+    try {
+      const view = render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
+      await screen.findByRole("dialog", { name: "Edit endpoint" });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.equal(saves, 1));
+
+      view.rerender(<EndpointsPage projectId="project_2" />);
+      await waitFor(() => assert.ok(screen.getByText("No endpoints configured")));
+      assert.equal(screen.queryByRole("dialog", { name: "Edit endpoint" }), null);
+
+      await act(async () => finishSave(endpoint));
+      assert.ok(screen.getByRole("heading", { name: "No endpoints configured" }));
+      assert.equal(screen.queryAllByText("DeepSeek").length, 0);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the newest endpoint, credential, and permission refresh", async () => {
     const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities };
     const latest = { ...endpoint, id: "endpoint_latest", name: "Latest endpoint" };

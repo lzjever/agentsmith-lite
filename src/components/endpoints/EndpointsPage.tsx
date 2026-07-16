@@ -34,22 +34,30 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   const [models, setModels] = useState<string[]>([]);
   const [checkingId, setCheckingId] = useState<string>();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [actionProjectId, setActionProjectId] = useState<string>();
   const [formError, setFormError] = useState("");
   const discoveryRevision = useRef(0);
   const endpointsLoadRevision = useRef(0);
   const credentialsLoadRevision = useRef(0);
   const capabilitiesLoadRevision = useRef(0);
+  const projectRevision = useRef(0);
+  const currentProjectId = useRef(projectId);
+  if (currentProjectId.current !== projectId) {
+    currentProjectId.current = projectId;
+    projectRevision.current += 1;
+  }
 
   const loadDependencies = useCallback(() => {
+    const targetProjectId = projectId;
     const credentialsRevision = ++credentialsLoadRevision.current;
     setCredentialsState("loading");
     setCredentialsError("");
     void apiClient.credentials(projectId).then((listed) => {
-      if (credentialsRevision !== credentialsLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
       setCredentials(listed);
       setCredentialsState("ready");
     }).catch((reason) => {
-      if (credentialsRevision !== credentialsLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
       setCredentials([]);
       setCredentialsError(message(reason));
       setCredentialsState("error");
@@ -59,11 +67,11 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setCapabilitiesState("loading");
     setCapabilitiesError("");
     void apiClient.projectCapabilities(projectId).then((projected) => {
-      if (capabilitiesRevision !== capabilitiesLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || capabilitiesRevision !== capabilitiesLoadRevision.current) return;
       setCapabilities(projected);
       setCapabilitiesState("ready");
     }).catch((reason) => {
-      if (capabilitiesRevision !== capabilitiesLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || capabilitiesRevision !== capabilitiesLoadRevision.current) return;
       setCapabilities(undefined);
       setCapabilitiesError(message(reason));
       setCapabilitiesState("error");
@@ -71,22 +79,32 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const load = useCallback(async () => {
+    const targetProjectId = projectId;
     const revision = ++endpointsLoadRevision.current;
     setState("loading");
     setError("");
     try {
       const listed = await apiClient.endpoints(projectId);
-      if (revision !== endpointsLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || revision !== endpointsLoadRevision.current) return;
       setEndpoints(listed);
       setState("ready");
     } catch (reason) {
-      if (revision !== endpointsLoadRevision.current) return;
+      if (targetProjectId !== currentProjectId.current || revision !== endpointsLoadRevision.current) return;
       setError(message(reason));
       setState("error");
     }
   }, [projectId]);
 
   useEffect(() => {
+    invalidateDiscovery();
+    setEditing(undefined);
+    setDeleting(undefined);
+    setCheckingId(undefined);
+    setDialogOpen(false);
+    setActionProjectId(undefined);
+    setInput(emptyEndpointInput());
+    setFormError("");
+    setSaving(false);
     void load();
     loadDependencies();
   }, [load, loadDependencies]);
@@ -111,6 +129,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setEditing(undefined);
     setInput(emptyEndpointInput());
     setFormError("");
+    setActionProjectId(projectId);
     setDialogOpen(true);
   }
   function edit(endpoint: Endpoint) {
@@ -119,6 +138,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setEditing(endpoint);
     setInput(endpointInputForEdit(endpoint));
     setFormError("");
+    setActionProjectId(projectId);
     setDialogOpen(true);
   }
   function denied(reason: unknown) {
@@ -129,29 +149,34 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canConfigure || input.capabilities.length === 0) return;
+    if (!canConfigure || actionProjectId !== projectId || input.capabilities.length === 0) return;
+    const revision = projectRevision.current;
     invalidateDiscovery();
     setSaving(true);
     setFormError("");
     try {
       const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input) : await apiClient.createEndpoint(projectId, input);
+      if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));
       setDialogOpen(false);
+      setActionProjectId(undefined);
       toast.success(editing ? "Endpoint updated" : "Endpoint created");
     } catch (reason) {
+      if (revision !== projectRevision.current) return;
       setFormError(denied(reason));
     } finally {
-      setSaving(false);
+      if (revision === projectRevision.current) setSaving(false);
     }
   }
   async function discoverModels() {
     if (!canConfigure) return;
+    const projectEpoch = projectRevision.current;
     const revision = ++discoveryRevision.current;
     setDiscovering(true);
     setFormError("");
     try {
       const result = await apiClient.discoverEndpointModels(projectId, { baseUrl: input.baseUrl, credentialId: input.credentialId, requestTimeoutSecs: input.requestTimeoutSecs, ...(editing ? { endpointId: editing.id } : {}) });
-      if (revision !== discoveryRevision.current) return;
+      if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
       if (result.health.status !== "healthy") {
         setModels([]);
         setFormError(`Model discovery failed: ${result.health.errorCategory ?? "unknown"}`);
@@ -161,39 +186,45 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
       if (result.models.length === 0) toast.success("Connection checked. Enter a model name manually.");
       else if (!input.model) setInput((current) => ({ ...current, model: result.models[0]! }));
     } catch (reason) {
-      if (revision !== discoveryRevision.current) return;
+      if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
       setModels([]);
       setFormError(denied(reason));
     } finally {
-      if (revision === discoveryRevision.current) setDiscovering(false);
+      if (projectEpoch === projectRevision.current && revision === discoveryRevision.current) setDiscovering(false);
     }
   }
   async function recheck(endpoint: Endpoint) {
     if (!canManage) return;
+    const revision = projectRevision.current;
     setCheckingId(endpoint.id);
     try {
       const checked = await apiClient.recheckEndpoint(projectId, endpoint.id);
+      if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, checked, true));
       if (checked.health?.status === "healthy") toast.success("Endpoint is healthy");
       else toast.error(`Endpoint unavailable: ${checked.health?.errorCategory ?? "unknown"}`);
     } catch (reason) {
+      if (revision !== projectRevision.current) return;
       toast.error(denied(reason));
     } finally {
-      setCheckingId(undefined);
+      if (revision === projectRevision.current) setCheckingId(undefined);
     }
   }
   async function remove() {
     if (!deleting || !canManage) return;
+    const revision = projectRevision.current;
     setSaving(true);
     try {
       await apiClient.deleteEndpoint(projectId, deleting.id);
+      if (revision !== projectRevision.current) return;
       setEndpoints((items) => removeEndpoint(items, deleting.id));
       setDeleting(undefined);
       toast.success("Endpoint deleted");
     } catch (reason) {
+      if (revision !== projectRevision.current) return;
       throw new Error(denied(reason));
     } finally {
-      setSaving(false);
+      if (revision === projectRevision.current) setSaving(false);
     }
   }
 
@@ -210,8 +241,8 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
     {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before starting a chat or task." : "An administrator can add an endpoint before chat or task work begins."}</p>{needsCredential ? <CredentialsLink /> : canConfigure ? <Button onClick={create}><Plus size={16} />Create endpoint</Button> : null}</div></PageState> : null}
     {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <div className="flex flex-wrap items-center justify-between gap-3 border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning"><span>{canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."}</span><CredentialsLink /></div> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)} · {endpoints.filter((endpoint) => endpoint.hasCredentialRef).length} configured</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} canManage={canManage} canEdit={canConfigure} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
-    <EndpointDialog open={dialogOpen} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
-    <DeleteEndpointDialog endpoint={deleting} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
+    <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
+    <DeleteEndpointDialog endpoint={deleting?.projectId === projectId ? deleting : undefined} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
   </PageLayout>;
 }
 
