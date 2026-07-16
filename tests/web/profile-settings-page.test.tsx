@@ -104,6 +104,22 @@ describe("profile and settings pages", () => {
     try { render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1"/></AppRouterContext.Provider>); await screen.findByRole("status"); assert.equal((screen.getByRole("textbox",{name:"Project name"}) as HTMLInputElement).disabled,true); assert.ok(screen.getByRole("button",{name:"Unarchive project"})); assert.ok(screen.getByRole("combobox",{name:"New project owner"})); } finally {apiClient.projectSettings=original.projectSettings;apiClient.currentIdentity=original.currentIdentity;apiClient.members=original.members;apiClient.unarchiveProject=original.unarchiveProject;}
   });
 
+  it("keeps project ownership transfer disabled when the containing workspace is read-only", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members };
+    apiClient.projectSettings = async () => ({ ...settings, project: { ...settings.project, ownerUserId: "user_1", lifecycleStatus: "active" }, capabilities: { canManageSettings: false } });
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.members = async () => [
+      { projectId: "project_1", userId: "user_1", role: "owner", email: "owner@example.test", createdAt: "x", updatedAt: "x" },
+      { projectId: "project_1", userId: "user_2", role: "admin", email: "candidate@example.test", createdAt: "x", updatedAt: "x" },
+    ];
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const owner = await screen.findByRole("combobox", { name: "New project owner" }) as HTMLButtonElement;
+      assert.equal(owner.disabled, true);
+      assert.equal((screen.getByRole("button", { name: "Transfer ownership" }) as HTMLButtonElement).disabled, true);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("reports an ownership candidate load failure instead of claiming there are no members", async () => {
     const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members };
     apiClient.projectSettings = async () => ({ ...settings, project: { ...settings.project, ownerUserId: "user_1" } });
