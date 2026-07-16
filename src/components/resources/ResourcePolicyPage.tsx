@@ -34,6 +34,11 @@ const endpointMetrics = [
   { value: "providerCost", label: "Cost", step: "any" },
 ] as const;
 export function ResourcePolicyPage({ projectId }: { projectId: string }) {
+  return <ProjectResourcePolicyPage key={projectId} projectId={projectId} />;
+}
+
+function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
+  const active = useRef(true);
   const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
@@ -47,6 +52,12 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
     setState("loading");
@@ -60,7 +71,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
       apiClient.projectCapabilities(projectId),
       apiClient.endpoints(projectId),
     ]);
-    if (request !== loadRequest.current) return;
+    if (!active.current || request !== loadRequest.current) return;
     if (policyResult.status === "rejected") {
       setError(
         policyResult.reason instanceof Error ? policyResult.reason.message : "Policy could not be loaded.",
@@ -98,10 +109,12 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
     setError("");
     try {
       const saved = await apiClient.updatePolicy(projectId, input);
+      if (!active.current) return;
       setPolicy(saved);
       setDraft(policyDraft(saved));
       toast.success("Resource policy updated.");
     } catch (cause) {
+      if (!active.current) return;
       if (cause instanceof ApiError && cause.status === 403)
         setCaps((current) =>
           current ? { ...current, canManagePolicy: false } : current,
@@ -110,7 +123,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
         cause instanceof Error ? cause.message : "Policy could not be saved.",
       );
     } finally {
-      setSaving(false);
+      if (active.current) setSaving(false);
     }
   }
   return (

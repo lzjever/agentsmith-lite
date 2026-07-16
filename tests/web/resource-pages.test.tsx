@@ -38,6 +38,27 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("does not apply a completed save after switching projects", async () => {
+    const original = snapshotClient();
+    let resolveSave: ((value: ProjectResourcePolicy) => void) | undefined;
+    apiClient.policy = async (requestedProjectId) => ({ ...policy, projectId: requestedProjectId, activeTasksLimit: requestedProjectId === "project_1" ? 2 : 8 });
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async () => new Promise((resolve) => { resolveSave = resolve; });
+    try {
+      const view = render(<ResourcePolicyPage projectId="project_1" />);
+      const activeTasks = await screen.findByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement;
+      fireEvent.change(activeTasks, { target: { value: "5" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.ok(resolveSave));
+
+      view.rerender(<ResourcePolicyPage projectId="project_2" />);
+      await waitFor(() => assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "8"));
+      await act(async () => resolveSave!({ ...policy, activeTasksLimit: 5 }));
+      assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "8");
+    } finally { restoreClient(original); }
+  });
+
   it("uses projected policy capability from the first ready render and sends the complete policy update", async () => {
     const original = snapshotClient();
     const updates: ProjectPolicyInput[] = [];
