@@ -168,6 +168,22 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("fails closed when alert management permission is revoked", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_denied", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Forbidden"); };
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Acknowledge alert" }));
+      await screen.findByText("Alert management permission changed. Alerts and rules are now read-only.");
+      assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Acknowledge alert" }), null);
+      assert.ok(screen.getByText("Task failure"));
+    } finally { restoreClient(original); }
+  });
+
   it("renders API-computed limits and trends, and refetches for the selected endpoint", async () => {
     const original = snapshotClient();
     const usageCalls: Array<string | undefined> = [];
@@ -313,8 +329,8 @@ describe("project resource pages", () => {
 
 const alertTypes: ProjectAlert["type"][] = ["active_tasks_limit", "provider_requests_limit", "provider_tokens_limit", "provider_cost_limit", "project_file_bytes_limit", "endpoint_failure", "provider_failure", "task_failure", "sandbox_failure"];
 
-function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, alertRules: apiClient.alertRules }; }
-function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.policy = original.policy; apiClient.updatePolicy = original.updatePolicy; apiClient.usage = original.usage; apiClient.alerts = original.alerts; apiClient.audit = original.audit; apiClient.endpoints = original.endpoints; apiClient.projectCapabilities = original.projectCapabilities; apiClient.transitionAlert = original.transitionAlert; apiClient.alertRules = original.alertRules; }
+function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules }; }
+function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
   Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });

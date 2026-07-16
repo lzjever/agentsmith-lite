@@ -148,8 +148,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
             : "Alert silence cleared.",
       );
     } catch (cause) {
-      forbidden(cause);
-      setRetry({ alert, action });
+      if (!forbidden(cause)) setRetry({ alert, action });
     } finally {
       setBusyId(null);
     }
@@ -160,14 +159,22 @@ export function AlertsPage({ projectId }: { projectId: string }) {
     );
   }
   function forbidden(cause: unknown) {
-    if (cause instanceof ApiError && cause.status === 403)
+    const accessDenied = cause instanceof ApiError && cause.status === 403;
+    if (accessDenied) {
       setCapabilities((current) =>
         current ? { ...current, canManagePolicy: false } : current,
       );
-    setError(
-      cause instanceof Error ? cause.message : "Alert could not be updated.",
-    );
+      setCapabilitiesError("Alert management permission changed. Alerts and rules are now read-only.");
+      setRetry(null);
+      setDismiss(null);
+      setError("");
+    } else {
+      setError(
+        cause instanceof Error ? cause.message : "Alert could not be updated.",
+      );
+    }
     toast.error("Alert could not be updated.");
+    return accessDenied;
   }
   const active = alerts.filter((alert) => alert.status === "active").length;
   return (
