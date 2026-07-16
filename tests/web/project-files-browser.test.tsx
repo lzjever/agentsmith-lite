@@ -15,15 +15,15 @@ const readOnly: ProjectCapabilities = { ...writable, canWriteFiles: false };
 afterEach(() => cleanup());
 
 describe("project files browser", () => {
-  it("uploads one selected file and reloads the listing", async () => {
+  it("commits a successful upload without depending on another listing read", async () => {
     const original = snapshotClient();
     let lists = 0;
     const uploaded: string[] = [];
     apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: ++lists === 1 ? [] : [file] });
+    apiClient.files = async () => { lists++; return { entries: [] }; };
     apiClient.uploadFile = async (_projectId, path) => {
       uploaded.push(path);
-      return { path, bytes: 1 };
+      return { path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
@@ -31,8 +31,8 @@ describe("project files browser", () => {
       const input = document.querySelector('input[type="file"]')!;
       fireEvent.change(input, { target: { files: [new File(["a"], "brief.txt")] } });
       await waitFor(() => assert.deepEqual(uploaded, ["files/brief.txt"]));
-      await waitFor(() => assert.equal(lists, 2));
       assert.ok(screen.getByText("brief.txt"));
+      assert.equal(lists, 1);
     } finally { restoreClient(original); }
   });
 
@@ -62,7 +62,7 @@ describe("project files browser", () => {
       attempts++;
       uploaded.push(path);
       if (attempts === 1) throw new Error("network unavailable");
-      return { path, bytes: 1 };
+      return { path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
@@ -83,7 +83,7 @@ describe("project files browser", () => {
     apiClient.uploadFile = async (_projectId, _path, _file, options) => {
       attempts.push(options?.overwrite === true);
       if (!options?.overwrite) throw new ApiError(409, "Project file already exists");
-      return { path: file.path, bytes: file.size ?? 0 };
+      return { path: file.path, bytes: file.size ?? 0, mediaType: "text/plain", updatedAt: file.updatedAt };
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
@@ -94,6 +94,27 @@ describe("project files browser", () => {
       fireEvent.click(screen.getByRole("button", { name: "Replace file" }));
       await waitFor(() => assert.deepEqual(attempts, [false, true]));
       await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Replace brief.txt?" }), null));
+    } finally { restoreClient(original); }
+  });
+
+  it("commits a successful delete without depending on another listing read", async () => {
+    const original = snapshotClient();
+    let lists = 0;
+    let deletes = 0;
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => { lists++; return { entries: [file] }; };
+    apiClient.deleteFile = async () => { deletes++; return { deleted: true }; };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
+      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
+      assert.ok(confirm);
+      await act(async () => { fireEvent.click(confirm); await Promise.resolve(); });
+      assert.equal(deletes, 1);
+      assert.equal(lists, 1);
+      assert.equal(screen.queryByText("brief.txt"), null);
     } finally { restoreClient(original); }
   });
 

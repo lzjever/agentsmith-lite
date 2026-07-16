@@ -195,7 +195,9 @@ describe("api product workflow", () => {
       model: "updated-compatible",
       protocol: "openai_chat_completions"
     });
-    assert.deepEqual(uploadedFile, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
+    const { updatedAt: uploadedAt, ...uploadedFileDetails } = uploadedFile;
+    assert.deepEqual(uploadedFileDetails, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
+    assert.equal(Number.isNaN(Date.parse(uploadedAt)), false);
     assert.equal(listedRootFiles.entries.some((entry: { name: string; path: string; type: string }) =>
       entry.path === "files/docs" && entry.name === "docs" && entry.type === "directory"
     ), true);
@@ -280,10 +282,9 @@ describe("api product workflow", () => {
     ];
 
     for (const upload of uploads) {
-      assert.deepEqual(
-        await requestRawFile(project.id, upload.path, upload.bytes, cookie, csrf, upload.contentType),
-        { path: upload.path, bytes: upload.bytes.byteLength, mediaType: upload.contentType.split(";", 1)[0] }
-      );
+      const { updatedAt, ...written } = await requestRawFile(project.id, upload.path, upload.bytes, cookie, csrf, upload.contentType);
+      assert.deepEqual(written, { path: upload.path, bytes: upload.bytes.byteLength, mediaType: upload.contentType.split(";", 1)[0] });
+      assert.equal(Number.isNaN(Date.parse(updatedAt)), false);
       const downloaded = await request(
         "GET",
         `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(upload.path)}`,

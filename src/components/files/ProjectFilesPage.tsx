@@ -81,9 +81,18 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
     setUploadFailure(undefined);
     setMessage("");
     try {
-      await apiClient.uploadFile(projectId, childFilePath(path, file.name), file, { overwrite });
+      const written = await apiClient.uploadFile(projectId, childFilePath(path, file.name), file, { overwrite });
+      const entry: ProjectFile = {
+        name: written.path.slice(written.path.lastIndexOf("/") + 1),
+        path: written.path,
+        type: "file",
+        size: written.bytes,
+        mediaType: written.mediaType,
+        updatedAt: written.updatedAt
+      };
+      setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
+      setSelected((current) => current?.path === written.path ? entry : current);
       if (overwrite) setReplaceTarget(undefined);
-      await load();
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
       if (!overwrite && error instanceof ApiError && error.status === 409) {
@@ -114,7 +123,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
       await apiClient.deleteFile(projectId, deleteTarget.path);
       setDeleteTarget(undefined);
       setSelected((current) => current?.path === deleteTarget.path ? undefined : current);
-      await load();
+      setEntries((current) => current.filter((entry) => entry.path !== deleteTarget.path));
       toast.success("File deleted");
     } catch (error) {
       throw new Error(errorMessage(error, "File could not be deleted."));

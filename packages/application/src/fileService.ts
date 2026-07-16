@@ -116,7 +116,12 @@ export class FileService {
         await restoreOptionalRegularFile(absolutePath, previous);
         throw error;
       }
-      return { path: normalizedPath, bytes: written.size, mediaType: detectProjectFileMediaType(input.bytes, normalizedPath) };
+      return {
+        path: normalizedPath,
+        bytes: written.size,
+        mediaType: detectProjectFileMediaType(input.bytes, normalizedPath),
+        updatedAt: written.mtime.toISOString()
+      };
     });
   }
 

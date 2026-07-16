@@ -709,6 +709,7 @@ export interface ProjectFileWriteResponse {
   path: string;
   bytes: number;
   mediaType: string;
+  updatedAt: ISODateString;
 }
 
 export interface ProjectFileDownloadResponse {
