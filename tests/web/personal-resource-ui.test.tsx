@@ -6,7 +6,7 @@ import React from "react";
 import { apiClient, type ProjectCapabilities, type ProjectMember, type UserNotification } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { MembersPage } = await import("../../src/components/members/MembersPage.js");
 const { NotificationsPage } = await import("../../src/components/notifications/NotificationsPage.js");
 const { NotificationBell } = await import("../../src/components/notifications/NotificationBell.js");
@@ -80,6 +80,24 @@ describe("personal and resource UI", () => {
       await screen.findByText("Validation project: task completed.");
       assert.ok(screen.getByText("Task finished"));
       assert.equal(screen.getByRole("link", { name: "View all notifications" }).getAttribute("href"), "/notifications?returnTo=%2Fworkspaces%2Fworkspace_1%2Fprojects%2Fproject_1%2Ftasks");
+    } finally { apiClient.notifications = original; }
+  });
+
+  it("does not let the initial unread request overwrite a newer opened menu", async () => {
+    const original = apiClient.notifications;
+    const stale = { ...notification, title: "Stale unread notification" };
+    const latest = { ...notification, id: "notice_latest", title: "Latest read notification", readAt: "2026-07-12T00:01:00.000Z" };
+    let resolveInitial!: (value: UserNotification[]) => void;
+    apiClient.notifications = async (unreadOnly) => unreadOnly ? new Promise((resolve) => { resolveInitial = resolve; }) : [latest];
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell /></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
+      await screen.findByText("Latest read notification");
+      assert.equal(screen.queryByRole("button", { name: "Mark all read" }), null);
+      await act(async () => { resolveInitial([stale]); await Promise.resolve(); });
+      assert.equal(screen.queryByText("Stale unread notification"), null);
+      assert.ok(screen.getByText("Latest read notification"));
+      assert.equal(screen.queryByRole("button", { name: "Mark all read" }), null);
     } finally { apiClient.notifications = original; }
   });
 

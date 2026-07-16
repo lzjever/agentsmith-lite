@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck } from "lucide-react";
-import { useCallback, useEffect, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { apiClient, type UserNotification } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { DropdownContent, DropdownMenu } from "../ui/dropdown-menu";
@@ -11,8 +11,9 @@ import { DropdownContent, DropdownMenu } from "../ui/dropdown-menu";
 export function NotificationBell({ returnTo }: { returnTo?: string }) {
   const router = useRouter();
   const [items, setItems] = useState<UserNotification[]>([]); const [open, setOpen] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState(""); const [markingAll, setMarkingAll] = useState(false);
-  const load = useCallback(async () => { setLoading(true); setError(""); try { setItems(await apiClient.notifications()); } catch { setError("Notifications could not be loaded."); } finally { setLoading(false); } }, []);
-  useEffect(() => { void apiClient.notifications(true).then(setItems).catch(() => undefined); }, []);
+  const loadRevision = useRef(0);
+  const load = useCallback(async () => { const revision=++loadRevision.current;setLoading(true);setError("");try{const listed=await apiClient.notifications();if(revision!==loadRevision.current)return;setItems(listed);}catch{if(revision!==loadRevision.current)return;setError("Notifications could not be loaded.");}finally{if(revision===loadRevision.current)setLoading(false);} }, []);
+  useEffect(() => { const revision=++loadRevision.current;void apiClient.notifications(true).then((listed)=>{if(revision===loadRevision.current)setItems(listed);}).catch(() => undefined);return()=>{if(revision===loadRevision.current)loadRevision.current+=1;}; }, []);
   function onOpenChange(nextOpen: boolean) { setOpen(nextOpen); if (nextOpen) void load(); }
   const unread = items.filter((item) => !item.readAt);
   async function markAllRead() { if (unread.length === 0) return; setMarkingAll(true); setError(""); try { setItems(await apiClient.markAllNotificationsRead()); } catch { setError("Notifications could not be marked as read. Try again."); } finally { setMarkingAll(false); } }
