@@ -67,6 +67,7 @@ describe("retained chat and overview behavior", () => {
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByText("This project is available for viewing.");
+      assert.ok(screen.getByRole("heading", { name: "Project" }));
       assert.ok(screen.getByText("Owner: Project Owner · Your access: Viewer · Status: Active"));
       assert.equal(screen.queryByRole("link", { name: "Configure an endpoint" }), null);
       assert.equal(screen.queryByRole("link", { name: "Invite collaborators" }), null);
@@ -95,7 +96,7 @@ describe("retained chat and overview behavior", () => {
       fireEvent.click(screen.getByRole("button", { name: "Try again" }));
       await screen.findByText("Project status: Active.");
       assert.equal(reads, 2);
-      assert.ok(screen.getByRole("link",{name:"Open Start a chat"}));
+      assert.ok(screen.getByRole("link",{name:"Start a chat"}));
       assert.equal(screen.queryByRole("link",{name:/Configure an endpoint/}),null);
     } finally {
       apiClient.projectOverview = original;

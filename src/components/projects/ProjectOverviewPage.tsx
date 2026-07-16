@@ -63,7 +63,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
   const headerSubtitle = overview?.owner
     ? `Owner: ${memberLabel(overview.owner)} · Your access: ${roleLabel(overview.memberRole)} · Status: ${lifecycleLabel(lifecycleStatus)}`
     : state === "loading" ? "Loading project status..." : "Project status is unavailable.";
-  const header = <PageHeader title="Project overview" subtitle={headerSubtitle} actions={primaryStep ? <Link href={`${base}/${primaryStep.href}`} className="inline-flex min-h-9 items-center justify-center rounded-sm bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90">Open {primaryStep.label}</Link> : undefined} />;
+  const header = <PageHeader title={overview?.project.name ?? "Project overview"} subtitle={headerSubtitle} actions={primaryStep ? <Link href={`${base}/${primaryStep.href}`} className="inline-flex min-h-9 items-center justify-center rounded-sm bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90">{primaryStep.label}</Link> : undefined} />;
 
   return <PageLayout header={header}>
     {state === "loading" ? <PageState><span className="text-secondary">Loading project overview...</span></PageState> : null}
