@@ -74,6 +74,23 @@ describe("profile and settings pages", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("keeps profile fields stable while saving and adopts saved server values", async () => {
+    const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile };
+    let finishSave!: (value: Profile) => void;
+    apiClient.profile = async () => profile;
+    apiClient.updateProfile = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      render(<ProfilePage />);
+      const displayName = await screen.findByRole("textbox", { name: "Display name" }) as HTMLInputElement;
+      fireEvent.change(displayName, { target: { value: "  Canonical owner  " } });
+      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      await waitFor(() => assert.equal(displayName.disabled, true));
+      await act(async () => finishSave({ ...profile, preferences: { ...profile.preferences, displayName: "Canonical owner" } }));
+      assert.equal(displayName.value, "Canonical owner");
+      assert.equal(displayName.disabled, false);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows archived project read-only state and keeps ownership transfer owner-scoped", async () => {
     const original={projectSettings:apiClient.projectSettings,currentIdentity:apiClient.currentIdentity,members:apiClient.members,unarchiveProject:apiClient.unarchiveProject};
     apiClient.projectSettings=async()=>({...settings,project:{...settings.project,ownerUserId:"user_1",lifecycleStatus:"archived"}});
