@@ -393,6 +393,7 @@ export interface ProductStore {
   expireProjectProviderSettlements(now: string): Promise<number>;
   pruneProjectProviderSettlements(before: string, limit: number): Promise<number>;
   listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]>;
+  measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>;
   measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlert["type"];metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
   upsertActiveProjectAlert(alert: ProjectAlert): Promise<ProjectAlert>;
   listActiveProjectAlerts(projectId: string): Promise<ProjectAlert[]>;

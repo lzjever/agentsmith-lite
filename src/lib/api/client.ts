@@ -92,11 +92,11 @@ export interface ProjectResourceUsage {
   updatedAt: string;
 }
 export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes";
-export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { kind: "project_lifetime"; startedAt: string; resetAt: null; } | { kind:"rolling";windowSeconds:number;startedAt:string;resetAt:string };
+export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { kind: "project_lifetime"; startedAt: string; resetAt: null; } | { kind:"rolling";windowSeconds:number;startedAt:string;resetAt:string|null };
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
 export interface ProjectUsageEndpoint { endpointId: string; endpointName: string; requests: number; tokens: number; cost: number;limits?:ProjectUsageLimit[]; }
-export interface ProjectUsageOverview { projectId: string; usage: ProjectResourceUsage; limits: ProjectUsageLimit[]; daily: ProjectUsageDay[]; trendTotals: { requests: number; tokens: number; cost: number }; endpoints: ProjectUsageEndpoint[]; selectedEndpointId: string | null;currentUser?:{userId:string;requests:number;tokens:number;cost:number}; }
+export interface ProjectUsageOverview { projectId: string; usage: ProjectResourceUsage; limits: ProjectUsageLimit[]; daily: ProjectUsageDay[]; trendTotals: { requests: number; tokens: number; cost: number }; endpoints: ProjectUsageEndpoint[]; selectedEndpointId: string | null; }
 export interface ProjectAlert { id: string; projectId: string; type: "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure"; status: "active" | "resolved" | "dismissed"; deliveryStatus: "not_configured" | "pending" | "delivered" | "failed";ruleId?:string|null;metric?:string|null;metricValue?:number|null;threshold?:number|null;endpointId?:string|null;acknowledgedAt?:string|null;acknowledgedBy?:string|null;silencedUntil?:string|null; createdAt: string; updatedAt: string; resolvedAt: string | null; dismissedAt: string | null; }
 export type ProjectAlertType = ProjectAlert["type"];
 export interface ProjectAlertRule { id: string; projectId: string;name?:string; alertType: ProjectAlertType;metric?:string;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string}; enabled: boolean; createdAt: string; updatedAt: string; }

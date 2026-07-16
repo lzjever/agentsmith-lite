@@ -13,22 +13,30 @@ describe("project usage overview", () => {
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Usage project" });
     const endpoints = [endpoint("endpoint_1", project.id, "Primary"), endpoint("endpoint_2", project.id, "Secondary")];
     await Promise.all(endpoints.map((value) => store.createEndpoint(value)));
-    await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 5, providerTokensLimit: 100, providerCostLimit: 10 });
+    const teammate = userRecord("teammate", "teammate@example.test");
+    await store.createUser(teammate);
+    await store.upsertProjectMembership({ projectId:project.id, userId:teammate.id, role:"member", createdAt:project.createdAt, updatedAt:project.updatedAt });
+    await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 5, providerTokensLimit: 100, providerCostLimit: 10, endpointWindows:[{ endpointId:"endpoint_1", metric:"providerRequests", limit:5, windowSeconds:3600 }, { endpointId:"endpoint_1", metric:"providerTokens", limit:100, windowSeconds:3600 }, { endpointId:"endpoint_2", metric:"providerRequests", limit:5, windowSeconds:3600 }] });
     const now = new Date().toISOString();
-    await settle(store, "settlement_1", project.id, "endpoint_1", now, { tokens: 7, cost: 1.5 });
-    await settle(store, "settlement_2", project.id, "endpoint_2", now, { tokens: 3, cost: 0.5 });
-    await store.reserveProjectProviderSettlement({ id: "settlement_reserved", projectId: project.id, taskId: null, endpointId: "endpoint_1", reservedTokens: 0, reservedCost: 0, reservedAt: now, expiresAt: new Date(Date.parse(now) + 60_000).toISOString() });
+    await settle(store, "settlement_1", project.id, "endpoint_1", user.id, now, { tokens: 7, cost: 1.5 });
+    await settle(store, "settlement_2", project.id, "endpoint_1", teammate.id, now, { tokens: 3, cost: 0.5 });
+    await store.reserveProjectProviderSettlement({ id: "settlement_reserved", projectId: project.id, taskId: null, endpointId: "endpoint_1", actorId:user.id, reservedTokens: 5, reservedCost: 0.25, reservedAt: now, expiresAt: new Date(Date.parse(now) + 60_000).toISOString() });
     assert.deepEqual((await store.listSettledProjectProviderSettlements(project.id, new Date(Date.parse(now) - 60_000).toISOString())).map((settlement) => settlement.id), ["settlement_1", "settlement_2"]);
 
     const overview = await services.policies.getUsageOverview(user.id, project.id);
     assert.equal(overview.daily.length, 30);
     assert.deepEqual(overview.limits.find((limit) => limit.metric === "activeTasks"), { metric: "activeTasks", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });
-    assert.deepEqual(overview.limits.find((limit) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 10, limit: 100, remaining: 90, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
-    assert.deepEqual(overview.endpoints.map((value) => [value.endpointName, value.requests, value.tokens, value.cost]), [["Primary", 1, 7, 1.5], ["Secondary", 1, 3, 0.5]]);
+    assert.deepEqual(overview.limits.find((limit) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 15, limit: 100, remaining: 85, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
+    assert.deepEqual(overview.trendTotals, { requests:1, tokens:7, cost:1.5 });
+    assert.equal("currentUser" in overview,false);
+    assert.deepEqual(overview.endpoints.map((value) => [value.endpointName, value.requests, value.tokens, value.cost]), [["Primary", 2, 10, 2], ["Secondary", 0, 0, 0]]);
+    assert.deepEqual(overview.endpoints[0]?.limits?.map((limit) => [limit.metric,limit.current,limit.remaining]), [["providerRequests",2,3],["providerTokens",12,88]]);
+    assert.equal(overview.endpoints[1]?.limits?.[0]?.window.resetAt,null);
 
     const selected = await services.policies.getUsageOverview(user.id, project.id, "endpoint_2");
     assert.equal(selected.selectedEndpointId, "endpoint_2");
-    assert.deepEqual(selected.daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), { requests: 1, tokens: 3, cost: 0.5 });
+    assert.deepEqual(selected.daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), { requests: 0, tokens: 0, cost: 0 });
+    assert.equal("currentUser" in selected,false);
     await assert.rejects(() => services.policies.getUsageOverview(user.id, project.id, "missing"), /Endpoint not found/);
   });
 
@@ -47,5 +55,5 @@ describe("project usage overview", () => {
 });
 
 function endpoint(id: string, projectId: string, name: string): ModelEndpoint { const now = new Date().toISOString(); return { id, projectId, name, protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "model", credentialId: "", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: now, updatedAt: now }; }
-async function settle(store: ReturnType<typeof createLocalInMemoryProductStore>, id: string, projectId: string, endpointId: string, time: string, usage: { tokens: number; cost: number }): Promise<void> { await store.reserveProjectProviderSettlement({ id, projectId, taskId: null, endpointId, reservedTokens: 0, reservedCost: 0, reservedAt: time, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() }); await store.markProjectProviderSettlementDispatched(id, time); await store.markProjectProviderSettlementDelivered(id, time); await store.settleProjectProviderSettlement(id, usage, time); }
+async function settle(store: ReturnType<typeof createLocalInMemoryProductStore>, id: string, projectId: string, endpointId: string, actorId:string, time: string, usage: { tokens: number; cost: number }): Promise<void> { await store.reserveProjectProviderSettlement({ id, projectId, taskId: null, endpointId, actorId, reservedTokens: 0, reservedCost: 0, reservedAt: time, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() }); await store.markProjectProviderSettlementDispatched(id, time); await store.markProjectProviderSettlementDelivered(id, time); await store.settleProjectProviderSettlement(id, usage, time); }
 function userRecord(id: string, email: string): StoredUser { const now = new Date().toISOString(); return { id, email, emailVerified: true, passwordHash: "hash", createdAt: now, updatedAt: now }; }

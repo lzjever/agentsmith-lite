@@ -409,6 +409,7 @@ postgresDescribe("postgres product store", () => {
     await store.reserveProjectProviderSettlement({ id: "settlement_settled", projectId: "proj_ledger", taskId: null, endpointId: "endpoint_ledger", actorId: "user_ledger", reservedTokens: 512, reservedCost: 0.125, reservedAt: timestamp, expiresAt: "2026-07-04T00:00:01.000Z" });
     await store.markProjectProviderSettlementDispatched("settlement_settled", timestamp);
     await store.settleProjectProviderSettlement("settlement_settled", { tokens: 7, cost: 0.01 }, timestamp);
+    assert.deepEqual(await store.measureProjectProviderWindow({projectId:"proj_ledger",endpointId:"endpoint_ledger",actorId:"user_ledger",metric:"providerTokens",since:timestamp}),{current:7175,oldestReservedAt:timestamp});
     assert.equal(await store.expireProjectProviderSettlements("2026-07-04T00:00:02.000Z"), 3);
     const usage = await store.findProjectResourceUsage("proj_ledger");
     assert.equal(usage?.providerRequests, 3);

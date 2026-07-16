@@ -64,7 +64,7 @@ export function UsagePage({ projectId }: { projectId: string }) {
       header={
         <PageHeader
           title="Usage"
-          subtitle="Settled project and current-user usage."
+          subtitle="Your provider activity with project-wide limits."
           actions={
             <Button
               variant="quiet"

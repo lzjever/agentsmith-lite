@@ -23,15 +23,15 @@ test("usage overview returns project limits and server-filtered settled endpoint
     await post(api.baseUrl, "/api/v1/auth/bootstrap", { password: "admin-password" });
     const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
-    const { csrfToken } = await login.json() as { csrfToken: string };
+    const { csrfToken, user } = await login.json() as { csrfToken: string; user:{id:string} };
     const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "Usage" }, cookie, csrfToken);
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "Usage project" }, cookie, csrfToken);
     const credential = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "usage-secret" }, cookie, csrfToken);
     const first = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, endpointInput("Primary", credential.id), cookie, csrfToken);
     const second = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, endpointInput("Secondary", credential.id), cookie, csrfToken);
     const now = new Date().toISOString();
-    await settle(store, "settlement_primary", project.id, first.id, now, { tokens: 8, cost: 1.25 });
-    await settle(store, "settlement_secondary", project.id, second.id, now, { tokens: 2, cost: 0.25 });
+    await settle(store, "settlement_primary", project.id, first.id, user.id, now, { tokens: 8, cost: 1.25 });
+    await settle(store, "settlement_secondary", project.id, second.id, user.id, now, { tokens: 2, cost: 0.25 });
 
     const all = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie);
     assert.equal(all.daily.length, 30);
@@ -49,7 +49,7 @@ test("usage overview returns project limits and server-filtered settled endpoint
 });
 
 function endpointInput(name: string, credentialId: string) { return { name, protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "model", credentialId, capabilities: ["text"], requestTimeoutSecs: 30 }; }
-async function settle(store: ReturnType<typeof createLocalInMemoryProductStore>, id: string, projectId: string, endpointId: string, time: string, usage: { tokens: number; cost: number }): Promise<void> { await store.reserveProjectProviderSettlement({ id, projectId, taskId: null, endpointId, reservedTokens: 0, reservedCost: 0, reservedAt: time, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() }); await store.markProjectProviderSettlementDispatched(id, time); await store.markProjectProviderSettlementDelivered(id, time); await store.settleProjectProviderSettlement(id, usage, time); }
+async function settle(store: ReturnType<typeof createLocalInMemoryProductStore>, id: string, projectId: string, endpointId: string, actorId:string, time: string, usage: { tokens: number; cost: number }): Promise<void> { await store.reserveProjectProviderSettlement({ id, projectId, taskId: null, endpointId, actorId, reservedTokens: 0, reservedCost: 0, reservedAt: time, expiresAt: new Date(Date.parse(time) + 60_000).toISOString() }); await store.markProjectProviderSettlementDispatched(id, time); await store.markProjectProviderSettlementDelivered(id, time); await store.settleProjectProviderSettlement(id, usage, time); }
 async function post(base: string, pathname: string, body: unknown): Promise<Response> { return fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
 async function json(base: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf }, body: JSON.stringify(body) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
 async function get(base: string, pathname: string, cookie: string): Promise<any> { const response = await fetch(base + pathname, { headers: { cookie } }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }

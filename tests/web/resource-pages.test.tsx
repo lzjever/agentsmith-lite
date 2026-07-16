@@ -127,9 +127,10 @@ describe("project resource pages", () => {
       await screen.findByText("Project limits");
       await screen.findByText("2.0 KiB");
       for (const label of ["Active tasks", "Provider requests", "Provider tokens", "Provider cost", "Project file storage"]) assert.ok(screen.getByText(label));
-      assert.ok(screen.getByText(/Settled provider requests from the last 30 days/));
+      assert.ok(screen.getByText(/Your settled provider requests/));
       assert.ok(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
-      fireEvent.click(screen.getByRole("combobox", { name: "Usage endpoint" }));
+      assert.equal(screen.queryByRole("combobox", { name: "Usage endpoint" }), null);
+      fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await screen.findByText("No settled provider usage in this period.");
       assert.deepEqual(usageCalls, [undefined, "endpoint_2"]);

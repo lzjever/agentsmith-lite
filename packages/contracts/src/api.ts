@@ -114,7 +114,7 @@ export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerT
 export type ProjectUsageWindow =
   | { kind: "current_gauge"; resetAt: null }
   | { kind: "project_lifetime"; startedAt: ISODateString; resetAt: null }
-  | { kind: "rolling"; windowSeconds: number; startedAt: ISODateString; resetAt: ISODateString };
+  | { kind: "rolling"; windowSeconds: number; startedAt: ISODateString; resetAt: ISODateString | null };
 
 export interface ProjectUsageLimit {
   metric: ProjectUsageMetric;
@@ -148,7 +148,6 @@ export interface ProjectUsageOverview {
   trendTotals: { requests: number; tokens: number; cost: number };
   endpoints: ProjectUsageEndpoint[];
   selectedEndpointId: string | null;
-  currentUser?: { userId: string; requests: number; tokens: number; cost: number };
 }
 
 export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure";

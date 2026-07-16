@@ -218,6 +218,22 @@ describe("project resource policy", () => {
     assert.deepEqual({ requests:usage.providerRequests, tokens:usage.providerTokens, cost:usage.providerCost }, { requests:1, tokens:2, cost:0.5 });
   });
 
+  it("keeps endpoint rolling windows scoped to each user", async () => {
+    const store=createInMemoryProductStore();
+    const services=createApplicationServices({store,dataRoot:"/tmp/agentsmith-user-window",builtinAdminPassword:"admin-password"});
+    const {user}=await services.auth.loginAfterBootstrap("admin-password");
+    const workspace=await services.workspaces.createWorkspace(user.id,{name:"W"});
+    const project=await services.workspaces.createProject(user.id,workspace.id,{name:"P"});
+    const endpoint=endpointRecord(project.id);
+    const teammate=await services.auth.loginExternalPrincipal({issuer:"https://idp.test",subject:"window-teammate",email:"window-teammate@example.test",emailVerified:true});
+    await store.createEndpoint(endpoint);
+    await services.policies.updatePolicy(user.id,project.id,{endpointWindows:[{endpointId:endpoint.id,metric:"providerRequests",limit:1,windowSeconds:3600}]});
+
+    await services.policies.reserveProvider(project.id,user.id,endpoint.id);
+    await assert.rejects(()=>services.policies.reserveProvider(project.id,user.id,endpoint.id),/provider requests limit reached/i);
+    await services.policies.reserveProvider(project.id,teammate.user.id,endpoint.id);
+  });
+
   it("patches nullable limits without replacing concurrent policy fields", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-patch", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");

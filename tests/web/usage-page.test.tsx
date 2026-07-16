@@ -22,13 +22,14 @@ describe("usage page", () => {
       await screen.findByRole("heading", { name: "Project limits" });
       assert.ok(screen.getByRole("heading", { name: "Usage scope" }));
       assert.ok(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
-      assert.ok(screen.getByText("The endpoint filter applies to your provider usage and the 30-day provider trend. Project limits and endpoint totals remain project-wide."));
+      assert.equal(screen.queryByRole("combobox", { name: "Usage endpoint" }), null);
+      assert.ok(screen.getByText("The endpoint filter applies to your 30-day provider usage. Project lifetime limits and settled endpoint totals remain project-wide; rolling endpoint limits show your capacity."));
       assert.ok(screen.getByText("58 remaining of 100"));
       assert.equal(screen.getAllByText("Current state").length, 2);
-      assert.equal(screen.getAllByText(/Project lifetime/).length, 3);
+      assert.equal(screen.getAllByText(/^Project lifetime · started/).length, 3);
       assert.equal(screen.queryByText("Current usage is measured for the project lifetime. It does not reset."), null);
       assert.ok(screen.getByLabelText("30-day request trend"));
-      fireEvent.click(screen.getByRole("combobox", { name: "Usage endpoint" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await screen.findByText("No settled provider usage in this period.");
       await waitFor(() => assert.deepEqual(requested, [undefined, "endpoint_2"]));
