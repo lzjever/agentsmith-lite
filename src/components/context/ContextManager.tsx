@@ -1,7 +1,7 @@
 "use client";
 
 import { FilePlus2, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type ContextContentType, type ContextEntry, type ContextList, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -40,14 +40,17 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const loadVersion = useRef(0);
   const projectScope = scope === "project_shared" || scope === "project_personal";
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     setState("loading");
     try {
       const next = await apiClient.contexts({ workspaceId, scope, ...(projectScope && projectId ? { projectId } : {}) });
+      if (version !== loadVersion.current) return;
       setResult(next); setSelectedKey(next.items[0]?.contextKey); setError(""); setState("ready");
-    } catch (reason) { setError(message(reason)); setState("error"); }
+    } catch (reason) { if (version === loadVersion.current) { setError(message(reason)); setState("error"); } }
   }, [projectId, projectScope, scope, workspaceId]);
 
   useEffect(() => { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); }, [load]);

@@ -5,12 +5,28 @@ import React from "react";
 import { ApiError, apiClient, type ContextList } from "../../src/lib/api/client.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { ContextManager } = await import("../../src/components/context/ContextManager.js");
 
 afterEach(() => cleanup());
 
 describe("context manager", () => {
+  it("keeps the newest context scope response", async () => {
+    const original = { contexts: apiClient.contexts };
+    let resolveShared!: (value: ContextList) => void;
+    const entry = (scope: "workspace_shared" | "workspace_personal", contextKey: string): ContextList => ({ items: [{ id: contextKey, workspaceId: "workspace_1", projectId: null, ownerUserId: scope === "workspace_personal" ? "user_1" : null, scope, contextKey, content: contextKey, contentType: "text", version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }], canWrite: true });
+    apiClient.contexts = async (input) => input.scope === "workspace_shared" ? new Promise((resolve) => { resolveShared = resolve; }) : entry("workspace_personal", "personal.current");
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      await waitFor(() => assert.ok(resolveShared));
+      fireEvent.click(screen.getByRole("tab", { name: "My workspace" }));
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Key" }) as HTMLInputElement).value, "personal.current"));
+      await act(async () => { resolveShared(entry("workspace_shared", "shared.stale")); await Promise.resolve(); });
+      assert.equal((screen.getByRole("textbox", { name: "Key" }) as HTMLInputElement).value, "personal.current");
+      assert.equal(screen.queryByText("shared.stale"), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("loads scopes, keeps read-only entries non-editable, and saves through the API", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext, deleteContext: apiClient.deleteContext };
     const calls: Array<Record<string, unknown>> = [];
