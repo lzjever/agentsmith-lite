@@ -4,7 +4,7 @@ import { ArrowLeft, CircleAlert, Loader2, RefreshCw, TerminalSquare, Trash2, X }
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskCapabilities } from "../../lib/api/client";
-import { apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
+import { ApiError, apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -135,14 +135,30 @@ export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly =
       mutationKeys.complete("task-cancel", taskId);
       refresh();
       toast.success("Task cancellation requested");
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 403) {
+        setCapabilities((current) => current ? { ...current, cancelTask: false } : current);
+        setCancelOpen(false);
+        await loadTask(true);
+      }
+      throw reason;
     } finally {
       setCancelling(false);
     }
   }
   async function deleteTask() {
-    await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
-    mutationKeys.complete("task-delete", taskId);
-    window.location.assign(basePath);
+    try {
+      await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
+      mutationKeys.complete("task-delete", taskId);
+      window.location.assign(basePath);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 403) {
+        setCapabilities((current) => current ? { ...current, deleteTask: false } : current);
+        setDeleteOpen(false);
+        await loadTask(true);
+      }
+      throw reason;
+    }
   }
 
   if (taskState === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;

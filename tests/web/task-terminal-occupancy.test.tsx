@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it, mock } from "node:test";
 import React from "react";
 import type { TaskCapabilities, TaskInteractionStreamEvent } from "../../src/lib/api/client.js";
-import { apiClient, type Task, type TaskArtifact } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Task, type TaskArtifact } from "../../src/lib/api/client.js";
 
 const sockets: TestWebSocket[] = [];
 class TestWebSocket {
@@ -151,6 +151,27 @@ describe("TaskDetailPage terminal occupancy", () => {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
       await screen.findByText("Conversation could not be loaded.");
       assert.ok(screen.getByRole("button", { name: "Cancel task" }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("removes the cancel action when permission is revoked during cancellation", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, cancelTask: apiClient.cancelTask };
+    let detailReads = 0;
+    apiClient.taskDetail = async () => ({ task, capabilities: detailReads++ === 0 ? available : { ...available, cancelTask: false } });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
+    apiClient.cancelTask = async () => { throw new ApiError(403, "Task cancellation permission was revoked."); };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel task" }));
+      await screen.findByRole("alertdialog", { name: "Cancel task?" });
+      fireEvent.click(screen.getAllByRole("button", { name: "Cancel task" }).at(-1)!);
+      await waitFor(() => assert.equal(detailReads, 2));
+      assert.equal(screen.queryByRole("button", { name: "Cancel task" }), null);
+      assert.equal(screen.queryByRole("alertdialog", { name: "Cancel task?" }), null);
     } finally {
       Object.assign(apiClient, original);
     }
