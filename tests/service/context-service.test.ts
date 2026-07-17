@@ -70,6 +70,44 @@ describe("context service", () => {
     assert.equal(unchanged.contextKey, "notes");
   });
 
+  it("keeps personal and shared context read-only after its project or workspace is archived", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "archive-owner", email: "archive-owner@example.test", emailVerified: true });
+    const viewer = await services.auth.loginExternalPrincipal({ issuer, subject: "archive-viewer", email: "archive-viewer@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: viewer.user.email }, "viewer");
+    await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
+    const projectPersonal = { workspaceId: workspace.id, projectId: project.id, scope: "project_personal" as const };
+    const workspacePersonal = { workspaceId: workspace.id, scope: "workspace_personal" as const };
+
+    await services.contexts.upsert(viewer.user.id, { ...projectPersonal, contextKey: "notes", content: "private", contentType: "text" });
+    assert.equal((await services.contexts.list(viewer.user.id, projectPersonal)).canWrite, true);
+
+    await services.settings.archiveProject(owner.user.id, project.id);
+    assert.equal((await services.contexts.list(viewer.user.id, projectPersonal)).canWrite, false);
+    assert.equal((await services.contexts.list(owner.user.id, { ...projectPersonal, scope: "project_shared" })).canWrite, false);
+    await assert.rejects(
+      () => services.contexts.upsert(viewer.user.id, { ...projectPersonal, contextKey: "blocked", content: "no", contentType: "text" }),
+      message(409, "Project is archived")
+    );
+
+    await services.settings.unarchiveProject(owner.user.id, project.id);
+    await services.settings.archiveWorkspace(owner.user.id, workspace.id);
+    assert.equal((await services.contexts.list(viewer.user.id, projectPersonal)).canWrite, false);
+    assert.equal((await services.contexts.list(viewer.user.id, workspacePersonal)).canWrite, false);
+    assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_shared" })).canWrite, false);
+    await assert.rejects(
+      () => services.contexts.upsert(viewer.user.id, { ...projectPersonal, contextKey: "blocked", content: "no", contentType: "text" }),
+      message(409, "Workspace is archived")
+    );
+    await assert.rejects(
+      () => services.contexts.upsert(viewer.user.id, { ...workspacePersonal, contextKey: "blocked", content: "no", contentType: "text" }),
+      message(409, "Workspace is archived")
+    );
+  });
+
   it("replays context creation, versioned updates, and deletion", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
     const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "context-replay-owner", email: "context-replay-owner@example.test", emailVerified: true });
@@ -111,3 +149,6 @@ describe("context service", () => {
 });
 
 function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }
+function message(expectedStatus: number, expectedMessage: string) {
+  return (error: unknown) => error instanceof ProductError && error.statusCode === expectedStatus && error.message === expectedMessage;
+}

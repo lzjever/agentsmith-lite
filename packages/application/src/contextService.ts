@@ -137,18 +137,32 @@ export class ContextService {
       const projectId = target.projectId!;
       const project = await this.workspaces.requireProjectForUser(userId, projectId, action === "write" && target.scope === "project_shared" ? "admin" : "view");
       if (project.workspaceId !== target.workspaceId) throw new NotFoundError("Project not found");
+      const workspace = await this.workspaces.requireWorkspaceForUser(userId, target.workspaceId, "view");
+      const active = lifecycleIsActive(project.lifecycleStatus) && lifecycleIsActive(workspace.lifecycleStatus);
       if (target.scope === "project_personal" && action === "write") {
-        await this.workspaces.requireProjectForUser(userId, projectId, "view");
+        requireActiveLifecycle("Project", project.lifecycleStatus);
+        requireActiveLifecycle("Workspace", workspace.lifecycleStatus);
       }
       const membership = await this.store.findProjectMembership(projectId, userId);
-      return { canWrite: target.scope === "project_personal" || membership?.role === "owner" || membership?.role === "admin" };
+      return { canWrite: active && (target.scope === "project_personal" || membership?.role === "owner" || membership?.role === "admin") };
     }
 
-    await this.workspaces.requireWorkspaceForUser(userId, target.workspaceId, action === "write" && target.scope === "workspace_shared" ? "admin" : "view");
+    const workspace = await this.workspaces.requireWorkspaceForUser(userId, target.workspaceId, action === "write" && target.scope === "workspace_shared" ? "admin" : "view");
+    const active = lifecycleIsActive(workspace.lifecycleStatus);
+    if (target.scope === "workspace_personal" && action === "write") requireActiveLifecycle("Workspace", workspace.lifecycleStatus);
     const membership = await this.store.findWorkspaceMembership(target.workspaceId, userId);
     const isWorkspaceAdmin = membership?.role === "owner" || membership?.role === "admin";
-    return { canWrite: target.scope === "workspace_personal" || isWorkspaceAdmin };
+    return { canWrite: active && (target.scope === "workspace_personal" || isWorkspaceAdmin) };
   }
+}
+
+function lifecycleIsActive(status: "active" | "archived" | "deleting" | undefined): boolean {
+  return status === undefined || status === "active";
+}
+
+function requireActiveLifecycle(kind: "Project" | "Workspace", status: "active" | "archived" | "deleting" | undefined): void {
+  if (lifecycleIsActive(status)) return;
+  throw new ProductError(status === "deleting" ? `${kind} is being deleted` : `${kind} is archived`, 409);
 }
 
 function normalizeTarget(target: ContextRequestTarget): Required<ContextRequestTarget> {
