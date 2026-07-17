@@ -83,6 +83,16 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
   async function recoverMutation(reason: unknown, retry: () => void) {
     const accessDenied = isReadOnlyMutationError(reason);
+    if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+      setWorkspace(undefined);
+      setMembers([]);
+      setSelected(undefined);
+      setOpen(false);
+      setMemberToRemove(undefined);
+      setMutationError(undefined);
+      setState("error");
+      return;
+    }
     try {
       await refresh();
     } catch {

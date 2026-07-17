@@ -123,6 +123,18 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     return message(reason);
   }
 
+  function invalidateRemovedAccess(reason: unknown): boolean {
+    if (!(reason instanceof ApiError) || (reason.status !== 403 && reason.status !== 404)) return false;
+    setMembers([]);
+    setWorkspaceMembers([]);
+    setCapabilities(undefined);
+    setSelected(undefined);
+    setRoleError(undefined);
+    setError(reason.message);
+    setState("error");
+    return true;
+  }
+
   function openInvite() {
     mutationKeys.clear("project-member.add");
     setInviteError("");
@@ -149,7 +161,9 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.add", projectId);
-      setInviteError(denied(reason));
+      const detail = denied(reason);
+      if (invalidateRemovedAccess(reason)) return;
+      setInviteError(detail);
       await Promise.allSettled([refreshMembers(), loadCandidates()]);
     } finally {
       if (mounted.current) setBusyUserId(undefined);
@@ -172,6 +186,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       const requestIdentity = `${member.userId}:${nextRole}`;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.change", requestIdentity);
       const detail = denied(reason);
+      if (invalidateRemovedAccess(reason)) return;
       let refreshed: ProjectMember[] | undefined;
       try { refreshed = await refreshMembers(); } catch {}
       if (!mounted.current) return;
@@ -201,6 +216,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.remove", member.userId);
       const detail = denied(reason);
+      if (invalidateRemovedAccess(reason)) return;
       let refreshed: ProjectMember[] | undefined;
       try { refreshed = await refreshMembers(); } catch {}
       if (!mounted.current) return;

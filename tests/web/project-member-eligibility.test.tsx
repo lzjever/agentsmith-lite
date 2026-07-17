@@ -135,6 +135,25 @@ describe("project member eligibility", () => {
     } finally { restoreClient(original); }
   });
 
+  it("clears the member directory when a mutation discovers project access was removed", async () => {
+    const original = snapshotClient();
+    apiClient.members = async () => [owner];
+    apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.addMember = async () => { throw new ApiError(403, "Project access denied"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Workspace member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Candidate Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+
+      await screen.findByRole("heading", { name: "Members unavailable" });
+      assert.equal(screen.queryByText("Owner"), null);
+      assert.equal(screen.queryByRole("dialog", { name: "Add member" }), null);
+    } finally { restoreClient(original); }
+  });
+
   it("explains when every workspace member already has project access", async () => {
     const original = snapshotClient();
     apiClient.members = async () => [owner];

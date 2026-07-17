@@ -131,6 +131,23 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("clears workspace members when a mutation discovers access was removed", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner];
+    apiClient.addWorkspaceMember = async () => { throw new ApiError(403, "Workspace access denied"); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Email" }), { target: { value: "member@example.test" } });
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+
+      await screen.findByRole("heading", { name: "Workspace members unavailable" });
+      assert.equal(screen.queryByText("Owner"), null);
+      assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a successful member addition when the following directory refresh fails", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
     const member: WorkspaceMember = { workspaceId: workspace.id, userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp };
