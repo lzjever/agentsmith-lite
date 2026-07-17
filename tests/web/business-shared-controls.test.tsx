@@ -30,6 +30,7 @@ describe("business shared controls", () => {
     await waitFor(() => assert.equal(changes.length, 1));
     assert.equal(changes[0]?.credentialId, credentials[0]!.id);
     assert.equal(changes[0]?.baseUrl, credentials[0]!.baseUrl);
+    assert.equal((screen.getByLabelText("Base URL") as HTMLInputElement).readOnly, true);
     fireEvent.click(screen.getByRole("checkbox", { name: "Tool calls" }));
     await waitFor(() => assert.deepEqual(changes.at(-1)?.capabilities, ["text", "tool_calls"]));
     view.rerender(<EndpointHarness saving onChange={() => undefined} />);

@@ -111,6 +111,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
 
   const canManage = capabilitiesState === "ready" && capabilities?.canManageEndpoints === true;
   const canConfigure = canManage && credentialsState === "ready" && credentials.length > 0;
+  const mutationBusy = saving || discovering || checkingId !== undefined;
 
   function invalidateDiscovery() {
     discoveryRevision.current += 1;
@@ -124,7 +125,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
 
   function create() {
-    if (!canConfigure) return;
+    if (!canConfigure || mutationBusy) return;
     invalidateDiscovery();
     setEditing(undefined);
     setInput(emptyEndpointInput());
@@ -133,7 +134,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setDialogOpen(true);
   }
   function edit(endpoint: Endpoint) {
-    if (!canConfigure) return;
+    if (!canConfigure || mutationBusy) return;
     invalidateDiscovery();
     setEditing(endpoint);
     setInput(endpointInputForEdit(endpoint));
@@ -149,7 +150,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canConfigure || actionProjectId !== projectId || input.capabilities.length === 0 || (editing !== undefined && !endpointInputChanged(input, editing))) return;
+    if (!canConfigure || mutationBusy || actionProjectId !== projectId || input.capabilities.length === 0 || (editing !== undefined && !endpointInputChanged(input, editing))) return;
     const revision = projectRevision.current;
     invalidateDiscovery();
     setSaving(true);
@@ -169,7 +170,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     }
   }
   async function discoverModels() {
-    if (!canConfigure) return;
+    if (!canConfigure || mutationBusy) return;
     const projectEpoch = projectRevision.current;
     const revision = ++discoveryRevision.current;
     setDiscovering(true);
@@ -194,7 +195,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     }
   }
   async function recheck(endpoint: Endpoint) {
-    if (!canManage) return;
+    if (!canManage || mutationBusy) return;
     const revision = projectRevision.current;
     setCheckingId(endpoint.id);
     try {
@@ -211,7 +212,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     }
   }
   async function remove() {
-    if (!deleting || !canManage) return;
+    if (!deleting || !canManage || mutationBusy) return;
     const revision = projectRevision.current;
     setSaving(true);
     try {
@@ -229,18 +230,19 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
 
   function refresh() {
+    if (mutationBusy) return;
     void load();
     loadDependencies();
   }
 
   const needsCredential = credentialsState === "ready" && credentials.length === 0;
-  return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible Chat Completions connections for this project." actions={<><Button variant="quiet" size="icon" aria-label="Refresh endpoints" title="Refresh endpoints" onClick={refresh}><RefreshCw size={17} /></Button>{canConfigure ? <Button onClick={create}><Plus size={16} />Create endpoint</Button> : null}</>} />}>
+  return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible Chat Completions connections for this project." actions={<><Button variant="quiet" size="icon" aria-label="Refresh endpoints" title="Refresh endpoints" disabled={mutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>{canConfigure ? <Button disabled={mutationBusy} onClick={create}><Plus size={16} />Create endpoint</Button> : null}</>} />}>
     {credentialsState === "error" ? <DependencyError message={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
     {capabilitiesState === "error" ? <DependencyError message={`${capabilitiesError} Endpoint management is disabled until project permissions can be loaded.`} /> : null}
     {state === "loading" ? <PageState><span className="text-secondary">Loading endpoints...</span></PageState> : null}
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
     {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before starting a chat or task." : "An administrator can add an endpoint before chat or task work begins."}</p>{needsCredential ? <CredentialsLink /> : canConfigure ? <Button onClick={create}><Plus size={16} />Create endpoint</Button> : null}</div></PageState> : null}
-    {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <div className="flex flex-wrap items-center justify-between gap-3 border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning"><span>{canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."}</span><CredentialsLink /></div> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)} · {endpoints.filter((endpoint) => endpoint.hasCredentialRef).length} configured</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} canManage={canManage} canEdit={canConfigure} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
+    {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <div className="flex flex-wrap items-center justify-between gap-3 border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning"><span>{canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."}</span><CredentialsLink /></div> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)} · {endpoints.filter((endpoint) => endpoint.hasCredentialRef).length} configured</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} canManage={canManage} canEdit={canConfigure} busy={mutationBusy} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
     <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} canSave={editing === undefined || endpointInputChanged(input, editing)} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
     <DeleteEndpointDialog endpoint={deleting?.projectId === projectId ? deleting : undefined} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
   </PageLayout>;

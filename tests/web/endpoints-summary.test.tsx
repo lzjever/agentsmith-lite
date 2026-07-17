@@ -121,6 +121,29 @@ describe("endpoint dependencies", () => {
       Object.assign(apiClient, original);
     }
   });
+
+  it("locks endpoint actions while a health recheck is in flight", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, recheckEndpoint: apiClient.recheckEndpoint };
+    const second = { ...endpoint, id: "endpoint_2", name: "Second endpoint" };
+    let finishRecheck!: (value: Endpoint) => void;
+    apiClient.endpoints = async () => [endpoint, second];
+    apiClient.credentials = async () => [credential];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.recheckEndpoint = async () => new Promise((resolve) => { finishRecheck = resolve; });
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Check health for DeepSeek" }))[0]!);
+      await waitFor(() => assert.ok(finishRecheck));
+
+      for (const name of ["Refresh endpoints", "Create endpoint", "Check health for DeepSeek", "Check health for Second endpoint", "Edit DeepSeek", "Edit Second endpoint", "Delete DeepSeek", "Delete Second endpoint"]) {
+        for (const button of screen.getAllByRole("button", { name })) assert.equal((button as HTMLButtonElement).disabled, true, name);
+      }
+
+      await act(async () => finishRecheck(endpoint));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
 });
 describe("endpoint management", () => it("edits and discovers models with the credential binding projected by the API", async () => {
   const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels, updateEndpoint: apiClient.updateEndpoint, recheckEndpoint: apiClient.recheckEndpoint };
@@ -183,8 +206,9 @@ describe("endpoint management", () => it("edits and discovers models with the cr
 describe("endpoint model discovery", () => it("ignores models discovered for connection details that have since changed", async () => {
   const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels };
   let resolveDiscovery!: (value: Awaited<ReturnType<typeof apiClient.discoverEndpointModels>>) => void;
+  const otherCredential = { ...credential, id: "credential_2", name: "Other provider", baseUrl: "https://other.example.test/v1" };
   apiClient.endpoints = async () => [endpoint];
-  apiClient.credentials = async () => [credential];
+  apiClient.credentials = async () => [credential, otherCredential];
   apiClient.projectCapabilities = async () => manager;
   apiClient.discoverEndpointModels = async () => new Promise((resolve) => { resolveDiscovery = resolve; });
   try {
@@ -192,7 +216,8 @@ describe("endpoint model discovery", () => it("ignores models discovered for con
     fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
     await screen.findByRole("dialog", { name: "Edit endpoint" });
     fireEvent.click(screen.getByRole("button", { name: "Discover models" }));
-    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://other.example.test/v1" } });
+    fireEvent.change(document.querySelector("select")!, { target: { value: otherCredential.id } });
+    assert.equal((screen.getByLabelText("Base URL") as HTMLInputElement).value, otherCredential.baseUrl);
     resolveDiscovery({ models: ["model-from-old-connection"], health: { status: "healthy", checkedAt: "2026-07-12T00:00:00.000Z", errorCategory: null } });
     await waitFor(() => assert.equal(screen.getByRole("button", { name: "Discover models" }).textContent?.includes("Checking"), false));
     assert.equal(screen.queryByRole("combobox", { name: "Discovered models" }), null);

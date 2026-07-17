@@ -117,8 +117,8 @@ export function EndpointDialog({
               <Input
                 required
                 type="url"
+                readOnly
                 value={input.baseUrl}
-                onChange={(event) => set("baseUrl", event.target.value)}
               />
             </label>
             <div className="grid gap-2">
