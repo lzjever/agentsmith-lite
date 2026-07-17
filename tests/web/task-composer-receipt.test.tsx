@@ -4,7 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import React from "react";
 
 installDom();
-const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { TaskComposer } = await import("../../src/components/tasks/TaskComposer.js");
 
 afterEach(() => cleanup());
@@ -36,6 +36,17 @@ describe("task composer receipts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     assert.match((await screen.findByRole("alert")).textContent ?? "", /Delivery is unavailable/);
     assert.equal(composer.value, "Please continue");
+  });
+
+  it("locks queued message controls while sending a message", async () => {
+    let sendStarted = false;
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => { sendStarted = true; return new Promise(() => undefined); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+    fireEvent.change(screen.getByRole("textbox", { name:"Message" }), { target:{ value:"One more instruction" } });
+    fireEvent.click(screen.getByRole("button", { name:"Send message" }));
+    await waitFor(() => assert.equal(sendStarted, true));
+
+    assert.equal((screen.getByRole("button", { name:"Edit queued message" }) as HTMLButtonElement).disabled, true);
+    assert.equal((screen.getByRole("button", { name:"Delete queued message" }) as HTMLButtonElement).disabled, true);
   });
 });
 
