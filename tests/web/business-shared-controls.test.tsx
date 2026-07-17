@@ -60,6 +60,35 @@ describe("business shared controls", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reuses the project ownership operation key after a lost response", async () => {
+    const original = snapshotClient();
+    const keys: unknown[] = [];
+    let settingsReads = 0;
+    apiClient.projectSettings = async () => { settingsReads += 1; return projectSettings; };
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [{ projectId: "project_1", userId: "owner_1", role: "owner", displayName: "Owner Person", email: "owner@example.test", createdAt: timestamp, updatedAt: timestamp }, { projectId: "project_1", userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp }];
+    apiClient.transferProjectOwner = (async (...args: unknown[]) => {
+      keys.push(args[2]);
+      if (keys.length === 1) throw new Error("Response was lost");
+      return { transferred: true };
+    }) as typeof apiClient.transferProjectOwner;
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("combobox", { name: "New project owner" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Transfer ownership" })[0]!);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
+      await screen.findByText(/Response was lost/);
+      assert.equal(settingsReads, 2);
+
+      fireEvent.click(screen.getByRole("button", { name: "Transfer ownership" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+
+      assert.equal(typeof keys[0], "string");
+      assert.equal(keys[1], keys[0]);
+    } finally { restoreClient(original); }
+  });
+
   it("transfers workspace ownership from the shared owner Select", async () => {
     const original = snapshotClient();
     const transfers: string[] = [];

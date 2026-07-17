@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2, Users } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, notifyDirectoryChanged, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -22,6 +23,7 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
 
 function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
   const router = useRouter();
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const memberRequest = useRef(0);
@@ -82,13 +84,16 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     if (!settingsDirty || mutationBusy) return;
     setSaving(true);
     try {
-      const saved = await apiClient.updateProjectSettings(projectId, { name: projectName });
+      const requestIdentity = projectName.trim();
+      const saved = await apiClient.updateProjectSettings(projectId, { name: projectName }, mutationKeys.key("project-settings", requestIdentity));
+      mutationKeys.complete("project-settings", requestIdentity);
       if (!mounted.current) return;
       setData(saved);
       setProjectName(saved.project.name);
       notifyDirectoryChanged();
       toast.success("Project settings saved.");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("project-settings", projectName.trim());
       if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Project settings could not be saved."));
     } finally {
@@ -107,29 +112,36 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const mutationBusy=saving||lifecycleBusy||ownerBusy||deleteBusy;
   const settingsDirty = data !== undefined && projectName.trim() !== data.project.name;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data||mutationBusy)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);if(!mounted.current)return;setData({...data,project});notifyDirectoryChanged();toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
+  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"project-unarchive":"project-archive";setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId,mutationKeys.key(operation,projectId)):await apiClient.archiveProject(projectId,mutationKeys.key(operation,projectId));mutationKeys.complete(operation,projectId);if(!mounted.current)return;setData({...data,project});notifyDirectoryChanged();toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,projectId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data||!canTransferOwnership||mutationBusy)return;
     setOwnerBusy(true);
     try {
-      await apiClient.transferProjectOwner(projectId,ownerTarget);
+      await apiClient.transferProjectOwner(projectId,ownerTarget,mutationKeys.key("project-owner-transfer",ownerTarget));
+      mutationKeys.complete("project-owner-transfer",ownerTarget);
       if(!mounted.current)return;
       setData({...data,project:{...data.project,ownerUserId:ownerTarget}});
       notifyDirectoryChanged();
       setOwnerOpen(false);
       setOwnerTarget("");
       toast.success("Project ownership transferred.");
+    } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("project-owner-transfer",ownerTarget);
+      if (mounted.current) await load();
+      throw reason;
     } finally { if(mounted.current)setOwnerBusy(false); }
   }
   async function deleteProject() {
     if (mutationBusy) return;
     setDeleteBusy(true);
     try {
-      await apiClient.deleteProject(projectId);
+      await apiClient.deleteProject(projectId,mutationKeys.key("project-delete",projectId));
+      mutationKeys.complete("project-delete",projectId);
       if (!mounted.current) return;
       toast.success("Project deleted.");
       router.push(`/workspaces/${workspaceId}`);
     } catch (error) {
+      if (error instanceof ApiError) mutationKeys.complete("project-delete",projectId);
       if (!mounted.current) return;
       throw new Error(deletionMessage(error));
     } finally {
@@ -141,6 +153,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     setDeleteOpen(open);
     if (!open) {
       setDeleteName("");
+      mutationKeys.clear("project-delete");
     }
   }
 
@@ -154,9 +167,9 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" disabled={mutationBusy || !settingsDirty}><Save size={16} />{saving ? "Saving..." : "Save project"}</Button> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
       </form>
       {canArchive||canRestore?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p><Button className="mt-4" variant="outline" disabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)}><Archive size={16}/>{archived?"Unarchive project":"Archive project"}</Button></section>:null}
-      {canArchive?<ConfirmationDialog open={archiveOpen} onOpenChange={setArchiveOpen} title="Archive project" description="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." confirmText="Archive project" confirmDisabled={mutationBusy} onConfirm={setArchive}/>:null}
+      {canArchive?<ConfirmationDialog open={archiveOpen} onOpenChange={(open)=>{setArchiveOpen(open);if(!open)mutationKeys.clear("project-archive");}} title="Archive project" description="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." confirmText="Archive project" confirmDisabled={mutationBusy} onConfirm={setArchive}/>:null}
       {isOwner?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Transfer ownership</h2><p className="mt-1 text-sm text-secondary">Choose an existing project member as the new owner.</p>{memberState==="loading"?<p className="mt-4 text-sm text-secondary" role="status">Loading eligible project members...</p>:null}{memberState==="error"?<div className="mt-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">Project members could not be loaded.</span><Button variant="quiet" size="sm" aria-label="Retry member loading" disabled={mutationBusy} onClick={()=>void loadMembers()}><RefreshCw size={14}/>Retry</Button></div>:null}{memberState==="ready"&&ownerCandidates.length === 0 ? <p className="mt-4 text-sm text-secondary" role="status">There are no other project members eligible to become owner.</p> : null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><div className="grid w-64 gap-2"><Label htmlFor="project-owner-target">New project owner</Label><Select value={ownerTarget} onValueChange={setOwnerTarget} disabled={!canTransferOwnership||mutationBusy}><SelectTrigger id="project-owner-target"><SelectValue placeholder="Select a member" /></SelectTrigger><SelectContent>{ownerCandidates.map(member=><SelectItem key={member.userId} value={member.userId}>{memberLabel(member)}</SelectItem>)}</SelectContent></Select></div><Button variant="outline" disabled={!ownerTarget||!canTransferOwnership||mutationBusy} onClick={()=>setOwnerOpen(true)}>Transfer ownership</Button></div>:null}</section>:null}
-      {isOwner?<ConfirmationDialog open={ownerOpen} onOpenChange={setOwnerOpen} title="Transfer project ownership" description="The current owner becomes an administrator." confirmText="Transfer ownership" variant="default" confirmDisabled={!ownerTarget||!canTransferOwnership||mutationBusy} onConfirm={transferOwner}/>:null}
+      {isOwner?<ConfirmationDialog open={ownerOpen} onOpenChange={(open)=>{setOwnerOpen(open);if(!open)mutationKeys.clear("project-owner-transfer");}} title="Transfer project ownership" description="The current owner becomes an administrator." confirmText="Transfer ownership" variant="default" confirmDisabled={!ownerTarget||!canTransferOwnership||mutationBusy} onConfirm={transferOwner}/>:null}
       {canDelete ? <section className="mt-8 border-t border-danger/40 pt-6" aria-label="Danger zone"><h2 className="type-title">{lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"}</h2><p className="mt-1 text-sm text-secondary">{lifecycleStatus==="deleting"?"Previous cleanup did not finish. Continue deleting the remaining project-owned data.":"This permanently removes this project and its project-owned data."}</p><Button className="mt-4" variant="destructive-primary" aria-label={lifecycleStatus==="deleting"?"Continue project deletion":"Open project deletion confirmation"} disabled={mutationBusy} onClick={() => setDialogOpen(true)}><Trash2 size={16} />{lifecycleStatus==="deleting"?"Continue deletion":"Delete project"}</Button></section> : null}
       {canDelete ? <ConfirmationDialog open={deleteOpen} onOpenChange={setDialogOpen} title={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"} description={<><span>Type <strong className="text-foreground">{data.project.name}</strong> to permanently delete this project.</span><label className="mt-4 grid gap-2"><span className="text-xs font-medium text-foreground">Project name</span><Input aria-label="Project name confirmation" value={deleteName} onChange={(event) => setDeleteName(event.target.value)} disabled={mutationBusy} autoComplete="off" /></label></>} confirmText={deleteBusy ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} confirmDisabled={mutationBusy || deleteName !== data.project.name} onConfirm={deleteProject} errorContext="Project could not be deleted" /> : null}
     </> : null}
