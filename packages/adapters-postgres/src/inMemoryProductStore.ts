@@ -61,6 +61,8 @@ import type {
   ManagedProjectMembershipDeleteResult,
   ManagedProjectMembershipUpdateResult,
   ManagedWorkspaceMembershipUpdateResult,
+  CreateWorkspaceMembershipResult,
+  CreateProjectMembershipResult,
   PersistedAgentTask,
   PersistedTaskArtifact,
   PersistedTaskMessage,
@@ -215,6 +217,7 @@ export class InMemoryProductStore implements ProductStore {
   async findWorkspaceMembership(workspaceId:string,userId:string){return clone(this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,userId))??null)}
   async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return [...this.workspaceMemberships.values()].filter((member)=>member.workspaceId===workspaceId).map((member)=>this.workspaceMembershipView(member))}
   async upsertWorkspaceMembership(value:WorkspaceMembership){this.workspaceMemberships.set(workspaceMembershipKey(value.workspaceId,value.userId),clone(value));return clone(value)}
+  async createWorkspaceMembership(value:WorkspaceMembership):Promise<CreateWorkspaceMembershipResult>{const key=workspaceMembershipKey(value.workspaceId,value.userId);if(this.workspaceMemberships.has(key))return "already_exists";this.workspaceMemberships.set(key,clone(value));return clone(value)}
   async updateWorkspaceMembership(value:WorkspaceMembership){const key=workspaceMembershipKey(value.workspaceId,value.userId);if(!this.workspaceMemberships.has(key))return null;this.workspaceMemberships.set(key,clone(value));return clone(value)}
   async updateManagedWorkspaceMembershipRole(workspaceId:string,userId:string,role:ManagedWorkspaceMembershipRole,updatedAt:string):Promise<ManagedWorkspaceMembershipUpdateResult>{const workspace=this.workspaces.get(workspaceId),key=workspaceMembershipKey(workspaceId,userId),current=this.workspaceMemberships.get(key);if(!workspace||!current)return "not_found";if(workspace.ownerUserId===userId||current.role==="owner")return "owner";const updated={...current,role,updatedAt};this.workspaceMemberships.set(key,clone(updated));return clone(updated)}
   async revokeWorkspaceMembership(workspaceId:string,userId:string){
@@ -302,6 +305,8 @@ export class InMemoryProductStore implements ProductStore {
     if(!project||!this.workspaceMemberships.has(workspaceMembershipKey(project.workspaceId,membership.userId)))return null;
     return this.upsertProjectMembership(membership);
   }
+
+  async createProjectMembershipForWorkspaceMember(membership:ProjectMembership):Promise<CreateProjectMembershipResult>{const project=this.projects.get(membership.projectId),key=membershipKey(membership.projectId,membership.userId);if(!project||!this.workspaceMemberships.has(workspaceMembershipKey(project.workspaceId,membership.userId)))return "not_workspace_member";if(this.memberships.has(key))return "already_exists";this.memberships.set(key,clone(membership));return clone(membership)}
 
   async updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null> {
     const key = membershipKey(membership.projectId, membership.userId);

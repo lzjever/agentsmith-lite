@@ -322,6 +322,8 @@ export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_c
 export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
 export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
 export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
+export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
+export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
 
 export interface ProductStore {
   readonly observedExternalModelCalls: number;
@@ -360,6 +362,7 @@ export interface ProductStore {
   findWorkspaceMembership(workspaceId: string, userId: string): Promise<WorkspaceMembership | null>;
   listWorkspaceMemberships(workspaceId: string): Promise<WorkspaceMembershipView[]>;
   upsertWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership>;
+  createWorkspaceMembership(membership: WorkspaceMembership): Promise<CreateWorkspaceMembershipResult>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
   updateManagedWorkspaceMembershipRole(workspaceId: string, userId: string, role: ManagedWorkspaceMembershipRole, updatedAt: string): Promise<ManagedWorkspaceMembershipUpdateResult>;
   revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<"revoked" | "not_found" | "owner">;
@@ -387,6 +390,7 @@ export interface ProductStore {
   listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]>;
   upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership>;
   upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null>;
+  createProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<CreateProjectMembershipResult>;
   updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null>;
   deleteProjectMembership(projectId: string, userId: string): Promise<boolean>;
   updateManagedProjectMembershipRole(projectId: string, userId: string, role: ManagedProjectMembershipRole, updatedAt: string): Promise<ManagedProjectMembershipUpdateResult>;

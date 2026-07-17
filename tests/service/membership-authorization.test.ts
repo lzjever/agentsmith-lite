@@ -117,6 +117,26 @@ describe("project membership authorization", () => {
       (error: unknown) => error instanceof ProductError && error.statusCode === 404
     );
   });
+
+  it("accepts only one concurrent project membership add", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "concurrent-owner", email: "concurrent-owner@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer, subject: "concurrent-member", email: "concurrent-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
+
+    const results = await Promise.allSettled([
+      services.memberships.addMember(owner.user.id, project.id, member.user.id, "member"),
+      services.memberships.addMember(owner.user.id, project.id, member.user.id, "viewer")
+    ]);
+
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    assert.ok(rejected?.reason instanceof ProductError);
+    assert.equal((rejected.reason as ProductError).statusCode, 409);
+  });
 });
 
 function status(code: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === code; }

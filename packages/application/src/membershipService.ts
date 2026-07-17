@@ -20,12 +20,10 @@ export class MembershipService {
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
       memberId = requireUserId(userId);
-      await this.requireNewMember(projectId, memberId);
       const timestamp = nowIso();
-      const membership = await this.store.upsertProjectMembershipForWorkspaceMember({ projectId, userId: memberId, role, createdAt: timestamp, updatedAt: timestamp });
-      if (!membership) {
-        throw new ProductError("User must be a workspace member before joining a project", 409);
-      }
+      const membership = await this.store.createProjectMembershipForWorkspaceMember({ projectId, userId: memberId, role, createdAt: timestamp, updatedAt: timestamp });
+      if (membership === "not_workspace_member") throw new ProductError("User must be a workspace member before joining a project", 409);
+      if (membership === "already_exists") throw new ProductError("Project membership already exists", 409);
       const view = await this.view(projectId, memberId);
       await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
       return view;
@@ -70,12 +68,6 @@ export class MembershipService {
 
   private async audit(projectId: string, actorId: string, action: MembershipAuditAction, resourceId: string | null, status: "accepted" | "rejected"): Promise<void> {
     await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind: "member", resourceId, createdAt: nowIso() });
-  }
-
-  private async requireNewMember(projectId: string, userId: string): Promise<void> {
-    if (await this.store.findProjectMembership(projectId, userId)) {
-      throw new ProductError("Project membership already exists", 409);
-    }
   }
 
   private async view(projectId: string, userId: string): Promise<ProjectMembershipView> {

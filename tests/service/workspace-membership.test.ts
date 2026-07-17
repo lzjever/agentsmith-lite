@@ -59,5 +59,14 @@ describe("workspace memberships", () => {
     assert.equal(await store.findProjectMembership(secondProject.id,member.user.id),null);
     await assert.rejects(()=>services.authorization.requireProject(member.user.id,firstProject.id,"view"),status(403));
   });
+  it("accepts only one concurrent workspace membership add",async()=>{
+    const store=createInMemoryProductStore();const services=createApplicationServices({store,dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password"});
+    const owner=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"concurrent-owner",email:"concurrent-owner@example.test",emailVerified:true});
+    const member=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"concurrent-member",email:"concurrent-member@example.test",emailVerified:true});
+    const workspace=await services.workspaces.createWorkspace(owner.user.id,{name:"Workspace"});
+    const results=await Promise.allSettled([services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"member"),services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"viewer")]);
+    assert.equal(results.filter(result=>result.status==="fulfilled").length,1);
+    const rejected=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");assert.ok(rejected?.reason instanceof ProductError);assert.equal((rejected.reason as ProductError).statusCode,409);
+  });
 });
 function status(code:number){return (error:unknown)=>error instanceof ProductError&&error.statusCode===code;}
