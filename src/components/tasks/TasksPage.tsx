@@ -155,9 +155,16 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
       if (!active.current) return;
       const detail = message(reason);
       if (isReadOnlyMutationError(reason)) {
-        setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
         setDialogOpen(false);
         mutationKeys.clear("task-create");
+        if (reason instanceof ApiError && reason.status === 403) {
+          setPage(emptyPage);
+          await load();
+          loadCreateDependencies();
+          toast.error(detail);
+          throw new Error(detail);
+        }
+        setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
       }
       setError(detail);
       toast.error(detail);

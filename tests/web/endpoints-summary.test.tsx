@@ -25,6 +25,46 @@ describe("endpoint dependencies", () => {
     } finally { Object.assign(apiClient,original); }
   });
 
+  it("clears endpoints when a mutation discovers project access was removed", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
+    let removed = false;
+    apiClient.endpoints = async () => { if (removed) throw new ApiError(403, "Project access denied"); return []; };
+    apiClient.credentials = async () => [credential];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.createEndpoint = async () => { removed = true; throw new ApiError(403, "Project access denied"); };
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button", { name:"Create endpoint" }))[0]!);
+      const dialog = await screen.findByRole("dialog", { name:"Create endpoint" });
+      fireEvent.change(within(dialog).getByLabelText("Name"), { target:{ value:"Provider" } });
+      fireEvent.change(within(dialog).getByLabelText("Model"), { target:{ value:"model" } });
+      fireEvent.change(document.querySelector("select")!, { target:{ value:credential.id } });
+      fireEvent.click(within(dialog).getByRole("button", { name:"Save" }));
+
+      await screen.findByRole("heading", { name:"Endpoints unavailable" });
+      assert.equal(screen.queryByRole("dialog", { name:"Create endpoint" }), null);
+      assert.equal(screen.queryByText("No endpoints configured"), null);
+    } finally { Object.assign(apiClient,original); }
+  });
+
+  it("keeps endpoints readable when a mutation discovers management was downgraded", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,recheckEndpoint:apiClient.recheckEndpoint };
+    let capabilityReads = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.credentials = async () => [credential];
+    apiClient.projectCapabilities = async () => capabilityReads++ === 0 ? manager : viewer;
+    apiClient.recheckEndpoint = async () => { throw new ApiError(403, "Endpoint management permission was revoked"); };
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button", { name:"Check health for DeepSeek" }))[0]!);
+
+      await waitFor(() => assert.ok(capabilityReads >= 2));
+      assert.ok(screen.getAllByText("DeepSeek").length > 0);
+      assert.ok(screen.getByText("Read-only access."));
+      assert.equal(screen.queryByRole("button", { name:"Create endpoint" }), null);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("reuses an endpoint creation key after an unknown network result", async () => {
     const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
     const keys:string[]=[];let attempts=0;

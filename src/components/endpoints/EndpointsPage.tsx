@@ -152,12 +152,19 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
   function denied(reason: unknown) {
     if (isReadOnlyMutationError(reason)) {
-      setCapabilities((current) => current ? { ...current, canManageEndpoints: false } : current);
-      setCapabilitiesError("Endpoint management access changed. Endpoints are now read-only. Refresh after access or lifecycle status changes.");
       setDialogOpen(false);
       setActionProjectId(undefined);
       setEditing(undefined);
       setDeleting(undefined);
+      if (reason.status === 403) {
+        setEndpoints([]);
+        setCapabilities(undefined);
+        void load();
+        loadDependencies();
+      } else {
+        setCapabilities((current) => current ? { ...current, canManageEndpoints: false } : current);
+        setCapabilitiesError("Endpoint management access changed. Endpoints are now read-only. Refresh after access or lifecycle status changes.");
+      }
     }
     return message(reason);
   }

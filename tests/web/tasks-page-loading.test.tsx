@@ -106,6 +106,60 @@ describe("tasks page loading", () => {
     }
   });
 
+  it("keeps tasks readable when creation discovers write access was removed", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+    const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
+    let capabilityReads = 0;
+    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.endpoints = async () => [eligible];
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? manager : readOnly;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.createTask = async () => { throw new ApiError(403, "Task creation is not allowed"); };
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Run the task" } });
+      await act(async () => { fireEvent.submit(screen.getByRole("form", { name: "Create task" })); await Promise.resolve(); });
+
+      await screen.findByText("Your project access is read-only.");
+      assert.ok(screen.getByRole("link", { name: /Prepare release notes/ }));
+      assert.equal(screen.queryByRole("form", { name: "Create task" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Create task" }), null);
+      assert.equal(capabilityReads, 2);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("clears tasks when creation discovers project access was removed", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+    let removed = false;
+    apiClient.tasks = async () => {
+      if (removed) throw new ApiError(403, "Project not found");
+      return { items: [task], total: 1, nextCursor: null };
+    };
+    apiClient.endpoints = async () => [eligible];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.createTask = async () => { removed = true; throw new ApiError(403, "Project not found"); };
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Run the task" } });
+      await act(async () => { fireEvent.submit(screen.getByRole("form", { name: "Create task" })); await Promise.resolve(); });
+
+      await screen.findByRole("button", { name: "Try again" });
+      assert.equal(screen.queryByRole("link", { name: /Prepare release notes/ }), null);
+      assert.equal(screen.queryByRole("form", { name: "Create task" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the newest endpoint and permission refresh for task creation", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
