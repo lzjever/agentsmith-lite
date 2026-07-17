@@ -467,14 +467,38 @@ export class TaskService {
     return { items: page.items.map(publicTask), total: page.total, nextCursor: offset + page.items.length < page.total ? encodeTaskListCursor(offset + page.items.length, listQuery) : null };
   }
 
-  /** Internal deletion path: it preserves the existing fenced sandbox cleanup intent. */
+  /** Internal deletion path: project data remains until every live sandbox is drained and cleaned. */
   async stopTasksForProjectDeletion(projectId: string): Promise<void> {
     for (const task of await this.store.listTasksForProject(projectId)) {
-      if (!isActiveTaskStatus(task.status)) continue;
-      const finalized=await this.finalizeTaskLifecycle(task.id,"cancelled",null);
-      await this.bestEffortAbortAndRequestCleanup(finalized);
-      if(finalized.executionMode==="live"){await this.drainTaskArtifacts(finalized);const drained=await this.store.findTask(finalized.id);if(drained)await this.cleanupTaskRuntime(drained);}
+      let current = task;
+      if (isActiveTaskStatus(current.status)) {
+        current = await this.finalizeTaskLifecycle(current.id, "cancelled", null);
+        await this.bestEffortAbortAndRequestCleanup(current);
+      }
+      if (current.executionMode !== "live") continue;
+
+      if (current.artifactProjectionStatus !== "drained") {
+        await this.drainTaskArtifacts(current);
+        current = await this.requireTaskDeletionStage(current.id, "artifact projection");
+      }
+      if (current.artifactProjectionStatus !== "drained") {
+        throw new ProductError("Task artifact projection is still pending", 409);
+      }
+
+      if (current.cleanupStatus !== "completed") {
+        await this.cleanupTaskRuntime(current);
+        current = await this.requireTaskDeletionStage(current.id, "sandbox cleanup");
+      }
+      if (current.cleanupStatus !== "completed") {
+        throw new ProductError("Task sandbox cleanup is still pending", 409);
+      }
     }
+  }
+
+  private async requireTaskDeletionStage(taskId: string, stage: string): Promise<PersistedAgentTask> {
+    const task = await this.store.findTask(taskId);
+    if (!task) throw new ProductError(`Task disappeared during ${stage}`, 409);
+    return task;
   }
 
   async listTaskSummaries(userId: string, projectId: string): Promise<TaskSummary[]> {

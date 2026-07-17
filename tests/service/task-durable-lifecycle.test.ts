@@ -909,6 +909,23 @@ describe("durable task lifecycle", () => {
     await assert.rejects(() => setup.services.tasks.taskInteractions(stranger.user.id, alpha.id), /Project access denied/);
   });
 
+  it("cleans a terminal live sandbox before deleting its project", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "delete-terminal-sandbox");
+    await setup.services.tasks.cancelTask(setup.userId, task.id, "cancel-before-project-delete");
+
+    const cancelled = await setup.store.findTask(task.id);
+    assert.equal(cancelled?.terminalReason, "cancelled");
+    assert.notEqual(cancelled?.cleanupStatus, "completed");
+    assert.ok(setup.port.resources.length > 0);
+
+    await setup.services.deletion.deleteProject(setup.userId, setup.projectId);
+
+    assert.equal(await setup.store.findProject(setup.projectId), null);
+    assert.equal(await setup.store.sandboxRuns.get(task.runId), null);
+    assert.equal(setup.port.resources.length, 0);
+  });
+
   async function createSetup(live: boolean) {
     const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-durable-")); roots.push(dataRoot);
     const store = createLocalInMemoryProductStore(); const botified = new DurableBotifiedClient(); const port = new MemorySandboxPort();
