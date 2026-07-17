@@ -58,8 +58,10 @@ export function NotificationsPage() {
     try {
       const saved = await apiClient.markNotificationRead(id);
       if (!mounted.current) return false;
-      setItems((current) => current.map((item) => item.id === id ? saved : item));
       notifyNotificationsChanged("page");
+      loadRequest.current += 1;
+      setItems((current) => current.map((item) => item.id === id ? saved : item));
+      setState("ready");
       return true;
     } catch {
       if (mounted.current) setMutationError({ id, action: "read", message: "Notification could not be marked as read." });
@@ -75,8 +77,10 @@ export function NotificationsPage() {
     try {
       await apiClient.dismissNotification(id);
       if (!mounted.current) return;
-      setItems((current) => current.filter((item) => item.id !== id));
       notifyNotificationsChanged("page");
+      loadRequest.current += 1;
+      setItems((current) => current.filter((item) => item.id !== id));
+      setState("ready");
     } catch {
       if (mounted.current) setMutationError({ id, action: "dismiss", message: "Notification could not be dismissed." });
     } finally {

@@ -74,6 +74,36 @@ describe("personal and resource UI", () => {
     } finally { window.removeEventListener("agentsmith:notifications-changed", changed); Object.assign(apiClient, original); }
   });
 
+  it("does not let an external refresh undo a completed notification mutation", async () => {
+    const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
+    let finishRefresh!: (value: UserNotification[]) => void;
+    let finishRead!: (value: UserNotification) => void;
+    const staleRefresh = new Promise<UserNotification[]>((resolve) => { finishRefresh = resolve; });
+    let reads = 0;
+    apiClient.notifications = async () => {
+      reads += 1;
+      if (reads === 1) return [notification];
+      return staleRefresh;
+    };
+    apiClient.markNotificationRead = async () => new Promise((resolve) => { finishRead = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Mark notification read" }));
+      act(() => {
+        window.dispatchEvent(new CustomEvent("agentsmith:notifications-changed", { detail: { source: "bell" } }));
+      });
+      await waitFor(() => assert.equal(reads, 2));
+
+      await act(async () => {
+        finishRead({ ...notification, readAt: "2026-07-12T00:01:00.000Z" });
+        finishRefresh([notification]);
+        await nextTurn();
+      });
+      assert.match(document.body.textContent ?? "", /Task finished/);
+      assert.equal(document.querySelector('[aria-label="Mark notification read"]'), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("marks a linked notification read before navigating to its resource", async () => {
     const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
     const pushed: string[] = [];
@@ -260,3 +290,5 @@ function installDom() {
 }
 
 function router(pushed: string[] = []) { return { back() {}, forward() {}, refresh() {}, push(path: string) { pushed.push(path); }, replace() {}, prefetch() {} }; }
+
+function nextTurn() { return new Promise<void>((resolve) => setImmediate(resolve)); }
