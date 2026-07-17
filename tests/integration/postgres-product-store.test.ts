@@ -314,8 +314,8 @@ postgresDescribe("postgres product store", () => {
     await store.createWorkspace({ id: "ws_profile", name: "Old", ownerUserId: "user_profile", createdAt: timestamp, updatedAt: timestamp });
     await store.createProject({ id: "proj_profile", workspaceId: "ws_profile", name: "Old", ownerUserId: "user_profile", rootPath: "workspaces/ws_profile/projects/proj_profile", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
     const updatedAt = "2026-07-04T00:01:00.000Z";
-    assert.equal((await store.updateWorkspace({ id: "ws_profile", name: "New", ownerUserId: "user_profile", createdAt: "ignored", updatedAt }))?.createdAt, timestamp);
-    assert.equal((await store.updateProject({ id: "proj_profile", workspaceId: "ws_profile", name: "New", ownerUserId: "user_profile", rootPath: "workspaces/ws_profile/projects/proj_profile", taskConcurrencyLimit: 2, createdAt: "ignored", updatedAt }))?.createdAt, timestamp);
+    assert.equal((await store.updateWorkspaceName("ws_profile", "New", updatedAt))?.createdAt, timestamp);
+    assert.equal((await store.updateProjectName("proj_profile", "New", updatedAt))?.createdAt, timestamp);
     await store.upsertUserProfilePreferences({ userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt });
     assert.deepEqual(await store.findUserProfilePreferences("user_profile"), { userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt });
   });

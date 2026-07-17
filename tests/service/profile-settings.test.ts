@@ -47,6 +47,34 @@ describe("profile and settings services", () => {
     assert.equal((await services.settings.project(owner.user.id, project.id)).capabilities.canManageSettings, false);
   });
 
+  it("updates names without reverting concurrent ownership or policy changes", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/asl-focused-settings", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-owner", email: "settings-owner@example.test", emailVerified: true });
+    const successor = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-successor", email: "settings-successor@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project", taskConcurrencyLimit: 2 });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: successor.user.email }, "admin");
+    await services.memberships.addMember(owner.user.id, project.id, successor.user.id, "admin");
+
+    const updateProjectName = store.updateProjectName.bind(store);
+    store.updateProjectName = async (projectId, name, updatedAt) => {
+      await store.transferProjectOwner(projectId, owner.user.id, successor.user.id, updatedAt);
+      await store.patchProjectResourcePolicy(projectId, { activeTasksLimit: 7 }, updatedAt);
+      return updateProjectName(projectId, name, updatedAt);
+    };
+    const savedProject = (await services.settings.updateProject(owner.user.id, project.id, { name: "Renamed project" })).project;
+    assert.deepEqual({ name: savedProject.name, ownerUserId: savedProject.ownerUserId, taskConcurrencyLimit: savedProject.taskConcurrencyLimit }, { name: "Renamed project", ownerUserId: successor.user.id, taskConcurrencyLimit: 7 });
+
+    const updateWorkspaceName = store.updateWorkspaceName.bind(store);
+    store.updateWorkspaceName = async (workspaceId, name, updatedAt) => {
+      await store.transferWorkspaceOwner(workspaceId, owner.user.id, successor.user.id, updatedAt);
+      return updateWorkspaceName(workspaceId, name, updatedAt);
+    };
+    const savedWorkspace = (await services.settings.updateWorkspace(owner.user.id, workspace.id, { name: "Renamed workspace" })).workspace;
+    assert.deepEqual({ name: savedWorkspace.name, ownerUserId: savedWorkspace.ownerUserId }, { name: "Renamed workspace", ownerUserId: successor.user.id });
+  });
+
   it("serializes lifecycle mutations, replays completed responses, and records one safe audit event", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });

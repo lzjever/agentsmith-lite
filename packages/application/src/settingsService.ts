@@ -17,7 +17,7 @@ export class SettingsService {
   }
   async updateWorkspace(userId: string, workspaceId: string, input: { name?: unknown }) {
     const workspace = await this.requireWorkspaceAdmin(userId, workspaceId);
-    const updated = await this.store.updateWorkspace({ ...workspace, name: input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name"), updatedAt: nowIso() });
+    const updated = await this.store.updateWorkspaceName(workspace.id, input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name"), nowIso());
     if (!updated) throw new NotFoundError("Workspace not found");
     return { workspace: updated, capabilities: { canManageSettings: true } };
   }
@@ -28,11 +28,7 @@ export class SettingsService {
   }
   async updateProject(userId: string, projectId: string, input: { name?: unknown }) {
     const project = await this.authorization.requireProject(userId, projectId, "admin");
-    const updated = await this.store.updateProject({
-      ...project,
-      name: input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name"),
-      updatedAt: nowIso()
-    });
+    const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name"), nowIso());
     if (!updated) throw new NotFoundError("Project not found");
     return { project: updated, capabilities: await this.projectCapabilities(userId, projectId) };
   }

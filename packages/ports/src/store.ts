@@ -354,7 +354,7 @@ export interface ProductStore {
   createWorkspace(workspace: Workspace): Promise<Workspace>;
   listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]>;
   findWorkspace(id: string): Promise<Workspace | null>;
-  updateWorkspace(workspace: Workspace): Promise<Workspace | null>;
+  updateWorkspaceName(workspaceId: string, name: string, updatedAt: string): Promise<Workspace | null>;
   beginWorkspaceDeletion(id: string, updatedAt: string): Promise<Workspace | null>;
   setWorkspaceLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Workspace | null>;
   transferWorkspaceOwner(workspaceId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Workspace | null>;
@@ -372,7 +372,7 @@ export interface ProductStore {
   listProjectPinsForUser(userId: string): Promise<Array<{ projectId: string; pinnedAt: string }>>;
   setProjectPin(userId: string, projectId: string, pinnedAt: string | null): Promise<boolean>;
   findProject(id: string): Promise<Project | null>;
-  updateProject(project: Project): Promise<Project | null>;
+  updateProjectName(projectId: string, name: string, updatedAt: string): Promise<Project | null>;
   beginProjectDeletion(id: string, updatedAt: string): Promise<Project | null>;
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
