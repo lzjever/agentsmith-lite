@@ -132,6 +132,24 @@ describe("context manager", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("reconciles a context entry deleted by another user", async () => {
+    const original = { contexts: apiClient.contexts, deleteContext: apiClient.deleteContext };
+    const entry = { id: "ctx_removed", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "keep", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    let loads = 0;
+    apiClient.contexts = async () => ({ items: loads++ === 0 ? [entry] : [], canWrite: true });
+    apiClient.deleteContext = async () => { throw new ApiError(404, "Context entry not found"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete entry" }));
+
+      await waitFor(() => assert.ok(loads >= 2));
+      assert.equal(screen.queryByRole("alertdialog", { name: "Delete context entry" }), null);
+      assert.equal(screen.queryByText("project.rules"), null);
+      assert.ok(screen.getByText("No context entries yet."));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("sends rename versions and offers recovery for a stale write", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     let loads = 0;

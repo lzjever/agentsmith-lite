@@ -56,12 +56,12 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const loadVersion = useRef(0);
   const projectScope = scope === "project_shared" || scope === "project_personal";
 
-  const load = useCallback(async (preserveDraft = false): Promise<boolean> => {
+  const load = useCallback(async (preserveDraft = false): Promise<ContextList | null> => {
     const version = ++loadVersion.current;
     setState("loading");
     try {
       const next = await apiClient.contexts({ workspaceId, scope, ...(projectScope && projectId ? { projectId } : {}) });
-      if (!mounted.current || version !== loadVersion.current) return false;
+      if (!mounted.current || version !== loadVersion.current) return null;
       const first = next.items[0];
       setResult(next);
       if (!preserveDraft) {
@@ -72,12 +72,12 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       }
       setError("");
       setState("ready");
-      return true;
+      return next;
     } catch (reason) {
-      if (!mounted.current || version !== loadVersion.current) return false;
+      if (!mounted.current || version !== loadVersion.current) return null;
       setError(message(reason, "Context could not be loaded."));
       setState("error");
-      return false;
+      return null;
     }
   }, [projectId, projectScope, scope, workspaceId]);
 
@@ -199,6 +199,15 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
       if (await revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
+      if (reason instanceof ApiError && reason.status === 404 && reason.message === "Context entry not found") {
+        const latest = await load();
+        if (!mounted.current) return;
+        if (latest && !latest.items.some((entry) => entry.id === selected.id || entry.contextKey === selected.contextKey)) {
+          setDeleteOpen(false);
+          setError("");
+          return;
+        }
+      }
       const detail = message(reason, "Context could not be deleted.");
       setError(detail);
       throw new Error(detail);

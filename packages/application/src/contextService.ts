@@ -62,6 +62,8 @@ export class ContextService {
       const timestamp = nowIso();
       const entries = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
       const existing = entries.find((entry) => entry.contextKey === previousContextKey);
+      const updateRequested = input.previousContextKey !== undefined || input.expectedVersion !== undefined;
+      if (!existing && updateRequested) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
       if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw new ProductError("A context entry already uses that key", 409);
       if (existing) {
         if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);

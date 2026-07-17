@@ -54,6 +54,9 @@ describe("context service", () => {
     await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: 1, contextKey: "notes", content: "stale", contentType: "text" }), status(409));
     await assert.rejects(() => services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: 1 }), status(409));
     assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items[0]?.version, 2);
+    await services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: renamed.version });
+    await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: renamed.version, contextKey: "notes", content: "must not recreate", contentType: "text" }), status(409));
+    assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items.length, 0);
   });
 
   it("does not create a new version for a normalized no-op update", async () => {
