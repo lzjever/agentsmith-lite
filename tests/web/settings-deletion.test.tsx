@@ -16,6 +16,76 @@ const projectSettings: ProjectSettings = { project: { id: "project_1", workspace
 const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace Alpha", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
 
 describe("settings deletion", () => {
+  it("refreshes project settings when a stale save discovers the project is archived", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, updateProjectSettings: apiClient.updateProjectSettings };
+    let loads = 0;
+    apiClient.projectSettings = async () => ({
+      ...projectSettings,
+      project: { ...projectSettings.project, lifecycleStatus: loads++ === 0 ? "active" : "archived" },
+      capabilities: { canManageSettings: loads === 1 },
+    });
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.updateProjectSettings = async () => { throw new ApiError(409, "Project is archived"); };
+    try {
+      render(<AppRouterContext.Provider value={router([])}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Project name" });
+      fireEvent.change(name, { target: { value: "Stale rename" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+
+      await screen.findByText("This project is archived and read-only.");
+      assert.equal((screen.getByRole("textbox", { name: "Project name" }) as HTMLInputElement).disabled, true);
+      assert.equal(screen.queryByRole("button", { name: "Save project" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("refreshes workspace settings when a stale save discovers access was revoked", async () => {
+    const original = { workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, updateWorkspaceSettings: apiClient.updateWorkspaceSettings };
+    let loads = 0;
+    apiClient.workspaceSettings = async () => ({
+      ...workspaceSettings,
+      capabilities: { canManageSettings: loads++ === 0 },
+    });
+    apiClient.currentIdentity = async () => ({ user: { id: "admin_1", email: "admin@example.test" } });
+    apiClient.updateWorkspaceSettings = async () => { throw new ApiError(403, "Workspace access denied"); };
+    try {
+      render(<AppRouterContext.Provider value={router([])}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Workspace name" });
+      fireEvent.change(name, { target: { value: "Stale rename" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save workspace" }));
+
+      await screen.findByText("Read-only access.");
+      assert.equal((screen.getByRole("textbox", { name: "Workspace name" }) as HTMLInputElement).disabled, true);
+      assert.equal(screen.queryByRole("button", { name: "Save workspace" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("restores editable settings after an owner unarchives a project or workspace", async () => {
+    const original = { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, unarchiveProject: apiClient.unarchiveProject, unarchiveWorkspace: apiClient.unarchiveWorkspace };
+    let projectArchived = true;
+    let workspaceArchived = true;
+    apiClient.projectSettings = async () => ({ ...projectSettings, project: { ...projectSettings.project, lifecycleStatus: projectArchived ? "archived" : "active" }, capabilities: { canManageSettings: !projectArchived } });
+    apiClient.workspaceSettings = async () => ({ ...workspaceSettings, workspace: { ...workspaceSettings.workspace, lifecycleStatus: workspaceArchived ? "archived" : "active" }, capabilities: { canManageSettings: !workspaceArchived } });
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [];
+    apiClient.workspaceMembers = async () => [];
+    apiClient.unarchiveProject = async () => { projectArchived = false; return { ...projectSettings.project, lifecycleStatus: "active" }; };
+    apiClient.unarchiveWorkspace = async () => { workspaceArchived = false; return { ...workspaceSettings.workspace, lifecycleStatus: "active" }; };
+    try {
+      const project = render(<AppRouterContext.Provider value={router([])}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const unarchiveProject = await screen.findByRole("button", { name: "Unarchive project" });
+      await act(async () => fireEvent.click(unarchiveProject));
+      assert.equal((screen.getByRole("textbox", { name: "Project name" }) as HTMLInputElement).disabled, false);
+      assert.ok(screen.getByRole("button", { name: "Save project" }));
+
+      project.unmount();
+      render(<AppRouterContext.Provider value={router([])}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      const unarchiveWorkspace = await screen.findByRole("button", { name: "Unarchive workspace" });
+      await act(async () => fireEvent.click(unarchiveWorkspace));
+      assert.equal((screen.getByRole("textbox", { name: "Workspace name" }) as HTMLInputElement).disabled, false);
+      assert.ok(screen.getByRole("button", { name: "Save workspace" }));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps project deletion owner-only, requires its name, and retries a pending cleanup", async () => {
     const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, deleteProject: apiClient.deleteProject };
     const pushed: string[] = [];

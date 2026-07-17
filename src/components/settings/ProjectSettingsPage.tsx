@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2, Users } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, notifyDirectoryChanged, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -96,6 +96,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       if (reason instanceof ApiError) mutationKeys.complete("project-settings", projectName.trim());
       if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Project settings could not be saved."));
+      if (isReadOnlyMutationError(reason)) await load();
     } finally {
       if (mounted.current) setSaving(false);
     }
@@ -112,7 +113,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const mutationBusy=saving||lifecycleBusy||ownerBusy||deleteBusy;
   const settingsDirty = data !== undefined && projectName.trim() !== data.project.name;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"project-unarchive":"project-archive";setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId,mutationKeys.key(operation,projectId)):await apiClient.archiveProject(projectId,mutationKeys.key(operation,projectId));mutationKeys.complete(operation,projectId);if(!mounted.current)return;setData({...data,project});notifyDirectoryChanged();toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,projectId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
+  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"project-unarchive":"project-archive";setLifecycleBusy(true);try{if(archived)await apiClient.unarchiveProject(projectId,mutationKeys.key(operation,projectId));else await apiClient.archiveProject(projectId,mutationKeys.key(operation,projectId));mutationKeys.complete(operation,projectId);if(!mounted.current)return;notifyDirectoryChanged();await load();if(mounted.current)toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,projectId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));if(isReadOnlyMutationError(reason))await load();}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data||!canTransferOwnership||mutationBusy)return;
     setOwnerBusy(true);

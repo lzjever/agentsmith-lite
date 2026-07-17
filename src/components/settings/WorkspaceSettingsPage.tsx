@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, notifyDirectoryChanged, type CurrentUser, type WorkspaceMember, type WorkspaceSettings } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type CurrentUser, type WorkspaceMember, type WorkspaceSettings } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -94,6 +94,7 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
       if (reason instanceof ApiError) mutationKeys.complete("workspace-settings", workspaceName.trim());
       if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Workspace settings could not be saved."));
+      if (isReadOnlyMutationError(reason)) await load();
     } finally {
       if (mounted.current) setSaving(false);
     }
@@ -109,7 +110,7 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
   const mutationBusy=saving||lifecycleBusy||ownerBusy||deleting;
   const settingsDirty = data !== undefined && workspaceName.trim() !== data.workspace.name;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"workspace-unarchive":"workspace-archive";setLifecycleBusy(true);try{const workspace=archived?await apiClient.unarchiveWorkspace(workspaceId,mutationKeys.key(operation,workspaceId)):await apiClient.archiveWorkspace(workspaceId,mutationKeys.key(operation,workspaceId));mutationKeys.complete(operation,workspaceId);if(!mounted.current)return;setData({...data,workspace});notifyDirectoryChanged();toast.success(archived?"Workspace restored.":"Workspace archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,workspaceId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Workspace lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
+  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"workspace-unarchive":"workspace-archive";setLifecycleBusy(true);try{if(archived)await apiClient.unarchiveWorkspace(workspaceId,mutationKeys.key(operation,workspaceId));else await apiClient.archiveWorkspace(workspaceId,mutationKeys.key(operation,workspaceId));mutationKeys.complete(operation,workspaceId);if(!mounted.current)return;notifyDirectoryChanged();await load();if(mounted.current)toast.success(archived?"Workspace restored.":"Workspace archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,workspaceId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Workspace lifecycle could not be updated."));if(isReadOnlyMutationError(reason))await load();}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
     if(!data||mutationBusy)return;
     setOwnerBusy(true);
