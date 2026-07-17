@@ -128,19 +128,23 @@ describe("api OIDC auth", () => {
     const project = await projectResponse.json();
     const replayedProject = await fetch(baseUrl + apiPath(`/api/v1/workspaces/${memberWorkspace.id}/projects`), projectRequest);
     assert.equal((await replayedProject.json()).id, project.id);
-    const credentialResponse = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/credentials`), {
+    const credentialRequest = {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: login.sessionCookie, "x-csrf-token": login.csrfToken },
+      headers: { "content-type": "application/json", cookie: login.sessionCookie, "x-csrf-token": login.csrfToken, "idempotency-key": "oidc-credential-create" },
       body: JSON.stringify({ name: "Member credential", baseUrl: "https://models.example.com/v1", secret: "sk-real-model-key" })
-    });
+    };
+    const credentialResponse = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/credentials`), credentialRequest);
     assert.equal(credentialResponse.status, 200);
     const credential = await credentialResponse.json();
-    const endpoint = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/endpoints`), {
+    const replayedCredential = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/credentials`), credentialRequest);
+    assert.equal((await replayedCredential.json()).id, credential.id);
+    const endpointRequest = {
       method: "POST",
       headers: {
         "content-type": "application/json",
         cookie: login.sessionCookie,
-        "x-csrf-token": login.csrfToken
+        "x-csrf-token": login.csrfToken,
+        "idempotency-key": "oidc-endpoint-create"
       },
       body: JSON.stringify({
         name: "Member endpoint",
@@ -151,8 +155,12 @@ describe("api OIDC auth", () => {
         capabilities: ["text", "tool_calls"],
         requestTimeoutSecs: 30
       })
-    });
-    assert.equal(endpoint.status, 200);
+    };
+    const endpointResponse = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/endpoints`), endpointRequest);
+    assert.equal(endpointResponse.status, 200);
+    const endpoint = await endpointResponse.json();
+    const replayedEndpoint = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/endpoints`), endpointRequest);
+    assert.equal((await replayedEndpoint.json()).id, endpoint.id);
 
     const logout = await fetch(baseUrl + apiPath("/api/v1/auth/logout"), {
       method: "POST",

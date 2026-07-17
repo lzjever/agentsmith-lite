@@ -17,8 +17,10 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   const { user } = await services.auth.loginAfterBootstrap("admin-password");
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" }, "credential-create-key");
+  const replayedCredential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" }, "credential-create-key");
 
+  assert.equal(replayedCredential.id, credential.id);
   assert.deepEqual(Object.keys(credential).sort(), ["baseUrl", "createdAt", "fingerprint", "id", "lastRotatedAt", "name", "projectId", "type", "updatedAt", "version"]);
   assert.deepEqual((await services.credentials.list(user.id, project.id)).map((item) => item.id), [credential.id]);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "first-secret");

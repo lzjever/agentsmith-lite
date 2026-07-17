@@ -57,7 +57,7 @@ async function post(baseUrl: string, pathname: string, body: unknown): Promise<R
 async function requestJson(baseUrl: string, method: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> {
   const response = await fetch(baseUrl + pathname, {
     method,
-    headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) },
+    headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) },
     body: JSON.stringify(body)
   });
   if (response.status !== 200) {

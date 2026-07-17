@@ -2,11 +2,31 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type Endpoint, type ProjectCapabilities } from "../../src/lib/api/client.js";
+import { apiClient, type Endpoint, type EndpointInput, type ProjectCapabilities } from "../../src/lib/api/client.js";
 installDom(); const {act,cleanup,fireEvent,render,screen,waitFor,within}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
 const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText(/1 endpoint configured · 1 configured/);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 describe("endpoint dependencies", () => {
+  it("reuses an endpoint creation key after an unknown network result", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
+    const keys:string[]=[];let attempts=0;
+    apiClient.endpoints=async()=>[];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;
+    apiClient.createEndpoint=(async(_projectId:string,input:EndpointInput,key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{...endpoint,...input};}) as typeof apiClient.createEndpoint;
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Create endpoint"}))[0]!);
+      const dialog=await screen.findByRole("dialog",{name:"Create endpoint"});
+      fireEvent.change(within(dialog).getByLabelText("Name"),{target:{value:"Provider"}});
+      fireEvent.change(within(dialog).getByLabelText("Model"),{target:{value:"model"}});
+      fireEvent.change(document.querySelector("select")!,{target:{value:credential.id}});
+      fireEvent.click(within(dialog).getByRole("button",{name:"Save"}));
+      await waitFor(()=>assert.equal(attempts,1));
+      fireEvent.click(within(dialog).getByRole("button",{name:"Save"}));
+      await waitFor(()=>assert.equal(attempts,2));
+      assert.equal(keys[0],keys[1]);assert.ok(keys[0]);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("closes project-scoped actions and ignores an old save after switching projects", async () => {
     const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, updateEndpoint: apiClient.updateEndpoint };
     let finishSave!: (value: Endpoint) => void;

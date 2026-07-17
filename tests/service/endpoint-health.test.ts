@@ -16,8 +16,11 @@ test("endpoint save validates with the bound write-only credential and exposes o
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
 
-  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  const endpointInput = { name: "Provider", protocol: "openai_chat_completions" as const, baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text" as const], requestTimeoutSecs: 30 };
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, endpointInput, "endpoint-create-key");
+  const replayedEndpoint = await services.endpoints.createEndpoint(user.id, project.id, endpointInput, "endpoint-create-key");
 
+  assert.equal(replayedEndpoint.id, endpoint.id);
   assert.deepEqual(calls, [{ apiKey: "never-expose-this", baseUrl: credential.baseUrl }]);
   assert.equal(endpoint.health?.status, "healthy");
   assert.equal(endpoint.health?.errorCategory, null);

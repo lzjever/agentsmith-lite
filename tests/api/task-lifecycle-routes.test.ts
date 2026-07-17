@@ -183,7 +183,7 @@ describe("task lifecycle API routes", () => {
     const headers: Record<string, string> = { cookie, "content-type": "application/json" };
     if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) headers["x-csrf-token"] = csrf;
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
-    else if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname))) headers["idempotency-key"] = crypto.randomUUID();
+    else if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname))) headers["idempotency-key"] = crypto.randomUUID();
     return fetch(api.baseUrl + pathname, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   }
 

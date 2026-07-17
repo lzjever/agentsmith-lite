@@ -224,11 +224,11 @@ export const apiClient = {
   removeMember: (projectId: string, userId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", { userId }),
   transferProjectOwner:(projectId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/projects/${encodeURIComponent(projectId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
   credentials: (projectId: string) => request<ProjectCredential[]>(`/projects/${encodeURIComponent(projectId)}/credentials`),
-  createCredential: (projectId: string, input: { name: string; baseUrl: string; secret: string }) => json<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials`, "POST", input),
+  createCredential: (projectId: string, input: { name: string; baseUrl: string; secret: string }, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials`, "POST", idempotencyKey, input),
   rotateCredential: (projectId: string, credentialId: string, secret: string) => json<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", { secret }),
   deleteCredential: (projectId: string, credentialId: string, expectedVersion: number) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", { expectedVersion }),
   endpoints: (projectId: string) => request<Endpoint[]>(`/projects/${encodeURIComponent(projectId)}/endpoints`),
-  createEndpoint: (projectId: string, input: EndpointInput) => json<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", { ...input, protocol: "openai_chat_completions" }),
+  createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput) =>
     json<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", { ...input, protocol: "openai_chat_completions" }),
   discoverEndpointModels: (projectId: string, input: Pick<EndpointInput, "baseUrl" | "credentialId" | "requestTimeoutSecs"> & { endpointId?: string }) =>

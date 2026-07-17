@@ -8,6 +8,7 @@ import { WorkspaceService } from "./workspaceService.js";
 import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 import { CredentialService } from "./credentialService.js";
 import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 
 export class EndpointService {
   constructor(
@@ -17,7 +18,7 @@ export class EndpointService {
     private readonly provider: OpenAIProviderBroker
   ) {}
 
-  async createEndpoint(userId: string, projectId: string, input: CreateEndpointInput): Promise<ModelEndpoint> {
+  async createEndpoint(userId: string, projectId: string, input: CreateEndpointInput, idempotencyKey?: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
     const timestamp = nowIso();
     const endpoint: ModelEndpoint = {
@@ -33,19 +34,9 @@ export class EndpointService {
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    let created: ModelEndpoint;
-    try {
-      validateOpenAICompatibleEndpoint(endpoint);
-      await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
-      created = await this.store.createEndpoint(await this.validate(endpoint, userId, null));
-    } catch (error) {
-      const health = endpointValidationHealth(error);
-      if (health) await this.endpointFailure(projectId, userId, "endpoint.create", endpoint.id, healthAuditDetail(health), null);
-      else await this.audit(projectId, userId, "endpoint.create", endpoint.id, "rejected");
-      throw error;
-    }
-    await this.audit(projectId, userId, "endpoint.create", created.id, "accepted", healthAuditDetail(created.health));
-    return created;
+    const create=async(id:string)=>{const existing=await this.store.findEndpoint(id);if(existing&&existing.projectId===projectId)return existing;const candidate={...endpoint,id};let created:ModelEndpoint;try{validateOpenAICompatibleEndpoint(candidate);await this.requireCredentialBinding(projectId,candidate.credentialId,candidate.baseUrl);created=await this.store.createEndpoint(await this.validate(candidate,userId,null));}catch(error){const health=endpointValidationHealth(error);if(health)await this.endpointFailure(projectId,userId,"endpoint.create",candidate.id,healthAuditDetail(health),null);else await this.audit(projectId,userId,"endpoint.create",candidate.id,"rejected");throw error;}await this.audit(projectId,userId,"endpoint.create",created.id,"accepted",healthAuditDetail(created.health));return created;};
+    if(!idempotencyKey)return create(endpoint.id);
+    return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.endpoint.create",key:idempotencyKey,request:{projectId,...input},resourceId:endpoint.id,failureMessage:"Endpoint could not be created",run:create});
   }
 
   async listEndpoints(userId: string, projectId: string): Promise<ModelEndpoint[]> {

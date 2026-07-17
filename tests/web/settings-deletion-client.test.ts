@@ -26,6 +26,23 @@ describe("settings deletion API client", () => {
     }
   });
 
+  it("sends explicit idempotency keys for credential and endpoint creation", async () => {
+    const originalFetch = globalThis.fetch;
+    const keys: Array<string | null> = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url, "http://localhost"), init);
+      keys.push(request.headers.get("idempotency-key"));
+      return Response.json({ id: "created" });
+    };
+    try {
+      await apiClient.createCredential("project_1", { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" }, "credential-key");
+      await apiClient.createEndpoint("project_1", { name: "Provider", baseUrl: "https://models.example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30 }, "endpoint-key");
+      assert.deepEqual(keys, ["credential-key", "endpoint-key"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("sends scoped delete requests with CSRF and preserves API error messages", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ url: string; method: string; csrf: string | null; idempotencyKey: string | null }> = [];
