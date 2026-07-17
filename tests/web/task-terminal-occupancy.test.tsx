@@ -33,6 +33,17 @@ const { TaskTerminalPanel } = await import("../../src/components/tasks/TaskTermi
 afterEach(() => { cleanup(); sockets.length = 0; });
 
 describe("TaskDetailPage terminal occupancy", () => {
+  it("returns an unavailable task deep link to the project task list", async () => {
+    const original = apiClient.taskDetail;
+    apiClient.taskDetail = async () => { throw new ApiError(404, "Task not found"); };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId="task_missing" />);
+      assert.equal((await screen.findByRole("alert")).textContent, "Task not found");
+      assert.equal(screen.getByRole("link", { name: "All tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+      assert.ok(screen.getByRole("button", { name: "Try again" }));
+    } finally { apiClient.taskDetail = original; }
+  });
+
   it("shows the retained execution and sandbox summary in task details", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const continued: Task = { ...task, sourceTaskId:"task_source", cleanupStatus:"pending" };

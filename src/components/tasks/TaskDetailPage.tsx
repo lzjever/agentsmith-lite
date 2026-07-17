@@ -195,7 +195,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   }
 
   if (taskState === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;
-  if (taskState === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{taskError}</p><Button className="mt-4" onClick={() => void loadTask()}>Try again</Button></div></PageState></PageLayout>;
+  if (taskState === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{taskError}</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link><Button onClick={() => void loadTask()}>Try again</Button></div></div></PageState></PageLayout>;
   if (!task) return null;
 
   const finalization = taskFinalizationPresentation(task);
