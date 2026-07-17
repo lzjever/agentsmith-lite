@@ -81,6 +81,25 @@ describe("durable task lifecycle", () => {
     assert.equal(detail.capabilities.cancelTask, true);
   });
 
+  it("settles an unclaimed initial prompt when the task is cancelled before delivery", async () => {
+    const setup = await createSetup(true);
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "cancel before delivery" }, "create-cancel-before-delivery");
+    assert.equal((await setup.store.findTask(task.id))?.startIntentStatus, "pending");
+
+    await setup.services.tasks.cancelTask(setup.userId, task.id, "cancel-before-delivery");
+    const cancelled = await setup.store.findTask(task.id);
+    assert.equal(cancelled?.terminalReason, "cancelled");
+    assert.equal(cancelled?.startIntentStatus, "failed");
+
+    await setup.store.updateTask({ ...cancelled!, startIntentStatus:"pending", startSafeError:null, updatedAt:new Date(Date.parse(cancelled!.updatedAt) + 1_000).toISOString() });
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    const initial = interactions.items.find((item) => item.kind === "user_message");
+
+    assert.equal(initial?.kind, "user_message");
+    assert.equal(initial?.status, "failed");
+    assert.equal(setup.botified.posts.length, 0);
+  });
+
   it("attributes task provider usage to the task creator", async () => {
     const setup = await createSetup(true);
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "attribute usage" }, "create-attributed-task");

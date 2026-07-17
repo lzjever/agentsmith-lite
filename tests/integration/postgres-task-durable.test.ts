@@ -70,6 +70,8 @@ postgresDescribe("postgres durable task store", () => {
     await Promise.all([store.finalizeTaskLifecycle(complete), store.finalizeTaskLifecycle(failed)]);
     const task = await store.findTask("task_terminal");
     assert.ok(task?.terminalReason === "completed" || task?.terminalReason === "failed");
+    assert.equal(task?.startIntentStatus, "failed");
+    assert.equal(task?.startSafeError, "Task ended before initial prompt delivery");
     const winner = task!.terminalReason;
     await store.finalizeTaskLifecycle(winner === "failed" ? complete : failed);
     assert.equal((await store.findTask("task_terminal"))?.terminalReason, winner);

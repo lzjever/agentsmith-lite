@@ -702,6 +702,7 @@ export class InMemoryProductStore implements ProductStore {
       terminalReason: input.terminalReason,
       terminalizedAt: input.updatedAt,
       activeReservation: false,
+      ...(current.startIntentStatus === "pending" ? { startIntentStatus:"failed" as const, startSafeError:"Task ended before initial prompt delivery", startNextRetryAt:null } : {}),
       finalizationIntentStatus: null,
       finalizationIntentAt: null,
       artifactProjectionStatus: current.executionMode === "live" ? "draining" : "drained",

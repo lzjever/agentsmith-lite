@@ -2469,6 +2469,7 @@ function isMessageReceiptOperation(operation: TaskIdempotencyOperation): boolean
 function startInteractionStatus(task: PersistedAgentTask): "pending" | "dispatching" | "retrying" | "accepted" | "failed" {
   if (task.startIntentStatus === "failed") return "failed";
   if (task.startIntentStatus === "dispatched" || task.executionMode === "dry-run") return "accepted";
+  if (task.terminalReason && task.startIntentStatus === "pending") return "failed";
   if (task.startIntentStatus === "dispatching") return task.startSafeError ? "retrying" : "dispatching";
   return "pending";
 }
