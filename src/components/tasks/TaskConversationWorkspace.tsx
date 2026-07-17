@@ -129,7 +129,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
-    } catch (reason) { await recoverMutation(reason); throw reason; }
+    } catch (reason) { const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
   }
   async function deleteQueued(messageId: string) {
     const stateVersion = authoritativeStateVersion.current;
@@ -139,14 +139,15 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
-    } catch (reason) { await recoverMutation(reason); throw reason; }
+    } catch (reason) { const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
   }
-  async function recoverMutation(reason: unknown) {
-    if (!(reason instanceof ApiError)) return;
-    if (reason.status === 404) { onUnavailable?.(); return; }
-    if (reason.status !== 403 && reason.status !== 409) return;
-    try { await load(); }
-    catch (refreshReason) { if (refreshReason instanceof ApiError && (refreshReason.status === 403 || refreshReason.status === 404)) onUnavailable?.(); }
+  async function recoverMutation(reason: unknown): Promise<boolean> {
+    if (!(reason instanceof ApiError) || (reason.status !== 403 && reason.status !== 404 && reason.status !== 409)) return false;
+    try { await load(); return true; }
+    catch (refreshReason) {
+      if (refreshReason instanceof ApiError && (refreshReason.status === 403 || refreshReason.status === 404)) onUnavailable?.();
+      return false;
+    }
   }
   function applyReceipt(receipt: TaskMessageReceipt, stateVersion: number) {
     if (receipt.interaction) {

@@ -56,14 +56,29 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const loadVersion = useRef(0);
   const projectScope = scope === "project_shared" || scope === "project_personal";
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (preserveDraft = false): Promise<boolean> => {
     const version = ++loadVersion.current;
     setState("loading");
     try {
       const next = await apiClient.contexts({ workspaceId, scope, ...(projectScope && projectId ? { projectId } : {}) });
-      if (!mounted.current || version !== loadVersion.current) return;
-      setResult(next); setSelectedKey(next.items[0]?.contextKey); setError(""); setState("ready");
-    } catch (reason) { if (mounted.current && version === loadVersion.current) { setError(message(reason, "Context could not be loaded.")); setState("error"); } }
+      if (!mounted.current || version !== loadVersion.current) return false;
+      const first = next.items[0];
+      setResult(next);
+      if (!preserveDraft) {
+        setSelectedKey(first?.contextKey);
+        setContextKey(first?.contextKey ?? "");
+        setContent(first?.content ?? "");
+        setContentType(first?.contentType ?? "text");
+      }
+      setError("");
+      setState("ready");
+      return true;
+    } catch (reason) {
+      if (!mounted.current || version !== loadVersion.current) return false;
+      setError(message(reason, "Context could not be loaded."));
+      setState("error");
+      return false;
+    }
   }, [projectId, projectScope, scope, workspaceId]);
 
   useEffect(() => {
@@ -85,11 +100,6 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const dirty = result?.canWrite === true && (selected
     ? normalizedContextKey !== selected.contextKey || content !== selected.content || contentType !== selected.contentType
     : normalizedContextKey.length > 0 || content.length > 0 || contentType !== "text");
-  useEffect(() => {
-    if (selected) { setContextKey(selected.contextKey); setContent(selected.content); setContentType(selected.contentType); }
-    else if (state === "ready") { setContextKey(""); setContent(""); setContentType("text"); }
-  }, [selected, state]);
-
   function applyNavigation(navigation: PendingNavigation) {
     setConflict(false);
     setError("");
@@ -130,14 +140,27 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     }
     applyNavigation(navigation);
   }
-  function revokeWriteAccess(reason: unknown) {
+  async function revokeWriteAccess(reason: unknown) {
     if (!isReadOnlyMutationError(reason)) return false;
-    setResult((current) => current ? { ...current, canWrite: false } : current);
     setDeleteOpen(false);
     setConflict(false);
-    setError("Context write access changed. This scope is now read-only.");
     mutationKeys.clear("context.save");
     mutationKeys.clear("context.delete");
+    if (reason.status === 403) {
+      setResult(undefined);
+      const readable = await load(true);
+      if (!mounted.current) return true;
+      if (!readable) {
+        setSelectedKey(undefined);
+        setContextKey("");
+        setContent("");
+        setContentType("text");
+        return true;
+      }
+    } else {
+      setResult((current) => current ? { ...current, canWrite: false } : current);
+    }
+    setError("Context write access changed. This scope is now read-only.");
     return true;
   }
   async function save() {
@@ -157,8 +180,8 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         else items.push(saved);
         return { ...current, items };
       });
-      setSelectedKey(saved.contextKey); setConflict(false); setError(""); toast.success("Context saved");
-    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.status === 409; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason, "Context could not be saved.")); } toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { if(mounted.current)setSaving(false); }
+      setSelectedKey(saved.contextKey); setContextKey(saved.contextKey); setContent(saved.content); setContentType(saved.contentType); setConflict(false); setError(""); toast.success("Context saved");
+    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = await revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.status === 409; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason, "Context could not be saved.")); } toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { if(mounted.current)setSaving(false); }
   }
   async function remove() {
     if (!result?.canWrite || !selected || deleting || saving) return;
@@ -170,11 +193,12 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
       const remaining = result.items.filter((entry) => entry.id !== selected.id);
-      setResult({ ...result, items: remaining }); setSelectedKey(remaining[0]?.contextKey); setDeleteOpen(false); setError(""); toast.success("Context deleted");
+      const first = remaining[0];
+      setResult({ ...result, items: remaining }); setSelectedKey(first?.contextKey); setContextKey(first?.contextKey ?? ""); setContent(first?.content ?? ""); setContentType(first?.contentType ?? "text"); setDeleteOpen(false); setError(""); toast.success("Context deleted");
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
-      if (revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
+      if (await revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
       const detail = message(reason, "Context could not be deleted.");
       setError(detail);
       throw new Error(detail);

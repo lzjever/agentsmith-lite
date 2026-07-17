@@ -1,7 +1,7 @@
 "use client";
 
 import { Pencil, Send, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { TaskCapabilities, TaskQueuedMessage } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
@@ -19,6 +19,11 @@ export function TaskComposer({ capabilities, queuedMessages, busy, onSend, onUpd
   const messageBusy = busy || submitting || saving || deleting;
   const nextEdit = editDraft.trim();
   const editChanged = Boolean(editing) && nextEdit !== editing?.content.trim();
+
+  useEffect(() => {
+    if (editing && !queuedMessages.some((message) => message.id === editing.id)) setEditing(undefined);
+    if (removing && !queuedMessages.some((message) => message.id === removing.id)) setRemoving(undefined);
+  }, [editing, queuedMessages, removing]);
 
   async function submit() {
     if (!draft.trim() || messageBusy || !capabilities.sendMessage) return;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type Task, type TaskCapabilities } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Task, type TaskCapabilities } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -52,6 +52,21 @@ describe("TaskLifecycleActions", () => {
       assert.equal(edits[0]?.taskId, task.id);
       assert.equal(edits[0]?.title, "Investigate production issue");
       assert.match(edits[0]?.key ?? "", /^web-task-edit-/);
+    } finally { apiClient.editTask = original; }
+  });
+
+  it("refreshes the parent when a lifecycle mutation discovers the task is gone", async () => {
+    const original = apiClient.editTask;
+    let refreshes = 0;
+    apiClient.editTask = async () => { throw new ApiError(404, "Task not found"); };
+    try {
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => { refreshes += 1; }} />);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+      fireEvent.change(await screen.findByLabelText("Task title"), { target: { value: "Missing task" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+
+      await waitFor(() => assert.equal(refreshes, 1));
     } finally { apiClient.editTask = original; }
   });
 

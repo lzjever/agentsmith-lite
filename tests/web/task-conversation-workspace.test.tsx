@@ -49,6 +49,33 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("reconciles a queued message that was consumed before editing", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, updateTaskMessage: apiClient.updateTaskMessage };
+    const queued = { id: "message_queued", content: "Queued instruction", deliveryStatus: "pending" as const, editable: true, deletable: true, updatedAt: "2026-07-15T00:00:01.000Z" };
+    const editableCapabilities = { ...capabilities, editQueuedMessage: true };
+    let reads = 0;
+    let unavailable = 0;
+    apiClient.getTaskInteractions = async () => ({ ...snapshot, queuedMessages: reads++ === 0 ? [queued] : [], capabilities: editableCapabilities });
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    apiClient.updateTaskMessage = async () => { throw new ApiError(404, "Task message not found"); };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit queued message" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Queued message" }), { target: { value: "Updated instruction" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+      await waitFor(() => assert.equal(reads, 2));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Edit queued message" }), null));
+      assert.equal(screen.queryByText("Queued instruction"), null);
+      assert.equal(screen.queryByText("Task message not found"), null);
+      assert.equal(unavailable, 0);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the initial snapshot error and Retry reachable", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let attempts = 0;

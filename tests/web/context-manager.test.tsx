@@ -163,6 +163,48 @@ describe("context manager", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("keeps a rejected draft readable when context write access was removed", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = { id: "ctx_downgraded", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    let denied = false;
+    let reads = 0;
+    apiClient.contexts = async () => { reads += 1; return { items: [entry], canWrite: !denied }; };
+    apiClient.saveContext = async () => { denied = true; throw new ApiError(403, "Context write is not allowed"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const content = await screen.findByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      fireEvent.change(content, { target: { value: "unsaved draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await screen.findByText("Context write access changed. This scope is now read-only.");
+      assert.equal(content.value, "unsaved draft");
+      assert.equal(content.disabled, true);
+      assert.equal(screen.queryByRole("button", { name: "Save" }), null);
+      assert.equal(reads, 2);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("clears context when a rejected write discovers workspace access was removed", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = { id: "ctx_removed", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "private.rules", content: "private content", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    let removed = false;
+    apiClient.contexts = async () => {
+      if (removed) throw new ApiError(403, "Workspace access denied");
+      return { items: [entry], canWrite: true };
+    };
+    apiClient.saveContext = async () => { removed = true; throw new ApiError(403, "Workspace access denied"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.change(await screen.findByRole("textbox", { name: "Content" }), { target: { value: "changed private content" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await screen.findByRole("button", { name: "Try again" });
+      assert.equal(screen.queryByRole("textbox", { name: "Content" }), null);
+      assert.equal(screen.queryByText("private.rules"), null);
+      assert.ok(screen.getByText("Workspace access denied"));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a successful context save when a later list read would fail", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     const entry = { id: "ctx_1", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };

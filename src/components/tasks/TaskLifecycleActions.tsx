@@ -2,7 +2,7 @@
 
 import { Archive, Copy, Ellipsis, Pencil, RotateCcw } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { apiClient, isReadOnlyMutationError, type Task, type TaskCapabilities } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskCapabilities } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
@@ -55,7 +55,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       await onRefresh();
       toast.success("Task renamed");
     } catch (reason) {
-      if (isReadOnlyMutationError(reason)) await onRefresh();
+      if (shouldRefreshTask(reason)) await onRefresh();
       setRenameError(message(reason, "Task could not be renamed."));
     } finally { setRenaming(false); }
   }
@@ -70,7 +70,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       mutationKeys.complete(action === "retry" ? "task-retry" : "task-duplicate", task.id);
       window.location.assign(appPath(`${basePath}/${created.id}`));
     } catch (reason) {
-      if (isReadOnlyMutationError(reason)) await onRefresh();
+      if (shouldRefreshTask(reason)) await onRefresh();
       toast.error(message(reason, action === "retry" ? "Task could not be retried." : "Task could not be duplicated."));
       setRunning(undefined);
     }
@@ -85,7 +85,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       await onRefresh();
       toast.success("Task archived");
     } catch (reason) {
-      if (isReadOnlyMutationError(reason)) await onRefresh();
+      if (shouldRefreshTask(reason)) await onRefresh();
       throw reason;
     } finally {
       setArchiving(false);
@@ -106,4 +106,8 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
 
 function message(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
+}
+
+function shouldRefreshTask(reason: unknown): boolean {
+  return isReadOnlyMutationError(reason) || (reason instanceof ApiError && reason.status === 404);
 }
