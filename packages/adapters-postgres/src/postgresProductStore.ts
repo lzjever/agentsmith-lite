@@ -57,6 +57,7 @@ import type {
   ResolveTerminalPendingMessageInput,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
+  DeleteProjectCredentialResult,
   PersistedAgentTask,
   PersistedTaskArtifact,
   PersistedTaskMessage,
@@ -487,7 +488,15 @@ export class PostgresProductStore implements ProductStore {
       return mapCredential(rows[0]);
     });
   }
-  async deleteProjectCredential(id: string): Promise<boolean> { const result=await this.pool.query("delete from project_credentials where id=$1",[id]); return result.rowCount===1; }
+  async deleteProjectCredential(id: string, projectId: string, expectedVersion: number): Promise<DeleteProjectCredentialResult> {
+    return transaction(this.pool, async (client) => {
+      const credential = await client.query<{ version: number }>("select version from project_credentials where id=$1 and project_id=$2 for update", [id, projectId]);
+      if (!credential.rows[0]) return "not_found";
+      if (credential.rows[0].version !== expectedVersion) return "version_conflict";
+      if ((await client.query("select 1 from model_endpoints where credential_id=$1 limit 1", [id])).rowCount) return "referenced_by_endpoints";
+      return (await client.query("delete from project_credentials where id=$1 and project_id=$2 and version=$3", [id, projectId, expectedVersion])).rowCount === 1 ? "deleted" : "version_conflict";
+    });
+  }
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { const rows=await this.queryRows<{id:string;project_id:string;base_url:string;api_key_secret_ref:string}>("select id,project_id,base_url,api_key_secret_ref from model_endpoints where credential_id is null and api_key_secret_ref is not null"); return rows.map((row)=>({endpointId:row.id,projectId:row.project_id,baseUrl:row.base_url,secretRef:row.api_key_secret_ref})); }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const result=await this.pool.query("update model_endpoints e set credential_id=$2, api_key_secret_ref=null from project_credentials c where e.id=$1 and e.credential_id is null and c.id=$2 and c.project_id=e.project_id",[endpointId,credentialId]); return result.rowCount===1; }
 

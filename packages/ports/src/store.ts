@@ -316,6 +316,7 @@ export interface PostgresLeaseStore {
 }
 
 export type DeleteEndpointResult = "deleted" | "not_found" | "referenced_by_tasks";
+export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_conflict" | "referenced_by_endpoints";
 
 export interface ProductStore {
   readonly observedExternalModelCalls: number;
@@ -413,7 +414,7 @@ export interface ProductStore {
   findProjectCredential(id: string): Promise<StoredProjectCredential | null>;
   listProjectCredentials(projectId: string): Promise<ProjectCredential[]>;
   updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict">;
-  deleteProjectCredential(id: string): Promise<boolean>;
+  deleteProjectCredential(id: string, projectId: string, expectedVersion: number): Promise<DeleteProjectCredentialResult>;
   listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>>;
   bindEndpointCredential(endpointId: string, credentialId: string): Promise<boolean>;
 

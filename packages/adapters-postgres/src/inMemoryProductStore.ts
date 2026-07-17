@@ -55,6 +55,7 @@ import type {
   ResolveTerminalPendingMessageInput,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
+  DeleteProjectCredentialResult,
   PersistedAgentTask,
   PersistedTaskArtifact,
   PersistedTaskMessage,
@@ -419,7 +420,7 @@ export class InMemoryProductStore implements ProductStore {
   async findProjectCredential(id:string): Promise<StoredProjectCredential | null> { return clone(this.credentials.get(id) ?? null); }
   async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
   async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v));for(const [id,endpoint] of this.endpoints){if(endpoint.credentialId===v.id)this.endpoints.set(id,clone({...endpoint,health:{status:"unknown",checkedAt:null,errorCategory:null},updatedAt:v.updatedAt}))}return publicCredential(v); }
-  async deleteProjectCredential(id:string): Promise<boolean> { return this.credentials.delete(id); }
+  async deleteProjectCredential(id:string,projectId:string,expectedVersion:number): Promise<DeleteProjectCredentialResult> { const current=this.credentials.get(id);if(!current||current.projectId!==projectId)return "not_found";if(current.version!==expectedVersion)return "version_conflict";if([...this.endpoints.values()].some(endpoint=>endpoint.credentialId===id))return "referenced_by_endpoints";this.credentials.delete(id);return "deleted"; }
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { return []; }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); const credential=this.credentials.get(credentialId); if(!endpoint||endpoint.credentialId||!credential||credential.projectId!==endpoint.projectId) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
   async createProjectContextEntry(v:ProjectContextEntry){this.contexts.set(v.id,clone(v));return clone(v)} async updateProjectContextEntry(v:ProjectContextEntry,expectedVersion:number){const current=this.contexts.get(v.id);if(!current||current.version!==expectedVersion)return null;this.contexts.set(v.id,clone(v));return clone(v)} async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null){return [...this.contexts.values()].filter(v=>v.workspaceId===workspaceId&&v.projectId===projectId&&v.scope===scope&&v.ownerUserId===ownerUserId).map(clone)} async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId"|"version">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId||current.version!==v.version)return false;return this.contexts.delete(v.id)}

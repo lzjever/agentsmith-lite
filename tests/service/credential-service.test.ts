@@ -34,9 +34,11 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   assert.equal((await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id)).health?.status, "healthy");
 
   assert.equal(endpoint.credentialId, credential.id);
-  await assert.rejects(() => services.credentials.remove(user.id, project.id, credential.id));
+  await assert.rejects(() => services.credentials.remove(user.id, project.id, credential.id, rotated.version));
   await services.endpoints.deleteEndpoint(user.id, project.id, endpoint.id);
-  await services.credentials.remove(user.id, project.id, credential.id);
+  await assert.rejects(() => services.credentials.remove(user.id, project.id, credential.id, credential.version), status(409));
+  assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "second-secret");
+  await services.credentials.remove(user.id, project.id, credential.id, rotated.version);
   assert.deepEqual(await services.credentials.list(user.id, project.id), []);
 });
 
@@ -76,3 +78,5 @@ test("legacy endpoint credential binding rejects a credential from another proje
   assert.equal(await store.bindEndpointCredential("endpoint_legacy", credential.id), false);
   assert.equal((await store.findEndpoint("endpoint_legacy"))!.credentialId, "");
 });
+
+function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }

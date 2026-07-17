@@ -35,10 +35,12 @@ test("credential routes never return submitted secret material", async () => {
     assert.doesNotMatch(JSON.stringify(rotated), /rotated-secret|ciphertext|nonce|authTag|keyId/);
 
     const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, { name: "Provider", protocol: "openai_chat_completions", baseUrl: created.baseUrl, model: "model", credentialId: created.id, capabilities: ["text"], requestTimeoutSecs: 30 }, cookie, csrfToken);
-    const blocked = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}`, { method: "DELETE", headers: { cookie, "x-csrf-token": csrfToken } });
+    const blocked = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}`, { method: "DELETE", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken }, body: JSON.stringify({ expectedVersion: rotated.version }) });
     assert.equal(blocked.status, 409);
     await requestJson(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, "DELETE", undefined, cookie, csrfToken);
-    assert.deepEqual(await requestJson(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}`, "DELETE", undefined, cookie, csrfToken), { deleted: true });
+    const staleDelete = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}`, { method: "DELETE", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken }, body: JSON.stringify({ expectedVersion: created.version }) });
+    assert.equal(staleDelete.status, 409);
+    assert.deepEqual(await requestJson(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}`, "DELETE", { expectedVersion: rotated.version }, cookie, csrfToken), { deleted: true });
   } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
 });
 

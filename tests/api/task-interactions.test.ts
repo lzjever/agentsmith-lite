@@ -425,7 +425,8 @@ describe("task interactions API", () => {
     assert.deepEqual(viewer.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,cancelTask:false,openTerminal:false,editTask:false,retryTask:false,duplicateTask:false,archiveTask:false,deleteTask:false});
 
     await store.updateProjectMembership(owner);
-    await store.deleteProjectCredential(endpoint.credentialId);
+    const findCredential = store.findProjectCredential.bind(store);
+    store.findProjectCredential = async (id) => id === endpoint.credentialId ? null : findCredential(id);
     const credentialDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(credentialDisabled.items.length,initial.items.length);
     assert.equal(credentialDisabled.capabilities.sendMessage,false);
