@@ -1,6 +1,7 @@
 "use client";
 
 import { MessagesSquare, RefreshCw, X } from "lucide-react";
+import Link from "next/link";
 import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatMessage, type ProjectChatThread } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
@@ -465,7 +466,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       {capabilitiesStatus === "ready" && !canSend ? <Notice>Your project access is read-only.</Notice> : null}
       {endpointsStatus === "loading" ? <Notice>Loading compatible endpoints...</Notice> : null}
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
-      {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation.</Notice> : null}
+      {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
       {actionError ? <Notice error>{actionError}</Notice> : null}
     </div>
   </PageLayout>;

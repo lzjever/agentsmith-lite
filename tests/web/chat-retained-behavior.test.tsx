@@ -189,6 +189,7 @@ describe("retained chat and overview behavior", () => {
     try {
       render(<ProjectChatPage projectId="project_1" />);
       await screen.findByText("Add or repair a compatible endpoint before starting a conversation.");
+      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "endpoints");
       assert.equal(screen.getByRole("button", { name: "Start conversation" }).hasAttribute("disabled"), true);
       assert.equal(screen.queryByText("DeepSeek chat (deepseek-chat)"), null);
     } finally {

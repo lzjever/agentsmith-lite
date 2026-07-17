@@ -1,6 +1,7 @@
 "use client";
 
 import { Plus, RefreshCw } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
@@ -179,7 +180,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {capabilitiesState === "error" ? <DependencyError>{capabilitiesError} Task creation is disabled until project permissions can be loaded.</DependencyError> : null}
     {state === "loading" ? <PageState>Loading tasks...</PageState> : null}
     {state === "error" ? <PageState><Button onClick={() => void load()}>Try again</Button></PageState> : null}
-    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && compatibleEndpoints.length === 0 ? <p className="mt-4 text-sm text-secondary">Add an endpoint with text and tool-call support before creating a task.</p> : null}</> : null}
+    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && compatibleEndpoints.length === 0 ? <p className="mt-4 text-sm text-secondary">Add an endpoint with text and tool-call support before creating a task. <Link className="font-medium text-foreground hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}>Open endpoints</Link></p> : null}</> : null}
     <TaskCreateDialog projectId={projectId} canWriteFiles={capabilities?.canWriteFiles === true} endpoints={compatibleEndpoints} projectFiles={projectFiles} projectFilesLoading={projectFilesLoading} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
