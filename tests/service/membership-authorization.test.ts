@@ -76,6 +76,11 @@ describe("project membership authorization", () => {
       ["membership.change", owner.user.id, "rejected"],
       ["membership.remove", owner.user.id, "rejected"]
     ]);
+
+    await services.memberships.transferOwner(owner.user.id, project.id, member.user.id);
+    assert.equal(await store.updateManagedProjectMembershipRole(project.id, member.user.id, "viewer", new Date().toISOString()), "owner");
+    assert.equal(await store.deleteManagedProjectMembership(project.id, member.user.id), "owner");
+    assert.equal((await store.findProjectMembership(project.id, member.user.id))?.role, "owner");
   });
 
   it("rejects stable IDs that are not workspace members and keeps missing resources distinct", async () => {

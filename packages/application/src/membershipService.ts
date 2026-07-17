@@ -40,17 +40,9 @@ export class MembershipService {
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
       memberId = requireUserId(userId);
-      await this.requireNotOwner(projectId, memberId);
-      const membership = await this.store.updateProjectMembership({
-        projectId,
-        userId: memberId,
-        role,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      });
-      if (!membership) {
-        throw new NotFoundError("Project membership not found");
-      }
+      const membership = await this.store.updateManagedProjectMembershipRole(projectId, memberId, role, nowIso());
+      if (membership === "not_found") throw new NotFoundError("Project membership not found");
+      if (membership === "owner") throw new ProductError("Project owner membership cannot be changed or removed", 409);
       const view = await this.view(projectId, memberId);
       await this.audit(projectId, actorUserId, "membership.change", memberId, "accepted");
       return view;
@@ -65,10 +57,9 @@ export class MembershipService {
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");
       memberId = requireUserId(userId);
-      await this.requireNotOwner(projectId, memberId);
-      if (!(await this.store.deleteProjectMembership(projectId, memberId))) {
-        throw new NotFoundError("Project membership not found");
-      }
+      const result = await this.store.deleteManagedProjectMembership(projectId, memberId);
+      if (result === "not_found") throw new NotFoundError("Project membership not found");
+      if (result === "owner") throw new ProductError("Project owner membership cannot be changed or removed", 409);
       await this.audit(projectId, actorUserId, "membership.remove", memberId, "accepted");
     } catch (error) {
       await this.audit(projectId, actorUserId, "membership.remove", memberId, "rejected");
@@ -79,12 +70,6 @@ export class MembershipService {
 
   private async audit(projectId: string, actorId: string, action: MembershipAuditAction, resourceId: string | null, status: "accepted" | "rejected"): Promise<void> {
     await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind: "member", resourceId, createdAt: nowIso() });
-  }
-
-  private async requireNotOwner(projectId: string, userId: string): Promise<void> {
-    if ((await this.store.findProjectMembership(projectId, userId))?.role === "owner") {
-      throw new ProductError("Project owner membership cannot be changed or removed", 409);
-    }
   }
 
   private async requireNewMember(projectId: string, userId: string): Promise<void> {

@@ -6,6 +6,7 @@ import type {
   AuthSession,
   EndpointHealth,
   ModelEndpoint,
+  ManagedProjectMembershipRole,
   Project,
   ProjectMembership, ProjectMembershipView,
   ProjectAlert,
@@ -17,8 +18,9 @@ import type {
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
-  Workspace
-  , UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, TaskSummary, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
+  Workspace,
+  ManagedWorkspaceMembershipRole,
+  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, TaskSummary, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import type {
@@ -56,6 +58,9 @@ import type {
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
+  ManagedProjectMembershipDeleteResult,
+  ManagedProjectMembershipUpdateResult,
+  ManagedWorkspaceMembershipUpdateResult,
   PersistedAgentTask,
   PersistedTaskArtifact,
   PersistedTaskMessage,
@@ -211,6 +216,7 @@ export class InMemoryProductStore implements ProductStore {
   async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return [...this.workspaceMemberships.values()].filter((member)=>member.workspaceId===workspaceId).map((member)=>this.workspaceMembershipView(member))}
   async upsertWorkspaceMembership(value:WorkspaceMembership){this.workspaceMemberships.set(workspaceMembershipKey(value.workspaceId,value.userId),clone(value));return clone(value)}
   async updateWorkspaceMembership(value:WorkspaceMembership){const key=workspaceMembershipKey(value.workspaceId,value.userId);if(!this.workspaceMemberships.has(key))return null;this.workspaceMemberships.set(key,clone(value));return clone(value)}
+  async updateManagedWorkspaceMembershipRole(workspaceId:string,userId:string,role:ManagedWorkspaceMembershipRole,updatedAt:string):Promise<ManagedWorkspaceMembershipUpdateResult>{const workspace=this.workspaces.get(workspaceId),key=workspaceMembershipKey(workspaceId,userId),current=this.workspaceMemberships.get(key);if(!workspace||!current)return "not_found";if(workspace.ownerUserId===userId||current.role==="owner")return "owner";const updated={...current,role,updatedAt};this.workspaceMemberships.set(key,clone(updated));return clone(updated)}
   async revokeWorkspaceMembership(workspaceId:string,userId:string){
     const key=workspaceMembershipKey(workspaceId,userId);const membership=this.workspaceMemberships.get(key);
     if(!membership)return "not_found" as const;
@@ -311,6 +317,9 @@ export class InMemoryProductStore implements ProductStore {
   async deleteProjectMembership(projectId: string, userId: string): Promise<boolean> {
     const key=membershipKey(projectId,userId);this.projectPins.delete(key);return this.memberships.delete(key);
   }
+
+  async updateManagedProjectMembershipRole(projectId:string,userId:string,role:ManagedProjectMembershipRole,updatedAt:string):Promise<ManagedProjectMembershipUpdateResult>{const project=this.projects.get(projectId),key=membershipKey(projectId,userId),current=this.memberships.get(key);if(!project||!current)return "not_found";if(project.ownerUserId===userId||current.role==="owner")return "owner";const updated={...current,role,updatedAt};this.memberships.set(key,clone(updated));return clone(updated)}
+  async deleteManagedProjectMembership(projectId:string,userId:string):Promise<ManagedProjectMembershipDeleteResult>{const project=this.projects.get(projectId),key=membershipKey(projectId,userId),current=this.memberships.get(key);if(!project||!current)return "not_found";if(project.ownerUserId===userId||current.role==="owner")return "owner";this.projectPins.delete(key);this.memberships.delete(key);return "deleted"}
 
   private workspaceMembershipView(membership: WorkspaceMembership): WorkspaceMembershipView { const user = this.users.get(membership.userId); return { ...clone(membership), displayName: this.profiles.get(membership.userId)?.displayName ?? null, email: user?.email ?? membership.userId }; }
   private projectMembershipView(membership: ProjectMembership): ProjectMembershipView { const user = this.users.get(membership.userId); return { ...clone(membership), displayName: this.profiles.get(membership.userId)?.displayName ?? null, email: user?.email ?? membership.userId }; }

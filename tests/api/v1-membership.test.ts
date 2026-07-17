@@ -97,6 +97,8 @@ describe("v1 project membership API", () => {
       projectId,
       userId: "user_member",
       role: "viewer",
+      displayName: "Member display",
+      email: "member@example.test",
       createdAt: created.createdAt,
       updatedAt: created.updatedAt
     });

@@ -9,6 +9,7 @@ import type {
   EndpointCapability,
   EndpointProtocol,
   ModelEndpoint,
+  ManagedProjectMembershipRole,
   Project,
   ProjectMembership, ProjectMembershipView,
   ProjectAlert,
@@ -20,7 +21,7 @@ import type {
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
-  Workspace, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
+  Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import type {
@@ -58,6 +59,9 @@ import type {
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
+  ManagedProjectMembershipDeleteResult,
+  ManagedProjectMembershipUpdateResult,
+  ManagedWorkspaceMembershipUpdateResult,
   PersistedAgentTask,
   PersistedTaskArtifact,
   PersistedTaskMessage,
@@ -226,6 +230,7 @@ export class PostgresProductStore implements ProductStore {
   async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return (await this.queryRows<WorkspaceMembershipRow>("select wm.*, u.email, p.display_name from workspace_memberships wm join users u on u.id=wm.user_id left join user_profile_preferences p on p.user_id=u.id where wm.workspace_id=$1 order by wm.created_at,wm.user_id",[workspaceId])).map(mapWorkspaceMembershipView)}
   async upsertWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership>{const rows=await this.queryRows<WorkspaceMembershipRow>("insert into workspace_memberships (workspace_id,user_id,role,created_at,updated_at) values ($1,$2,$3,$4,$5) on conflict (workspace_id,user_id) do update set role=excluded.role,updated_at=excluded.updated_at returning *",[value.workspaceId,value.userId,value.role,value.createdAt,value.updatedAt]);return mapWorkspaceMembership(rows[0]!)}
   async updateWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership|null>{const rows=await this.queryRows<WorkspaceMembershipRow>("update workspace_memberships set role=$3,updated_at=$4 where workspace_id=$1 and user_id=$2 returning *",[value.workspaceId,value.userId,value.role,value.updatedAt]);return rows[0]?mapWorkspaceMembership(rows[0]):null}
+  async updateManagedWorkspaceMembershipRole(workspaceId:string,userId:string,role:ManagedWorkspaceMembershipRole,updatedAt:string):Promise<ManagedWorkspaceMembershipUpdateResult>{return transaction(this.pool,async(client)=>{const updated=await client.query<WorkspaceMembershipRow>(`update workspace_memberships wm set role=$3,updated_at=$4 from workspaces w where wm.workspace_id=$1 and wm.user_id=$2 and w.id=wm.workspace_id and wm.role<>'owner' and w.owner_user_id<>wm.user_id returning wm.*`,[workspaceId,userId,role,updatedAt]);if(updated.rows[0])return mapWorkspaceMembership(updated.rows[0]);const current=await client.query<{role:string;owner_user_id:string}>(`select wm.role,w.owner_user_id from workspace_memberships wm join workspaces w on w.id=wm.workspace_id where wm.workspace_id=$1 and wm.user_id=$2`,[workspaceId,userId]);if(!current.rows[0])return "not_found";return current.rows[0].role==="owner"||current.rows[0].owner_user_id===userId?"owner":"not_found"})}
   async revokeWorkspaceMembership(workspaceId:string,userId:string):Promise<"revoked"|"not_found"|"owner">{return transaction(this.pool,async(client)=>{const membership=await client.query<{role:string}>("select role from workspace_memberships where workspace_id=$1 and user_id=$2 for update",[workspaceId,userId]);if(!membership.rows[0])return "not_found";if(membership.rows[0].role==="owner")return "owner";const owned=await client.query("select p.id from projects p join project_memberships pm on pm.project_id=p.id where p.workspace_id=$1 and pm.user_id=$2 and (p.owner_user_id=$2 or pm.role='owner') for update of p,pm",[workspaceId,userId]);if(owned.rowCount)return "owner";await client.query("delete from project_memberships pm using projects p where pm.project_id=p.id and p.workspace_id=$1 and pm.user_id=$2",[workspaceId,userId]);const deleted=await client.query("delete from workspace_memberships where workspace_id=$1 and user_id=$2 and role<>'owner'",[workspaceId,userId]);return deleted.rowCount===1?"revoked":"not_found"})}
 
   async createProject(project: Project): Promise<Project> {
@@ -359,6 +364,9 @@ export class PostgresProductStore implements ProductStore {
     );
     return result.rowCount === 1;
   }
+
+  async updateManagedProjectMembershipRole(projectId:string,userId:string,role:ManagedProjectMembershipRole,updatedAt:string):Promise<ManagedProjectMembershipUpdateResult>{return transaction(this.pool,async(client)=>{const updated=await client.query<ProjectMembershipRow>(`update project_memberships pm set role=$3,updated_at=$4 from projects p where pm.project_id=$1 and pm.user_id=$2 and p.id=pm.project_id and pm.role<>'owner' and p.owner_user_id<>pm.user_id returning pm.*`,[projectId,userId,role,updatedAt]);if(updated.rows[0])return mapProjectMembership(updated.rows[0]);const current=await client.query<{role:string;owner_user_id:string}>(`select pm.role,p.owner_user_id from project_memberships pm join projects p on p.id=pm.project_id where pm.project_id=$1 and pm.user_id=$2`,[projectId,userId]);if(!current.rows[0])return "not_found";return current.rows[0].role==="owner"||current.rows[0].owner_user_id===userId?"owner":"not_found"})}
+  async deleteManagedProjectMembership(projectId:string,userId:string):Promise<ManagedProjectMembershipDeleteResult>{return transaction(this.pool,async(client)=>{const deleted=await client.query(`delete from project_memberships pm using projects p where pm.project_id=$1 and pm.user_id=$2 and p.id=pm.project_id and pm.role<>'owner' and p.owner_user_id<>pm.user_id`,[projectId,userId]);if(deleted.rowCount===1)return "deleted";const current=await client.query<{role:string;owner_user_id:string}>(`select pm.role,p.owner_user_id from project_memberships pm join projects p on p.id=pm.project_id where pm.project_id=$1 and pm.user_id=$2`,[projectId,userId]);if(!current.rows[0])return "not_found";return current.rows[0].role==="owner"||current.rows[0].owner_user_id===userId?"owner":"not_found"})}
 
   async createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy> {
     await this.pool.query(`insert into project_resource_policies (project_id, active_tasks_limit, provider_requests_limit, provider_tokens_limit, provider_cost_limit, project_file_bytes_limit, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`, policyValues(policy));

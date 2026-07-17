@@ -49,6 +49,10 @@ describe("workspace memberships", () => {
     assert.equal((await store.findWorkspaceMembership(workspace.id,admin.user.id))?.role,"admin");
     assert.equal((await store.findProjectMembership(adminProject.id,admin.user.id))?.role,"owner");
 
+    await services.workspaceMemberships.transferOwner(owner.user.id,workspace.id,viewer.user.id);
+    assert.equal(await store.updateManagedWorkspaceMembershipRole(workspace.id,viewer.user.id,"member",new Date().toISOString()),"owner");
+    assert.equal((await store.findWorkspaceMembership(workspace.id,viewer.user.id))?.role,"owner");
+
     await services.workspaceMemberships.remove(admin.user.id,workspace.id,member.user.id);
     assert.equal(await store.findWorkspaceMembership(workspace.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(firstProject.id,member.user.id),null);

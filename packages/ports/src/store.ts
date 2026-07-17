@@ -9,6 +9,7 @@ import type {
   AuthSession,
   EndpointHealth,
   ModelEndpoint,
+  ManagedProjectMembershipRole,
   ProjectMembership,
   ProjectMembershipView,
   ProjectAlert,
@@ -27,6 +28,7 @@ import type {
   Workspace,
   WorkspaceListProjection,
   WorkspaceMembership,
+  ManagedWorkspaceMembershipRole,
   WorkspaceMembershipView,
   TaskSummary,
   TaskTerminalReason,
@@ -317,6 +319,9 @@ export interface PostgresLeaseStore {
 
 export type DeleteEndpointResult = "deleted" | "not_found" | "referenced_by_tasks";
 export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_conflict" | "referenced_by_endpoints";
+export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
+export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
+export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
 
 export interface ProductStore {
   readonly observedExternalModelCalls: number;
@@ -356,6 +361,7 @@ export interface ProductStore {
   listWorkspaceMemberships(workspaceId: string): Promise<WorkspaceMembershipView[]>;
   upsertWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
+  updateManagedWorkspaceMembershipRole(workspaceId: string, userId: string, role: ManagedWorkspaceMembershipRole, updatedAt: string): Promise<ManagedWorkspaceMembershipUpdateResult>;
   revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<"revoked" | "not_found" | "owner">;
 
   createProject(project: Project): Promise<Project>;
@@ -383,6 +389,8 @@ export interface ProductStore {
   upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null>;
   updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null>;
   deleteProjectMembership(projectId: string, userId: string): Promise<boolean>;
+  updateManagedProjectMembershipRole(projectId: string, userId: string, role: ManagedProjectMembershipRole, updatedAt: string): Promise<ManagedProjectMembershipUpdateResult>;
+  deleteManagedProjectMembership(projectId: string, userId: string): Promise<ManagedProjectMembershipDeleteResult>;
   createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy>;
   findProjectResourcePolicy(projectId: string): Promise<ProjectResourcePolicy | null>;
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string): Promise<ProjectResourcePolicy | null>;
