@@ -79,6 +79,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!settingsDirty) return;
     setSaving(true);
     try {
       const saved = await apiClient.updateProjectSettings(projectId, { name: projectName });
@@ -103,6 +104,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const canArchive=data?.capabilities.canManageSettings===true&&isActive;
   const canRestore=isOwner&&archived;
   const canTransferOwnership=isOwner&&isActive&&data?.capabilities.canManageSettings===true;
+  const settingsDirty = data !== undefined && projectName.trim() !== data.project.name;
   const ownerCandidates = members.filter((member) => member.userId !== user?.id);
   async function setArchive(){if(!data)return;setLifecycleBusy(true);try{const project=archived?await apiClient.unarchiveProject(projectId):await apiClient.archiveProject(projectId);if(!mounted.current)return;setData({...data,project});notifyDirectoryChanged();toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));}finally{if(mounted.current)setLifecycleBusy(false)}}
   async function transferOwner(){
@@ -144,7 +146,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{lifecycleMessage("project",lifecycleStatus)}</p>
       <form onSubmit={submit} className="grid gap-5 border-y border-subtle py-5">
         <label className="grid gap-2 text-sm"><span>Project name</span><Input name="name" value={projectName} onChange={(event) => setProjectName(event.target.value)} disabled={saving||!data.capabilities.canManageSettings||!isActive} /></label>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" disabled={saving}><Save size={16} />{saving ? "Saving..." : "Save project"}</Button> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" disabled={saving || !settingsDirty}><Save size={16} />{saving ? "Saving..." : "Save project"}</Button> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
       </form>
       {canArchive||canRestore?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p><Button className="mt-4" variant="outline" disabled={lifecycleBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)}><Archive size={16}/>{archived?"Unarchive project":"Archive project"}</Button></section>:null}
       {canArchive?<ConfirmationDialog open={archiveOpen} onOpenChange={setArchiveOpen} title="Archive project" description="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." confirmText="Archive project" onConfirm={setArchive}/>:null}

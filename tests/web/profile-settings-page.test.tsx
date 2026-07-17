@@ -3,20 +3,22 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import React from "react";
-import { ApiError, apiClient, type Profile, type ProjectSettings } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Profile, type ProjectSettings, type WorkspaceSettings } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { ProfilePage } = await import("../../src/components/profile/ProfilePage.js");
 const { ProjectSettingsPage } = await import("../../src/components/settings/ProjectSettingsPage.js");
+const { WorkspaceSettingsPage } = await import("../../src/components/settings/WorkspaceSettingsPage.js");
 
 afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 const profile: Profile = { user: { id: "user_1", email: "owner@example.test", pictureUrl: "https://idp.test/owner.png", emailVerified: true, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, preferences: { userId: "user_1", displayName: "Owner", timezone: "UTC", bio: "Builds tools", jobTitle: "Engineer", company: "AgentSmith", greetingPreference: "Hello", interests: ["Engineering"], updatedAt: "2026-07-11T00:00:00.000Z" } };
 const settings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", name: "Project", taskConcurrencyLimit: 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
+const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", name: "Workspace", ownerUserId: "user_1", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
 
 describe("profile and settings pages", () => {
-  it("renders immutable identity and sends profile/project mutations through the API client", async () => {
+  it("renders immutable identity and only sends changed profile/project mutations", async () => {
     const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile, projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
     const updates: unknown[] = [];
     apiClient.profile = async () => profile;
@@ -38,14 +40,26 @@ describe("profile and settings pages", () => {
       assert.equal(screen.queryByText("Account ID"), null);
       assert.equal(screen.queryByText("user_1"), null);
       assert.equal(screen.queryByText("https://idp.test"), null);
-      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      const saveProfile = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement;
+      assert.equal(saveProfile.disabled, true);
+      fireEvent.submit(saveProfile.closest("form")!);
+      assert.deepEqual(updates, []);
+      fireEvent.change(screen.getByRole("textbox", { name: "Display name" }), { target: { value: "Updated owner" } });
+      assert.equal(saveProfile.disabled, false);
+      fireEvent.click(saveProfile);
       await waitFor(() => assert.equal(updates.length, 1));
       view.unmount();
       render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
       await screen.findByRole("link", { name: "Manage members" });
-      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+      const saveProject = screen.getByRole("button", { name: "Save project" }) as HTMLButtonElement;
+      assert.equal(saveProject.disabled, true);
+      fireEvent.submit(saveProject.closest("form")!);
+      assert.equal(updates.length, 1);
+      fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Updated project" } });
+      assert.equal(saveProject.disabled, false);
+      fireEvent.click(saveProject);
       await waitFor(() => assert.equal(updates.length, 2));
-      assert.deepEqual(updates[1], { name: "Project" });
+      assert.deepEqual(updates[1], { name: "Updated project" });
       assert.equal(screen.queryByRole("spinbutton", { name: "Task concurrency" }), null);
     } finally {
       apiClient.profile = original.profile;
@@ -54,6 +68,28 @@ describe("profile and settings pages", () => {
       apiClient.updateProjectSettings = original.updateProjectSettings;
       apiClient.currentIdentity = original.currentIdentity;
     }
+  });
+
+  it("only enables workspace saving after its name changes", async () => {
+    const original = { workspaceSettings: apiClient.workspaceSettings, updateWorkspaceSettings: apiClient.updateWorkspaceSettings, currentIdentity: apiClient.currentIdentity, workspaceMembers: apiClient.workspaceMembers };
+    const updates: unknown[] = [];
+    apiClient.workspaceSettings = async () => workspaceSettings;
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.workspaceMembers = async () => [];
+    apiClient.updateWorkspaceSettings = async (_id, input) => { updates.push(input); return { ...workspaceSettings, workspace: { ...workspaceSettings.workspace, name: input.name } }; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceSettingsPage workspaceId="workspace_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Workspace name" });
+      const save = screen.getByRole("button", { name: "Save workspace" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
+      fireEvent.submit(save.closest("form")!);
+      assert.deepEqual(updates, []);
+      fireEvent.change(name, { target: { value: "Updated workspace" } });
+      assert.equal(save.disabled, false);
+      fireEvent.click(save);
+      await waitFor(() => assert.deepEqual(updates, [{ name: "Updated workspace" }]));
+      assert.equal(save.disabled, true);
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("keeps the project name stable while saving and adopts the saved server value", async () => {
