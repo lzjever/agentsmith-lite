@@ -46,11 +46,13 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   const input = useRef<HTMLInputElement>(null);
   const currentPath = useRef(path);
   const loadVersion = useRef(0);
+  const previewVersion = useRef(0);
 
   const load = useCallback(async () => {
     const requestedPath = path;
     if (currentPath.current !== requestedPath) return;
     const version = ++loadVersion.current;
+    previewVersion.current += 1;
     setState("loading");
     setMessage("");
     setCapabilities(undefined);
@@ -82,6 +84,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   }, [load]);
 
   function navigate(nextPath: string) {
+    previewVersion.current += 1;
     currentPath.current = nextPath;
     setSelected(undefined);
     setPreview(null);
@@ -90,6 +93,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   }
 
   function select(entry: ProjectFile) {
+    previewVersion.current += 1;
     setSelected(entry);
     setPreview((current) => current?.path === entry.path ? current : null);
     setMobileDetailsOpen(true);
@@ -124,7 +128,10 @@ function ProjectFiles({ projectId }: { projectId: string }) {
         setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
         setSelected((current) => current?.path === written.path ? entry : current);
       }
-      if (overwrite) setPreview((current) => invalidateFilePreview(current, written.path));
+      if (overwrite) {
+        previewVersion.current += 1;
+        setPreview((current) => invalidateFilePreview(current, written.path));
+      }
       if (overwrite) setReplaceTarget(undefined);
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
@@ -148,7 +155,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     if (file) void upload(file);
   }
   useEffect(()=>()=>{if(preview?.kind==="image")URL.revokeObjectURL(preview.value);},[preview]);
-  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name,path:entry.path};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current)return;setPreview({kind:"text",value,name:entry.name,path:entry.path});return;}throw new Error();}catch{if(mounted.current)toast.error("Preview is unavailable for this file.");}}
+  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;const version=++previewVersion.current;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current||version!==previewVersion.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);if(version!==previewVersion.current){URL.revokeObjectURL(value);return;}setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name,path:entry.path};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current||version!==previewVersion.current)return;setPreview({kind:"text",value,name:entry.name,path:entry.path});return;}throw new Error();}catch{if(mounted.current&&version===previewVersion.current)toast.error("Preview is unavailable for this file.");}}
 
   async function removeSelectedFile() {
     if (!deleteTarget) return;
@@ -157,6 +164,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     try {
       await apiClient.deleteFile(projectId, deleteTarget.path);
       if (!mounted.current) return;
+      previewVersion.current += 1;
       setDeleteTarget(undefined);
       setSelected((current) => current?.path === deleteTarget.path ? undefined : current);
       setPreview((current) => invalidateFilePreview(current, deleteTarget.path));
@@ -195,7 +203,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       <aside className="hidden rounded-md border border-subtle bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} canWrite={canWrite} onDelete={setDeleteTarget} onPreview={openPreview} /></aside>
     </div>
     <div className="lg:hidden">{selected ? <Button variant="quiet" className="w-full justify-between" aria-expanded={mobileDetailsOpen} onClick={() => setMobileDetailsOpen((open) => !open)}><span>File details</span><ChevronRight className={mobileDetailsOpen ? "rotate-90 transition-transform" : "transition-transform"} size={16} /></Button> : null}{showFileDetails(selected, true, mobileDetailsOpen) ? <div className="mt-2 rounded-md border border-subtle bg-surface p-4"><FileDetails entry={selected} projectId={projectId} canWrite={canWrite} onDelete={setDeleteTarget} onPreview={openPreview} /></div> : null}</div>
-    {preview?<div className="mt-4 rounded-md border border-subtle bg-surface p-4"><div className="mb-3 flex justify-between"><strong>{preview.name}</strong><Button variant="quiet" size="icon" aria-label="Close preview" onClick={()=>{if(preview.kind==="image")URL.revokeObjectURL(preview.value);setPreview(null);}}><X size={15}/></Button></div>{preview.kind==="image"?<img className="max-h-96 max-w-full" src={preview.value} alt={preview.name}/>:<pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{preview.value}</pre>}</div>:null}
+    {preview?<div className="mt-4 rounded-md border border-subtle bg-surface p-4"><div className="mb-3 flex justify-between"><strong>{preview.name}</strong><Button variant="quiet" size="icon" aria-label="Close preview" onClick={()=>{previewVersion.current+=1;if(preview.kind==="image")URL.revokeObjectURL(preview.value);setPreview(null);}}><X size={15}/></Button></div>{preview.kind==="image"?<img className="max-h-96 max-w-full" src={preview.value} alt={preview.name}/>:<pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">{preview.value}</pre>}</div>:null}
     <DeleteFileDialog entry={deleteTarget} deleting={deleting} onCancel={() => { if (!deleting) setDeleteTarget(undefined); }} onConfirm={removeSelectedFile} />
     <ConfirmationDialog open={Boolean(replaceTarget)} onOpenChange={(open) => !open && !uploading && setReplaceTarget(undefined)} title={`Replace ${replaceTarget?.file.name ?? "file"}?`} description="A file with this name already exists in this folder. This will permanently replace its contents." confirmText="Replace file" variant="default" confirmDisabled={uploading} onConfirm={() => replaceTarget ? upload(replaceTarget.file, true, replaceTarget.path) : undefined} errorContext="File could not be replaced" />
   </PageLayout>;

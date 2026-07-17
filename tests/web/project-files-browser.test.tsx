@@ -321,6 +321,27 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("ignores a preview download that finishes after folder navigation", async () => {
+    const original = snapshotClient();
+    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
+    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [file, folder] : [] });
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.downloadProjectFile = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return new Blob(["stale preview"], { type: "text/plain" });
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Preview" })[0]!);
+      fireEvent.click(screen.getByRole("button", { name: "reports" }));
+      await screen.findByRole("heading", { name: "This folder is empty" });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+      assert.equal(screen.queryByText("stale preview"), null);
+      assert.ok(screen.getByRole("heading", { name: "This folder is empty" }));
+    } finally { restoreClient(original); }
+  });
+
   it("shows a distinct no-match state and clears the filter", async () => {
     const original = snapshotClient();
     apiClient.files = async () => ({ entries: [file] });
