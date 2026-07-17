@@ -5,6 +5,7 @@ import type {
   ProjectChatMessage,
   ProjectChatThread,
   AuthSession,
+  EndpointHealth,
   EndpointCapability,
   EndpointProtocol,
   ModelEndpoint,
@@ -538,6 +539,17 @@ export class PostgresProductStore implements ProductStore {
         endpoint.health?.errorCategory ?? null,
         endpoint.updatedAt
       ]
+    );
+    return rows[0] ? mapEndpoint(rows[0]) : null;
+  }
+
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null> {
+    const rows = await this.queryRows<ModelEndpointRow>(
+      `update model_endpoints
+       set health_status=$3, health_checked_at=$4, health_error_category=$5, updated_at=$6
+       where id=$1 and project_id=$2
+       returning *`,
+      [id, projectId, health.status, health.checkedAt, health.errorCategory, updatedAt]
     );
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }

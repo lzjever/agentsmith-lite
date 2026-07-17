@@ -4,6 +4,7 @@ import type {
   ProjectChatMessage,
   ProjectChatThread,
   AuthSession,
+  EndpointHealth,
   ModelEndpoint,
   Project,
   ProjectMembership, ProjectMembershipView,
@@ -437,6 +438,14 @@ export class InMemoryProductStore implements ProductStore {
     this.requireEndpointCredentialProject(endpoint);
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
+  }
+
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null> {
+    const current = this.endpoints.get(id);
+    if (!current || current.projectId !== projectId) return null;
+    const updated = { ...current, health: clone(health), updatedAt };
+    this.endpoints.set(id, clone(updated));
+    return clone(updated);
   }
 
   private requireEndpointCredentialProject(endpoint: ModelEndpoint): void {

@@ -7,6 +7,7 @@ import type {
   ProjectChatThread,
   AgentTaskStatus,
   AuthSession,
+  EndpointHealth,
   ModelEndpoint,
   ProjectMembership,
   ProjectMembershipView,
@@ -418,6 +419,7 @@ export interface ProductStore {
 
   createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint>;
   updateEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint | null>;
+  updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null>;
   deleteEndpoint(id: string): Promise<DeleteEndpointResult>;
   listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]>;
   findEndpoint(id: string): Promise<ModelEndpoint | null>;

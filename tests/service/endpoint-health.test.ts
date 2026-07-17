@@ -82,3 +82,37 @@ test("endpoint model discovery and recheck persist only safe health transitions"
   assert.equal(settlements.filter((settlement) => settlement.endpointId === null).length, 2);
   assert.equal(settlements.filter((settlement) => settlement.endpointId === endpoint.id).length, 3);
 });
+
+test("endpoint recheck does not overwrite configuration changed while the provider responds", async () => {
+  let validationCalls = 0;
+  let recheckStarted!: () => void;
+  let finishRecheck!: (value: { status: "healthy" }) => void;
+  const started = new Promise<void>((resolve) => { recheckStarted = resolve; });
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot: "/tmp/agentsmith-endpoint-recheck-race",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => {
+        validationCalls += 1;
+        if (validationCalls !== 2) return { status: "healthy" as const };
+        recheckStarted();
+        return new Promise((resolve) => { finishRecheck = resolve; });
+      }
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Before", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+
+  const rechecking = services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
+  await started;
+  await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs });
+  finishRecheck({ status: "healthy" });
+
+  assert.equal((await rechecking).name, "After");
+  assert.equal((await services.endpoints.listEndpoints(user.id, project.id))[0]?.name, "After");
+});

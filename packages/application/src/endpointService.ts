@@ -128,7 +128,7 @@ export class EndpointService {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
     const existing = await this.requireEndpointForProject(projectId, endpointId);
     const checked = await this.healthFor(existing, userId, existing.id);
-    const updated = await this.store.updateEndpoint({ ...existing, health: checked, updatedAt: nowIso() });
+    const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nowIso());
     if (!updated) throw new NotFoundError("Endpoint not found");
     if (checked.status === "unavailable") {
       await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked));
