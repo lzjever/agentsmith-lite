@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   apiClient,
+  isReadOnlyMutationError,
   type ProjectAlert,
   type ProjectCapabilities,
 } from "../../lib/api/client";
@@ -212,13 +213,13 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     setCapabilities((current) =>
       current ? { ...current, canManagePolicy: false } : current,
     );
-    setCapabilitiesError("Alert management permission changed. Alerts and rules are now read-only.");
+    setCapabilitiesError("Alert management access changed. Alerts and rules are now read-only.");
     setRetry(null);
     setDismiss(null);
     setError("");
   }
   function forbidden(cause: unknown) {
-    const accessDenied = cause instanceof ApiError && cause.status === 403;
+    const accessDenied = isReadOnlyMutationError(cause);
     if (accessDenied) {
       revokeAccess();
     } else {

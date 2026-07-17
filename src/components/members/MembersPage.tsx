@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, apiClient, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -114,9 +114,9 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
 
   function denied(reason: unknown) {
-    if (reason instanceof ApiError && reason.status === 403) {
+    if (isReadOnlyMutationError(reason)) {
       setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
-      setCapabilitiesError("Member management permission changed. Members are now read-only.");
+      setCapabilitiesError("Member management access changed. Members are now read-only.");
       setInviteOpen(false);
       setRemoving(undefined);
     }

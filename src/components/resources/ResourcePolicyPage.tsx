@@ -4,6 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError,
   apiClient,
+  isReadOnlyMutationError,
   type Endpoint,
   type ProjectCapabilities,
   type ProjectPolicyInput,
@@ -119,7 +120,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       toast.success("Resource policy updated.");
     } catch (cause) {
       if (!active.current) return;
-      if (cause instanceof ApiError && cause.status === 403)
+      if (isReadOnlyMutationError(cause))
         setCaps((current) =>
           current ? { ...current, canManagePolicy: false } : current,
         );

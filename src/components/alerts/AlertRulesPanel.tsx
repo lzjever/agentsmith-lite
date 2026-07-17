@@ -2,7 +2,7 @@
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
@@ -59,7 +59,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   }, [canManage]);
 
   function mutationFailed(reason: unknown, message: string) {
-    if (reason instanceof ApiError && reason.status === 403) {
+    if (isReadOnlyMutationError(reason)) {
       setDialogOpen(false);
       setRemoving(null);
       onAccessDenied?.();
@@ -103,7 +103,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "alert-rule.update" : "alert-rule.create", editing ? `${editing.id}:form` : projectId);
       const message = editing ? "Alert rule could not be updated." : "Alert rule could not be created.";
-      if (!(reason instanceof ApiError && reason.status === 403)) setFormError(message);
+      if (!isReadOnlyMutationError(reason)) setFormError(message);
       mutationFailed(reason, message);
     } finally {
       if (mounted.current) setSaving(false);

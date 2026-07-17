@@ -180,12 +180,12 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("honors a forbidden policy mutation while keeping the API authoritative", async () => {
+  it("keeps policy read-only when the project is archived during a mutation", async () => {
     const original = snapshotClient();
     apiClient.policy = async () => policy;
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [];
-    apiClient.updatePolicy = async () => { throw new ApiError(403, "forbidden"); };
+    apiClient.updatePolicy = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
       fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
@@ -331,37 +331,37 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("fails closed when alert management permission is revoked", async () => {
+  it("fails closed when the project is archived during alert management", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_denied", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     apiClient.alerts = async () => [alert];
     apiClient.projectCapabilities = async () => capabilities;
-    apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Forbidden"); };
+    apiClient.acknowledgeAlert = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<AlertsPage projectId={projectId} />);
       fireEvent.click(await screen.findByRole("button", { name: "Acknowledge alert" }));
-      await screen.findByText("Alert management permission changed. Alerts and rules are now read-only.");
+      await screen.findByText("Alert management access changed. Alerts and rules are now read-only.");
       assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
       assert.equal(screen.queryByRole("button", { name: "Acknowledge alert" }), null);
       assert.ok(screen.getByText("Task failure"));
     } finally { restoreClient(original); }
   });
 
-  it("revokes alert management when a rule mutation is forbidden", async () => {
+  it("revokes alert management when the project is archived during a rule mutation", async () => {
     const original = snapshotClient();
     const rule = { id: "rule_denied", projectId, alertType: "task_failure" as const, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
     apiClient.alerts = async () => [];
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [rule];
     apiClient.endpoints = async () => [];
-    apiClient.updateAlertRule = async () => { throw new ApiError(403, "Forbidden"); };
+    apiClient.updateAlertRule = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<AlertsPage projectId={projectId} />);
       const rulesTab = await screen.findByRole("tab", { name: "Rules" });
       fireEvent.mouseDown(rulesTab, { button: 0 });
       fireEvent.click(rulesTab);
       fireEvent.click(await screen.findByRole("button", { name: "Enabled" }));
-      await screen.findByText("Alert management permission changed. Alerts and rules are now read-only.");
+      await screen.findByText("Alert management access changed. Alerts and rules are now read-only.");
       assert.equal(screen.queryByRole("button", { name: "Add rule" }), null);
       assert.equal(screen.queryByRole("button", { name: "Enabled" }), null);
       assert.ok(screen.getByText("Read-only"));
