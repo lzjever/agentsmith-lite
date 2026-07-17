@@ -72,7 +72,9 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   }, []);
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get("scope");
-    setScope(tabs.some((tab) => tab.scope === requested) ? requested as ContextScope : tabs[0]!.scope);
+    const valid = tabs.some((tab) => tab.scope === requested);
+    setScope(valid ? requested as ContextScope : tabs[0]!.scope);
+    if (requested && !valid) replaceContextScope(tabs[0]!.scope, tabs[0]!.scope);
     setScopeReady(true);
   }, []);
   useEffect(() => { if (scopeReady) { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); } }, [load, scopeReady]);

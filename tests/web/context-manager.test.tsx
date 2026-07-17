@@ -29,6 +29,7 @@ describe("context manager", () => {
       window.history.replaceState({}, "", "/?scope=project_personal");
       render(<ContextManager workspaceId="workspace_1" />);
       await waitFor(() => assert.deepEqual(calls, ["workspace_shared"]));
+      assert.equal(new URL(window.location.href).searchParams.has("scope"), false);
     } finally { Object.assign(apiClient, original); }
   });
 

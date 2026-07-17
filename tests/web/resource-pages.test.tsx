@@ -510,6 +510,21 @@ describe("project resource pages", () => {
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); apiClient.transitionAlert = original.transitionAlert; }
   });
 
+  it("removes an alert deep link when the instance is not in this project", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "available_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => capabilities;
+    try {
+      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/alerts?alertId=other_project_alert#instances");
+      render(<AlertsPage projectId={projectId} />);
+      await screen.findByText("Task failure");
+      await waitFor(() => assert.equal(new URL(window.location.href).searchParams.has("alertId"), false));
+      assert.equal(window.location.hash, "#instances");
+      assert.equal(screen.queryByText("Linked instance"), null);
+    } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
+  });
+
   it("filters alert history and keeps a failed resolve in the ready state without rejecting the click handler", async () => {
     const original = snapshotClient();
     const active: ProjectAlert = { id: "active_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };

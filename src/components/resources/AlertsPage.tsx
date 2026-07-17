@@ -122,6 +122,13 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
         : new URLSearchParams(window.location.search).get("alertId"),
     );
   }, [projectId]);
+  useEffect(() => {
+    if (state !== "ready" || !selectedAlertId || alerts.some((alert) => alert.id === selectedAlertId)) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("alertId");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    setSelectedAlertId(null);
+  }, [alerts, selectedAlertId, state]);
   const canManage = capabilities?.canManagePolicy === true;
   async function transition(
     alert: ProjectAlert,
