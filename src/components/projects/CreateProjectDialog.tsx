@@ -2,14 +2,14 @@
 
 import { FolderPlus } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
-import { ApiError, apiClient, type Project } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Project } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { toast } from "../ui/toast";
 
-export function CreateProjectDialog({ workspaceId, open, onOpenChange, onCreated }: { workspaceId: string; open: boolean; onOpenChange: (open: boolean) => void; onCreated: (project: Project) => void }) {
+export function CreateProjectDialog({ workspaceId, open, onOpenChange, onCreated, onAccessChanged }: { workspaceId: string; open: boolean; onOpenChange: (open: boolean) => void; onCreated: (project: Project) => void; onAccessChanged?: () => void | Promise<void> }) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -29,7 +29,14 @@ export function CreateProjectDialog({ workspaceId, open, onOpenChange, onCreated
       toast.success("Project created");
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("project.create", requestIdentity);
-      setError(reason instanceof ApiError ? reason.message : "Project could not be created.");
+      const message = reason instanceof ApiError ? reason.message : "Project could not be created.";
+      if (isReadOnlyMutationError(reason)) {
+        toast.error(message);
+        onOpenChange(false);
+        await onAccessChanged?.();
+      } else {
+        setError(message);
+      }
     } finally {
       setSaving(false);
     }

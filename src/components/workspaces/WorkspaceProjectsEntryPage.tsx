@@ -64,7 +64,7 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
     {state === "ready" && pinError ? <div className="mb-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">{pinError.message}</span><Button variant="quiet" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}>Retry</Button></div> : null}
     {state === "ready" && workspace?.projects.length === 0 ? <ProjectsEmpty canCreateProject={canCreateProject} onCreate={() => setCreateOpen(true)} /> : null}
     {state === "ready" && workspace && workspace.projects.length > 0 ? <ProjectsTable workspaceId={workspace.id} projects={workspace.projects} pinBusyId={pinBusyId} onTogglePin={(projectId)=>void togglePin(projectId)} /> : null}
-    {canCreateProject ? <CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} /> : null}
+    {canCreateProject ? <CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} onAccessChanged={load} /> : null}
   </PageLayout>;
 }
 
