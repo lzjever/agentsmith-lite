@@ -621,19 +621,23 @@ async function routeApi(
         return sendJson(res, 200, written);
       }
       if (!segments[5] && method === "DELETE") {
+        const idempotencyKey = requireIdempotencyKey(req);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const body = await readJson(req);
         const filePath = asString(body.path);
-        const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
-          record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
+        const response = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,async()=>{
+          const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
+            record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
+          });
+          await services.policies.recordOperation(projectId, user.id, "file.delete", "accepted", filePath, "file", {
+            filePath,
+            bytes: deleted.bytes,
+            mediaType: deleted.mediaType
+          });
+          return deleted.response;
         });
-        await services.policies.recordOperation(projectId, user.id, "file.delete", "accepted", filePath, "file", {
-          filePath,
-          bytes: deleted.bytes,
-          mediaType: deleted.mediaType
-        });
-        return sendJson(res, 200, deleted.response);
+        return sendJson(res, 200, response);
       }
       if (segments[5] === "download" && method === "GET") {
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");

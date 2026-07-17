@@ -94,6 +94,11 @@ describe("task lifecycle API routes", () => {
     const replay=await upload("first","file-upload-key");assert.equal(replay.status,200);assert.deepEqual(await replay.json(),written);
     const mismatch=await upload("changed","file-upload-key");assert.equal(mismatch.status,409);
     const events=await store.listProjectAuditEvents(projectId);assert.equal(events.filter(event=>event.action==="file.upload"&&event.resourceId===written.path&&event.status==="accepted").length,1);
+    const remove=(key?:string)=>fetch(api.baseUrl+`/api/v1/projects/${projectId}/files`,{method:"DELETE",headers:{cookie,"x-csrf-token":csrf,"content-type":"application/json",...(key?{"idempotency-key":key}:{})},body:JSON.stringify({path:written.path})});
+    const missingDelete=await remove();assert.equal(missingDelete.status,400);
+    const deleted=await remove("file-delete-key");assert.equal(deleted.status,200);const deletion=await deleted.json();
+    const deleteReplay=await remove("file-delete-key");assert.equal(deleteReplay.status,200);assert.deepEqual(await deleteReplay.json(),deletion);
+    const afterDelete=await store.listProjectAuditEvents(projectId);assert.equal(afterDelete.filter(event=>event.action==="file.delete"&&event.resourceId===written.path&&event.status==="accepted").length,1);
   });
 
   it("searches, filters, sorts, paginates, edits, archives, retries, duplicates, and deletes", async () => {

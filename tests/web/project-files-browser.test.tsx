@@ -199,6 +199,28 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reuses a file deletion key after an unknown network result", async () => {
+    const original = snapshotClient();
+    const keys: string[] = [];
+    let attempts = 0;
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.deleteFile = (async (_projectId:string,_path:string,key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{deleted:true as const};}) as typeof apiClient.deleteFile;
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
+      const confirm = () => Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete")!;
+      fireEvent.click(confirm());
+      await screen.findByText(/connection closed/);
+      fireEvent.click(confirm());
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.ok(keys[0]);assert.equal(keys[1],keys[0]);
+      await waitFor(() => assert.equal(screen.queryByText("brief.txt"), null));
+    } finally { restoreClient(original); }
+  });
+
   it("does not apply a completed delete after switching projects", async () => {
     const original = snapshotClient();
     const secondFile: ProjectFile = { ...file, name: "second.txt", path: "files/second.txt" };

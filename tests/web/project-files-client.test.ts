@@ -23,11 +23,11 @@ describe("project files API client", () => {
       await apiClient.currentIdentity();
       await apiClient.files("project_1", "files/reports");
       await apiClient.uploadFile("project_1", "files/reports/brief.bin", new Blob([Uint8Array.from([0, 255, 7])], { type: "application/octet-stream" }) as File, { idempotencyKey: "file-upload-key" });
-      await apiClient.deleteFile("project_1", "files/reports/brief.bin");
+      await apiClient.deleteFile("project_1", "files/reports/brief.bin", "file-delete-key");
 
       assert.equal(requests[1]?.url, "http://localhost/api/v1/projects/project_1/files?path=files%2Freports");
       assert.deepEqual(requests[2] && { method: requests[2].method, contentType: requests[2].contentType, csrf: requests[2].csrf, idempotencyKey: requests[2].idempotencyKey }, { method: "PUT", contentType: "application/octet-stream", csrf: "csrf_1", idempotencyKey: "file-upload-key" });
-      assert.deepEqual(requests[3] && { method: requests[3].method, contentType: requests[3].contentType, csrf: requests[3].csrf }, { method: "DELETE", contentType: "application/json", csrf: "csrf_1" });
+      assert.deepEqual(requests[3] && { method: requests[3].method, contentType: requests[3].contentType, csrf: requests[3].csrf, idempotencyKey: requests[3].idempotencyKey }, { method: "DELETE", contentType: "application/json", csrf: "csrf_1", idempotencyKey: "file-delete-key" });
       assert.equal(apiClient.fileDownloadUrl("project_1", "files/reports/brief.bin"), "/api/v1/projects/project_1/files/download?path=files%2Freports%2Fbrief.bin");
     } finally {
       globalThis.fetch = originalFetch;

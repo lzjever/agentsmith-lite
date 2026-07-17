@@ -168,8 +168,10 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     if (!deleteTarget || uploading || deleting) return;
     setDeleting(true);
     setMessage("");
+    const requestIdentity = deleteTarget.path;
     try {
-      await apiClient.deleteFile(projectId, deleteTarget.path);
+      await apiClient.deleteFile(projectId, deleteTarget.path, mutationKeys.key("file.delete", requestIdentity));
+      mutationKeys.complete("file.delete", requestIdentity);
       if (!mounted.current) return;
       previewVersion.current += 1;
       setDeleteTarget(undefined);
@@ -179,6 +181,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       toast.success("File deleted");
     } catch (error) {
       if (!mounted.current) return;
+      if (error instanceof ApiError) mutationKeys.complete("file.delete", requestIdentity);
       if (revokeWriteAccess(error)) return;
       throw new Error(errorMessage(error, "File could not be deleted."));
     } finally {
