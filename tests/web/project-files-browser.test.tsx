@@ -36,6 +36,24 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("locks file deletion while an upload is pending", async () => {
+    const original = snapshotClient();
+    let uploadStarted = false;
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.uploadFile = async () => {
+      uploadStarted = true;
+      return new Promise(() => undefined);
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target:{ files:[new File(["a"], "new.txt")] } });
+      await waitFor(() => assert.equal(uploadStarted, true));
+      for (const button of screen.getAllByRole("button", { name:"Delete" })) assert.equal(button.hasAttribute("disabled"), true);
+    } finally { restoreClient(original); }
+  });
+
   it("does not insert an upload response into a different folder", async () => {
     const original = snapshotClient();
     const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
