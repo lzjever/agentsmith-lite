@@ -118,7 +118,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
-    } catch (reason) { await recoverMutation(reason); throw reason; }
+    } catch (reason) { mutationKeys.completeApiFailure(reason, "task-message", identity); await recoverMutation(reason); throw reason; }
   }
   async function updateQueued(messageId: string, content: string) {
     const identity = `${messageId}:${content}`;
@@ -129,7 +129,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
-    } catch (reason) { const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
+    } catch (reason) { mutationKeys.completeApiFailure(reason, "task-message-edit", identity); const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
   }
   async function deleteQueued(messageId: string) {
     const stateVersion = authoritativeStateVersion.current;
@@ -139,7 +139,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
-    } catch (reason) { const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
+    } catch (reason) { mutationKeys.completeApiFailure(reason, "task-message-delete", messageId); const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
   }
   async function recoverMutation(reason: unknown): Promise<boolean> {
     if (!(reason instanceof ApiError) || (reason.status !== 403 && reason.status !== 404 && reason.status !== 409)) return false;
@@ -166,14 +166,14 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
   async function abort() {
     setAborting(true);
     try { await apiClient.abortTaskTurn(taskId, mutationKeys.key("task-turn-abort", taskId)); mutationKeys.complete("task-turn-abort", taskId); }
-    catch (reason) { await recoverMutation(reason); throw reason; }
+    catch (reason) { mutationKeys.completeApiFailure(reason, "task-turn-abort", taskId); await recoverMutation(reason); throw reason; }
     finally { setAborting(false); }
   }
   async function stopWork(interactionId: string) {
     try {
       await apiClient.stopTaskWork(taskId, interactionId, mutationKeys.key("task-work-stop", interactionId));
       mutationKeys.complete("task-work-stop", interactionId);
-    } catch (reason) { await recoverMutation(reason); throw reason; }
+    } catch (reason) { mutationKeys.completeApiFailure(reason, "task-work-stop", interactionId); await recoverMutation(reason); throw reason; }
   }
   function retry() { reconnectCount.current = 0; streamCursor.current = undefined; setError(""); setRefreshGeneration((value) => value + 1); }
   function onScroll() { const element = viewport.current; if (!element) return; if (isNearHistoryTop(element.scrollTop)) void loadEarlier(); if (element.scrollHeight - element.scrollTop - element.clientHeight < 96) setNewActivity(false); }

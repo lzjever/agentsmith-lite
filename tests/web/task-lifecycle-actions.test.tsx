@@ -70,6 +70,30 @@ describe("TaskLifecycleActions", () => {
     } finally { apiClient.editTask = original; }
   });
 
+  it("uses a new rename key after a definitive API failure", async () => {
+    const original = apiClient.editTask;
+    const keys: string[] = [];
+    let refreshes = 0;
+    apiClient.editTask = async (_taskId, title, key) => {
+      keys.push(key);
+      if (keys.length === 1) throw new ApiError(409, "Task changed while renaming");
+      return { ...task, title };
+    };
+    try {
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => { refreshes += 1; }} />);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+      fireEvent.change(await screen.findByLabelText("Task title"), { target: { value: "Recovered title" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+      await screen.findByText("Task changed while renaming");
+
+      fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+      await waitFor(() => assert.equal(refreshes, 1));
+      assert.equal(keys.length, 2);
+      assert.notEqual(keys[0], keys[1]);
+    } finally { apiClient.editTask = original; }
+  });
+
   it("does not expose lifecycle actions without a server capability", () => {
     render(<TaskLifecycleActions task={task} capabilities={{ ...capabilities, editTask:false, duplicateTask:false }} basePath="/tasks" onRefresh={async () => undefined} />);
     assert.equal(screen.queryByRole("button", { name:"Task actions" }), null);

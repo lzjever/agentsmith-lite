@@ -98,6 +98,65 @@ describe("tasks page loading", () => {
     }
   });
 
+  it("uses a new task creation key after a definitive API failure", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+    const keys: string[] = [];
+    const navigations: string[] = [];
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async () => [eligible];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.createTask = async (_projectId, _input, key) => {
+      keys.push(key);
+      if (keys.length === 1) throw new ApiError(409, "Project active tasks limit reached");
+      return task;
+    };
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={(path) => navigations.push(path)} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Run after capacity is released" } });
+      fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+
+      fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
+      await waitFor(() => assert.deepEqual(navigations, ["/workspaces/workspace_1/projects/project_1/tasks/task_1"]));
+      assert.equal(keys.length, 2);
+      assert.notEqual(keys[0], keys[1]);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("refreshes task endpoints when the selected endpoint disappears", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Removed endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model-1", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const replacement: Endpoint = { ...eligible, id: "endpoint_2", name: "Replacement endpoint", model: "model-2", credentialId: "credential_2" };
+    const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+    let endpointReads = 0;
+    let finishEndpointRefresh!: (value: Endpoint[]) => void;
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async () => ++endpointReads === 1 ? [eligible] : new Promise((resolve) => { finishEndpointRefresh = resolve; });
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.files = async () => ({ entries: [] });
+    apiClient.createTask = async () => { throw new ApiError(404, "Endpoint not found"); };
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Create task" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Keep this task draft" } });
+      fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
+
+      await waitFor(() => assert.equal(endpointReads, 2));
+      assert.equal((screen.getByRole("button", { name: "Creating..." }) as HTMLButtonElement).disabled, true);
+      await act(async () => finishEndpointRefresh([replacement]));
+      assert.match(screen.getByRole("combobox").textContent ?? "", /Replacement endpoint \(model-2\)/);
+      assert.equal((screen.getByRole("textbox", { name: "Task prompt" }) as HTMLTextAreaElement).value, "Keep this task draft");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("closes task creation when the project is archived during creation", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };

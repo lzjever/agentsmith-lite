@@ -49,6 +49,34 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("uses a new message key after a definitive API failure", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, sendTaskMessage: apiClient.sendTaskMessage };
+    const keys: string[] = [];
+    apiClient.getTaskInteractions = async () => snapshot;
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    apiClient.sendTaskMessage = async (_taskId, _content, key) => {
+      keys.push(key);
+      if (keys.length === 1) throw new ApiError(409, "Task message state changed");
+      return { messageId: "message_2", disposition: "queued_for_active_run", targetTaskId: "task_1", duplicate: false, queuedMessage: null, interaction: null, capabilities };
+    };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
+      fireEvent.change(composer, { target: { value: "Continue after recovery" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await screen.findByText("Task message state changed");
+
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => assert.equal(composer.value, ""));
+      assert.equal(keys.length, 2);
+      assert.notEqual(keys[0], keys[1]);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("reconciles a queued message that was consumed before editing", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, updateTaskMessage: apiClient.updateTaskMessage };
     const queued = { id: "message_queued", content: "Queued instruction", deliveryStatus: "pending" as const, editable: true, deletable: true, updatedAt: "2026-07-15T00:00:01.000Z" };

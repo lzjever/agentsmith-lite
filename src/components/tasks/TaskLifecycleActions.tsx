@@ -55,6 +55,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       await onRefresh();
       toast.success("Task renamed");
     } catch (reason) {
+      mutationKeys.completeApiFailure(reason, "task-edit", identity);
       if (shouldRefreshTask(reason)) await onRefresh();
       setRenameError(message(reason, "Task could not be renamed."));
     } finally { setRenaming(false); }
@@ -70,6 +71,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       mutationKeys.complete(action === "retry" ? "task-retry" : "task-duplicate", task.id);
       window.location.assign(appPath(`${basePath}/${created.id}`));
     } catch (reason) {
+      mutationKeys.completeApiFailure(reason, action === "retry" ? "task-retry" : "task-duplicate", task.id);
       if (shouldRefreshTask(reason)) await onRefresh();
       toast.error(message(reason, action === "retry" ? "Task could not be retried." : "Task could not be duplicated."));
       setRunning(undefined);
@@ -85,6 +87,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh, 
       await onRefresh();
       toast.success("Task archived");
     } catch (reason) {
+      mutationKeys.completeApiFailure(reason, "task-archive", task.id);
       if (shouldRefreshTask(reason)) await onRefresh();
       throw reason;
     } finally {

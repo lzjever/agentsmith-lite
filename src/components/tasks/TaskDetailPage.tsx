@@ -180,6 +180,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       toast.success("Task cancellation requested");
     } catch (reason) {
       if (!mounted.current) return;
+      mutationKeys.completeApiFailure(reason, "task-cancel", taskId);
       if (isReadOnlyMutationError(reason)) {
         setCapabilities((current) => current ? { ...current, cancelTask: false } : current);
         setCancelOpen(false);
@@ -200,6 +201,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       window.location.assign(appPath(basePath));
     } catch (reason) {
       if (!mounted.current) return;
+      mutationKeys.completeApiFailure(reason, "task-delete", taskId);
       if (isReadOnlyMutationError(reason)) {
         setCapabilities((current) => current ? { ...current, deleteTask: false } : current);
         setDeleteOpen(false);

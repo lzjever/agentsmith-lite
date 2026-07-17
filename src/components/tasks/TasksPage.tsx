@@ -57,21 +57,24 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
-  const loadCreateDependencies = useCallback(() => {
+  const loadEndpoints = useCallback(async () => {
     const endpointsVersion = ++endpointsLoadVersion.current;
     setEndpointsState("loading");
     setEndpointsError("");
-    void apiClient.endpoints(projectId).then((available) => {
+    try {
+      const available = await apiClient.endpoints(projectId);
       if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints(available);
       setEndpointsState("ready");
-    }).catch((reason) => {
+    } catch (reason) {
       if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
       setEndpoints([]);
       setEndpointsError(message(reason));
       setEndpointsState("error");
-    });
+    }
+  }, [projectId]);
 
+  const loadCapabilities = useCallback(() => {
     const capabilitiesVersion = ++capabilitiesLoadVersion.current;
     setCapabilitiesState("loading");
     setCapabilitiesError("");
@@ -86,6 +89,11 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
       setCapabilitiesState("error");
     });
   }, [projectId]);
+
+  const loadCreateDependencies = useCallback(() => {
+    void loadEndpoints();
+    loadCapabilities();
+  }, [loadCapabilities, loadEndpoints]);
 
   const load = useCallback(async (quiet = false) => {
     const version = ++loadVersion.current;
@@ -154,6 +162,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     } catch (reason) {
       if (!active.current) return;
       const detail = message(reason);
+      mutationKeys.completeApiFailure(reason, "task-create", identity);
       if (isReadOnlyMutationError(reason)) {
         setDialogOpen(false);
         mutationKeys.clear("task-create");
@@ -165,6 +174,8 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
           throw new Error(detail);
         }
         setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
+      } else if (isTaskEndpointDrift(reason)) {
+        await loadEndpoints();
       }
       setError(detail);
       toast.error(detail);
@@ -198,3 +209,10 @@ function DependencyError({ children }: { children: ReactNode }) {
 }
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : error instanceof Error ? error.message : "The task request could not be completed."; }
+
+function isTaskEndpointDrift(error: unknown): boolean {
+  return error instanceof ApiError && (
+    error.status === 404 && (error.message === "Endpoint not found" || error.message === "Credential not found")
+    || error.status === 409 && error.message === "Endpoint is unavailable. Recheck it before use."
+  );
+}
