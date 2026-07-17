@@ -185,6 +185,24 @@ describe("personal and resource UI", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("locks notification items while marking all as read", async () => {
+    const original = { notifications: apiClient.notifications, markAllNotificationsRead: apiClient.markAllNotificationsRead };
+    let markStarted = false;
+    apiClient.notifications = async () => [notification];
+    apiClient.markAllNotificationsRead = async () => {
+      markStarted = true;
+      return new Promise(() => undefined);
+    };
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell /></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button", { name:"Open notifications" }), { button:0, ctrlKey:false });
+      fireEvent.click(await screen.findByRole("button", { name:"Mark all read" }));
+      await waitFor(() => assert.equal(markStarted, true));
+
+      assert.equal((screen.getByRole("button", { name:/Task finished/ }) as HTMLButtonElement).disabled, true);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("does not let an older menu load undo mark all read", async () => {
     const original = { notifications: apiClient.notifications, markAllNotificationsRead: apiClient.markAllNotificationsRead };
     let initialLoaded = false;
