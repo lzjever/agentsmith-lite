@@ -45,6 +45,28 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reuses a resource policy key after an unknown network result", async () => {
+    const original = snapshotClient();
+    const keys: string[] = [];
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = (async (_projectId: string, input: ProjectPolicyInput, key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { ...policy, ...input };
+    }) as typeof apiClient.updatePolicy;
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.equal(keys[1], keys[0]);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps the newest resource policy refresh", async () => {
     const original = snapshotClient();
     const resolvers: Array<(value: ProjectResourcePolicy) => void> = [];
@@ -392,6 +414,52 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reuses the original silence request after an unknown network result", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_silence_retry", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", silencedUntil: null, createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    const attempts: Array<{ until: string | null; key: string }> = [];
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.silenceAlert = (async (_projectId: string, _alertId: string, until: string | null, key: string) => {
+      attempts.push({ until, key });
+      if (attempts.length === 1) throw new Error("connection closed");
+      return { ...alert, silencedUntil: until };
+    }) as typeof apiClient.silenceAlert;
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Silence alert for one hour" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+      await waitFor(() => assert.equal(attempts.length, 2));
+      assert.deepEqual(attempts[1], attempts[0]);
+    } finally { restoreClient(original); }
+  });
+
+  it("reuses an alert rule update key after an unknown network result", async () => {
+    const original = snapshotClient();
+    const rule = { id: "rule_update_retry", projectId, alertType: "task_failure" as const, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
+    const keys: string[] = [];
+    apiClient.alerts = async () => [];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.alertRules = async () => [rule];
+    apiClient.endpoints = async () => [];
+    apiClient.updateAlertRule = (async (_projectId: string, _ruleId: string, _input: unknown, key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { ...rule, enabled: false };
+    }) as typeof apiClient.updateAlertRule;
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      const rulesTab = await screen.findByRole("tab", { name: "Rules" });
+      fireEvent.mouseDown(rulesTab, { button: 0 });
+      fireEvent.click(rulesTab);
+      fireEvent.click(await screen.findByRole("button", { name: "Enabled" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+      fireEvent.click(screen.getByRole("button", { name: "Enabled" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.equal(keys[1], keys[0]);
+    } finally { restoreClient(original); }
+  });
+
   it("renders API-computed limits and trends, and refetches for the selected endpoint", async () => {
     const original = snapshotClient();
     const usageCalls: Array<string | undefined> = [];
@@ -575,7 +643,7 @@ describe("project resource pages", () => {
 
 const alertTypes: ProjectAlert["type"][] = ["active_tasks_limit", "provider_requests_limit", "provider_tokens_limit", "provider_cost_limit", "project_file_bytes_limit", "endpoint_failure", "provider_failure", "task_failure", "sandbox_failure"];
 
-function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule }; }
+function snapshotClient() { return { policy: apiClient.policy, updatePolicy: apiClient.updatePolicy, usage: apiClient.usage, alerts: apiClient.alerts, audit: apiClient.audit, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, transitionAlert: apiClient.transitionAlert, acknowledgeAlert: apiClient.acknowledgeAlert, silenceAlert: apiClient.silenceAlert, alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule, deleteAlertRule: apiClient.deleteAlertRule, testAlertRule: apiClient.testAlertRule }; }
 function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

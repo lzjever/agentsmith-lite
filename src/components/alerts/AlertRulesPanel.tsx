@@ -51,6 +51,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   useEffect(() => {
     if (!canManage) {
       mutationKeys.clear("alert-rule.create");
+      mutationKeys.clear("alert-rule.update");
+      mutationKeys.clear("alert-rule.delete");
       setDialogOpen(false);
       setRemoving(null);
     }
@@ -87,9 +89,10 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     setFormError("");
     try {
       const saved = editing
-        ? await apiClient.updateAlertRule(projectId, editing.id, value)
+        ? await apiClient.updateAlertRule(projectId, editing.id, value, mutationKeys.key("alert-rule.update", `${editing.id}:form`))
         : await apiClient.createAlertRule(projectId, value, mutationKeys.key("alert-rule.create", projectId));
-      if (!editing) mutationKeys.complete("alert-rule.create", projectId);
+      if (editing) mutationKeys.complete("alert-rule.update", `${editing.id}:form`);
+      else mutationKeys.complete("alert-rule.create", projectId);
       if (!mounted.current) return;
       setRules((current) => editing ? current.map((rule) => rule.id === saved.id ? saved : rule) : [...current, saved]);
       await onInstancesChanged?.();
@@ -98,7 +101,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       toast.success(editing ? "Alert rule updated." : "Alert rule created.");
     } catch (reason) {
       if (!mounted.current) return;
-      if (!editing && reason instanceof ApiError) mutationKeys.complete("alert-rule.create", projectId);
+      if (reason instanceof ApiError) mutationKeys.complete(editing ? "alert-rule.update" : "alert-rule.create", editing ? `${editing.id}:form` : projectId);
       const message = editing ? "Alert rule could not be updated." : "Alert rule could not be created.";
       if (!(reason instanceof ApiError && reason.status === 403)) setFormError(message);
       mutationFailed(reason, message);
@@ -111,7 +114,9 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     if (!canManage || busyRuleId !== null) return;
     setBusyRuleId(rule.id);
     try {
-      const saved = await apiClient.updateAlertRule(projectId, rule.id, { enabled: !rule.enabled });
+      const identity = `${rule.id}:toggle:${!rule.enabled}`;
+      const saved = await apiClient.updateAlertRule(projectId, rule.id, { enabled: !rule.enabled }, mutationKeys.key("alert-rule.update", identity));
+      mutationKeys.complete("alert-rule.update", identity);
       if (!mounted.current) return;
       setRules((current) => current.map((item) => item.id === rule.id ? saved : item));
       await onInstancesChanged?.();
@@ -119,6 +124,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       toast.success(saved.enabled ? "Alert rule enabled." : "Alert rule disabled.");
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("alert-rule.update", `${rule.id}:toggle:${!rule.enabled}`);
       mutationFailed(reason, "Alert rule could not be updated.");
     } finally {
       if (mounted.current) setBusyRuleId(null);
@@ -130,7 +136,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     if (!removing || !canManage || busyRuleId !== null) return;
     setBusyRuleId(removing.id);
     try {
-      await apiClient.deleteAlertRule(projectId, removing.id);
+      await apiClient.deleteAlertRule(projectId, removing.id, mutationKeys.key("alert-rule.delete", removing.id));
+      mutationKeys.complete("alert-rule.delete", removing.id);
       if (!mounted.current) return;
       setRules((current) => current.filter((item) => item.id !== removing.id));
       await onInstancesChanged?.();
@@ -139,6 +146,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       toast.success("Alert rule deleted.");
     } catch (error) {
       if (!mounted.current) return;
+      if (error instanceof ApiError) mutationKeys.complete("alert-rule.delete", removing.id);
       mutationFailed(error, "Alert rule could not be deleted.");
       throw error;
     } finally {

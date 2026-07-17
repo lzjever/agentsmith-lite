@@ -3,6 +3,7 @@ import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
 type Limit = ProjectAlertType;
@@ -49,20 +50,29 @@ export class ProjectPolicyService {
     for (const type of activeTypes) await recoverProjectAlerts(this.store, projectId, type, undefined, true);
     return this.store.listProjectAlerts(projectId);
   }
-  async transitionAlert(userId: string, projectId: string, alertId: string, status: "resolved" | "dismissed") {
+  async transitionAlert(userId: string, projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey?: string) {
     const action: ProjectAuditAction = status === "resolved" ? "alert.resolve" : "alert.dismiss";
-    let alert: ProjectAlert;
     try {
       await this.authorization.requireProject(userId, projectId, "admin");
-      const transitioned = await this.store.transitionProjectAlert(projectId, alertId, status, nowIso());
-      if (!transitioned) throw new ProductError("Active project alert not found", 404);
-      alert = transitioned;
     } catch (error) {
       await this.auditEvent(projectId, userId, action, "rejected", alertId, "alert");
       throw error;
     }
-    await this.auditEvent(projectId, userId, action, "accepted", alert.id, "alert");
-    return alert;
+    const transition = async () => {
+      let alert: ProjectAlert;
+      try {
+        const transitioned = await this.store.transitionProjectAlert(projectId, alertId, status, nowIso());
+        if (!transitioned) throw new ProductError("Active project alert not found", 404);
+        alert = transitioned;
+      } catch (error) {
+        await this.auditEvent(projectId, userId, action, "rejected", alertId, "alert");
+        throw error;
+      }
+      await this.auditEvent(projectId, userId, action, "accepted", alert.id, "alert");
+      return alert;
+    };
+    if (!idempotencyKey) return transition();
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.alert.transition", key: idempotencyKey, request: { alertId, status }, resourceId: alertId, failureMessage: "Alert could not be updated", run: transition });
   }
   async audit(userId:string,projectId:string):Promise<import("../../contracts/src/api.js").ProjectAuditEventView[]>;
   async audit(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAuditQuery):Promise<import("../../contracts/src/api.js").ProjectAuditPage>;
@@ -78,24 +88,33 @@ export class ProjectPolicyService {
       return { ...event,detail:safeAuditDetail(event.detail), actorDisplayName: actor?.displayName ?? null, actorEmail: actor?.email ?? null };
     });return query===undefined?items:{nextCursor:events.nextCursor,items};
   }
-  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput): Promise<ProjectResourcePolicy> {
-    let result: ProjectResourcePolicy;
-    let previous!: ProjectResourcePolicy;
+  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput, idempotencyKey?: string): Promise<ProjectResourcePolicy> {
     try {
       await this.authorization.requireProject(userId, projectId, "admin");
-      const updated = validatePolicyInput(input);
-      previous = await this.requirePolicy(projectId);
-      if(updated.endpointWindows){const endpoints=await this.store.listEndpointsForProject(projectId);const endpointIds=new Set(endpoints.map(endpoint=>endpoint.id));if(updated.endpointWindows.some(window=>!endpointIds.has(window.endpointId)))throw new ProductError("Endpoint policy window endpoint not found",404)}
-      if (Object.keys(updated).length === 0) throw new ProductError("Project policy update requires at least one limit");
-      const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nowIso()); if (!patched) throw new ProductError("Project policy not found", 404);
-      result = patched;
     } catch (error) {
       await this.auditEvent(projectId, userId, "policy.update", "rejected", projectId);
       throw error;
     }
-    await this.auditEvent(projectId, userId, "policy.update", "accepted", projectId);
-    await this.recoverChangedPolicyAlerts(previous, result);
-    return result;
+    const update = async () => {
+      let result: ProjectResourcePolicy;
+      let previous!: ProjectResourcePolicy;
+      try {
+        const updated = validatePolicyInput(input);
+        previous = await this.requirePolicy(projectId);
+        if(updated.endpointWindows){const endpoints=await this.store.listEndpointsForProject(projectId);const endpointIds=new Set(endpoints.map(endpoint=>endpoint.id));if(updated.endpointWindows.some(window=>!endpointIds.has(window.endpointId)))throw new ProductError("Endpoint policy window endpoint not found",404)}
+        if (Object.keys(updated).length === 0) throw new ProductError("Project policy update requires at least one limit");
+        const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nowIso()); if (!patched) throw new ProductError("Project policy not found", 404);
+        result = patched;
+      } catch (error) {
+        await this.auditEvent(projectId, userId, "policy.update", "rejected", projectId);
+        throw error;
+      }
+      await this.auditEvent(projectId, userId, "policy.update", "accepted", projectId);
+      await this.recoverChangedPolicyAlerts(previous, result);
+      return result;
+    };
+    if (!idempotencyKey) return update();
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.policy.update", key: idempotencyKey, request: input, resourceId: projectId, failureMessage: "Project policy could not be updated", run: update });
   }
   async reserveTask(projectId: string, actorId: string, taskId: string): Promise<void> { await this.change(projectId, actorId, "task.create", taskId, { activeTasks: 1 }, "active_tasks_limit"); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); }
   async recordTaskReservationRejected(projectId: string, actorId: string, taskId: string): Promise<void> {

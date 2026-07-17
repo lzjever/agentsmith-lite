@@ -559,21 +559,21 @@ async function routeApi(
     }
     if (segments[4] === "policy") {
       if (method === "GET") return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId));
-      if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req))));
+      if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req)));
     }
     if (segments[4] === "usage" && method === "GET") return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
     if (segments[4] === "alerts") {
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.policies.alerts(user.id, projectId));
-      if (segments[5] && segments[6] === "acknowledge" && method === "POST") return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5]));
-      if (segments[5] && segments[6] === "silence" && method === "POST") return sendJson(res,200,await services.alertRules.silence(user.id,projectId,segments[5],(await readJson(req)).silencedUntil));
-      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.policies.transitionAlert(user.id, projectId, segments[5], asProjectAlertTransition(await readJson(req))));
+      if (segments[5] && segments[6] === "acknowledge" && method === "POST") return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5],requireIdempotencyKey(req)));
+      if (segments[5] && segments[6] === "silence" && method === "POST") return sendJson(res,200,await services.alertRules.silence(user.id,projectId,segments[5],(await readJson(req)).silencedUntil,requireIdempotencyKey(req)));
+      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.policies.transitionAlert(user.id, projectId, segments[5], asProjectAlertTransition(await readJson(req)), requireIdempotencyKey(req)));
     }
     if (segments[4] === "alert-rules") {
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.alertRules.list(user.id, projectId));
       if (!segments[5] && method === "POST") return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req)), requireIdempotencyKey(req)));
       if (segments[5] && segments[6] === "test" && method === "POST") return sendJson(res,200,await services.alertRules.test(user.id,projectId,segments[5]));
-      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req))));
-      if (segments[5] && method === "DELETE") return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5]));
+      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req)), requireIdempotencyKey(req)));
+      if (segments[5] && method === "DELETE") return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5], requireIdempotencyKey(req)));
     }
     if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
     if (segments[4] === "files") {

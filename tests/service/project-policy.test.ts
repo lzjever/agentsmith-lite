@@ -324,6 +324,33 @@ describe("project resource policy", () => {
     ]);
   });
 
+  it("replays policy updates and alert transitions without repeating their audit events", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-mutation-replay", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const updatePolicy = services.policies.updatePolicy.bind(services.policies) as typeof services.policies.updatePolicy & ((userId: string, projectId: string, input: { providerRequestsLimit: number }, key: string) => ReturnType<typeof services.policies.updatePolicy>);
+    const transitionAlert = services.policies.transitionAlert.bind(services.policies) as typeof services.policies.transitionAlert & ((userId: string, projectId: string, alertId: string, status: "resolved", key: string) => ReturnType<typeof services.policies.transitionAlert>);
+
+    const firstPolicy = await updatePolicy(user.id, project.id, { providerRequestsLimit: 4 }, "policy-update-key");
+    const replayedPolicy = await updatePolicy(user.id, project.id, { providerRequestsLimit: 4 }, "policy-update-key");
+    assert.deepEqual(replayedPolicy, firstPolicy);
+
+    await store.appendProjectAuditEvent({ id: "policy_replay_task_failure", projectId: project.id, actorId: user.id, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: "task_replay", createdAt: new Date().toISOString() });
+    await services.alertRules.create(user.id, project.id, { alertType: "task_failure" });
+    await services.policies.raiseAlert(project.id, "task_failure");
+    const active = (await services.policies.alerts(user.id, project.id)).find((alert) => alert.status === "active");
+    assert.ok(active);
+    const resolved = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");
+    const replayed = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");
+    assert.deepEqual(replayed, resolved);
+
+    const events = await store.listProjectAuditEvents(project.id);
+    assert.equal(events.filter((event) => event.action === "policy.update").length, 1);
+    assert.equal(events.filter((event) => event.action === "alert.resolve").length, 1);
+  });
+
   it("projects audit actor identity from one membership read with an id fallback", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-audit-actors", builtinAdminPassword: "admin-password" });

@@ -17,6 +17,7 @@ import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { PageLoading } from "../ui/loading";
 import { toast } from "../ui/toast";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
 type PolicyDraft = Omit<Required<ProjectPolicyInput>, "activeTasksLimit"> & { activeTasksLimit: number | null };
@@ -38,6 +39,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
 }
 
 function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
+  const mutationKeys = useMutationKeys();
   const active = useRef(true);
   const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
@@ -109,7 +111,8 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     setSaving(true);
     setError("");
     try {
-      const saved = await apiClient.updatePolicy(projectId, input);
+      const saved = await apiClient.updatePolicy(projectId, input, mutationKeys.key("project.policy.update", projectId));
+      mutationKeys.complete("project.policy.update", projectId);
       if (!active.current) return;
       setPolicy(saved);
       setDraft(policyDraft(saved));
@@ -120,6 +123,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
         setCaps((current) =>
           current ? { ...current, canManagePolicy: false } : current,
         );
+      if (cause instanceof ApiError) mutationKeys.complete("project.policy.update", projectId);
       setError(
         cause instanceof Error ? cause.message : "Policy could not be saved.",
       );

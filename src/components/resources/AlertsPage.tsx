@@ -37,6 +37,7 @@ import {
 } from "../ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { toast } from "../ui/toast";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const labels: Record<ProjectAlert["type"], string> = {
   active_tasks_limit: "Task capacity reached",
@@ -55,6 +56,7 @@ export function AlertsPage({ projectId }: { projectId: string }) {
 }
 
 function ProjectAlertsPage({ projectId }: { projectId: string }) {
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [alerts, setAlerts] = useState<ProjectAlert[]>([]);
@@ -67,6 +69,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
   const [retry, setRetry] = useState<{
     alert: ProjectAlert;
     action: "ack" | "silence";
+    silencedUntil?: string | null;
   } | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   useEffect(() => {
@@ -138,11 +141,14 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     loadRequest.current += 1;
     setBusyId(alert.id);
     try {
+      const identity = `${alert.id}:${status}`;
       const saved = await apiClient.transitionAlert(
         projectId,
         alert.id,
         status,
+        mutationKeys.key("project.alert.transition", identity),
       );
+      mutationKeys.complete("project.alert.transition", identity);
       if (!mounted.current) return;
       replace(saved);
       setDismiss(null);
@@ -151,30 +157,32 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
       );
     } catch (cause) {
       if (!mounted.current) return;
+      if (cause instanceof ApiError) mutationKeys.complete("project.alert.transition", `${alert.id}:${status}`);
       forbidden(cause);
       throw cause;
     } finally {
       if (mounted.current) setBusyId(null);
     }
   }
-  async function instance(alert: ProjectAlert, action: "ack" | "silence") {
+  async function instance(alert: ProjectAlert, action: "ack" | "silence", retrySilencedUntil?: string | null) {
     if (!canManage) return;
     loadRequest.current += 1;
     setBusyId(alert.id);
     setRetry(null);
+    const silenced = !!alert.silencedUntil && Date.parse(alert.silencedUntil) > Date.now();
+    const silencedUntil = action === "silence" ? retrySilencedUntil ?? (silenced ? null : new Date(Date.now() + 3_600_000).toISOString()) : undefined;
+    const identity = action === "ack" ? alert.id : `${alert.id}:${silencedUntil}`;
     try {
-      const silenced =
-        alert.silencedUntil !== null &&
-        alert.silencedUntil !== undefined &&
-        Date.parse(alert.silencedUntil) > Date.now();
       const saved =
         action === "ack"
-          ? await apiClient.acknowledgeAlert(projectId, alert.id)
+          ? await apiClient.acknowledgeAlert(projectId, alert.id, mutationKeys.key("project.alert.acknowledge", identity))
           : await apiClient.silenceAlert(
               projectId,
               alert.id,
-              silenced ? null : new Date(Date.now() + 3_600_000).toISOString(),
+              silencedUntil!,
+              mutationKeys.key("project.alert.silence", identity),
             );
+      mutationKeys.complete(action === "ack" ? "project.alert.acknowledge" : "project.alert.silence", identity);
       if (!mounted.current) return;
       replace(saved);
       toast.success(
@@ -186,7 +194,8 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
       );
     } catch (cause) {
       if (!mounted.current) return;
-      if (!forbidden(cause)) setRetry({ alert, action });
+      if (cause instanceof ApiError) mutationKeys.complete(action === "ack" ? "project.alert.acknowledge" : "project.alert.silence", identity);
+      if (!forbidden(cause)) setRetry({ alert, action, ...(silencedUntil === undefined ? {} : { silencedUntil }) });
     } finally {
       if (mounted.current) setBusyId(null);
     }
@@ -197,6 +206,9 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     );
   }
   function revokeAccess() {
+    mutationKeys.clear("project.alert.transition");
+    mutationKeys.clear("project.alert.acknowledge");
+    mutationKeys.clear("project.alert.silence");
     setCapabilities((current) =>
       current ? { ...current, canManagePolicy: false } : current,
     );
@@ -270,7 +282,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
               retry={retry}
               selectedAlertId={selectedAlertId}
               onAck={(alert) => void instance(alert, "ack")}
-              onSilence={(alert) => void instance(alert, "silence")}
+              onSilence={(alert, silencedUntil) => void instance(alert, "silence", silencedUntil)}
               onResolve={(alert) =>
                 void transition(alert, "resolved").catch(() => undefined)
               }
@@ -314,10 +326,10 @@ function AlertInstances({
   alerts: ProjectAlert[];
   canManage: boolean;
   busyId: string | null;
-  retry: { alert: ProjectAlert; action: "ack" | "silence" } | null;
+  retry: { alert: ProjectAlert; action: "ack" | "silence"; silencedUntil?: string | null } | null;
   selectedAlertId: string | null;
   onAck: (alert: ProjectAlert) => void;
-  onSilence: (alert: ProjectAlert) => void;
+  onSilence: (alert: ProjectAlert, silencedUntil?: string | null) => void;
   onResolve: (alert: ProjectAlert) => void;
   onDismiss: (alert: ProjectAlert) => void;
 }) {
@@ -448,7 +460,7 @@ function AlertInstances({
                         onClick={() =>
                           retry.action === "ack"
                             ? onAck(alert)
-                            : onSilence(alert)
+                            : onSilence(alert, retry.silencedUntil)
                         }
                       >
                         Retry

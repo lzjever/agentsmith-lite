@@ -272,17 +272,17 @@ export const apiClient = {
   saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }) => json<ContextEntry>("/context", "PUT", input),
   deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }) => json<{ deleted: true }>("/context", "DELETE", input),
   policy: (projectId: string) => request<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`),
-  updatePolicy: (projectId: string, input: ProjectPolicyInput) =>
-    json<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", input),
+  updatePolicy: (projectId: string, input: ProjectPolicyInput, idempotencyKey: string) =>
+    jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
   usage: (projectId: string, endpointId?: string) => request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${endpointId ? `?endpointId=${encodeURIComponent(endpointId)}` : ""}`),
   alerts: (projectId: string) => request<ProjectAlert[]>(`/projects/${encodeURIComponent(projectId)}/alerts`),
-  transitionAlert: (projectId: string, alertId: string, status: "resolved" | "dismissed") => json<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`, "PATCH", { status }),
-  acknowledgeAlert:(projectId:string,alertId:string)=>json<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}/acknowledge`,"POST",{}),
-  silenceAlert:(projectId:string,alertId:string,silencedUntil:string|null)=>json<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}/silence`,"POST",{silencedUntil}),
+  transitionAlert: (projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey: string) => jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`, "PATCH", idempotencyKey, { status }),
+  acknowledgeAlert:(projectId:string,alertId:string,idempotencyKey:string)=>jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}/acknowledge`,"POST",idempotencyKey,{}),
+  silenceAlert:(projectId:string,alertId:string,silencedUntil:string|null,idempotencyKey:string)=>jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}/silence`,"POST",idempotencyKey,{silencedUntil}),
   alertRules: (projectId: string) => request<ProjectAlertRule[]>(`/projects/${encodeURIComponent(projectId)}/alert-rules`),
   createAlertRule: (projectId: string, input: { name?:string;alertType:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules`, "POST", idempotencyKey, input),
-  updateAlertRule: (projectId: string, ruleId: string, input: { name?:string;alertType?:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean }) => json<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "PATCH", input),
-  deleteAlertRule: (projectId: string, ruleId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "DELETE"),
+  updateAlertRule: (projectId: string, ruleId: string, input: { name?:string;alertType?:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "PATCH", idempotencyKey, input),
+  deleteAlertRule: (projectId: string, ruleId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "DELETE", idempotencyKey),
   testAlertRule:(projectId:string,ruleId:string)=>json<{matched:boolean;metric:string;value:number;threshold:number;evaluatedAt:string}>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}/test`,"POST",{}),
   async audit(projectId: string, query:Record<string,string|number|undefined>={}): Promise<{items:ProjectAuditEvent[];nextCursor:string|null}> {
     const params=new URLSearchParams();for(const [key,value] of Object.entries(query))if(value!==undefined)params.set(key,String(value));
