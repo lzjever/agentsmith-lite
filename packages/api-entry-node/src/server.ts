@@ -23,6 +23,7 @@ import type { OidcClientAdapter } from "./oidcClient.js";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 const MAX_PENDING_TERMINAL_INPUT_BYTES = 64 * 1024;
+const MAX_PENDING_TERMINAL_OUTPUT_BYTES = 256 * 1024;
 
 interface CommonApiServerOptions {
   port: number;
@@ -186,6 +187,12 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
           const pendingInput:Array<{data:RawData;isBinary:boolean}>=[];
           let pendingInputBytes=0;
           const clearPendingInput=()=>{pendingInput.length=0;pendingInputBytes=0;};
+          const closeForBufferLimit=(reason:string)=>{
+            clearPendingInput();
+            release();
+            if(client.readyState===WebSocket.OPEN)client.close(1009,reason);
+            upstream.close();
+          };
           const recordActivity=()=>{void services.tasks.recordTaskTerminalActivity(terminalTaskId!);};
           upstream.on("open",()=>{
             for(const frame of pendingInput){
@@ -194,18 +201,27 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             }
             clearPendingInput();
           });
-          upstream.on("message",(data,isBinary)=>{recordActivity();if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
+          upstream.on("message",(data,isBinary)=>{
+            recordActivity();
+            if(client.readyState!==WebSocket.OPEN)return;
+            if(client.bufferedAmount+rawDataByteLength(data)>MAX_PENDING_TERMINAL_OUTPUT_BYTES){
+              closeForBufferLimit("Terminal output buffer exceeded");
+              return;
+            }
+            client.send(data,{binary:isBinary});
+          });
           client.on("message",(data,isBinary)=>{
             recordActivity();
-            if(upstream.readyState===WebSocket.OPEN){upstream.send(data,{binary:isBinary});return;}
-            if(upstream.readyState!==WebSocket.CONNECTING)return;
             const frameBytes=rawDataByteLength(data);
+            if(upstream.readyState===WebSocket.OPEN){
+              if(upstream.bufferedAmount+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){closeForBufferLimit("Terminal input buffer exceeded");return;}
+              upstream.send(data,{binary:isBinary});
+              return;
+            }
+            if(upstream.readyState!==WebSocket.CONNECTING)return;
             if(pendingInputBytes+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){
-              clearPendingInput();
-              release();
               if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal input exceeded the connection buffer"}));
-              client.close(1009,"Terminal input buffer exceeded");
-              upstream.close();
+              closeForBufferLimit("Terminal input buffer exceeded");
               return;
             }
             pendingInput.push({data,isBinary});

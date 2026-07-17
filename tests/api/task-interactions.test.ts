@@ -427,6 +427,56 @@ describe("task interactions API", () => {
     await closed;
   });
 
+  it("closes a terminal connection when client input exceeds the upstream buffer", async () => {
+    terminalUpstream = new WebSocketServer({ port:0 });
+    await once(terminalUpstream, "listening");
+    const upstreamAddress = terminalUpstream.address();
+    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    const upstreamConnected = new Promise<void>((resolve) => terminalUpstream!.once("connection", () => resolve()));
+
+    const store = createLocalInMemoryProductStore();
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:()=>"api-service-key", store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal oversized input", endpointId:auth.endpointId });
+    const task = await store.findTask(created.id as string); assert.ok(task);
+    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
+    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    await once(client, "open");
+    await upstreamConnected;
+    const closeCode = new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Oversized terminal input did not close the proxy connection")), 1_000);
+      client.once("close", (code) => { clearTimeout(timeout); resolve(code); });
+    });
+    client.send(Buffer.alloc(65 * 1024));
+    assert.equal(await closeCode, 1009);
+  });
+
+  it("closes a terminal connection when one upstream output frame exceeds the proxy buffer", async () => {
+    terminalUpstream = new WebSocketServer({ port:0 });
+    await once(terminalUpstream, "listening");
+    const upstreamAddress = terminalUpstream.address();
+    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    terminalUpstream.once("connection", (socket) => socket.send(Buffer.alloc(300 * 1024)));
+
+    const store = createLocalInMemoryProductStore();
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:()=>"api-service-key", store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal output", endpointId:auth.endpointId });
+    const task = await store.findTask(created.id as string); assert.ok(task);
+    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
+    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    const closeCode = new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Oversized terminal output did not close the proxy connection")), 1_000);
+      client.once("close", (code) => { clearTimeout(timeout); resolve(code); });
+    });
+    await once(client, "open");
+    assert.equal(await closeCode, 1009);
+  });
+
   it("retains history while current endpoint, credential, and membership eligibility disable capabilities", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
