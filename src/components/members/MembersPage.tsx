@@ -124,7 +124,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   }
 
   function invalidateRemovedAccess(reason: unknown): boolean {
-    if (!(reason instanceof ApiError) || (reason.status !== 403 && reason.status !== 404)) return false;
+    if (!(reason instanceof ApiError) || (reason.status !== 403 && !(reason.status === 404 && reason.message === "Project not found"))) return false;
     setMembers([]);
     setWorkspaceMembers([]);
     setCapabilities(undefined);

@@ -206,10 +206,21 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
       current.map((item) => (item.id === saved.id ? saved : item)),
     );
   }
-  function revokeAccess() {
+  function revokeAccess(cause?: unknown) {
     mutationKeys.clear("project.alert.transition");
     mutationKeys.clear("project.alert.acknowledge");
     mutationKeys.clear("project.alert.silence");
+    if (cause instanceof ApiError && cause.status === 403) {
+      setAlerts([]);
+      setCapabilities(undefined);
+      setCapabilitiesError("");
+      setRetry(null);
+      setDismiss(null);
+      setSelectedAlertId(null);
+      setError(cause.message);
+      setState("error");
+      return;
+    }
     setCapabilities((current) =>
       current ? { ...current, canManagePolicy: false } : current,
     );
@@ -221,7 +232,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
   function forbidden(cause: unknown) {
     const accessDenied = isReadOnlyMutationError(cause);
     if (accessDenied) {
-      revokeAccess();
+      revokeAccess(cause);
     } else {
       setError(
         cause instanceof Error ? cause.message : "Alert could not be updated.",

@@ -120,14 +120,25 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       toast.success("Resource policy updated.");
     } catch (cause) {
       if (!active.current) return;
-      if (isReadOnlyMutationError(cause))
+      const accessRemoved = cause instanceof ApiError && cause.status === 403;
+      if (accessRemoved) {
+        setPolicy(undefined);
+        setDraft(undefined);
+        setEndpoints([]);
+        setCaps(undefined);
+        setError(cause.message);
+        setState("error");
+      } else if (isReadOnlyMutationError(cause)) {
         setCaps((current) =>
           current ? { ...current, canManagePolicy: false } : current,
         );
+      }
       if (cause instanceof ApiError) mutationKeys.complete("project.policy.update", projectId);
-      setError(
-        cause instanceof Error ? cause.message : "Policy could not be saved.",
-      );
+      if (!accessRemoved) {
+        setError(
+          cause instanceof Error ? cause.message : "Policy could not be saved.",
+        );
+      }
     } finally {
       if (active.current) setSaving(false);
     }

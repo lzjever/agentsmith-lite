@@ -152,6 +152,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
   const load = useCallback(async () => {
     const revision = ++requestRevision.current;
     setState("loading");
+    setSelected(null);
     try {
       const page = await apiClient.audit(projectId, {
         limit: 20,

@@ -83,7 +83,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
   async function recoverMutation(reason: unknown, retry: () => void) {
     const accessDenied = isReadOnlyMutationError(reason);
-    if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+    if (reason instanceof ApiError && (reason.status === 403 || (reason.status === 404 && reason.message === "Workspace not found"))) {
       setWorkspace(undefined);
       setMembers([]);
       setSelected(undefined);
@@ -144,6 +144,9 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("workspace-member.change", requestIdentity);
       await recoverMutation(reason, () => void change(member, next));
+      if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace membership not found") {
+        setMutationError(undefined);
+      }
     } finally {
       if (mounted.current) setBusyUserId(undefined);
     }
@@ -163,6 +166,11 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("workspace-member.remove", member.userId);
       await recoverMutation(reason, () => void remove(member));
+      if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace membership not found") {
+        setMutationError(undefined);
+        setMemberToRemove(undefined);
+        return;
+      }
       throw reason;
     } finally {
       if (mounted.current) setBusyUserId(undefined);

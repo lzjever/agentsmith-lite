@@ -196,6 +196,23 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("clears the resource policy when a save discovers project access was removed", async () => {
+    const original = snapshotClient();
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async () => { throw new ApiError(403, "Project access denied"); };
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+      await screen.findByRole("heading", { name: "Resource policy unavailable" });
+      assert.equal(screen.queryByRole("spinbutton", { name: "Active tasks" }), null);
+      assert.equal(screen.queryByText("Read-only policy"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps policy readable but read-only when permissions cannot be loaded", async () => {
     const original = snapshotClient();
     apiClient.policy = async () => policy;
@@ -344,6 +361,22 @@ describe("project resource pages", () => {
       assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
       assert.equal(screen.queryByRole("button", { name: "Acknowledge alert" }), null);
       assert.ok(screen.getByText("Task failure"));
+    } finally { restoreClient(original); }
+  });
+
+  it("clears alert data when a mutation discovers project access was removed", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_removed", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Project access denied"); };
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Acknowledge alert" }));
+
+      await screen.findByRole("heading", { name: "Alerts unavailable" });
+      assert.equal(screen.queryByText("Task failure"), null);
+      assert.equal(screen.queryByRole("tab", { name: "Rules" }), null);
     } finally { restoreClient(original); }
   });
 
@@ -536,6 +569,26 @@ describe("project resource pages", () => {
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
+  });
+
+  it("closes a stale audit detail when a refresh loses project access", async () => {
+    const original = snapshotClient();
+    const event = { id: "audit_removed", projectId, actorId: "user_1", action: "task.create", status: "accepted" as const, resourceKind: "task" as const, resourceId: "task_1", createdAt: policy.createdAt } as ProjectAuditEvent;
+    let reads = 0;
+    apiClient.audit = async () => {
+      reads += 1;
+      if (reads === 1) return { items: [event], nextCursor: null };
+      throw new ApiError(403, "Project access denied");
+    };
+    try {
+      render(<AuditPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: /task.create/ }));
+      await screen.findByRole("heading", { name: "Audit event detail" });
+      fireEvent.click(screen.getByRole("button", { name: "Refresh audit", hidden: true }));
+
+      await screen.findByRole("heading", { name: "Audit unavailable" });
+      assert.equal(screen.queryByRole("heading", { name: "Audit event detail" }), null);
+    } finally { restoreClient(original); }
   });
 
   it("starts audit from default filters after switching projects", async () => {

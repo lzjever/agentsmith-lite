@@ -148,6 +148,26 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("reconciles a missing member without invalidating workspace access", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, removeWorkspaceMember: apiClient.removeWorkspaceMember };
+    const member: WorkspaceMember = { ...owner, userId: "member_removed", role: "member", displayName: "Removed Member", email: "removed@example.test" };
+    let listed = [owner, member];
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => listed;
+    apiClient.removeWorkspaceMember = async () => { listed = [owner]; throw new ApiError(404, "Workspace membership not found"); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Remove Removed Member" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Remove workspace member" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Remove member" }));
+
+      await waitFor(() => assert.equal(screen.queryAllByText("Removed Member").length, 0));
+      assert.equal(screen.queryByRole("heading", { name: "Workspace members unavailable" }), null);
+      assert.equal(screen.queryByRole("alertdialog", { name: "Remove workspace member" }), null);
+      assert.ok(screen.getAllByText("Owner Person").length > 0);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps a successful member addition when the following directory refresh fails", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
     const member: WorkspaceMember = { workspaceId: workspace.id, userId: "member_1", role: "member", displayName: "Member Person", email: "member@example.test", createdAt: timestamp, updatedAt: timestamp };

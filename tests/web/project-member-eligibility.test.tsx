@@ -154,6 +154,25 @@ describe("project member eligibility", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reconciles a member-specific not-found without invalidating project access", async () => {
+    const original = snapshotClient();
+    const member: ProjectMember = { ...owner, userId: "member_removed", role: "member", displayName: "Removed Member", email: "removed@example.test" };
+    let listed = [owner, member];
+    apiClient.members = async () => listed;
+    apiClient.workspaceMembers = async () => [workspaceOwner];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.changeMember = async () => { listed = [owner]; throw new ApiError(404, "Project membership not found"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click((await screen.findAllByRole("combobox", { name: "Role for Removed Member" }))[0]!);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+
+      await waitFor(() => assert.equal(screen.queryByText("Removed Member"), null));
+      assert.equal(screen.queryByRole("heading", { name: "Members unavailable" }), null);
+      assert.ok(screen.getAllByText("Owner").length > 0);
+    } finally { restoreClient(original); }
+  });
+
   it("explains when every workspace member already has project access", async () => {
     const original = snapshotClient();
     apiClient.members = async () => [owner];

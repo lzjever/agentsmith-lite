@@ -12,7 +12,7 @@ import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormV
 const initialType = alertRuleTypes[0]!;
 const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
 
-export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstancesChanged }: { projectId: string; canManage: boolean; onAccessDenied?: () => void; onInstancesChanged?: () => Promise<void> }) {
+export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstancesChanged }: { projectId: string; canManage: boolean; onAccessDenied?: (reason: unknown) => void; onInstancesChanged?: () => Promise<void> }) {
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
@@ -62,7 +62,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     if (isReadOnlyMutationError(reason)) {
       setDialogOpen(false);
       setRemoving(null);
-      onAccessDenied?.();
+      onAccessDenied?.(reason);
     }
     toast.error(message);
   }
