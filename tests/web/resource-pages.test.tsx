@@ -198,10 +198,14 @@ describe("project resource pages", () => {
 
   it("clears the resource policy when a save discovers project access was removed", async () => {
     const original = snapshotClient();
-    apiClient.policy = async () => policy;
+    let removed = false;
+    apiClient.policy = async () => {
+      if (removed) throw new ApiError(403, "Project access denied");
+      return policy;
+    };
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [];
-    apiClient.updatePolicy = async () => { throw new ApiError(403, "Project access denied"); };
+    apiClient.updatePolicy = async () => { removed = true; throw new ApiError(403, "Project access denied"); };
     try {
       render(<ResourcePolicyPage projectId={projectId} />);
       fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
@@ -210,6 +214,26 @@ describe("project resource pages", () => {
       await screen.findByRole("heading", { name: "Resource policy unavailable" });
       assert.equal(screen.queryByRole("spinbutton", { name: "Active tasks" }), null);
       assert.equal(screen.queryByText("Read-only policy"), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps the resource policy readable when management access was removed", async () => {
+    const original = snapshotClient();
+    let capabilityReads = 0;
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? capabilities : { ...capabilities, canManagePolicy: false };
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async () => { throw new ApiError(403, "Policy management is not allowed"); };
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      fireEvent.change(await screen.findByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+      await screen.findByText("Read-only policy");
+      assert.ok(screen.getByText("Active tasks"));
+      assert.equal(screen.queryByRole("spinbutton", { name: "Active tasks" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Save policy" }), null);
+      assert.equal(capabilityReads, 2);
     } finally { restoreClient(original); }
   });
 
@@ -367,9 +391,13 @@ describe("project resource pages", () => {
   it("clears alert data when a mutation discovers project access was removed", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_removed", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
-    apiClient.alerts = async () => [alert];
+    let removed = false;
+    apiClient.alerts = async () => {
+      if (removed) throw new ApiError(403, "Project access denied");
+      return [alert];
+    };
     apiClient.projectCapabilities = async () => capabilities;
-    apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Project access denied"); };
+    apiClient.acknowledgeAlert = async () => { removed = true; throw new ApiError(403, "Project access denied"); };
     try {
       render(<AlertsPage projectId={projectId} />);
       fireEvent.click(await screen.findByRole("button", { name: "Acknowledge alert" }));
@@ -377,6 +405,25 @@ describe("project resource pages", () => {
       await screen.findByRole("heading", { name: "Alerts unavailable" });
       assert.equal(screen.queryByText("Task failure"), null);
       assert.equal(screen.queryByRole("tab", { name: "Rules" }), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps alerts readable when management access was removed", async () => {
+    const original = snapshotClient();
+    const alert: ProjectAlert = { id: "alert_read_only", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
+    let capabilityReads = 0;
+    apiClient.alerts = async () => [alert];
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? capabilities : { ...capabilities, canManagePolicy: false };
+    apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Alert management is not allowed"); };
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Acknowledge alert" }));
+
+      await screen.findByText("Task failure");
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Acknowledge alert" }), null));
+      assert.ok(screen.getByRole("tab", { name: "Rules" }));
+      assert.equal(screen.queryByRole("heading", { name: "Alerts unavailable" }), null);
+      assert.equal(capabilityReads, 2);
     } finally { restoreClient(original); }
   });
 

@@ -113,26 +113,34 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const canAdd = canManage && busyUserId === undefined && candidateState === "ready" && eligible.length > 0;
   const filtered = useMemo(() => members.filter((member) => memberMatchesQuery(member, query) && (roleFilter === "all" || member.role === roleFilter)), [members, query, roleFilter]);
 
-  function denied(reason: unknown) {
-    if (isReadOnlyMutationError(reason)) {
-      setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
-      setCapabilitiesError("Member management access changed. Members are now read-only.");
-      setInviteOpen(false);
-      setRemoving(undefined);
+  async function recoverMutationAccess(reason: unknown): Promise<boolean> {
+    const projectMissing = reason instanceof ApiError && reason.status === 404 && reason.message === "Project not found";
+    if (!projectMissing && !isReadOnlyMutationError(reason)) return false;
+    setInviteOpen(false);
+    setRemoving(undefined);
+    if (projectMissing) {
+      setMembers([]);
+      setWorkspaceMembers([]);
+      setCapabilities(undefined);
+      setSelected(undefined);
+      setRoleError(undefined);
+      setError(reason.message);
+      setState("error");
+      return true;
     }
-    return message(reason);
-  }
-
-  function invalidateRemovedAccess(reason: unknown): boolean {
-    if (!(reason instanceof ApiError) || (reason.status !== 403 && !(reason.status === 404 && reason.message === "Project not found"))) return false;
-    setMembers([]);
-    setWorkspaceMembers([]);
-    setCapabilities(undefined);
-    setSelected(undefined);
-    setRoleError(undefined);
-    setError(reason.message);
-    setState("error");
-    return true;
+    if (reason.status === 403) {
+      setMembers([]);
+      setWorkspaceMembers([]);
+      setCapabilities(undefined);
+      setSelected(undefined);
+      setRoleError(undefined);
+      setState("loading");
+      await load();
+      return true;
+    }
+    setCapabilities((current) => current ? { ...current, canManageMembers: false } : current);
+    setCapabilitiesError("Member management access changed. Members are now read-only.");
+    return false;
   }
 
   function openInvite() {
@@ -161,10 +169,11 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.add", projectId);
-      const detail = denied(reason);
-      if (invalidateRemovedAccess(reason)) return;
+      const detail = message(reason);
+      if (await recoverMutationAccess(reason)) return;
       setInviteError(detail);
-      await Promise.allSettled([refreshMembers(), loadCandidates()]);
+      const [membersResult] = await Promise.allSettled([refreshMembers(), loadCandidates()]);
+      if (membersResult.status === "rejected") await recoverMutationAccess(membersResult.reason);
     } finally {
       if (mounted.current) setBusyUserId(undefined);
     }
@@ -185,10 +194,12 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       if (!mounted.current) return;
       const requestIdentity = `${member.userId}:${nextRole}`;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.change", requestIdentity);
-      const detail = denied(reason);
-      if (invalidateRemovedAccess(reason)) return;
+      const detail = message(reason);
+      if (await recoverMutationAccess(reason)) return;
       let refreshed: ProjectMember[] | undefined;
-      try { refreshed = await refreshMembers(); } catch {}
+      try { refreshed = await refreshMembers(); } catch (refreshReason) {
+        if (await recoverMutationAccess(refreshReason)) return;
+      }
       if (!mounted.current) return;
       if (refreshed?.some((item) => item.userId === member.userId && item.role === nextRole)) {
         toast.success("Member role updated");
@@ -215,10 +226,12 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("project-member.remove", member.userId);
-      const detail = denied(reason);
-      if (invalidateRemovedAccess(reason)) return;
+      const detail = message(reason);
+      if (await recoverMutationAccess(reason)) return;
       let refreshed: ProjectMember[] | undefined;
-      try { refreshed = await refreshMembers(); } catch {}
+      try { refreshed = await refreshMembers(); } catch (refreshReason) {
+        if (await recoverMutationAccess(refreshReason)) return;
+      }
       if (!mounted.current) return;
       if (refreshed && !refreshed.some((item) => item.userId === member.userId)) {
         mutationKeys.complete("project-member.remove", member.userId);

@@ -43,7 +43,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     const request = ++workspaceRequest.current;
     const workspaces = await apiClient.workspaces();
     const found = workspaces.find((item) => item.id === workspaceId);
-    if (!found) throw new ApiError(404, "Workspace not found.");
+    if (!found) throw new ApiError(404, "Workspace not found");
     if (!mounted.current || request !== workspaceRequest.current) return;
     setWorkspace(found);
   }, [workspaceId]);
@@ -83,7 +83,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
   async function recoverMutation(reason: unknown, retry: () => void) {
     const accessDenied = isReadOnlyMutationError(reason);
-    if (reason instanceof ApiError && (reason.status === 403 || (reason.status === 404 && reason.message === "Workspace not found"))) {
+    if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace not found") {
       setWorkspace(undefined);
       setMembers([]);
       setSelected(undefined);
@@ -93,9 +93,38 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       setState("error");
       return;
     }
+    if (reason instanceof ApiError && reason.status === 403) {
+      setWorkspace(undefined);
+      setMembers([]);
+      setSelected(undefined);
+      setOpen(false);
+      setMemberToRemove(undefined);
+      setMutationError(undefined);
+      setState("loading");
+      try {
+        await refresh();
+      } catch {
+        if (mounted.current) setState("error");
+        return;
+      }
+      if (!mounted.current) return;
+      setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
+      setMutationError({ message: errorMessage(reason) });
+      return;
+    }
     try {
       await refresh();
-    } catch {
+    } catch (refreshReason) {
+      if (refreshReason instanceof ApiError && (refreshReason.status === 403 || (refreshReason.status === 404 && refreshReason.message === "Workspace not found"))) {
+        setWorkspace(undefined);
+        setMembers([]);
+        setSelected(undefined);
+        setOpen(false);
+        setMemberToRemove(undefined);
+        setMutationError(undefined);
+        setState("error");
+        return;
+      }
       // Preserve the original mutation error while the page remains usable.
     }
     if (!mounted.current) return;

@@ -217,8 +217,8 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
       setRetry(null);
       setDismiss(null);
       setSelectedAlertId(null);
-      setError(cause.message);
-      setState("error");
+      setState("loading");
+      void load();
       return;
     }
     setCapabilities((current) =>

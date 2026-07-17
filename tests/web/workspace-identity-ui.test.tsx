@@ -133,9 +133,10 @@ describe("workspace identity UX", () => {
 
   it("clears workspace members when a mutation discovers access was removed", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
-    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    let removed = false;
+    apiClient.workspaces = async () => removed ? [] : [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
     apiClient.workspaceMembers = async () => [owner];
-    apiClient.addWorkspaceMember = async () => { throw new ApiError(403, "Workspace access denied"); };
+    apiClient.addWorkspaceMember = async () => { removed = true; throw new ApiError(403, "Workspace access denied"); };
     try {
       render(<WorkspaceMembersPage workspaceId={workspace.id} />);
       fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
@@ -145,6 +146,26 @@ describe("workspace identity UX", () => {
       await screen.findByRole("heading", { name: "Workspace members unavailable" });
       assert.equal(screen.queryByText("Owner"), null);
       assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("keeps workspace members readable when management access was removed", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
+    let workspaceReads = 0;
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: workspaceReads++ === 0 ? "admin" : "viewer", capabilities: { canCreateProject: false, canManageMembers: workspaceReads === 1 } }];
+    apiClient.workspaceMembers = async () => [owner];
+    apiClient.addWorkspaceMember = async () => { throw new ApiError(403, "Workspace member management is not allowed"); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Email" }), { target: { value: "member@example.test" } });
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+
+      await screen.findByText("Your workspace access is read-only.");
+      assert.ok(screen.getAllByText("Owner Person").length > 0);
+      assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Add member" }), null);
+      assert.ok(workspaceReads >= 2);
     } finally { Object.assign(apiClient, original); }
   });
 
@@ -165,6 +186,23 @@ describe("workspace identity UX", () => {
       assert.equal(screen.queryByRole("heading", { name: "Workspace members unavailable" }), null);
       assert.equal(screen.queryByRole("alertdialog", { name: "Remove workspace member" }), null);
       assert.ok(screen.getAllByText("Owner Person").length > 0);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("clears members when member reconciliation discovers workspace access was removed", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
+    const member: WorkspaceMember = { ...owner, userId: "member_removed_with_workspace", role: "member", displayName: "Removed With Workspace", email: "removed-workspace@example.test" };
+    let removed = false;
+    apiClient.workspaces = async () => removed ? [] : [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner, member];
+    apiClient.changeWorkspaceMember = async () => { removed = true; throw new ApiError(404, "Workspace membership not found"); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click((await screen.findAllByRole("combobox", { name: "Role for Removed With Workspace" }))[0]!);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+
+      await screen.findByRole("heading", { name: "Workspace members unavailable" });
+      assert.equal(screen.queryAllByText("Removed With Workspace").length, 0);
     } finally { Object.assign(apiClient, original); }
   });
 

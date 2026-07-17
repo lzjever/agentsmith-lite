@@ -137,10 +137,59 @@ describe("project member eligibility", () => {
 
   it("clears the member directory when a mutation discovers project access was removed", async () => {
     const original = snapshotClient();
-    apiClient.members = async () => [owner];
+    let removed = false;
+    apiClient.members = async () => {
+      if (removed) throw new ApiError(403, "Project access denied");
+      return [owner];
+    };
     apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
     apiClient.projectCapabilities = async () => capabilities;
-    apiClient.addMember = async () => { throw new ApiError(403, "Project access denied"); };
+    apiClient.addMember = async () => { removed = true; throw new ApiError(403, "Project access denied"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Workspace member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Candidate Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+
+      await screen.findByRole("heading", { name: "Members unavailable" });
+      assert.equal(screen.queryByText("Owner"), null);
+      assert.equal(screen.queryByRole("dialog", { name: "Add member" }), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps the member directory readable when management access was removed", async () => {
+    const original = snapshotClient();
+    let capabilityReads = 0;
+    apiClient.members = async () => [owner];
+    apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? capabilities : { ...capabilities, canManageMembers: false };
+    apiClient.addMember = async () => { throw new ApiError(403, "Project member management is not allowed"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Workspace member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Candidate Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+
+      await screen.findByText("Your project access is read-only.");
+      assert.ok(screen.getAllByText("Owner").length > 0);
+      assert.equal(screen.queryByRole("dialog", { name: "Add member" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Add member" }), null);
+      assert.equal(capabilityReads, 2);
+    } finally { restoreClient(original); }
+  });
+
+  it("clears members when add reconciliation discovers project access was removed", async () => {
+    const original = snapshotClient();
+    let removed = false;
+    apiClient.members = async () => {
+      if (removed) throw new ApiError(403, "Project access denied");
+      return [owner];
+    };
+    apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.addMember = async () => { removed = true; throw new ApiError(503, "Response lost"); };
     try {
       render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
       fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
@@ -170,6 +219,27 @@ describe("project member eligibility", () => {
       await waitFor(() => assert.equal(screen.queryByText("Removed Member"), null));
       assert.equal(screen.queryByRole("heading", { name: "Members unavailable" }), null);
       assert.ok(screen.getAllByText("Owner").length > 0);
+    } finally { restoreClient(original); }
+  });
+
+  it("clears members when member reconciliation discovers project access was removed", async () => {
+    const original = snapshotClient();
+    const member: ProjectMember = { ...owner, userId: "member_removed_with_project", role: "member", displayName: "Removed With Project", email: "removed-project@example.test" };
+    let removed = false;
+    apiClient.members = async () => {
+      if (removed) throw new ApiError(403, "Project access denied");
+      return [owner, member];
+    };
+    apiClient.workspaceMembers = async () => [workspaceOwner];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.changeMember = async () => { removed = true; throw new ApiError(404, "Project membership not found"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click((await screen.findAllByRole("combobox", { name: "Role for Removed With Project" }))[0]!);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+
+      await screen.findByRole("heading", { name: "Members unavailable" });
+      assert.equal(screen.queryByText("Removed With Project"), null);
     } finally { restoreClient(original); }
   });
 
