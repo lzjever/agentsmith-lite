@@ -89,6 +89,17 @@ describe("endpoint deletion", () => {
     assert.equal(await store.findEndpoint(endpoint.id), null);
     assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, null);
   });
+
+  it("replays a successful deletion without returning not found or duplicating audit", async () => {
+    const { services, store, userId, projectId, credentialId } = await setup();
+    const endpoint = await services.endpoints.createEndpoint(userId, projectId, endpointInput("Replay deletion", credentialId));
+
+    await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id, "endpoint-delete-key");
+    await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id, "endpoint-delete-key");
+
+    assert.equal(await store.findEndpoint(endpoint.id), null);
+    assert.equal((await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "endpoint.delete" && event.resourceId === endpoint.id).length, 1);
+  });
 });
 
 async function setup() {

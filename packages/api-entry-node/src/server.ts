@@ -515,7 +515,7 @@ async function routeApi(
         return sendJson(res, 200, await services.endpoints.discoverModels(user.id, projectId, asEndpointModelDiscoveryInput(await readJson(req))));
       }
       if (segments[5] && segments[6] === "health" && method === "POST") {
-        return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5])));
+        return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req))));
       }
       if (!segments[5] && method === "GET") {
         const endpoints = await services.endpoints.listEndpoints(user.id, projectId);
@@ -526,11 +526,11 @@ async function routeApi(
         return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
       if (segments[5] && method === "PATCH") {
-        const endpoint = await services.endpoints.updateEndpoint(user.id, projectId, segments[5], asEndpointUpdateInput(await readJson(req)));
+        const endpoint = await services.endpoints.updateEndpoint(user.id, projectId, segments[5], asEndpointUpdateInput(await readJson(req)), requireIdempotencyKey(req));
         return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
       if (segments[5] && method === "DELETE") {
-        await services.endpoints.deleteEndpoint(user.id, projectId, segments[5]);
+        await services.endpoints.deleteEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req));
         return sendJson(res, 200, { deleted: true });
       }
     }

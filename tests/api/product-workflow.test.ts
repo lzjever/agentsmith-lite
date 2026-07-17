@@ -333,6 +333,12 @@ describe("api product workflow", () => {
     if (pathname.includes("/tasks") && ["POST","PATCH","DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
+    if (/\/endpoints\/[^/]+(?:\/health)?$/.test(pathname) && ["POST", "PATCH", "DELETE"].includes(method)) {
+      headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
+    }
+    if (/\/projects\/[^/]+\/files(?:\/url-note)?$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
+      headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
+    }
     if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
       headers["idempotency-key"] = crypto.randomUUID();
     }
@@ -366,7 +372,8 @@ describe("api product workflow", () => {
       headers: {
         "content-type": contentType,
         cookie,
-        "x-csrf-token": csrf
+        "x-csrf-token": csrf,
+        "idempotency-key": crypto.randomUUID()
       },
       body: Buffer.from(bytes)
     });
@@ -384,6 +391,7 @@ describe("api product workflow", () => {
           "content-type": "application/octet-stream",
           cookie,
           "x-csrf-token": csrf,
+          "idempotency-key": crypto.randomUUID(),
           ...headers
         }
       }, (response) => {

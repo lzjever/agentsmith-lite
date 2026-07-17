@@ -27,6 +27,43 @@ describe("endpoint dependencies", () => {
     } finally { Object.assign(apiClient,original); }
   });
 
+  it("reuses endpoint update, health, and delete keys after unknown network results", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,updateEndpoint:apiClient.updateEndpoint,recheckEndpoint:apiClient.recheckEndpoint,deleteEndpoint:apiClient.deleteEndpoint };
+    const keys = { update:[] as string[], health:[] as string[], delete:[] as string[] };
+    let updateAttempts=0;let healthAttempts=0;let deleteAttempts=0;
+    apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;
+    apiClient.updateEndpoint=(async(_projectId:string,_endpointId:string,input:EndpointInput,key:string)=>{keys.update.push(key);if(++updateAttempts===1)throw new Error("connection closed");return{...endpoint,...input};}) as typeof apiClient.updateEndpoint;
+    apiClient.recheckEndpoint=(async(_projectId:string,_endpointId:string,key:string)=>{keys.health.push(key);if(++healthAttempts===1)throw new Error("connection closed");return endpoint;}) as typeof apiClient.recheckEndpoint;
+    apiClient.deleteEndpoint=(async(_projectId:string,_endpointId:string,key:string)=>{keys.delete.push(key);if(++deleteAttempts===1)throw new Error("connection closed");return{deleted:true};}) as typeof apiClient.deleteEndpoint;
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Edit DeepSeek"}))[0]!);
+      fireEvent.change(screen.getByLabelText("Model"),{target:{value:"updated-model"}});
+      fireEvent.click(screen.getByRole("button",{name:"Save"}));
+      await waitFor(()=>assert.equal(updateAttempts,1));
+      fireEvent.click(screen.getByRole("button",{name:"Save"}));
+      await waitFor(()=>assert.equal(updateAttempts,2));
+      assert.equal(keys.update[0],keys.update[1]);
+
+      await waitFor(()=>assert.equal((screen.getAllByRole("button",{name:"Check health for DeepSeek"})[0] as HTMLButtonElement).disabled,false));
+      fireEvent.click(screen.getAllByRole("button",{name:"Check health for DeepSeek"})[0]!);
+      await waitFor(()=>assert.equal(healthAttempts,1));
+      await waitFor(()=>assert.equal((screen.getAllByRole("button",{name:"Check health for DeepSeek"})[0] as HTMLButtonElement).disabled,false));
+      fireEvent.click(screen.getAllByRole("button",{name:"Check health for DeepSeek"})[0]!);
+      await waitFor(()=>assert.equal(healthAttempts,2));
+      assert.equal(keys.health[0],keys.health[1]);
+
+      await waitFor(()=>assert.equal((screen.getAllByRole("button",{name:"Delete DeepSeek"})[0] as HTMLButtonElement).disabled,false));
+      fireEvent.click(screen.getAllByRole("button",{name:"Delete DeepSeek"})[0]!);
+      fireEvent.click(await screen.findByRole("button",{name:"Delete endpoint"}));
+      await waitFor(()=>assert.equal(deleteAttempts,1));
+      fireEvent.click(screen.getByRole("button",{name:"Delete endpoint"}));
+      await waitFor(()=>assert.equal(deleteAttempts,2));
+      assert.equal(keys.delete[0],keys.delete[1]);
+      assert.ok(keys.update[0]&&keys.health[0]&&keys.delete[0]);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("closes project-scoped actions and ignores an old save after switching projects", async () => {
     const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, updateEndpoint: apiClient.updateEndpoint };
     let finishSave!: (value: Endpoint) => void;

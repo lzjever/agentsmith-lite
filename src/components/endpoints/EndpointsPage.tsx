@@ -48,6 +48,9 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     currentProjectId.current = projectId;
     projectRevision.current += 1;
     mutationKeys.clear("endpoint.create");
+    mutationKeys.clear("endpoint.update");
+    mutationKeys.clear("endpoint.recheck");
+    mutationKeys.clear("endpoint.delete");
   }
 
   const loadDependencies = useCallback(() => {
@@ -143,6 +146,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setEditing(endpoint);
     setInput(endpointInputForEdit(endpoint));
     setFormError("");
+    mutationKeys.clear("endpoint.update");
     setActionProjectId(projectId);
     setDialogOpen(true);
   }
@@ -160,15 +164,15 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setSaving(true);
     setFormError("");
     try {
-      const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input) : await apiClient.createEndpoint(projectId, input, mutationKeys.key("endpoint.create", projectId));
-      if (!editing) mutationKeys.complete("endpoint.create", projectId);
+      const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input, mutationKeys.key("endpoint.update", editing.id)) : await apiClient.createEndpoint(projectId, input, mutationKeys.key("endpoint.create", projectId));
+      mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));
       setDialogOpen(false);
       setActionProjectId(undefined);
       toast.success(editing ? "Endpoint updated" : "Endpoint created");
     } catch (reason) {
-      if (!editing && reason instanceof ApiError) mutationKeys.complete("endpoint.create", projectId);
+      if (reason instanceof ApiError) mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
       setFormError(denied(reason));
     } finally {
@@ -205,12 +209,14 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     const revision = projectRevision.current;
     setCheckingId(endpoint.id);
     try {
-      const checked = await apiClient.recheckEndpoint(projectId, endpoint.id);
+      const checked = await apiClient.recheckEndpoint(projectId, endpoint.id, mutationKeys.key("endpoint.recheck", endpoint.id));
+      mutationKeys.complete("endpoint.recheck", endpoint.id);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, checked, true));
       if (checked.health?.status === "healthy") toast.success("Endpoint is healthy");
       else toast.error(`Endpoint unavailable: ${checked.health?.errorCategory ?? "unknown"}`);
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("endpoint.recheck", endpoint.id);
       if (revision !== projectRevision.current) return;
       toast.error(denied(reason));
     } finally {
@@ -222,12 +228,14 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     const revision = projectRevision.current;
     setSaving(true);
     try {
-      await apiClient.deleteEndpoint(projectId, deleting.id);
+      await apiClient.deleteEndpoint(projectId, deleting.id, mutationKeys.key("endpoint.delete", deleting.id));
+      mutationKeys.complete("endpoint.delete", deleting.id);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => removeEndpoint(items, deleting.id));
       setDeleting(undefined);
       toast.success("Endpoint deleted");
     } catch (reason) {
+      if (reason instanceof ApiError && deleting) mutationKeys.complete("endpoint.delete", deleting.id);
       if (revision !== projectRevision.current) return;
       throw new Error(denied(reason));
     } finally {

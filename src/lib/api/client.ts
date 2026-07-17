@@ -229,14 +229,14 @@ export const apiClient = {
   deleteCredential: (projectId: string, credentialId: string, expectedVersion: number) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", { expectedVersion }),
   endpoints: (projectId: string) => request<Endpoint[]>(`/projects/${encodeURIComponent(projectId)}/endpoints`),
   createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
-  updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput) =>
-    json<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", { ...input, protocol: "openai_chat_completions" }),
+  updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput, idempotencyKey: string) =>
+    jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   discoverEndpointModels: (projectId: string, input: Pick<EndpointInput, "baseUrl" | "credentialId" | "requestTimeoutSecs"> & { endpointId?: string }) =>
     json<EndpointModelDiscovery>(`/projects/${encodeURIComponent(projectId)}/endpoints/models`, "POST", input),
-  recheckEndpoint: (projectId: string, endpointId: string) =>
-    json<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}/health`, "POST"),
-  deleteEndpoint: (projectId: string, endpointId: string) =>
-    json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "DELETE"),
+  recheckEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
+    jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}/health`, "POST", idempotencyKey),
+  deleteEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
+    jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "DELETE", idempotencyKey),
   chatThreads: (projectId: string, query?: string) => request<ProjectChatThread[]>(`/projects/${encodeURIComponent(projectId)}/chat/threads${query ? `?query=${encodeURIComponent(query)}` : ""}`),
   createChatThread: (projectId: string, endpointId: string, idempotencyKey: string) => jsonIdempotent<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads`, "POST", idempotencyKey, { endpointId }),
   updateChatThread: (projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean;starred?:boolean }) => json<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}`, "PATCH", input),

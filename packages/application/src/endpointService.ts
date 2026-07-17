@@ -44,48 +44,53 @@ export class EndpointService {
     return this.store.listEndpointsForProject(projectId);
   }
 
-  async updateEndpoint(userId: string, projectId: string, endpointId: string, input: UpdateEndpointInput): Promise<ModelEndpoint> {
+  async updateEndpoint(userId: string, projectId: string, endpointId: string, input: UpdateEndpointInput, idempotencyKey?: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
-    const existing = await this.requireEndpointForProject(projectId, endpointId);
-    const endpoint: ModelEndpoint = {
-      ...existing,
-      name: requireNonEmptyString(input.name, "endpoint.name"),
-      protocol: input.protocol,
-      baseUrl: requireNonEmptyString(input.baseUrl, "endpoint.baseUrl"),
-      model: requireNonEmptyString(input.model, "endpoint.model"),
-      credentialId: input.credentialId === undefined ? existing.credentialId : requireNonEmptyString(input.credentialId, "endpoint.credentialId"),
-      capabilities: input.capabilities,
-      requestTimeoutSecs: input.requestTimeoutSecs,
-      updatedAt: nowIso()
+    const update = async (): Promise<ModelEndpoint> => {
+      const existing = await this.requireEndpointForProject(projectId, endpointId);
+      const endpoint: ModelEndpoint = {
+        ...existing,
+        name: requireNonEmptyString(input.name, "endpoint.name"),
+        protocol: input.protocol,
+        baseUrl: requireNonEmptyString(input.baseUrl, "endpoint.baseUrl"),
+        model: requireNonEmptyString(input.model, "endpoint.model"),
+        credentialId: input.credentialId === undefined ? existing.credentialId : requireNonEmptyString(input.credentialId, "endpoint.credentialId"),
+        capabilities: input.capabilities,
+        requestTimeoutSecs: input.requestTimeoutSecs,
+        updatedAt: nowIso()
+      };
+      let updated: ModelEndpoint;
+      try {
+        validateOpenAICompatibleEndpoint(endpoint);
+        await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
+        const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id));
+        if (!stored) throw new NotFoundError("Endpoint not found");
+        updated = stored;
+      } catch (error) {
+        const health = endpointValidationHealth(error);
+        if (health) await this.endpointFailure(projectId, userId, "endpoint.update", endpointId, healthAuditDetail(health));
+        else await this.audit(projectId, userId, "endpoint.update", endpointId, "rejected");
+        throw error;
+      }
+      await this.audit(projectId, userId, "endpoint.update", endpointId, "accepted", healthAuditDetail(updated.health));
+      return updated;
     };
-    let updated: ModelEndpoint;
-    try {
-      validateOpenAICompatibleEndpoint(endpoint);
-      await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
-      const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id));
-      if (!stored) throw new NotFoundError("Endpoint not found");
-      updated = stored;
-    } catch (error) {
-      const health = endpointValidationHealth(error);
-      if (health) await this.endpointFailure(projectId, userId, "endpoint.update", endpointId, healthAuditDetail(health));
-      else await this.audit(projectId, userId, "endpoint.update", endpointId, "rejected");
-      throw error;
-    }
-    await this.audit(projectId, userId, "endpoint.update", endpointId, "accepted", healthAuditDetail(updated.health));
-    return updated;
+    if (!idempotencyKey) return update();
+    return runIdempotentMutation({ store:this.store, actorId:userId, scopeId:projectId, operation:"project.endpoint.update", key:idempotencyKey, request:{projectId,endpointId,...input}, resourceId:endpointId, failureMessage:"Endpoint could not be updated", run:update });
   }
 
-  async deleteEndpoint(userId: string, projectId: string, endpointId: string): Promise<void> {
+  async deleteEndpoint(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<void> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
-    await this.requireEndpointForProject(projectId, endpointId);
-    const result = await this.store.deleteEndpoint(endpointId);
-    if (result === "referenced_by_tasks") {
-      throw new ProductError("Endpoint cannot be deleted while tasks reference it", 409);
-    }
-    if (result === "not_found") {
-      throw new NotFoundError("Endpoint not found");
-    }
-    await this.audit(projectId, userId, "endpoint.delete", endpointId, "accepted");
+    const remove = async () => {
+      await this.requireEndpointForProject(projectId, endpointId);
+      const result = await this.store.deleteEndpoint(endpointId);
+      if (result === "referenced_by_tasks") throw new ProductError("Endpoint cannot be deleted while tasks reference it", 409);
+      if (result === "not_found") throw new NotFoundError("Endpoint not found");
+      await this.audit(projectId, userId, "endpoint.delete", endpointId, "accepted");
+      return { deleted:true as const };
+    };
+    if (!idempotencyKey) { await remove(); return; }
+    await runIdempotentMutation({ store:this.store, actorId:userId, scopeId:projectId, operation:"project.endpoint.delete", key:idempotencyKey, request:{projectId,endpointId}, resourceId:endpointId, failureMessage:"Endpoint could not be deleted", run:remove });
   }
 
   async discoverModels(userId: string, projectId: string, input: DiscoverEndpointModelsInput): Promise<EndpointModelDiscovery> {
@@ -115,19 +120,22 @@ export class EndpointService {
     return checked;
   }
 
-  async recheckEndpoint(userId: string, projectId: string, endpointId: string): Promise<ModelEndpoint> {
+  async recheckEndpoint(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
-    const existing = await this.requireEndpointForProject(projectId, endpointId);
-    const checked = await this.healthFor(existing, userId, existing.id);
-    const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nowIso());
-    if (!updated) throw new NotFoundError("Endpoint not found");
-    if (checked.status === "unavailable") {
-      await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked));
-    } else {
-      await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked));
-      await recoverProjectAlerts(this.store, projectId, "endpoint_failure", endpointId);
-    }
-    return updated;
+    const recheck = async (): Promise<ModelEndpoint> => {
+      const existing = await this.requireEndpointForProject(projectId, endpointId);
+      const checked = await this.healthFor(existing, userId, existing.id);
+      const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nowIso());
+      if (!updated) throw new NotFoundError("Endpoint not found");
+      if (checked.status === "unavailable") await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked));
+      else {
+        await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked));
+        await recoverProjectAlerts(this.store, projectId, "endpoint_failure", endpointId);
+      }
+      return updated;
+    };
+    if (!idempotencyKey) return recheck();
+    return runIdempotentMutation({ store:this.store, actorId:userId, scopeId:projectId, operation:"project.endpoint.recheck", key:idempotencyKey, request:{projectId,endpointId}, resourceId:endpointId, failureMessage:"Endpoint health could not be checked", run:recheck });
   }
 
   private async audit(projectId: string, actorId: string, action: EndpointAuditAction, resourceId: string|null, status: "accepted" | "rejected", detail?:import("../../contracts/src/api.js").ProjectAuditSafeDetail): Promise<void> {

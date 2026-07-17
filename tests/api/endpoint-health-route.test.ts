@@ -40,6 +40,8 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.deepEqual(persistedDiscovery.models, ["model-b", "model-a"]);
 
     available = false;
+    const missingHealthKey = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken } });
+    assert.equal(missingHealthKey.status, 400);
     const unavailable = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, undefined, cookie, csrfToken);
     assert.deepEqual(unavailable.health.status, "unavailable");
     assert.equal(unavailable.health.errorCategory, "auth");
@@ -69,7 +71,7 @@ async function post(base: string, pathname: string, body: unknown): Promise<Resp
 }
 
 async function json(base: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> {
-  const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/endpoints\/[^/]+\/health$/.test(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   if (response.status !== 200) assert.fail(await response.text());
   return response.json();
 }

@@ -119,3 +119,34 @@ test("endpoint recheck does not overwrite configuration changed while the provid
   assert.equal((await rechecking).name, "After");
   assert.equal((await services.endpoints.listEndpoints(user.id, project.id))[0]?.name, "After");
 });
+
+test("endpoint updates and health rechecks replay without repeating provider work or audit", async () => {
+  let validationCalls = 0;
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot: "/tmp/agentsmith-endpoint-mutation-replay",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => { validationCalls += 1; return { status: "healthy" }; }
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Before", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  const input = { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs };
+
+  const updated = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input, "endpoint-update-key");
+  const replayedUpdate = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input, "endpoint-update-key");
+  assert.deepEqual(replayedUpdate, updated);
+
+  const checked = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id, "endpoint-recheck-key");
+  const replayedCheck = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id, "endpoint-recheck-key");
+  assert.deepEqual(replayedCheck, checked);
+  assert.equal(validationCalls, 3);
+  const audit = await store.listProjectAuditEvents(project.id);
+  assert.equal(audit.filter((event) => event.action === "endpoint.update" && event.status === "accepted").length, 1);
+  assert.equal(audit.filter((event) => event.action === "endpoint.health_check" && event.status === "accepted").length, 1);
+});
