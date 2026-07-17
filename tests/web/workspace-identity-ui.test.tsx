@@ -414,6 +414,26 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("closes project creation when the workspace was deleted", async () => {
+    const original = { workspaces: apiClient.workspaces, createProject: apiClient.createProject };
+    let loads = 0;
+    apiClient.workspaces = async () => loads++ === 0
+      ? [{ ...workspace, capabilities: { canCreateProject: true, canManageMembers: true } }]
+      : [];
+    apiClient.createProject = async () => { throw new ApiError(404, "Workspace not found"); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
+      fireEvent.click(await within(screen.getByTestId("page-layout__header")).findByRole("button", { name: "New project" }));
+      fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "Orphaned project" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+      await waitFor(() => assert.ok(loads >= 2));
+      assert.equal(screen.queryByRole("dialog", { name: "New project" }), null);
+      assert.ok(screen.getByRole("heading", { name: "Projects unavailable" }));
+      assert.equal(screen.queryByRole("button", { name: "New project" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("does not enter a project created for a workspace the user has left", async () => {
     const original = { workspaces: apiClient.workspaces, createProject: apiClient.createProject };
     const pushed: string[] = [];
