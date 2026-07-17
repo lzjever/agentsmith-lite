@@ -3,6 +3,7 @@ import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 
 export class MembershipService {
   constructor(
@@ -15,7 +16,12 @@ export class MembershipService {
     return this.store.listProjectMemberships(projectId);
   }
 
-  async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembershipView> {
+  async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole, idempotencyKey?: string): Promise<ProjectMembershipView> {
+    if (idempotencyKey) return runIdempotentMutation({ store:this.store, actorId:actorUserId, scopeId:projectId, operation:"project.member.add", key:idempotencyKey, request:{projectId,userId:userId.trim(),role}, resourceId:userId.trim() || "member", failureMessage:"Project member could not be added", run:()=>this.addMemberOnce(actorUserId,projectId,userId,role) });
+    return this.addMemberOnce(actorUserId,projectId,userId,role);
+  }
+
+  private async addMemberOnce(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole): Promise<ProjectMembershipView> {
     let memberId: string | null = null;
     try {
       await this.authorization.requireProject(actorUserId, projectId, "admin");

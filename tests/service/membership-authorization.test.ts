@@ -137,6 +137,21 @@ describe("project membership authorization", () => {
     assert.ok(rejected?.reason instanceof ProductError);
     assert.equal((rejected.reason as ProductError).statusCode, 409);
   });
+
+  it("replays project membership creation without duplicating its audit event", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "replay-owner", email: "replay-owner@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer, subject: "replay-member", email: "replay-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
+    const add = services.memberships.addMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"member",key:string)=>Promise<{userId:string}>;
+    const first = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
+    const replayed = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
+    assert.equal(replayed.userId, first.userId);
+    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.status === "accepted").length, 1);
+  });
 });
 
 function status(code: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === code; }

@@ -151,6 +151,27 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("reuses a workspace member creation key after an unknown network result", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
+    const keys: string[] = [];
+    let attempts = 0;
+    const member: WorkspaceMember = { workspaceId: workspace.id, userId: "member_retry", role: "member", displayName: "Retry Member", email: "retry@example.test", createdAt: timestamp, updatedAt: timestamp };
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner];
+    apiClient.addWorkspaceMember = (async (_workspaceId:string,_email:string,_role:"member",key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return member;}) as typeof apiClient.addWorkspaceMember;
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Email" }), { target: { value: member.email } });
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+      await screen.findByRole("button", { name: "Retry" });
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.ok(keys[0]);
+      assert.equal(keys[1], keys[0]);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("serializes workspace membership mutations", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
     const first: WorkspaceMember = { ...owner, userId: "member_1", role: "member", displayName: "First member", email: "first@example.test" };

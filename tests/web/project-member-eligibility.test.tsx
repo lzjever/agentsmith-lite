@@ -95,6 +95,28 @@ describe("project member eligibility", () => {
     } finally { restoreClient(original); }
   });
 
+  it("reuses a project member creation key after an unknown network result", async () => {
+    const original = snapshotClient();
+    const keys: string[] = [];
+    let attempts = 0;
+    apiClient.members = async () => [owner];
+    apiClient.workspaceMembers = async () => [workspaceOwner, candidate];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.addMember = (async (_projectId:string,userId:string,role:"member",key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return {...candidate,projectId,userId,role};}) as typeof apiClient.addMember;
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Workspace member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Candidate Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+      await waitFor(() => assert.equal(attempts, 1));
+      fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.ok(keys[0]);
+      assert.equal(keys[1], keys[0]);
+    } finally { restoreClient(original); }
+  });
+
   it("closes member mutations when management permission is revoked", async () => {
     const original = snapshotClient();
     apiClient.members = async () => [owner];

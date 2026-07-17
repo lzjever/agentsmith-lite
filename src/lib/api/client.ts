@@ -205,7 +205,7 @@ export const apiClient = {
     jsonIdempotent<Project>(`/workspaces/${encodeURIComponent(workspaceId)}/projects`, "POST", idempotencyKey, input),
   setProjectPinned: (projectId:string,pinned:boolean) => json<Project>(`/projects/${encodeURIComponent(projectId)}/pin`,"PUT",{pinned}),
   workspaceMembers: (workspaceId: string) => request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
-  addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", { email, role }),
+  addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">, idempotencyKey: string) => jsonIdempotent<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", idempotencyKey, { email, role }),
   changeWorkspaceMember: (workspaceId: string, userId: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "PATCH", { userId, role }),
   removeWorkspaceMember: (workspaceId: string, userId: string) => json<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "DELETE", { userId }),
   transferWorkspaceOwner:(workspaceId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/workspaces/${encodeURIComponent(workspaceId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
@@ -217,8 +217,8 @@ export const apiClient = {
   unarchiveProject:(projectId:string,idempotencyKey:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/unarchive`,"POST",idempotencyKey),
   deleteProject: (projectId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}`, "DELETE", idempotencyKey),
   members: (projectId: string) => request<ProjectMember[]>(`/projects/${encodeURIComponent(projectId)}/members`),
-  addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">) =>
-    json<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", { userId, role }),
+  addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
+    jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", idempotencyKey, { userId, role }),
   changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">) =>
     json<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", { userId, role }),
   removeMember: (projectId: string, userId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", { userId }),

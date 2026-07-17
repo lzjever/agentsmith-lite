@@ -3,6 +3,7 @@
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -21,6 +22,7 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
 }
 
 function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const refreshRequest = useRef(0);
@@ -73,6 +75,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     };
   }, []);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!open) mutationKeys.clear("workspace-member.add"); }, [open]);
 
   const canManage = workspace?.capabilities.canManageMembers === true;
   const mutationBusy = busyUserId !== undefined;
@@ -99,7 +102,8 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     setBusyUserId("new");
     setMutationError(undefined);
     try {
-      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role);
+      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role, mutationKeys.key("workspace-member.add", workspaceId));
+      mutationKeys.complete("workspace-member.add", workspaceId);
       if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
       setOpen(false);
@@ -108,6 +112,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.add", workspaceId);
       await recoverMutation(reason, () => void add());
     } finally {
       if (mounted.current) setBusyUserId(undefined);

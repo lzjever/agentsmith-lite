@@ -624,7 +624,7 @@ export interface TaskStageFailureInput extends TaskStageCompleteInput {
   nextRetryAt: string;
 }
 
-export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.settings.update" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.credential.create" | "project.endpoint.create" | "project.chat-thread.create" | "project.alert-rule.create" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.settings.update" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.credential.create" | "project.endpoint.create" | "project.chat-thread.create" | "project.alert-rule.create" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;

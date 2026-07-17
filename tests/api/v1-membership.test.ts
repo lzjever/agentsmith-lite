@@ -72,6 +72,9 @@ describe("v1 project membership API", () => {
       headers: { cookie: `asl_session=${memberSession}` }
     });
     assert.equal(denied.status, 403, "project membership is required");
+    const missingMembershipKey = await fetch(`${api.baseUrl}/api/v1/workspaces/${workspaceId}/members`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken, "content-type": "application/json" }, body: JSON.stringify({ email: "member@example.test", role: "viewer" }) });
+    assert.equal(missingMembershipKey.status, 400);
+    assert.deepEqual(await missingMembershipKey.json(), { error: "Idempotency-Key header is required" });
     for (const resource of ["alerts", "audit"]) {
       const response = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/${resource}`, {
         headers: { cookie: `asl_session=${memberSession}` }
@@ -210,7 +213,7 @@ describe("v1 project membership API", () => {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(cookie ? { cookie } : {}),
         ...(["POST", "PATCH", "DELETE"].includes(method) && csrfToken ? { "x-csrf-token": csrfToken } : {}),
-        ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
+        ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/(projects|members)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|members)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });

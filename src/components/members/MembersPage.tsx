@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -23,6 +24,7 @@ export function MembersPage({ workspaceId, projectId }: { workspaceId: string; p
 }
 
 function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const memberRequest = useRef(0);
@@ -103,6 +105,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     };
   }, []);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!inviteOpen) mutationKeys.clear("project-member.add"); }, [inviteOpen]);
 
   const canManage = capabilities?.canManageMembers === true;
   const memberIds = useMemo(() => new Set(members.map((member) => member.userId)), [members]);
@@ -121,6 +124,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   }
 
   function openInvite() {
+    mutationKeys.clear("project-member.add");
     setInviteError("");
     setCandidateUserId(eligible[0]?.userId ?? "");
     setInviteOpen(true);
@@ -134,7 +138,8 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setBusyUserId("new");
     setInviteError("");
     try {
-      const added = await apiClient.addMember(projectId, candidateUserId, role);
+      const added = await apiClient.addMember(projectId, candidateUserId, role, mutationKeys.key("project-member.add", projectId));
+      mutationKeys.complete("project-member.add", projectId);
       if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
       setInviteOpen(false);
@@ -143,6 +148,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       toast.success("Member added");
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("project-member.add", projectId);
       setInviteError(denied(reason));
       await Promise.allSettled([refreshMembers(), loadCandidates()]);
     } finally {
