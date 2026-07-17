@@ -68,6 +68,17 @@ describe("task interaction list", () => {
     assert.equal(attempts, 1);
   });
 
+  it("keeps an accepted work stop disabled until server state updates", async () => {
+    const running = { ...itemFor("background_task", 1), executionStatus:"running", canStop:true } as TaskInteractionItem;
+    let attempts = 0;
+    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} basePath="/tasks" onStopWork={async () => { attempts += 1; }} />);
+    fireEvent.click(screen.getByRole("button", { name:"Stop work" }));
+    const accepted = await screen.findByRole("button", { name:"Stop requested" }) as HTMLButtonElement;
+    assert.equal(accepted.disabled, true);
+    fireEvent.click(accepted);
+    assert.equal(attempts, 1);
+  });
+
   it("does not offer a download for a failed file projection", () => {
     const failed = { ...itemFor("file", 1), status: "failed", body: "Artifact projection failed" } as TaskInteractionItem;
     render(<TaskInteractionList taskId="task_1" items={[failed]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
