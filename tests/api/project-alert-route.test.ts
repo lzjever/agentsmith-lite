@@ -28,6 +28,9 @@ describe("project alert history API", () => {
       const silencedUntil = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
       const silenced = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alerts/${alert.id}/silence`, { silencedUntil }, ownerCookie, ownerCsrf);
       assert.equal(silenced.silencedUntil, silencedUntil);
+      const missingRuleKey = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf }, body: JSON.stringify({ alertType: "task_failure" }) });
+      assert.equal(missingRuleKey.status, 400);
+      assert.deepEqual(await missingRuleKey.json(), { error: "Idempotency-Key header is required" });
       const rule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "task_failure" }, ownerCookie, ownerCsrf);
       const testedRule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules/${rule.id}/test`, {}, ownerCookie, ownerCsrf);
       assert.equal(testedRule.metric, rule.metric);
@@ -57,4 +60,4 @@ describe("project alert history API", () => {
 });
 
 async function post(baseUrl: string, pathname: string, body: unknown) { return fetch(baseUrl + pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
-async function json(baseUrl: string, method: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(baseUrl + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) }, body: JSON.stringify(body) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
+async function json(baseUrl: string, method: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(baseUrl + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|alert-rules)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) }, body: JSON.stringify(body) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }

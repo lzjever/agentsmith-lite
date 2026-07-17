@@ -568,7 +568,7 @@ async function routeApi(
     }
     if (segments[4] === "alert-rules") {
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.alertRules.list(user.id, projectId));
-      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req))));
+      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req)), requireIdempotencyKey(req)));
       if (segments[5] && segments[6] === "test" && method === "POST") return sendJson(res,200,await services.alertRules.test(user.id,projectId,segments[5]));
       if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req))));
       if (segments[5] && method === "DELETE") return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5]));
