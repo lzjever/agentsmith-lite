@@ -150,7 +150,37 @@ describe("project membership authorization", () => {
     const first = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
     const replayed = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
     assert.equal(replayed.userId, first.userId);
+    const change = services.memberships.changeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"admin",key:string)=>Promise<{role:string}>;
+    const changed = await change(owner.user.id, project.id, member.user.id, "admin", "project-member-change-key");
+    const replayedChange = await change(owner.user.id, project.id, member.user.id, "admin", "project-member-change-key");
+    assert.deepEqual(replayedChange, changed);
+    const remove = services.memberships.removeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,key:string)=>Promise<void>;
+    await remove(owner.user.id, project.id, member.user.id, "project-member-remove-key");
+    await remove(owner.user.id, project.id, member.user.id, "project-member-remove-key");
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.status === "accepted").length, 1);
+    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.change" && event.status === "accepted").length, 1);
+    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.remove" && event.status === "accepted").length, 1);
+  });
+
+  it("reauthorizes a project member addition before replaying it", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "reauth-owner", email: "reauth-owner@example.test", emailVerified: true });
+    const admin = await services.auth.loginExternalPrincipal({ issuer, subject: "reauth-admin", email: "reauth-admin@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer, subject: "reauth-member", email: "reauth-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: admin.user.email }, "admin");
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
+    await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
+    await services.memberships.addMember(admin.user.id, project.id, member.user.id, "member", "admin-member-add-key");
+    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member");
+
+    await assert.rejects(
+      () => services.memberships.addMember(admin.user.id, project.id, member.user.id, "member", "admin-member-add-key"),
+      status(403)
+    );
+    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.actorId === admin.user.id && event.status === "rejected").length, 1);
   });
 });
 

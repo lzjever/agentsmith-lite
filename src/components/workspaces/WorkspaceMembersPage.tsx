@@ -123,13 +123,16 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     if (!canManage || mutationBusy) return;
     setBusyUserId(member.userId);
     setMutationError(undefined);
+    const requestIdentity = `${member.userId}:${next}`;
     try {
-      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next);
+      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next, mutationKeys.key("workspace-member.change", requestIdentity));
+      mutationKeys.complete("workspace-member.change", requestIdentity);
       if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === changed.userId ? changed : item));
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.change", requestIdentity);
       await recoverMutation(reason, () => void change(member, next));
     } finally {
       if (mounted.current) setBusyUserId(undefined);
@@ -141,12 +144,14 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     setBusyUserId(member.userId);
     setMutationError(undefined);
     try {
-      await apiClient.removeWorkspaceMember(workspaceId, member.userId);
+      await apiClient.removeWorkspaceMember(workspaceId, member.userId, mutationKeys.key("workspace-member.remove", member.userId));
+      mutationKeys.complete("workspace-member.remove", member.userId);
       if (!mounted.current) return;
       setMembers((current) => current.filter((item) => item.userId !== member.userId));
       void refreshWorkspace().catch(() => undefined);
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.remove", member.userId);
       await recoverMutation(reason, () => void remove(member));
       throw reason;
     } finally {

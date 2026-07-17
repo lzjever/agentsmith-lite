@@ -161,12 +161,16 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setBusyUserId(member.userId);
     setRoleError(undefined);
     try {
-      const updated = await apiClient.changeMember(projectId, member.userId, nextRole);
+      const requestIdentity = `${member.userId}:${nextRole}`;
+      const updated = await apiClient.changeMember(projectId, member.userId, nextRole, mutationKeys.key("project-member.change", requestIdentity));
+      mutationKeys.complete("project-member.change", requestIdentity);
       if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === updated.userId ? updated : item));
       toast.success("Member role updated");
     } catch (reason) {
       if (!mounted.current) return;
+      const requestIdentity = `${member.userId}:${nextRole}`;
+      if (reason instanceof ApiError) mutationKeys.complete("project-member.change", requestIdentity);
       const detail = denied(reason);
       let refreshed: ProjectMember[] | undefined;
       try { refreshed = await refreshMembers(); } catch {}
@@ -186,7 +190,8 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     const member = removing;
     setBusyUserId(member.userId);
     try {
-      await apiClient.removeMember(projectId, member.userId);
+      await apiClient.removeMember(projectId, member.userId, mutationKeys.key("project-member.remove", member.userId));
+      mutationKeys.complete("project-member.remove", member.userId);
       if (!mounted.current) return;
       setMembers((items) => removeMemberById(items, member.userId));
       setRemoving(undefined);
@@ -194,11 +199,13 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       void loadCandidates();
     } catch (reason) {
       if (!mounted.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("project-member.remove", member.userId);
       const detail = denied(reason);
       let refreshed: ProjectMember[] | undefined;
       try { refreshed = await refreshMembers(); } catch {}
       if (!mounted.current) return;
       if (refreshed && !refreshed.some((item) => item.userId === member.userId)) {
+        mutationKeys.complete("project-member.remove", member.userId);
         setRemoving(undefined);
         toast.success("Member removed");
         void loadCandidates();

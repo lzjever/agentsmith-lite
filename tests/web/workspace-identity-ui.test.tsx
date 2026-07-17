@@ -172,6 +172,25 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("reuses a workspace member role key from the in-place retry", async () => {
+    const original = { workspaces:apiClient.workspaces, workspaceMembers:apiClient.workspaceMembers, changeWorkspaceMember:apiClient.changeWorkspaceMember };
+    const member:WorkspaceMember={...owner,userId:"member_role_retry",role:"member",displayName:"Role Retry",email:"role-retry@example.test"};
+    const keys:string[]=[];let attempts=0;
+    apiClient.workspaces=async()=>[{...workspace,memberRole:"admin",capabilities:{canCreateProject:true,canManageMembers:true}}];
+    apiClient.workspaceMembers=async()=>[owner,member];
+    apiClient.changeWorkspaceMember=(async(_workspaceId:string,_userId:string,_role:"admin",key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{...member,role:"admin"};}) as typeof apiClient.changeWorkspaceMember;
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id}/>);
+      fireEvent.click(await screen.findByRole("combobox",{name:"Role for Role Retry"}));
+      fireEvent.click(await screen.findByRole("option",{name:"Admin"}));
+      const alert=await screen.findByRole("alert");
+      fireEvent.click(within(alert).getByRole("button",{name:"Retry"}));
+      await waitFor(()=>assert.equal(attempts,2));
+      assert.ok(keys[0]);assert.equal(keys[1],keys[0]);
+      await waitFor(()=>assert.match(screen.getByRole("combobox",{name:"Role for Role Retry"}).textContent??"",/Admin/));
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("serializes workspace membership mutations", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
     const first: WorkspaceMember = { ...owner, userId: "member_1", role: "member", displayName: "First member", email: "first@example.test" };

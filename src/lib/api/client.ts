@@ -219,8 +219,8 @@ export const apiClient = {
   setProjectPinned: (projectId:string,pinned:boolean) => json<Project>(`/projects/${encodeURIComponent(projectId)}/pin`,"PUT",{pinned}),
   workspaceMembers: (workspaceId: string) => request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
   addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">, idempotencyKey: string) => jsonIdempotent<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", idempotencyKey, { email, role }),
-  changeWorkspaceMember: (workspaceId: string, userId: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "PATCH", { userId, role }),
-  removeWorkspaceMember: (workspaceId: string, userId: string) => json<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "DELETE", { userId }),
+  changeWorkspaceMember: (workspaceId: string, userId: string, role: Exclude<WorkspaceMemberRole, "owner">, idempotencyKey: string) => jsonIdempotent<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "PATCH", idempotencyKey, { userId, role }),
+  removeWorkspaceMember: (workspaceId: string, userId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "DELETE", idempotencyKey, { userId }),
   transferWorkspaceOwner:(workspaceId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/workspaces/${encodeURIComponent(workspaceId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
   projectCapabilities: (projectId: string) => request<ProjectCapabilities>(`/projects/${encodeURIComponent(projectId)}/capabilities`),
   projectOverview: (projectId: string) => request<ProjectOverview>(`/projects/${encodeURIComponent(projectId)}/overview`),
@@ -232,14 +232,14 @@ export const apiClient = {
   members: (projectId: string) => request<ProjectMember[]>(`/projects/${encodeURIComponent(projectId)}/members`),
   addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
     jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", idempotencyKey, { userId, role }),
-  changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">) =>
-    json<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", { userId, role }),
-  removeMember: (projectId: string, userId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", { userId }),
+  changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
+    jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", idempotencyKey, { userId, role }),
+  removeMember: (projectId: string, userId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", idempotencyKey, { userId }),
   transferProjectOwner:(projectId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/projects/${encodeURIComponent(projectId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
   credentials: (projectId: string) => request<ProjectCredential[]>(`/projects/${encodeURIComponent(projectId)}/credentials`),
   createCredential: (projectId: string, input: { name: string; baseUrl: string; secret: string }, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials`, "POST", idempotencyKey, input),
   rotateCredential: (projectId: string, credentialId: string, secret: string, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", idempotencyKey, { secret }),
-  deleteCredential: (projectId: string, credentialId: string, expectedVersion: number) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", { expectedVersion }),
+  deleteCredential: (projectId: string, credentialId: string, expectedVersion: number, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", idempotencyKey, { expectedVersion }),
   endpoints: (projectId: string) => request<Endpoint[]>(`/projects/${encodeURIComponent(projectId)}/endpoints`),
   createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput, idempotencyKey: string) =>

@@ -442,8 +442,8 @@ async function routeApi(
     if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
     if (!segments[5] && method === "GET") return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId));
     if (!segments[5] && method === "POST") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asWorkspaceMemberIdentity(body), asWorkspaceMembershipRole(body.role), requireIdempotencyKey(req))); }
-    if (method === "PATCH") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role))); }
-    if (method === "DELETE") { const body = await readJson(req); await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId)); return sendJson(res, 200, { deleted: true }); }
+    if (method === "PATCH") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role), requireIdempotencyKey(req))); }
+    if (method === "DELETE") { const body = await readJson(req); await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId), requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
   }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "settings") {
     const workspaceId = segments[3];
@@ -495,12 +495,13 @@ async function routeApi(
           user.id,
           projectId,
           asUserId(body.userId),
-          asProjectMembershipRole(body.role)
+          asProjectMembershipRole(body.role),
+          requireIdempotencyKey(req)
         ));
       }
       if (method === "DELETE") {
         const body = await readJson(req);
-        await services.memberships.removeMember(user.id, projectId, asUserId(body.userId));
+        await services.memberships.removeMember(user.id, projectId, asUserId(body.userId), requireIdempotencyKey(req));
         return sendJson(res, 200, { deleted: true });
       }
     }
@@ -508,7 +509,7 @@ async function routeApi(
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.credentials.list(user.id, projectId));
       if (!segments[5] && method === "POST") return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req)));
       if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && method === "DELETE") { const body=await readJson(req);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion")); return sendJson(res, 200, { deleted: true }); }
+      if (segments[5] && method === "DELETE") { const body=await readJson(req);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
     }
     if (segments[4] === "endpoints") {
       if (segments[5] === "models" && method === "POST") {

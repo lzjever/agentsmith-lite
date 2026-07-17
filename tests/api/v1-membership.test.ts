@@ -126,13 +126,13 @@ describe("v1 project membership API", () => {
     assert.equal(fileList.status, 200);
     const viewerUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Fviewer.txt`, {
       method: "PUT",
-      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream" },
+      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream", "idempotency-key": "viewer-upload" },
       body: "viewer"
     });
     assert.equal(viewerUpload.status, 403);
     const viewerDelete = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files`, {
       method: "DELETE",
-      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/json" },
+      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/json", "idempotency-key": "viewer-delete" },
       body: JSON.stringify({ path: "files/viewer.txt" })
     });
     assert.equal(viewerDelete.status, 403);
@@ -144,7 +144,7 @@ describe("v1 project membership API", () => {
     assert.equal(updated.role, "member");
     const memberUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Fmember.txt`, {
       method: "PUT",
-      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream" },
+      headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream", "idempotency-key": "member-upload" },
       body: "member"
     });
     assert.equal(memberUpload.status, 200);
@@ -213,7 +213,7 @@ describe("v1 project membership API", () => {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(cookie ? { cookie } : {}),
         ...(["POST", "PATCH", "DELETE"].includes(method) && csrfToken ? { "x-csrf-token": csrfToken } : {}),
-        ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/(projects|members)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|members)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
+        ...((method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname))) || (["POST", "PATCH", "DELETE"].includes(method) && /^\/api\/v1\/(workspaces|projects)\/[^/]+\/members$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
