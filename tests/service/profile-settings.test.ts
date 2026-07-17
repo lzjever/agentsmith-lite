@@ -110,4 +110,23 @@ describe("profile and settings services", () => {
     await services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "settings-key", { name: "One" }, project.id, async () => ({ updated: true }));
     await assert.rejects(() => services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "settings-key", { name: "Two" }, project.id, async () => ({ updated: true })), (error: unknown) => error instanceof ProductError && error.statusCode === 409);
   });
+
+  it("identifies an idempotent mutation that is still running", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "running-owner", email: "running-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    let finish!: () => void;
+    const running = services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "running-settings-key", { name: "One" }, project.id, async () => {
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return { updated: true };
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await assert.rejects(
+      () => services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "running-settings-key", { name: "One" }, project.id, async () => ({ updated: true })),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 409 && error.code === "idempotency_in_progress"
+    );
+    finish();
+    await running;
+  });
 });

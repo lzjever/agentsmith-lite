@@ -11,6 +11,13 @@ export class ApiError extends Error {
   }
 }
 
+export class IdempotencyPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IdempotencyPendingError";
+  }
+}
+
 export const SESSION_EXPIRED_EVENT = "agentsmith:session-expired";
 export const DIRECTORY_CHANGED_EVENT = "agentsmith:directory-changed";
 export const NOTIFICATIONS_CHANGED_EVENT = "agentsmith:notifications-changed";
@@ -143,7 +150,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set("content-type", "application/json");
   }
   const response = observeSession(await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" }));
-  if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+  if (!response.ok) throw await apiResponseError(response);
   return response.json() as Promise<T>;
 }
 
@@ -156,21 +163,27 @@ function observeSession(response: Response): Response {
 }
 
 async function errorMessage(response: Response): Promise<string> {
+  return (await apiResponseError(response)).message;
+}
+
+async function apiResponseError(response: Response): Promise<Error> {
   const text = await response.text();
-  if (!text) return response.statusText;
+  if (!text) return new ApiError(response.status, response.statusText);
   try {
     const body: unknown = JSON.parse(text);
     if (body && typeof body === "object") {
+      const code = (body as { code?: unknown }).code;
       const error = (body as { error?: unknown }).error;
-      if (typeof error === "string") return error;
+      if (code === "idempotency_in_progress" && typeof error === "string") return new IdempotencyPendingError(error);
+      if (typeof error === "string") return new ApiError(response.status, error);
       if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
-        return (error as { message: string }).message;
+        return new ApiError(response.status, (error as { message: string }).message);
       }
     }
   } catch {
     // Preserve a non-JSON API error verbatim.
   }
-  return text;
+  return new ApiError(response.status, text);
 }
 
 function json<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
@@ -284,7 +297,7 @@ export const apiClient = {
     const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
       method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream", "idempotency-key": options.idempotencyKey ?? newIdempotencyKey("file-upload") }, body: file
     }));
-    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+    if (!response.ok) throw await apiResponseError(response);
     return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
   },
   createTaskUrlInput: (projectId:string,url:string,idempotencyKey:string) => jsonIdempotent<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",idempotencyKey,{url}),

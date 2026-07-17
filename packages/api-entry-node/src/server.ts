@@ -1302,7 +1302,7 @@ function handleError(res: ServerResponse, error: unknown): void {
   }
   const statusCode = error instanceof ProductError ? error.statusCode : 500;
   const message = error instanceof Error ? error.message : "Internal server error";
-  sendJson(res, statusCode, { error: message });
+  sendJson(res, statusCode, { error: message, ...(error instanceof ProductError && error.code ? { code:error.code } : {}) });
 }
 
 function handleTaskRouteError(res: ServerResponse, error: unknown): void {

@@ -1,7 +1,8 @@
 export class ProductError extends Error {
   constructor(
     message: string,
-    readonly statusCode = 400
+    readonly statusCode = 400,
+    readonly code?: string
   ) {
     super(message);
     this.name = "ProductError";
@@ -28,4 +29,3 @@ export class NotFoundError extends ProductError {
     this.name = "NotFoundError";
   }
 }
-

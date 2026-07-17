@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ApiError, apiClient, SESSION_EXPIRED_EVENT } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, IdempotencyPendingError, SESSION_EXPIRED_EVENT } from "../../src/lib/api/client.js";
 
 describe("settings deletion API client", () => {
   it("sends explicit idempotency keys for workspace and project creation", async () => {
@@ -87,6 +87,19 @@ describe("settings deletion API client", () => {
     globalThis.fetch = async () => Response.json({ error: { code: "runtime_unavailable", message: "Runtime is temporarily unavailable.", retryable: true } }, { status: 503 });
     try {
       await assert.rejects(apiClient.projectSettings("project_1"), (error: unknown) => error instanceof ApiError && error.status === 503 && error.message === "Runtime is temporarily unavailable.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps in-progress idempotent responses distinct from final API errors", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ error: "Idempotent operation is still in progress", code: "idempotency_in_progress" }, { status: 409 });
+    try {
+      await assert.rejects(
+        apiClient.deleteProject("project_1", "project-delete-key"),
+        (error: unknown) => error instanceof IdempotencyPendingError && !(error instanceof ApiError) && error.message === "Idempotent operation is still in progress"
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

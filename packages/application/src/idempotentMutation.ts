@@ -31,7 +31,7 @@ export async function runIdempotentMutation<T>(input: {
     leaseExpiresAt: new Date(Date.parse(timestamp) + 30_000).toISOString()
   });
   if (begun.kind === "hash_mismatch") throw new ProductError("Idempotency-Key was already used with a different request", 409);
-  if (begun.kind === "in_progress") throw new ProductError("Idempotent operation is still in progress", 409);
+  if (begun.kind === "in_progress") throw new ProductError("Idempotent operation is still in progress", 409, "idempotency_in_progress");
   if (begun.kind === "replay") {
     if (begun.responseStatus >= 400) {
       const body = begun.responseBody as { error?: unknown };
