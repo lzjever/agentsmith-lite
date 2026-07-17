@@ -2,7 +2,7 @@
 
 import { ChevronRight, Download, FileText, Folder, FolderUp, Image, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type ProjectCapabilities, type ProjectFile } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -102,12 +102,12 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   }
 
   function revokeWriteAccess(error: unknown) {
-    if (!(error instanceof ApiError) || error.status !== 403) return false;
+    if (!isReadOnlyMutationError(error)) return false;
     setCapabilities((current) => current ? { ...current, canWriteFiles: false } : current);
     setUploadFailure(undefined);
     setReplaceTarget(undefined);
     setDeleteTarget(undefined);
-    setMessage("File write permission changed. Files are now read-only.");
+    setMessage("File write access changed. Files are now read-only.");
     return true;
   }
 

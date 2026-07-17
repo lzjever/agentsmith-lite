@@ -4,7 +4,7 @@ import { Plus, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -154,7 +154,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     } catch (reason) {
       if (!active.current) return;
       const detail = message(reason);
-      if (reason instanceof ApiError && reason.status === 403) {
+      if (isReadOnlyMutationError(reason)) {
         setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
         setDialogOpen(false);
         mutationKeys.clear("task-create");

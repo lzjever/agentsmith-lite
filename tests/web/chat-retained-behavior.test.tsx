@@ -416,13 +416,13 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
-  it("makes chat read-only when the server revokes write access", async () => {
+  it("makes chat read-only when the project is archived during a send", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     apiClient.endpoints = async () => [endpoint];
     apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
     apiClient.chatThreads = async () => threads;
     apiClient.chatMessages = async () => [];
-    apiClient.sendChatMessage = async () => { throw new ApiError(403, "Chat access was revoked."); };
+    apiClient.sendChatMessage = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<ProjectChatPage projectId="project_1" />);
       await screen.findByRole("textbox", { name: "Message" });
@@ -430,7 +430,7 @@ describe("retained chat and overview behavior", () => {
       const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
       fireEvent.change(composer, { target: { value: "Can I still send?" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-      await screen.findAllByText("Chat access was revoked.");
+      await screen.findAllByText("Project is archived");
       assert.equal(composer.disabled, true);
       assert.ok(screen.getByText("Your project access is read-only."));
     } finally {

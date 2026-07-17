@@ -4,7 +4,7 @@ import { ArrowLeft, CircleAlert, Loader2, RefreshCw, TerminalSquare, Trash2, X }
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskCapabilities } from "../../lib/api/client";
-import { ApiError, apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -163,7 +163,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       toast.success("Task cancellation requested");
     } catch (reason) {
       if (!mounted.current) return;
-      if (reason instanceof ApiError && reason.status === 403) {
+      if (isReadOnlyMutationError(reason)) {
         setCapabilities((current) => current ? { ...current, cancelTask: false } : current);
         setCancelOpen(false);
         await loadTask(true);
@@ -183,7 +183,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       window.location.assign(appPath(basePath));
     } catch (reason) {
       if (!mounted.current) return;
-      if (reason instanceof ApiError && reason.status === 403) {
+      if (isReadOnlyMutationError(reason)) {
         setCapabilities((current) => current ? { ...current, deleteTask: false } : current);
         setDeleteOpen(false);
         await loadTask(true);

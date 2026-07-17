@@ -91,16 +91,16 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
-  it("fails closed when file write permission is revoked", async () => {
+  it("fails closed when the project is archived during a file upload", async () => {
     const original = snapshotClient();
     apiClient.projectCapabilities = async () => writable;
     apiClient.files = async () => ({ entries: [file] });
-    apiClient.uploadFile = async () => { throw new ApiError(403, "Forbidden"); };
+    apiClient.uploadFile = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
       await screen.findByText("brief.txt");
       fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
-      await screen.findByText("File write permission changed. Files are now read-only.");
+      await screen.findByText("File write access changed. Files are now read-only.");
       assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
       assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
       fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));

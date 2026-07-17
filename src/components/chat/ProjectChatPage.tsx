@@ -3,7 +3,7 @@
 import { MessagesSquare, RefreshCw, X } from "lucide-react";
 import Link from "next/link";
 import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatMessage, type ProjectChatThread } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectCapabilities, type ProjectChatMessage, type ProjectChatThread } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -396,7 +396,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   function failAction(reason: unknown): false {
     if (!active.current) return false;
     const detail = message(reason);
-    if (reason instanceof ApiError && reason.status === 403) {
+    if (isReadOnlyMutationError(reason)) {
       setCapabilities((current) => current ? { ...current, canSendChat: false } : current);
       setCapabilitiesStatus("ready");
     }

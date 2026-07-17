@@ -82,7 +82,7 @@ describe("tasks page loading", () => {
     }
   });
 
-  it("closes task creation when the server revokes create access", async () => {
+  it("closes task creation when the project is archived during creation", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
@@ -91,7 +91,7 @@ describe("tasks page loading", () => {
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
     apiClient.files = async () => ({ entries: [] });
-    apiClient.createTask = async () => { attempts++; throw new ApiError(403, "Task creation access was revoked."); };
+    apiClient.createTask = async () => { attempts++; throw new ApiError(409, "Project is archived"); };
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
       fireEvent.click(await screen.findByRole("button", { name: "Create task" }));

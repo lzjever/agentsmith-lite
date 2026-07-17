@@ -297,14 +297,14 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
-  it("removes the cancel action when permission is revoked during cancellation", async () => {
+  it("removes the cancel action when the project is archived during cancellation", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, cancelTask: apiClient.cancelTask };
     let detailReads = 0;
     apiClient.taskDetail = async () => ({ task, capabilities: detailReads++ === 0 ? available : { ...available, cancelTask: false } });
     apiClient.taskArtifacts = async () => [];
     apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
-    apiClient.cancelTask = async () => { throw new ApiError(403, "Task cancellation permission was revoked."); };
+    apiClient.cancelTask = async () => { throw new ApiError(409, "Project is archived"); };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
       fireEvent.click(await screen.findByRole("button", { name: "Cancel task" }));
