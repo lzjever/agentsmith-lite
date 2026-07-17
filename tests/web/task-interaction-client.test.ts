@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { apiClient } from "../../src/lib/api/client.js";
+import { apiClient, taskTerminalWebSocketUrlForApiBase } from "../../src/lib/api/client.js";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 describe("task interaction API client", () => {
+  it("builds terminal sockets from both same-origin and absolute development API bases", () => {
+    assert.equal(
+      taskTerminalWebSocketUrlForApiBase("/app/api/v1", "task/1", "https://agentsmith.localhost/app/tasks"),
+      "wss://agentsmith.localhost/app/api/v1/tasks/task%2F1/terminal/ws"
+    );
+    assert.equal(
+      taskTerminalWebSocketUrlForApiBase("http://127.0.0.1:3001/api/v1", "task/1", "http://127.0.0.1:3000/tasks"),
+      "ws://127.0.0.1:3001/api/v1/tasks/task%2F1/terminal/ws"
+    );
+  });
+
   it("uses the interaction, message, turn, work, and task routes with idempotency keys", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     globalThis.fetch = async (input, init = {}) => {

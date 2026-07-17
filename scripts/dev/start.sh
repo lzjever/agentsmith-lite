@@ -14,7 +14,7 @@ trap cleanup EXIT INT TERM
 
 PORT="$api_port" npm run dev:api &
 api_pid=$!
-APP_PUBLIC_BASE_URL="http://127.0.0.1:${web_port}" NEXT_PUBLIC_API_BASE_PATH="$api_url" npm run dev:web -- --port "$web_port" &
+APP_PUBLIC_BASE_URL="http://127.0.0.1:${web_port}" LOCAL_API_BASE_URL="$api_url" npm run dev:web -- --port "$web_port" &
 web_pid=$!
 
 echo "Web: http://127.0.0.1:${web_port}  API: ${api_url}" >&2

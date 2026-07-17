@@ -311,10 +311,7 @@ export const apiClient = {
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
   taskInputs: (taskId: string) => request<TaskInput[]>(`/tasks/${encodeURIComponent(taskId)}/inputs`),
   taskInputDownloadUrl: (taskId: string, path: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/inputs/download?path=${encodeURIComponent(path)}`,
-  taskTerminalWebSocketUrl: (taskId:string) => {
-    const protocol=window.location.protocol==="https:"?"wss:":"ws:";
-    return `${protocol}//${window.location.host}${apiBasePath}/tasks/${encodeURIComponent(taskId)}/terminal/ws`;
-  },
+  taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
   async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
     const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
@@ -371,6 +368,15 @@ export const apiClient = {
     return response.blob();
   }
 };
+
+export function taskTerminalWebSocketUrlForApiBase(basePath:string,taskId:string,pageUrl:string):string{
+  const url=new URL(basePath,pageUrl);
+  url.protocol=url.protocol==="https:"?"wss:":"ws:";
+  url.pathname=`${url.pathname.replace(/\/$/,"")}/tasks/${encodeURIComponent(taskId)}/terminal/ws`;
+  url.search="";
+  url.hash="";
+  return url.toString();
+}
 
 export const oidcStartUrl = `${apiBasePath}/auth/oidc/start`;
 
