@@ -245,6 +245,26 @@ describe("profile and settings pages", () => {
       assert.equal(screen.queryByRole("button", { name: "Unarchive project" }), null);
     } finally { Object.assign(apiClient, original); }
   });
+
+  it("locks other project settings while an archive request is in flight", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, archiveProject: apiClient.archiveProject };
+    let finishArchive!: (value: ProjectSettings["project"]) => void;
+    apiClient.projectSettings = async () => ({ ...settings, project: { ...settings.project, ownerUserId: "user_1", lifecycleStatus: "active" } });
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.members = async () => [];
+    apiClient.archiveProject = async () => new Promise((resolve) => { finishArchive = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Archive project" }));
+      fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Archive project" }));
+      await waitFor(() => assert.ok(finishArchive));
+
+      assert.equal((document.querySelector('input[name="name"]') as HTMLInputElement).disabled, true);
+      assert.equal((document.querySelector('button[aria-label="Open project deletion confirmation"]') as HTMLButtonElement).disabled, true);
+
+      await act(async () => finishArchive({ ...settings.project, ownerUserId: "user_1", lifecycleStatus: "archived" }));
+    } finally { Object.assign(apiClient, original); }
+  });
 });
 
 function router(pushed: string[] = []) { return { back() {}, forward() {}, refresh() {}, push(path: string) { pushed.push(path); }, replace() {}, prefetch() {} }; }
