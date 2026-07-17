@@ -5,6 +5,7 @@ import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService, type ProjectPermission } from "./authorizationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 
 export class WorkspaceService {
   constructor(
@@ -13,32 +14,30 @@ export class WorkspaceService {
     private readonly policies?: ProjectPolicyService
   ) {}
 
-  async createWorkspace(userId: string, input: CreateWorkspaceInput): Promise<Workspace> {
+  async createWorkspace(userId: string, input: CreateWorkspaceInput, idempotencyKey?: string): Promise<Workspace> {
+    const name = requireNonEmptyString(input.name, "workspace.name");
     const timestamp = nowIso();
-    return this.store.createWorkspace({
-      id: newId("ws"),
-      name: requireNonEmptyString(input.name, "workspace.name"),
-      ownerUserId: userId,
-      createdAt: timestamp,
-      updatedAt: timestamp
-    });
+    const create = async (id: string) => {
+      const existing = await this.store.findWorkspace(id);
+      if (existing) return existing;
+      return this.store.createWorkspace({ id, name, ownerUserId: userId, createdAt: timestamp, updatedAt: timestamp });
+    };
+    if (!idempotencyKey) return create(newId("ws"));
+    return runIdempotentMutation({ store:this.store, actorId:userId, scopeId:userId, operation:"workspace.create", key:idempotencyKey, request:{name}, resourceId:newId("ws"), failureMessage:"Workspace could not be created", run:create });
   }
 
-  async createProject(userId: string, workspaceId: string, input: CreateProjectInput): Promise<Project> {
+  async createProject(userId: string, workspaceId: string, input: CreateProjectInput, idempotencyKey?: string): Promise<Project> {
     await this.authorization.requireWorkspaceProjectCreation(userId, workspaceId);
+    const name = requireNonEmptyString(input.name, "project.name");
+    const taskConcurrencyLimit = requirePositiveInteger(input.taskConcurrencyLimit, "project.taskConcurrencyLimit", 2);
     const timestamp = nowIso();
-    const id = newId("proj");
-    const project: Project = {
-      id,
-      workspaceId,
-      name: requireNonEmptyString(input.name, "project.name"),
-      ownerUserId: userId,
-      rootPath: `workspaces/${workspaceId}/projects/${id}`,
-      taskConcurrencyLimit: requirePositiveInteger(input.taskConcurrencyLimit, "project.taskConcurrencyLimit", 2),
-      createdAt: timestamp,
-      updatedAt: timestamp
+    const create = async (id: string) => {
+      const existing = await this.store.findProject(id);
+      if (existing) return existing;
+      return this.store.createProject({ id, workspaceId, name, ownerUserId: userId, rootPath: `workspaces/${workspaceId}/projects/${id}`, taskConcurrencyLimit, createdAt: timestamp, updatedAt: timestamp });
     };
-    return this.store.createProject(project);
+    if (!idempotencyKey) return create(newId("proj"));
+    return runIdempotentMutation({ store:this.store, actorId:userId, scopeId:workspaceId, operation:"project.create", key:idempotencyKey, request:{workspaceId,name,taskConcurrencyLimit}, resourceId:newId("proj"), failureMessage:"Project could not be created", run:create });
   }
 
   async listWorkspaces(userId: string): Promise<WorkspaceWithProjects[]> {

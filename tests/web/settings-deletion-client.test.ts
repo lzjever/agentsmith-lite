@@ -3,6 +3,29 @@ import { describe, it } from "node:test";
 import { ApiError, apiClient, SESSION_EXPIRED_EVENT } from "../../src/lib/api/client.js";
 
 describe("settings deletion API client", () => {
+  it("sends explicit idempotency keys for workspace and project creation", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; idempotencyKey: string | null }> = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url, "http://localhost"), init);
+      requests.push({ url: request.url, idempotencyKey: request.headers.get("idempotency-key") });
+      if (request.url.endsWith("/me")) return Response.json({ user: { id: "owner_1", email: "owner@example.test" }, csrfToken: "csrf_1" });
+      if (request.url.endsWith("/workspaces")) return Response.json({ id: "workspace_1" });
+      return Response.json({ id: "project_1" });
+    };
+    try {
+      await apiClient.currentIdentity();
+      await apiClient.createWorkspace("Workspace", "workspace-create-key");
+      await apiClient.createProject("workspace_1", { name: "Project" }, "project-create-key");
+      assert.deepEqual(requests.slice(1), [
+        { url: "http://localhost/api/v1/workspaces", idempotencyKey: "workspace-create-key" },
+        { url: "http://localhost/api/v1/workspaces/workspace_1/projects", idempotencyKey: "project-create-key" }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("sends scoped delete requests with CSRF and preserves API error messages", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ url: string; method: string; csrf: string | null; idempotencyKey: string | null }> = [];

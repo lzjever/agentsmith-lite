@@ -36,6 +36,31 @@ describe("workspace identity UX", () => {
     } finally { apiClient.workspaces = original; }
   });
 
+  it("reuses a workspace creation key after an unknown network result", async () => {
+    const original = { workspaces: apiClient.workspaces, createWorkspace: apiClient.createWorkspace };
+    const keys: string[] = [];
+    let attempts = 0;
+    apiClient.workspaces = async () => [];
+    apiClient.createWorkspace = (async (_name: string, key: string) => {
+      keys.push(key);
+      if (++attempts === 1) throw new Error("connection closed");
+      return workspace;
+    }) as typeof apiClient.createWorkspace;
+    try {
+      render(<WorkspaceDirectoryPage />);
+      const create = await screen.findByRole("button", { name: "New workspace" }) as HTMLButtonElement;
+      await waitFor(() => assert.equal(create.disabled, false));
+      fireEvent.click(create);
+      fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Workspace" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.equal(keys[0], keys[1]);
+      assert.ok(keys[0]);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("waits for the workspace directory before allowing creation", async () => {
     const original = apiClient.workspaces;
     let finishLoad!: (value: Workspace[]) => void;

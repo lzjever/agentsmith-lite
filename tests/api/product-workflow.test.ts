@@ -333,6 +333,9 @@ describe("api product workflow", () => {
     if (pathname.includes("/tasks") && ["POST","PATCH","DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
+    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname))) {
+      headers["idempotency-key"] = crypto.randomUUID();
+    }
     const requestInit: RequestInit = { method, headers };
     if (body) {
       requestInit.body = JSON.stringify(body);

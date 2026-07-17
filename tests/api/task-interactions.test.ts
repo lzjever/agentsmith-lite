@@ -682,6 +682,9 @@ async function createProjectWithEndpoint(baseUrl: string) {
     if (pathname.includes("/tasks") && ["POST", "PATCH", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `task-events-${++idempotencySequence}`;
     }
+    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname))) {
+      headers["idempotency-key"] = crypto.randomUUID();
+    }
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
       init.body = JSON.stringify(body);

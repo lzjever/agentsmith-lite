@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Project, ProjectAuditAction, Workspace } from "../../contracts/src/api.js";
 import { ForbiddenError, NotFoundError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
@@ -6,6 +5,7 @@ import { ProductError } from "../../domain/src/errors.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
 import type { ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 
 export class SettingsService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
@@ -37,12 +37,7 @@ export class SettingsService {
   async archiveProject(userId:string,projectId:string){const project=await this.authorization.requireProject(userId,projectId,"admin");return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"archived",nowIso()))}
   async unarchiveProject(userId:string,projectId:string){const project=await this.requireProjectOwner(userId,projectId);await this.authorization.requireProjectWorkspaceActive(project);return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"active",nowIso()))}
   async runIdempotentMutation<T>(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>,key:string,request:unknown,resourceId:string,run:()=>Promise<T>):Promise<T>{
-    const timestamp=nowIso();const requestHash=canonicalRequestHash(request);const claimToken=newId("idempotency_claim");
-    const begun=await this.store.beginTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,resourceId,claimToken,now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+30_000).toISOString()});
-    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-    if(begun.kind==="in_progress")throw new ProductError("Idempotent settings operation is still in progress",409);
-    if(begun.kind==="replay"){if(begun.responseStatus>=400){const body=begun.responseBody as {error?:unknown};throw new ProductError(typeof body?.error==="string"?body.error:"Settings operation failed",begun.responseStatus);}return begun.responseBody as T;}
-    try{const response=await run();if(!await this.store.completeTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt:nowIso()}))throw new ProductError("Idempotent settings operation lost its claim",409);return response;}catch(error){const productError=error instanceof ProductError?error:new ProductError("Settings operation failed",500);await this.store.completeTaskIdempotency({actorId,projectId:scopeId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:productError.statusCode,responseBody:{error:productError.message},updatedAt:nowIso()});throw productError;}
+    return runIdempotentMutation({ store:this.store, actorId, scopeId, operation, key, request, resourceId, failureMessage:"Settings operation failed", run:() => run() });
   }
   async runIdempotentProjectLifecycleMutation<T>(actorId:string,projectId:string,operation:Extract<TaskIdempotencyOperation,`project.${"archive"|"unarchive"}`>,key:string,action:ProjectLifecycleAuditAction,run:()=>Promise<T>):Promise<T>{
     return this.runIdempotentMutation(actorId,projectId,operation,key,{projectId},projectId,async()=>{
@@ -79,6 +74,4 @@ export class SettingsService {
   }
 }
 
-function canonicalRequestHash(value:unknown):string{return createHash("sha256").update(canonicalJson(value),"utf8").digest("base64url")}
-function canonicalJson(value:unknown):string{if(value===null||typeof value==="string"||typeof value==="boolean")return JSON.stringify(value);if(typeof value==="number"){if(!Number.isFinite(value))throw new ProductError("Settings request contains a non-finite number",400);return JSON.stringify(value)}if(Array.isArray(value))return`[${value.map(canonicalJson).join(",")}]`;if(typeof value==="object"){const record=value as Record<string,unknown>;return`{${Object.keys(record).sort().filter((key)=>record[key]!==undefined).map((key)=>`${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`}throw new ProductError("Settings request cannot be canonically hashed",400)}
 type ProjectLifecycleAuditAction = Extract<ProjectAuditAction, "project.archive" | "project.unarchive">;

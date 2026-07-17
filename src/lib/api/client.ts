@@ -195,14 +195,14 @@ export const apiClient = {
   profile: () => request<Profile>("/me/profile"),
   updateProfile: (input: { displayName?: string | null; timezone?: string | null; bio?: string | null; jobTitle?: string | null; company?: string | null; greetingPreference?: string | null; interests?: string[] }) => json<Profile>("/me/profile", "PATCH", input),
   workspaces: () => request<Workspace[]>("/workspaces"),
-  createWorkspace: (name: string) => json<Workspace>("/workspaces", "POST", { name }),
+  createWorkspace: (name: string, idempotencyKey: string) => jsonIdempotent<Workspace>("/workspaces", "POST", idempotencyKey, { name }),
   deleteWorkspace: (workspaceId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}`, "DELETE", idempotencyKey),
   workspaceSettings: (workspaceId: string) => request<WorkspaceSettings>(`/workspaces/${encodeURIComponent(workspaceId)}/settings`),
   updateWorkspaceSettings: (workspaceId: string, input: { name?: string }, idempotencyKey: string) => jsonIdempotent<WorkspaceSettings>(`/workspaces/${encodeURIComponent(workspaceId)}/settings`, "PATCH", idempotencyKey, input),
   archiveWorkspace: (workspaceId:string,idempotencyKey:string) => jsonIdempotent<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}/settings/archive`,"POST",idempotencyKey),
   unarchiveWorkspace: (workspaceId:string,idempotencyKey:string) => jsonIdempotent<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}/settings/unarchive`,"POST",idempotencyKey),
-  createProject: (workspaceId: string, input: { name: string; taskConcurrencyLimit?: number }) =>
-    json<Project>(`/workspaces/${encodeURIComponent(workspaceId)}/projects`, "POST", input),
+  createProject: (workspaceId: string, input: { name: string; taskConcurrencyLimit?: number }, idempotencyKey: string) =>
+    jsonIdempotent<Project>(`/workspaces/${encodeURIComponent(workspaceId)}/projects`, "POST", idempotencyKey, input),
   setProjectPinned: (projectId:string,pinned:boolean) => json<Project>(`/projects/${encodeURIComponent(projectId)}/pin`,"PUT",{pinned}),
   workspaceMembers: (workspaceId: string) => request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
   addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">) => json<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", { email, role }),

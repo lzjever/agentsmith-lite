@@ -117,7 +117,7 @@ describe("project chat threads API", () => {
 
   async function requestJson(method: string, pathname: string, body?: unknown) { const result = await request(method, pathname, body); assert.equal(result.response.status, 200, `${method} ${pathname}: ${JSON.stringify(result.body)}`); return result.body as any; }
   async function request(method: string, pathname: string, body?: unknown, session = cookie, token = csrf): Promise<{ response: Response; body: unknown }> {
-    const response = await fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(session ? { cookie: session } : {}), ...(["POST", "PATCH", "DELETE"].includes(method) && token ? { "x-csrf-token": token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const response = await fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(session ? { cookie: session } : {}), ...(["POST", "PATCH", "DELETE"].includes(method) && token ? { "x-csrf-token": token } : {}), ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { response, body: await response.json() };
   }
   async function sendMessage(threadId: string, content: string): Promise<void> {

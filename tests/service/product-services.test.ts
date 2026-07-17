@@ -44,6 +44,26 @@ describe("product services", () => {
     assert.deepEqual(await store.listProjectPinsForUser(member.user.id), []);
   });
 
+  it("replays workspace and project creation without duplicating resources", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginAfterBootstrap("admin-password");
+
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Operations" }, "workspace-create-key");
+    const replayedWorkspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Operations" }, "workspace-create-key");
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Runtime" }, "project-create-key");
+    const replayedProject = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Runtime" }, "project-create-key");
+
+    assert.equal(replayedWorkspace.id, workspace.id);
+    assert.equal(replayedProject.id, project.id);
+    assert.equal((await services.workspaces.listWorkspaces(owner.user.id)).length, 1);
+    assert.equal((await store.listProjectsForUser(owner.user.id)).length, 1);
+    await assert.rejects(
+      () => services.workspaces.createWorkspace(owner.user.id, { name: "Different" }, "workspace-create-key"),
+      /Idempotency-Key was already used with a different request/
+    );
+  });
+
   it("revokes built-in admin sessions on logout", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({

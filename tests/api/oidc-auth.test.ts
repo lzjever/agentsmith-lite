@@ -97,29 +97,37 @@ describe("api OIDC auth", () => {
     });
     assert.equal(missingCsrf.status, 403);
 
-    const workspace = await fetch(baseUrl + apiPath("/api/v1/workspaces"), {
+    const workspaceRequest = {
       method: "POST",
       headers: {
         "content-type": "application/json",
         cookie: login.sessionCookie,
-        "x-csrf-token": login.csrfToken
+        "x-csrf-token": login.csrfToken,
+        "idempotency-key": "oidc-workspace-create"
       },
       body: JSON.stringify({ name: "OIDC Workspace" })
-    });
+    };
+    const workspace = await fetch(baseUrl + apiPath("/api/v1/workspaces"), workspaceRequest);
     assert.equal(workspace.status, 200);
 
     const memberWorkspace = await workspace.json();
-    const projectResponse = await fetch(baseUrl + apiPath(`/api/v1/workspaces/${memberWorkspace.id}/projects`), {
+    const replayedWorkspace = await fetch(baseUrl + apiPath("/api/v1/workspaces"), workspaceRequest);
+    assert.equal((await replayedWorkspace.json()).id, memberWorkspace.id);
+    const projectRequest = {
       method: "POST",
       headers: {
         "content-type": "application/json",
         cookie: login.sessionCookie,
-        "x-csrf-token": login.csrfToken
+        "x-csrf-token": login.csrfToken,
+        "idempotency-key": "oidc-project-create"
       },
       body: JSON.stringify({ name: "OIDC Project" })
-    });
+    };
+    const projectResponse = await fetch(baseUrl + apiPath(`/api/v1/workspaces/${memberWorkspace.id}/projects`), projectRequest);
     assert.equal(projectResponse.status, 200);
     const project = await projectResponse.json();
+    const replayedProject = await fetch(baseUrl + apiPath(`/api/v1/workspaces/${memberWorkspace.id}/projects`), projectRequest);
+    assert.equal((await replayedProject.json()).id, project.id);
     const credentialResponse = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/credentials`), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: login.sessionCookie, "x-csrf-token": login.csrfToken },

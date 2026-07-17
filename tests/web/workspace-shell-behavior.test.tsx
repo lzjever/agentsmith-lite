@@ -56,6 +56,30 @@ describe("workspace and shell interactions", () => {
     }
   });
 
+  it("reuses a project creation key after an unknown network result", async () => {
+    const original = apiClient.createProject;
+    const created = { ...workspace.projects[1]!, id: "proj_replayed", name: "Replayed project" };
+    const keys: string[] = [];
+    let attempts = 0;
+    apiClient.createProject = (async (_workspaceId: string, _input: { name: string }, key: string) => {
+      keys.push(key);
+      if (++attempts === 1) throw new Error("connection closed");
+      return created;
+    }) as typeof apiClient.createProject;
+    try {
+      const view = render(<CreateProjectDialog workspaceId={workspace.id} open onOpenChange={() => {}} onCreated={() => {}} />);
+      fireEvent.change(await view.findByLabelText("Project name"), { target: { value: created.name } });
+      fireEvent.click(view.getByRole("button", { name: "Create project" }));
+      await view.findByRole("alert");
+      fireEvent.click(view.getByRole("button", { name: "Create project" }));
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.equal(keys[0], keys[1]);
+      assert.ok(keys[0]);
+    } finally {
+      apiClient.createProject = original;
+    }
+  });
+
   it("keeps the dialog accessible, focuses its form, handles Escape, and shows create failures", async () => {
     const original = apiClient.createProject;
     apiClient.createProject = async () => { throw new ApiError(409, "Project name is unavailable"); };

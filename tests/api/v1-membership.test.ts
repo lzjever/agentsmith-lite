@@ -209,7 +209,8 @@ describe("v1 project membership API", () => {
       headers: {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(cookie ? { cookie } : {}),
-        ...(["POST", "PATCH", "DELETE"].includes(method) && csrfToken ? { "x-csrf-token": csrfToken } : {})
+        ...(["POST", "PATCH", "DELETE"].includes(method) && csrfToken ? { "x-csrf-token": csrfToken } : {}),
+        ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });

@@ -414,7 +414,7 @@ async function routeApi(
 
   if (method === "POST" && url.pathname === "/api/v1/workspaces") {
     const body = await readJson(req);
-    const created = await services.workspaces.createWorkspace(user.id, { name: asString(body.name) });
+    const created = await services.workspaces.createWorkspace(user.id, { name: asString(body.name) }, requireIdempotencyKey(req));
     const workspace = (await services.workspaces.listWorkspaces(user.id)).find((candidate) => candidate.id === created.id);
     if (!workspace) {
       throw new ProductError("Created workspace could not be loaded", 500);
@@ -434,7 +434,7 @@ async function routeApi(
       return sendJson(res, 200, await services.workspaces.createProject(user.id, workspaceId, {
         name: asString(body.name),
         ...(typeof body.taskConcurrencyLimit === "number" ? { taskConcurrencyLimit: body.taskConcurrencyLimit } : {})
-      }));
+      }, requireIdempotencyKey(req)));
     }
   }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "members") {

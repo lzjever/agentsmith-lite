@@ -4,6 +4,7 @@ import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -68,10 +69,12 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const mutationKeys = useMutationKeys();
   useEffect(() => {
     if (open) {
       setName("");
       setError("");
+      mutationKeys.clear("workspace.create");
     }
   }, [open]);
 
@@ -79,20 +82,23 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
     event.preventDefault();
     const nextName = name.trim();
     if (!nextName) return;
+    const requestIdentity = nextName;
     setSaving(true);
     setError("");
     try {
-      const workspace = await apiClient.createWorkspace(nextName);
+      const workspace = await apiClient.createWorkspace(nextName, mutationKeys.key("workspace.create", requestIdentity));
+      mutationKeys.complete("workspace.create", requestIdentity);
       onCreated(workspace);
       toast.success("Workspace created");
       setName("");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("workspace.create", requestIdentity);
       setError(errorMessage(reason, "Workspace could not be created."));
     } finally {
       setSaving(false);
     }
   }
-  return <Dialog open={open} onOpenChange={(next) => { if (!saving && !next) onClose(); }}><DialogContent><form onSubmit={submit}><DialogHeader><p className="type-caption text-tertiary">Workspace</p><DialogTitle className="type-title mt-2 block">New workspace</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Create a home for one or more projects.</DialogDescription></DialogHeader><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus required value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><DialogClose asChild><Button variant="quiet" disabled={saving}>Cancel</Button></DialogClose><Button type="submit" disabled={saving || name.trim().length === 0}>{saving ? "Creating..." : "Create workspace"}</Button></footer></form></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={(next) => { if (!saving && !next) { mutationKeys.clear("workspace.create"); onClose(); } }}><DialogContent><form onSubmit={submit}><DialogHeader><p className="type-caption text-tertiary">Workspace</p><DialogTitle className="type-title mt-2 block">New workspace</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Create a home for one or more projects.</DialogDescription></DialogHeader><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus required value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><DialogClose asChild><Button variant="quiet" disabled={saving}>Cancel</Button></DialogClose><Button type="submit" disabled={saving || name.trim().length === 0}>{saving ? "Creating..." : "Create workspace"}</Button></footer></form></DialogContent></Dialog>;
 }
 
 function errorMessage(reason: unknown, fallback: string): string {
