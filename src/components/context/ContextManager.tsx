@@ -97,7 +97,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   useEffect(() => { if (scopeReady) { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); } }, [load, scopeReady]);
   const selected = useMemo(() => result?.items.find((entry) => entry.contextKey === selectedKey), [result, selectedKey]);
   const normalizedContextKey = contextKey.trim();
-  const dirty = result?.canWrite === true && (selected
+  const dirty = result !== undefined && (selected
     ? normalizedContextKey !== selected.contextKey || content !== selected.content || contentType !== selected.contentType
     : normalizedContextKey.length > 0 || content.length > 0 || contentType !== "text");
   function applyNavigation(navigation: PendingNavigation) {

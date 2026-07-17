@@ -202,6 +202,25 @@ describe("context manager", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("confirms before discarding a rejected draft after write access was removed", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = (id: string, content: string) => ({ id, workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: id, content, contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" });
+    let denied = false;
+    apiClient.contexts = async () => ({ items: [entry("project.rules", "before"), entry("team.notes", "notes")], canWrite: !denied });
+    apiClient.saveContext = async () => { denied = true; throw new ApiError(403, "Context write is not allowed"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const content = await screen.findByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      fireEvent.change(content, { target: { value: "unsaved draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await screen.findByText("Context write access changed. This scope is now read-only.");
+
+      fireEvent.click(screen.getByRole("button", { name: /team\.notes/i }));
+      assert.ok(screen.getByRole("alertdialog", { name: "Discard unsaved context changes?" }));
+      assert.equal(content.value, "unsaved draft");
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("clears context when a rejected write discovers workspace access was removed", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     const entry = { id: "ctx_removed", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_shared" as const, contextKey: "private.rules", content: "private content", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
