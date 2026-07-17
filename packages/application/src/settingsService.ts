@@ -37,6 +37,7 @@ export class SettingsService {
   async archiveProject(userId:string,projectId:string){const project=await this.authorization.requireProject(userId,projectId,"admin");return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"archived",nowIso()))}
   async unarchiveProject(userId:string,projectId:string){const project=await this.requireProjectOwner(userId,projectId);await this.authorization.requireProjectWorkspaceActive(project);return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"active",nowIso()))}
   async runIdempotentMutation<T>(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>,key:string,request:unknown,resourceId:string,run:()=>Promise<T>):Promise<T>{
+    await this.authorizeIdempotentOperation(actorId,scopeId,operation);
     return runIdempotentMutation({ store:this.store, actorId, scopeId, operation, key, request, resourceId, failureMessage:"Settings operation failed", run:() => run() });
   }
   async runIdempotentProjectLifecycleMutation<T>(actorId:string,projectId:string,operation:Extract<TaskIdempotencyOperation,`project.${"archive"|"unarchive"}`>,key:string,action:ProjectLifecycleAuditAction,run:()=>Promise<T>):Promise<T>{
@@ -67,6 +68,15 @@ export class SettingsService {
   }
   private async requireWorkspaceOwner(userId:string,workspaceId:string){const workspace=await this.authorization.requireWorkspace(userId,workspaceId,"view");if(workspace.ownerUserId!==userId)throw new ForbiddenError("Workspace owner access required");if(workspace.lifecycleStatus==="deleting")throw new ProductError("Workspace is being deleted",409);return workspace}
   private async requireProjectOwner(userId:string,projectId:string){const project=await this.authorization.requireProject(userId,projectId,"view");if(project.ownerUserId!==userId)throw new ForbiddenError("Project owner access required");if(project.lifecycleStatus==="deleting")throw new ProductError("Project is being deleted",409);return project}
+  private async authorizeIdempotentOperation(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>):Promise<void>{
+    if(operation==="workspace.delete"||operation==="project.delete")return;
+    if(operation==="workspace.unarchive"){await this.requireWorkspaceOwner(actorId,scopeId);return}
+    if(operation==="project.unarchive"){await this.requireProjectOwner(actorId,scopeId);return}
+    if(operation==="workspace.settings.update"||operation==="workspace.archive"||operation==="workspace.owner.transfer"){await this.authorization.requireWorkspaceMembership(actorId,scopeId,"admin");return}
+    if(operation==="project.settings.update"||operation==="project.archive"||operation==="project.owner.transfer"){await this.authorization.requireProjectMembership(actorId,scopeId,"admin");return}
+    if(operation==="project.file.upload"||operation==="project.file.url-note"||operation==="project.file.delete"){await this.authorization.requireProjectMembership(actorId,scopeId,"write");return}
+    throw new ProductError(`Unsupported settings operation: ${operation}`,500);
+  }
   private requireWorkspaceState(value:Workspace|null){if(!value)throw new NotFoundError("Workspace not found");return value}
   private requireProjectState(value:Project|null){if(!value)throw new NotFoundError("Project not found");return value}
   private async projectCapabilities(userId: string, projectId: string) {

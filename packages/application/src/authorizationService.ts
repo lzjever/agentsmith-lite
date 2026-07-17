@@ -18,6 +18,15 @@ export class AuthorizationService {
   constructor(private readonly store: ProductStore) {}
 
   async requireProject(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {
+    const project = await this.requireProjectMembership(userId, projectId, permission);
+    if (permission !== "view" && project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") {
+      throw new ProductError(project.lifecycleStatus === "deleting" ? "Project is being deleted" : "Project is archived", 409);
+    }
+    if (permission !== "view") await this.requireProjectWorkspaceActive(project);
+    return project;
+  }
+
+  async requireProjectMembership(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {
     const project = await this.store.findProject(projectId);
     if (!project) {
       throw new NotFoundError("Project not found");
@@ -26,10 +35,6 @@ export class AuthorizationService {
     if (!membership || !permissions[membership.role].includes(permission)) {
       throw new ForbiddenError("Project access denied");
     }
-    if (permission !== "view" && project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") {
-      throw new ProductError(project.lifecycleStatus === "deleting" ? "Project is being deleted" : "Project is archived", 409);
-    }
-    if (permission !== "view") await this.requireProjectWorkspaceActive(project);
     return project;
   }
 
@@ -68,6 +73,12 @@ export class AuthorizationService {
   }
 
   async requireWorkspace(userId: string, workspaceId: string, permission: WorkspacePermission = "view"): Promise<Workspace> {
+    const workspace = await this.requireWorkspaceMembership(userId, workspaceId, permission);
+    if (permission !== "view" && workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active") throw new ProductError(workspace.lifecycleStatus === "deleting" ? "Workspace is being deleted" : "Workspace is archived", 409);
+    return workspace;
+  }
+
+  async requireWorkspaceMembership(userId: string, workspaceId: string, permission: WorkspacePermission = "view"): Promise<Workspace> {
     const workspace = await this.store.findWorkspace(workspaceId);
     if (!workspace) {
       throw new NotFoundError("Workspace not found");
@@ -76,7 +87,6 @@ export class AuthorizationService {
     if (!membership || !workspacePermissions[membership.role].includes(permission)) {
       throw new ForbiddenError("Workspace access denied");
     }
-    if (permission !== "view" && workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active") throw new ProductError(workspace.lifecycleStatus === "deleting" ? "Workspace is being deleted" : "Workspace is archived", 409);
     return workspace;
   }
 

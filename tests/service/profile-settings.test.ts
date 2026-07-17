@@ -129,4 +129,38 @@ describe("profile and settings services", () => {
     finish();
     await running;
   });
+
+  it("reauthorizes settings before replaying a completed response", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-owner", email: "settings-owner@example.test", emailVerified: true });
+    const admin = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-admin", email: "settings-admin@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: admin.user.email }, "admin");
+    await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
+    const update = () => services.settings.runIdempotentMutation(admin.user.id, project.id, "project.settings.update", "admin-settings-key", { name: "Renamed" }, project.id, () => services.settings.updateProject(admin.user.id, project.id, { name: "Renamed" }));
+
+    await update();
+    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member");
+    await assert.rejects(update, (error: unknown) => error instanceof ProductError && error.statusCode === 403);
+  });
+
+  it("allows the former owner to confirm a transfer until their admin access is revoked", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "transfer-owner", email: "transfer-owner@example.test", emailVerified: true });
+    const successor = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "transfer-successor", email: "transfer-successor@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: successor.user.email }, "admin");
+    await services.memberships.addMember(owner.user.id, project.id, successor.user.id, "admin");
+    const transfer = () => services.settings.runIdempotentMutation(owner.user.id, project.id, "project.owner.transfer", "owner-transfer-key", { projectId: project.id, userId: successor.user.id }, project.id, async () => {
+      await services.memberships.transferOwner(owner.user.id, project.id, successor.user.id);
+      return { transferred: true as const };
+    });
+
+    const first = await transfer();
+    assert.deepEqual(await transfer(), first);
+    await services.memberships.changeMember(successor.user.id, project.id, owner.user.id, "member");
+    await assert.rejects(transfer, (error: unknown) => error instanceof ProductError && error.statusCode === 403);
+  });
 });
