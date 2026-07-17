@@ -36,6 +36,9 @@ describe("notification API", () => {
       const dismissed = await fetch(api.baseUrl + "/api/v1/notifications/notice_route", { method: "DELETE", headers: { cookie, "x-csrf-token": identity.csrfToken } });
       assert.equal(dismissed.status, 200);
       assert.deepEqual(await dismissed.json(), { dismissed: true });
+      const retried = await fetch(api.baseUrl + "/api/v1/notifications/notice_route", { method: "DELETE", headers: { cookie, "x-csrf-token": identity.csrfToken } });
+      assert.equal(retried.status, 200);
+      assert.deepEqual(await retried.json(), { dismissed: true });
     } finally {
       await api.close();
       await rm(dataRoot, { recursive: true, force: true });

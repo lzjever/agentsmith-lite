@@ -7,5 +7,5 @@ export class NotificationService {
   list(userId: string, unreadOnly = false) { return this.store.listUserNotifications(userId, unreadOnly); }
   async markRead(userId: string, notificationId: string) { const value = await this.store.markUserNotificationRead(notificationId, userId, nowIso()); if (!value) throw new NotFoundError("Notification not found"); return value; }
   async markAllRead(userId: string) { await this.store.markAllUserNotificationsRead(userId, nowIso()); return this.store.listUserNotifications(userId); }
-  async dismiss(userId: string, notificationId: string) { if (!await this.store.dismissUserNotification(notificationId, userId)) throw new NotFoundError("Notification not found"); return { dismissed: true }; }
+  async dismiss(userId: string, notificationId: string) { await this.store.dismissUserNotification(notificationId, userId); return { dismissed: true }; }
 }
