@@ -34,6 +34,7 @@ export function EndpointDialog({
   discovering,
   models,
   canSubmit,
+  canSave,
   error,
   credentials,
   onDiscoverModels,
@@ -49,6 +50,7 @@ export function EndpointDialog({
   discovering: boolean;
   models: string[];
   canSubmit: boolean;
+  canSave: boolean;
   error: string;
   credentials: ProjectCredential[];
   onDiscoverModels: () => void;
@@ -239,6 +241,7 @@ export function EndpointDialog({
               type="submit"
               disabled={
                 !canSubmit ||
+                !canSave ||
                 saving ||
                 discovering ||
                 !input.credentialId ||

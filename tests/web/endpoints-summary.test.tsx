@@ -19,7 +19,13 @@ describe("endpoint dependencies", () => {
       const view = render(<EndpointsPage projectId="project_1" />);
       fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
       await screen.findByRole("dialog", { name: "Edit endpoint" });
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
+      fireEvent.submit(save.closest("form")!);
+      assert.equal(saves, 0);
+      fireEvent.change(screen.getByLabelText("Model"), { target: { value: "updated-model" } });
+      assert.equal(save.disabled, false);
+      fireEvent.click(save);
       await waitFor(() => assert.equal(saves, 1));
 
       view.rerender(<EndpointsPage projectId="project_2" />);
@@ -139,6 +145,7 @@ describe("endpoint management", () => it("edits and discovers models with the cr
     fireEvent.click(screen.getAllByRole("button", { name: "Edit DeepSeek" })[0]!);
     await screen.findByRole("dialog", { name: "Edit endpoint" });
     assert.equal((document.querySelector("select") as HTMLSelectElement | null)?.value, "credential_1");
+    assert.equal((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled, true);
 
     fireEvent.click(screen.getByRole("button", { name: "Discover models" }));
     await waitFor(() => assert.deepEqual(discoveryInput, {

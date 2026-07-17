@@ -149,7 +149,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canConfigure || actionProjectId !== projectId || input.capabilities.length === 0) return;
+    if (!canConfigure || actionProjectId !== projectId || input.capabilities.length === 0 || (editing !== undefined && !endpointInputChanged(input, editing))) return;
     const revision = projectRevision.current;
     invalidateDiscovery();
     setSaving(true);
@@ -241,7 +241,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
     {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before starting a chat or task." : "An administrator can add an endpoint before chat or task work begins."}</p>{needsCredential ? <CredentialsLink /> : canConfigure ? <Button onClick={create}><Plus size={16} />Create endpoint</Button> : null}</div></PageState> : null}
     {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <div className="flex flex-wrap items-center justify-between gap-3 border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning"><span>{canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."}</span><CredentialsLink /></div> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)} · {endpoints.filter((endpoint) => endpoint.hasCredentialRef).length} configured</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} canManage={canManage} canEdit={canConfigure} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
-    <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
+    <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} canSave={editing === undefined || endpointInputChanged(input, editing)} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
     <DeleteEndpointDialog endpoint={deleting?.projectId === projectId ? deleting : undefined} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
   </PageLayout>;
 }
@@ -256,4 +256,14 @@ function DependencyError({ message: detail }: { message: string }) {
 
 function message(error: unknown) {
   return error instanceof ApiError ? error.message : error instanceof Error ? error.message : "The endpoint request could not be completed.";
+}
+
+function endpointInputChanged(input: EndpointInput, endpoint: Endpoint): boolean {
+  const original = endpointInputForEdit(endpoint);
+  return input.name !== original.name ||
+    input.baseUrl !== original.baseUrl ||
+    input.model !== original.model ||
+    input.credentialId !== original.credentialId ||
+    input.requestTimeoutSecs !== original.requestTimeoutSecs ||
+    [...input.capabilities].sort().join("\0") !== [...original.capabilities].sort().join("\0");
 }
