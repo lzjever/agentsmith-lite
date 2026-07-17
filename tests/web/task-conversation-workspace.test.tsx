@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
 import type { TaskCapabilities, TaskInteractionSnapshot } from "../../src/lib/api/client.js";
-import { apiClient } from "../../src/lib/api/client.js";
+import { ApiError, apiClient } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -12,6 +12,21 @@ const { TaskConversationWorkspace } = await import("../../src/components/tasks/T
 afterEach(() => cleanup());
 
 describe("TaskConversationWorkspace", () => {
+  it("stops reconnecting and invalidates the task when conversation access is gone", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    let attempts = 0;
+    let unavailable = 0;
+    apiClient.getTaskInteractions = async () => { attempts += 1; throw new ApiError(404, "Task not found"); };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
+      await waitFor(() => assert.equal(unavailable, 1));
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      assert.equal(attempts, 1);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the initial snapshot error and Retry reachable", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let attempts = 0;

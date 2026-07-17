@@ -13,7 +13,7 @@ import { TaskConnectionNotice, TaskRunStatus } from "./TaskRunStatus";
 
 type ConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
 
-export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, onRunState, onArtifactPublished }: { taskId: string; basePath: string; onCapabilities: (capabilities: TaskCapabilities) => void; onRunState?: (runState: TaskInteractionSnapshot["runState"]) => void; onArtifactPublished: () => void }) {
+export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, onRunState, onUnavailable, onArtifactPublished }: { taskId: string; basePath: string; onCapabilities: (capabilities: TaskCapabilities) => void; onRunState?: (runState: TaskInteractionSnapshot["runState"]) => void; onUnavailable?: () => void; onArtifactPublished: () => void }) {
   const mutationKeys = useTaskMutationKeys();
   const viewport = useRef<HTMLDivElement>(null);
   const streamCursor = useRef<string | undefined>(undefined);
@@ -75,6 +75,12 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
         reconnectTimer.current = window.setTimeout(() => void connect(), 1_000);
       } catch (reason) {
         if (disposed || controller.signal.aborted) return;
+        if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+          setConnection("disconnected");
+          setError(reason.message);
+          onUnavailable?.();
+          return;
+        }
         reconnectCount.current += 1;
         setConnection("disconnected");
         setError(reason instanceof Error ? reason.message : "Conversation updates are unavailable.");
@@ -83,7 +89,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
     };
     void connect();
     return () => { disposed = true; controller?.abort(); if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current); };
-  }, [load, onArtifactPublished, onCapabilities, onRunState, refreshGeneration, taskId]);
+  }, [load, onArtifactPublished, onCapabilities, onRunState, onUnavailable, refreshGeneration, taskId]);
 
   async function loadEarlier() {
     if (!snapshot?.nextPageCursor || loadingEarlierRef.current) return;
