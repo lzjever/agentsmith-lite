@@ -2953,7 +2953,9 @@ fn detached_ack_tool_result(
             snapshot.output_dropped_bytes
         ));
     }
-    text.push_str("The final result will arrive as a task callback.");
+    text.push_str(
+        "This acknowledgement proves only running state and task identity, not success, completion, readiness, usable output, or callback delivery. Any terminal callback is best-effort.",
+    );
 
     ToolResult::success(tool_call.id.clone(), tool_call.name.clone(), text).with_details(
         task_ack_details(
@@ -3983,6 +3985,30 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::tools::ToolSpec;
+
+    #[test]
+    fn detached_ack_proves_running_identity_without_promising_completion() {
+        let result = detached_ack_tool_result(
+            &ToolCall::new("call_detached", "bash", json!({"command":"sleep 30"})),
+            "task_detached",
+            ToolExecutionControls {
+                detach_after: Duration::ZERO,
+                timeout: Some(Duration::from_secs(60)),
+            },
+            None,
+        );
+
+        assert!(result
+            .text
+            .contains("proves only running state and task identity"));
+        assert!(result
+            .text
+            .contains("not success, completion, readiness, usable output, or callback delivery"));
+        assert!(result
+            .text
+            .contains("Any terminal callback is best-effort."));
+        assert!(!result.text.contains("The final result will arrive"));
+    }
 
     struct CountingTool {
         calls: Arc<AtomicUsize>,

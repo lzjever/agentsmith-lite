@@ -359,7 +359,7 @@ impl Tool for BashTool {
                     },
                     "detach_after_secs": {
                         "type": ["number", "integer"],
-                        "description": "Optional delay in seconds before detaching execution into a background task. Use 0 to detach immediately. Detached tasks return an immediate task ack and later deliver a final callback."
+                        "description": "Optional foreground-wait threshold in seconds before detaching execution into a background task. Use 0 to detach immediately. This threshold does not guarantee runtime, timeout, success, readiness, output, or callback delivery. A detached task returns an acknowledgement that proves only running state and task identity. Any terminal callback is a best-effort terminal callback."
                     },
                     "interactive_stdio": {
                         "type": "boolean",
@@ -1056,6 +1056,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::tasks::{BotifiedFrameEvent, InteractiveStdioBridge, TaskStdinWriter};
+
+    #[test]
+    fn detach_schema_does_not_promise_completion_or_callback_delivery() {
+        let spec = BashTool::new().spec();
+        let description = spec.input_schema["properties"]["detach_after_secs"]["description"]
+            .as_str()
+            .expect("detach_after_secs description");
+
+        assert!(description.contains("proves only running state and task identity"));
+        assert!(description.contains("does not guarantee runtime, timeout, success, readiness"));
+        assert!(description.contains("best-effort terminal callback"));
+    }
 
     enum FakeRead {
         Chunk(Vec<u8>),
