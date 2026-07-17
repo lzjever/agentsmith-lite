@@ -120,6 +120,41 @@ test("endpoint recheck does not overwrite configuration changed while the provid
   assert.equal((await services.endpoints.listEndpoints(user.id, project.id))[0]?.name, "After");
 });
 
+test("a slower endpoint update cannot overwrite a newer validated configuration", async () => {
+  let validationCalls = 0;
+  let slowStarted!: () => void;
+  let finishSlow!: () => void;
+  const started = new Promise<void>((resolve) => { slowStarted = resolve; });
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store, dataRoot:"/tmp/agentsmith-endpoint-update-race", builtinAdminPassword:"admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => {
+        validationCalls += 1;
+        if (validationCalls !== 2) return { status:"healthy" as const };
+        slowStarted();
+        return new Promise<{ status:"healthy" }>((resolve) => { finishSlow = () => resolve({ status:"healthy" }); });
+      }
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name:"W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name:"P" });
+  const credential = await services.credentials.create(user.id, project.id, { name:"Provider", baseUrl:"https://models.example.test/v1", secret:"secret" });
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name:"Before", protocol:"openai_chat_completions", baseUrl:credential.baseUrl, model:"model", credentialId:credential.id, capabilities:["text"], requestTimeoutSecs:30 });
+  const input = (name:string) => ({ name, protocol:endpoint.protocol, baseUrl:endpoint.baseUrl, model:endpoint.model, credentialId:credential.id, capabilities:endpoint.capabilities, requestTimeoutSecs:endpoint.requestTimeoutSecs });
+
+  const slow = services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input("Slow"));
+  await started;
+  const fast = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input("Fast"));
+  finishSlow();
+
+  assert.equal(fast.name, "Fast");
+  await assert.rejects(slow, /changed by another request/);
+  assert.equal((await services.endpoints.requireEndpointForProject(project.id, endpoint.id)).name, "Fast");
+});
+
 test("endpoint updates and health rechecks replay without repeating provider work or audit", async () => {
   let validationCalls = 0;
   const store = createInMemoryProductStore();

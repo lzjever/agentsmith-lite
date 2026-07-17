@@ -446,8 +446,9 @@ export class InMemoryProductStore implements ProductStore {
     return clone(endpoint);
   }
 
-  async updateEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint | null> {
-    if (!this.endpoints.has(endpoint.id)) {
+  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
+    const current = this.endpoints.get(endpoint.id);
+    if (!current || expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) {
       return null;
     }
     this.requireEndpointCredentialProject(endpoint);
@@ -455,9 +456,9 @@ export class InMemoryProductStore implements ProductStore {
     return clone(endpoint);
   }
 
-  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null> {
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
     const current = this.endpoints.get(id);
-    if (!current || current.projectId !== projectId) return null;
+    if (!current || current.projectId !== projectId || expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) return null;
     const updated = { ...current, health: clone(health), updatedAt };
     this.endpoints.set(id, clone(updated));
     return clone(updated);

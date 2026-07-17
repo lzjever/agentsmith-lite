@@ -540,12 +540,12 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(endpoint);
   }
 
-  async updateEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint | null> {
+  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
     const rows = await this.queryRows<ModelEndpointRow>(
       `update model_endpoints
        set name = $2, protocol = $3, base_url = $4, model = $5, credential_id=$6,
            capabilities = $7::jsonb, request_timeout_secs = $8, health_status=$9, health_checked_at=$10, health_error_category=$11, updated_at = $12
-       where id = $1
+       where id = $1 and ($13::timestamptz is null or updated_at = $13::timestamptz)
        returning *`,
       [
         endpoint.id,
@@ -559,19 +559,20 @@ export class PostgresProductStore implements ProductStore {
         endpoint.health?.status ?? "unknown",
         endpoint.health?.checkedAt ?? null,
         endpoint.health?.errorCategory ?? null,
-        endpoint.updatedAt
+        endpoint.updatedAt,
+        expectedUpdatedAt ?? null
       ]
     );
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }
 
-  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null> {
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
     const rows = await this.queryRows<ModelEndpointRow>(
       `update model_endpoints
        set health_status=$3, health_checked_at=$4, health_error_category=$5, updated_at=$6
-       where id=$1 and project_id=$2
+       where id=$1 and project_id=$2 and ($7::timestamptz is null or updated_at=$7::timestamptz)
        returning *`,
-      [id, projectId, health.status, health.checkedAt, health.errorCategory, updatedAt]
+      [id, projectId, health.status, health.checkedAt, health.errorCategory, updatedAt, expectedUpdatedAt ?? null]
     );
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }

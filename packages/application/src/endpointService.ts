@@ -57,14 +57,18 @@ export class EndpointService {
         credentialId: input.credentialId === undefined ? existing.credentialId : requireNonEmptyString(input.credentialId, "endpoint.credentialId"),
         capabilities: input.capabilities,
         requestTimeoutSecs: input.requestTimeoutSecs,
-        updatedAt: nowIso()
+        updatedAt: nextEndpointUpdatedAt(existing.updatedAt)
       };
       let updated: ModelEndpoint;
       try {
         validateOpenAICompatibleEndpoint(endpoint);
         await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
-        const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id));
-        if (!stored) throw new NotFoundError("Endpoint not found");
+        const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id), existing.updatedAt);
+        if (!stored) {
+          const current = await this.store.findEndpoint(endpointId);
+          if (current?.projectId === projectId) throw new ProductError("Endpoint changed by another request. Refresh and try again.", 409);
+          throw new NotFoundError("Endpoint not found");
+        }
         updated = stored;
       } catch (error) {
         const health = endpointValidationHealth(error);
@@ -125,8 +129,8 @@ export class EndpointService {
     const recheck = async (): Promise<ModelEndpoint> => {
       const existing = await this.requireEndpointForProject(projectId, endpointId);
       const checked = await this.healthFor(existing, userId, existing.id);
-      const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nowIso());
-      if (!updated) throw new NotFoundError("Endpoint not found");
+      const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nextEndpointUpdatedAt(existing.updatedAt), existing.updatedAt);
+      if (!updated) return this.requireEndpointForProject(projectId, endpointId);
       if (checked.status === "unavailable") await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked));
       else {
         await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked));
@@ -205,6 +209,11 @@ class EndpointValidationError extends ProductError {
 }
 
 function endpointValidationHealth(error:unknown):EndpointHealth|undefined{return error instanceof EndpointValidationError?error.health:undefined}
+
+function nextEndpointUpdatedAt(previous: string): string {
+  const previousTime = Date.parse(previous);
+  return new Date(Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0)).toISOString();
+}
 
 function healthAuditDetail(health: EndpointHealth | undefined): import("../../contracts/src/api.js").ProjectAuditSafeDetail | undefined {
   return health ? { healthStatus: health.status, ...(health.errorCategory ? { errorCategory: health.errorCategory } : {}) } : undefined;

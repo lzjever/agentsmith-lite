@@ -431,8 +431,8 @@ export interface ProductStore {
   bindEndpointCredential(endpointId: string, credentialId: string): Promise<boolean>;
 
   createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint>;
-  updateEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint | null>;
-  updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string): Promise<ModelEndpoint | null>;
+  updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null>;
+  updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null>;
   deleteEndpoint(id: string): Promise<DeleteEndpointResult>;
   listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]>;
   findEndpoint(id: string): Promise<ModelEndpoint | null>;
