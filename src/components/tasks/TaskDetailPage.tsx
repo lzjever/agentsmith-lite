@@ -76,7 +76,13 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     } catch (reason) {
       if (!mounted.current || version !== taskLoadVersion.current) return;
       setTaskError(message(reason));
-      if (!quiet) setTaskState("error");
+      if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+        setTask(undefined);
+        setCapabilities(undefined);
+        setTaskState("error");
+      } else if (!quiet) {
+        setTaskState("error");
+      }
     }
   }, [applyCapabilities, projectId, taskId, workspaceId]);
 

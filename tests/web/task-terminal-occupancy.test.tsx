@@ -44,6 +44,27 @@ describe("TaskDetailPage terminal occupancy", () => {
     } finally { apiClient.taskDetail = original; }
   });
 
+  it("invalidates a loaded task when refresh discovers it was removed", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    let reads = 0;
+    apiClient.taskDetail = async () => {
+      if (reads++ === 0) return { task, capabilities: available };
+      throw new ApiError(404, "Task not found");
+    };
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Refresh task" }));
+      await waitFor(() => assert.equal(reads, 2));
+
+      assert.equal(screen.queryByRole("heading", { name: "Task detail" }), null);
+      assert.equal(screen.getByRole("alert").textContent, "Task not found");
+      assert.equal(screen.getByRole("link", { name: "All tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows the retained execution and sandbox summary in task details", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const continued: Task = { ...task, sourceTaskId:"task_source", cleanupStatus:"pending" };
