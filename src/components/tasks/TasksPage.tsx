@@ -12,7 +12,7 @@ import { Button } from "../ui/button";
 import { toast } from "../ui/toast";
 import { TaskCreateDialog } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
-import { taskCompatibleEndpoints, taskNeedsRefresh } from "./task-ui";
+import { taskCompatibleEndpoints, taskEndpointGuidance, taskNeedsRefresh } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
@@ -173,6 +173,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   }
 
   const compatibleEndpoints = taskCompatibleEndpoints(endpoints);
+  const endpointGuidance = taskEndpointGuidance(endpoints);
   const canCreate = capabilitiesState === "ready" && capabilities?.canCreateTasks === true;
   const createReady = canCreate && endpointsState === "ready" && compatibleEndpoints.length > 0;
 
@@ -187,7 +188,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {capabilitiesState === "error" ? <DependencyError>{capabilitiesError} Task creation is disabled until project permissions can be loaded.</DependencyError> : null}
     {state === "loading" ? <PageState>Loading tasks...</PageState> : null}
     {state === "error" ? <PageState><Button onClick={() => void load()}>Try again</Button></PageState> : null}
-    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && compatibleEndpoints.length === 0 ? <p className="mt-4 text-sm text-secondary">Add an endpoint with text and tool-call support before creating a task. <Link className="font-medium text-foreground hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}>Open endpoints</Link></p> : null}</> : null}
+    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && endpointGuidance ? <p className="mt-4 text-sm text-secondary">{endpointGuidance} <Link className="font-medium text-foreground hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}>Open endpoints</Link></p> : null}</> : null}
     <TaskCreateDialog projectId={projectId} canWriteFiles={capabilities?.canWriteFiles === true} endpoints={compatibleEndpoints} projectFiles={projectFiles} projectFilesLoading={projectFilesLoading} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }

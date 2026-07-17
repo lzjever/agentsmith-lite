@@ -186,7 +186,7 @@ export class ProjectPolicyService {
       await this.requirePolicy(projectId);
       await this.openAlert(projectId, "project_file_bytes_limit");
       await this.auditEvent(projectId, actorId, "file.quota", "rejected", null, "file_quota");
-      throw new ProductError("Project project file bytes limit reached", 409);
+      throw new ProductError("Project file bytes limit reached", 409);
     }
     throw new ProductError("Project policy usage not found", 409);
   }

@@ -228,9 +228,9 @@ describe("file CRUD service", () => {
       await service.uploadFile(root, { path: "files/locked.txt", bytes: Buffer.from("before") });
       await assert.rejects(
         () => service.uploadFileWithAccounting(root, { path: "files/locked.txt", bytes: Buffer.from("after"), overwrite: true }, {
-          record: async () => { throw new ProductError("Project project file bytes limit reached", 409); }
+          record: async () => { throw new ProductError("Project file bytes limit reached", 409); }
         }),
-        /project file bytes limit reached/
+        /project file bytes limit reached/i
       );
       assert.equal(Buffer.from((await service.downloadFile(root, "files/locked.txt")).bytes).toString(), "before");
     } finally {
@@ -244,7 +244,7 @@ describe("file CRUD service", () => {
     let used = 0;
     const accounting = {
       async record(_path: string, delta: number) {
-        if (used + delta > 4) throw new ProductError("Project project file bytes limit reached", 409);
+        if (used + delta > 4) throw new ProductError("Project file bytes limit reached", 409);
         used += delta;
       }
     };

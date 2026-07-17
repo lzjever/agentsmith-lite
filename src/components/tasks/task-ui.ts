@@ -10,6 +10,17 @@ export function taskCompatibleEndpoints(endpoints: Endpoint[]): Endpoint[] {
   return endpoints.filter((endpoint) => endpoint.taskEligible);
 }
 
+export function taskEndpointGuidance(endpoints: Endpoint[]): string | null {
+  if (endpoints.some((endpoint) => endpoint.taskEligible)) return null;
+  if (endpoints.length === 0) return "Add an endpoint with text and tool-call support before creating a task.";
+  const capable = endpoints.filter((endpoint) => endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls"));
+  if (capable.length === 0) return "Enable text and tool-call support on an endpoint before creating a task.";
+  const configured = capable.filter((endpoint) => endpoint.hasCredentialRef);
+  if (configured.length === 0) return "Attach a project credential to a task-capable endpoint before creating a task.";
+  if (configured.some((endpoint) => endpoint.health?.status !== "healthy")) return "Check endpoint health successfully before creating a task.";
+  return "Review endpoint configuration before creating a task.";
+}
+
 export function taskStatusLabel(status: TaskStatus): string {
   const label = status === "cleaned" ? "Cleaned up" : status === "running" ? "Active" : status.replaceAll("_", " ");
   return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;

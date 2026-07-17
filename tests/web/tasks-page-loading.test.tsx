@@ -25,6 +25,22 @@ describe("tasks page loading", () => {
     }
   });
 
+  it("explains when configured endpoints need a successful health check", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const unavailable: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, health: { status: "unavailable", checkedAt: task.updatedAt, errorCategory: "auth" }, hasCredentialRef: true, taskEligible: false, createdAt: task.createdAt, updatedAt: task.updatedAt };
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async () => [unavailable];
+    apiClient.projectCapabilities = async () => ({ canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true });
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      await screen.findByText("Check endpoint health successfully before creating a task.");
+      assert.equal(screen.queryByText("Add an endpoint with text and tool-call support before creating a task."), null);
+      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/endpoints");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("starts from the first task page after switching projects", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
     const calls: Array<{ projectId: string; cursor?: string }> = [];

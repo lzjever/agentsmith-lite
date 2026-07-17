@@ -109,6 +109,44 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("keeps files readable when an upload discovers write access was removed", async () => {
+    const original = snapshotClient();
+    let capabilityReads = 0;
+    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? writable : readOnly;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.uploadFile = async () => { throw new ApiError(403, "File upload is not allowed"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
+
+      await screen.findByText("File write access changed. Files are now read-only.");
+      assert.ok(screen.getByRole("button", { name: "brief.txt" }));
+      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
+      assert.equal(capabilityReads, 2);
+    } finally { restoreClient(original); }
+  });
+
+  it("clears files when an upload discovers project access was removed", async () => {
+    const original = snapshotClient();
+    let removed = false;
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => {
+      if (removed) throw new ApiError(403, "Project not found");
+      return { entries: [file] };
+    };
+    apiClient.uploadFile = async () => { removed = true; throw new ApiError(403, "Project not found"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
+
+      await screen.findByRole("heading", { name: "Files unavailable" });
+      assert.equal(screen.queryByRole("button", { name: "brief.txt" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
+    } finally { restoreClient(original); }
+  });
+
   it("retries the same failed file", async () => {
     const original = snapshotClient();
     let attempts = 0;
@@ -163,7 +201,7 @@ describe("project files browser", () => {
     apiClient.projectCapabilities = async () => writable;
     apiClient.files = async () => ({ entries: [] });
     apiClient.uploadFile = async () => {
-      throw new ApiError(409, "Project project file bytes limit reached");
+      throw new ApiError(409, "Project file bytes limit reached");
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);

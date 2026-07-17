@@ -50,9 +50,9 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   const loadVersion = useRef(0);
   const previewVersion = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     const requestedPath = path;
-    if (currentPath.current !== requestedPath) return;
+    if (currentPath.current !== requestedPath) return false;
     const version = ++loadVersion.current;
     previewVersion.current += 1;
     setState("loading");
@@ -60,7 +60,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setCapabilities(undefined);
     try {
       const [filesResult, capabilitiesResult] = await Promise.allSettled([apiClient.files(projectId, requestedPath), apiClient.projectCapabilities(projectId)]);
-      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return;
+      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return false;
       if (filesResult.status === "rejected") throw filesResult.reason;
       setEntries(sortFileEntries(filesResult.value.entries));
       setSelected((current) => filesResult.value.entries.find((entry) => entry.path === current?.path));
@@ -68,10 +68,12 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       if (capabilitiesResult.status === "fulfilled") setCapabilities(capabilitiesResult.value);
       else setMessage("File permissions could not be loaded. Files are read-only until refreshed.");
       setState("ready");
+      return true;
     } catch (error) {
-      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return;
+      if (!mounted.current || version !== loadVersion.current || currentPath.current !== requestedPath) return false;
       setMessage(errorMessage(error, "Files could not be loaded."));
       setState("error");
+      return false;
     }
   }, [path, projectId]);
 
@@ -101,12 +103,20 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setMobileDetailsOpen(true);
   }
 
-  function revokeWriteAccess(error: unknown) {
+  async function revokeWriteAccess(error: unknown) {
     if (!isReadOnlyMutationError(error)) return false;
-    setCapabilities((current) => current ? { ...current, canWriteFiles: false } : current);
     setUploadFailure(undefined);
     setReplaceTarget(undefined);
     setDeleteTarget(undefined);
+    if (error.status === 403) {
+      setEntries([]);
+      setSelected(undefined);
+      setPreview(null);
+      setMobileDetailsOpen(false);
+      if (await load()) setMessage("File write access changed. Files are now read-only.");
+      return true;
+    }
+    setCapabilities((current) => current ? { ...current, canWriteFiles: false } : current);
     setMessage("File write access changed. Files are now read-only.");
     return true;
   }
@@ -143,7 +153,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("file.upload", requestIdentity);
-      if (revokeWriteAccess(error)) return;
+      if (await revokeWriteAccess(error)) return;
       if (!overwrite && error instanceof ApiError && error.status === 409 && error.message === "Project file already exists") {
         setReplaceTarget({ file, path: uploadPath });
       } else if (overwrite) {
@@ -182,7 +192,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("file.delete", requestIdentity);
-      if (revokeWriteAccess(error)) return;
+      if (await revokeWriteAccess(error)) return;
       throw new Error(errorMessage(error, "File could not be deleted."));
     } finally {
       if (mounted.current) setDeleting(false);
@@ -224,7 +234,7 @@ function FileBrowserLoading() {
   return <div className="space-y-2 p-3" aria-label="Loading files"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
 }
 
-function FileBrowserError({ onRetry }: { onRetry: () => Promise<void> }) {
+function FileBrowserError({ onRetry }: { onRetry: () => Promise<unknown> }) {
   return <ErrorState title="Files unavailable" message="The project file list could not be loaded." onRetry={() => void onRetry()} />;
 }
 
