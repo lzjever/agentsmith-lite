@@ -267,6 +267,22 @@ describe("workspace identity UX", () => {
     }finally{Object.assign(apiClient,original)}
   });
 
+  it("removes a project when pinning discovers membership was revoked", async () => {
+    const original={workspaces:apiClient.workspaces,setProjectPinned:apiClient.setProjectPinned};
+    const project={id:"project_revoked",workspaceId:workspace.id,name:"Revoked project",taskConcurrencyLimit:2,createdAt:timestamp,updatedAt:timestamp};
+    let loads=0;
+    apiClient.workspaces=async()=>[{...workspace,projects:loads++===0?[project]:[]}];
+    apiClient.setProjectPinned=async()=>{throw new ApiError(409,"Project membership changed while updating the pin")};
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id}/></AppRouterContext.Provider>);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Pin Revoked project"}))[0]!);
+
+      await waitFor(()=>assert.ok(loads>=2));
+      assert.equal(screen.queryByText("Revoked project"),null);
+      assert.equal(screen.queryByRole("button",{name:"Retry"}),null);
+    } finally {Object.assign(apiClient,original)}
+  });
+
   it("locks every project pin while a pin update is in flight", async () => {
     const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
     const first = { id:"project_pin_first",workspaceId:workspace.id,name:"First project",pinnedAt:null,taskConcurrencyLimit:2,createdAt:timestamp,updatedAt:timestamp };
