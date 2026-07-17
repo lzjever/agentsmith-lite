@@ -33,7 +33,8 @@ import type {
   TaskSummary,
   TaskTerminalReason,
   TaskListArchivedFilter,
-  TaskListSort
+  TaskListSort,
+  SandboxRenderResult
 } from "../../contracts/src/api.js";
 
 export interface PersistedDeliveryReceipt {
@@ -44,7 +45,8 @@ export interface PersistedDeliveryReceipt {
   cursor?: string;
 }
 
-export interface PersistedAgentTask extends AgentTask {
+export interface PersistedAgentTask extends Omit<AgentTask, "sandbox"> {
+  sandbox: SandboxRenderResult;
   createdByUserId?: string | null;
   agentContext?: string;
   startDeliveryKey?: string | null;

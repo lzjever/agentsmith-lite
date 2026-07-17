@@ -3,9 +3,9 @@ import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "../../packages/application/src/sandboxLifecycleService.js";
-import type { AgentTask, KubernetesResource, ProjectAuditEvent } from "../../packages/contracts/src/api.js";
+import type { KubernetesResource, ProjectAuditEvent } from "../../packages/contracts/src/api.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
-import type { PersistedSandboxRunState } from "../../packages/ports/src/store.js";
+import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 import type { KubernetesResourceRef } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 import { applySandboxReconcileActions, reconcileSandboxRuns, type SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
 
@@ -151,7 +151,7 @@ async function sandboxSetup(secret: string) {
   const setup = await projectSetup();
   const timestamp = new Date().toISOString();
   const run = sandboxRun(setup.workspaceId, setup.projectId, setup.project.rootPath, timestamp);
-  const task: AgentTask = {
+  const task: PersistedAgentTask = {
     id: run.taskId,
     workspaceId: setup.workspaceId,
     projectId: setup.projectId,

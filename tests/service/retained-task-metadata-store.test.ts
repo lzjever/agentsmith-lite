@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import type { AgentTask } from "../../packages/contracts/src/api.js";
+import type { PersistedAgentTask } from "../../packages/ports/src/store.js";
 
 describe("retained chat, task, and artifact store metadata", () => {
   it("orders active threads by pin/activity and hides soft-deleted threads", async () => {
@@ -31,6 +31,6 @@ function thread(id: string, timestamp: string) {
   return { id, projectId: "project_1", endpointId: "endpoint_1", title: null, pinnedAt: null, deletedAt: null, createdAt: timestamp, updatedAt: timestamp };
 }
 
-function task(id: string, timestamp: string): AgentTask {
+function task(id: string, timestamp: string): PersistedAgentTask {
   return { id, workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", prompt: "do work", status: "completed", runId: `run_${id}`, executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
 }

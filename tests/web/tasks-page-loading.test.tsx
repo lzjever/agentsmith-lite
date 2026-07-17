@@ -288,7 +288,7 @@ const task: Task = {
   status: "completed",
   runId: "run_1",
   executionMode: "live",
-  sandbox: { namespace: "agentsmith", resources: [] },
+  sandbox: { namespace: "agentsmith" },
   createdAt: "2026-07-14T00:00:00.000Z",
   updatedAt: "2026-07-14T00:01:00.000Z"
 };

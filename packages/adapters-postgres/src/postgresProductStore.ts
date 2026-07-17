@@ -1689,7 +1689,7 @@ function mapTask(row: AgentTaskRow): PersistedAgentTask {
     cleanupAttemptCount: row.cleanup_attempt_count ?? 0,
     cleanupNextRetryAt: row.cleanup_next_retry_at ? toIso(row.cleanup_next_retry_at) : null,
     cleanupCompletedAt: row.cleanup_completed_at ? toIso(row.cleanup_completed_at) : null,
-    sandbox: asRecord(row.sandbox) as unknown as AgentTask["sandbox"],
+    sandbox: asRecord(row.sandbox) as unknown as PersistedAgentTask["sandbox"],
     finalizationIntentStatus: row.finalization_intent_status ?? null,
     finalizationIntentAt: row.finalization_intent_at ? toIso(row.finalization_intent_at) : null,
     createdAt: toIso(row.created_at),

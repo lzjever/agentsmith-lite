@@ -324,6 +324,10 @@ export type TaskStartIntentStatus = "pending" | "dispatching" | "dispatched" | "
 export type TaskArtifactProjectionStatus = "pending" | "draining" | "drained" | "failed";
 export type TaskCleanupStatus = "pending" | "running" | "completed" | "failed";
 
+export interface TaskSandboxSummary {
+  namespace: string;
+}
+
 export interface AgentTask {
   id: string;
   workspaceId: string;
@@ -336,7 +340,7 @@ export interface AgentTask {
   runId: string;
   sourceTaskId?: string | null;
   executionMode: TaskExecutionMode;
-  sandbox: SandboxRenderResult;
+  sandbox: TaskSandboxSummary;
   activeReservation?: boolean;
   archivedAt?: ISODateString | null;
   deletedAt?: ISODateString | null;

@@ -89,7 +89,7 @@ export interface Task {
   sourceTaskId?: string | null;
   finalizationIntentStatus?: Extract<TaskStatus, "completed" | "failed" | "expired" | "cleaned"> | null;
   executionMode: TaskExecutionMode;
-  sandbox: { namespace: string; resources: Array<{ apiVersion: string; kind: string; metadata: { name: string; namespace?: string } }> };
+  sandbox: { namespace: string };
   createdAt: string; updatedAt: string;
 }
 export interface TaskDetail { task: Task; capabilities: TaskCapabilities; }

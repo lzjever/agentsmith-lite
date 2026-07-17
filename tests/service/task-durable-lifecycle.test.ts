@@ -39,7 +39,7 @@ describe("durable task lifecycle", () => {
     assert.equal(first.status, "completed");
     assert.equal(first.terminalReason, "not_executed");
     assert.equal(first.activeReservation, false);
-    assert.deepEqual(first.sandbox.resources, []);
+    assert.deepEqual(first.sandbox, { namespace: "agentsmith" });
     assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.activeTasks, 0);
     assert.equal(await setup.store.jsonDocs.get("sandbox_runtime_state", first.id), null);
     await assert.rejects(
@@ -68,6 +68,8 @@ describe("durable task lifecycle", () => {
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "start later" }, "create-live");
     const persistedTask = await setup.store.findTask(task.id);
     assert.ok(persistedTask);
+    assert.ok(persistedTask.sandbox.resources.length > 0);
+    assert.deepEqual(task.sandbox, { namespace: "agentsmith" });
     assert.equal(task.status, "starting");
     assert.equal(task.startIntentStatus, "pending");
     assert.equal(persistedTask.startClaimToken, null);
@@ -78,6 +80,7 @@ describe("durable task lifecycle", () => {
     assert.equal(setup.botified.posts.length, 0);
     const detail = await setup.services.tasks.getTaskDetail(setup.userId, task.id);
     assert.equal(detail.task.id, task.id);
+    assert.deepEqual(detail.task.sandbox, { namespace: "agentsmith" });
     assert.equal(detail.capabilities.cancelTask, true);
   });
 

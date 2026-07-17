@@ -101,7 +101,7 @@ describe("TaskLifecycleActions", () => {
 });
 
 const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:true, openTerminal:true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask:false };
-const task: Task = { id:"task_1", workspaceId:"workspace_1", projectId:"project_1", endpointId:"endpoint_1", title:"Investigate", prompt:"Inspect the workspace", status:"running", runId:"run_1", executionMode:"live", sandbox:{ namespace:"task-1", resources:[] }, createdAt:"2026-07-16T00:00:00.000Z", updatedAt:"2026-07-16T00:00:00.000Z" };
+const task: Task = { id:"task_1", workspaceId:"workspace_1", projectId:"project_1", endpointId:"endpoint_1", title:"Investigate", prompt:"Inspect the workspace", status:"running", runId:"run_1", executionMode:"live", sandbox:{ namespace:"task-1" }, createdAt:"2026-07-16T00:00:00.000Z", updatedAt:"2026-07-16T00:00:00.000Z" };
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url:"http://localhost" });

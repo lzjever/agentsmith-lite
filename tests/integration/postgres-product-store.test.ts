@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
-import type { AgentTask, ModelEndpoint, Project, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
-import type { PersistedTaskArtifact } from "../../packages/ports/src/store.js";
+import type { ModelEndpoint, Project, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
+import type { PersistedAgentTask, PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
@@ -249,8 +249,8 @@ postgresDescribe("postgres product store", () => {
     await store.createProject({ id: "proj_follow_up", workspaceId: "ws_follow_up", name: "Follow up", ownerUserId: "user_follow_up", rootPath: "workspaces/ws_follow_up/projects/proj_follow_up", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp });
     await store.createProjectCredential({ id: "cred_follow_up", projectId: "proj_follow_up", name: "Provider", type: "api_key", baseUrl: "https://models.example.test/v1", keyId: "test", nonce: Buffer.alloc(12), ciphertext: Buffer.from("ciphertext"), authTag: Buffer.alloc(16), fingerprint: "fingerprint", version: 1, createdAt: timestamp, lastRotatedAt: null, updatedAt: timestamp });
     await store.createEndpoint({ id: "endpoint_follow_up", projectId: "proj_follow_up", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "m", credentialId: "cred_follow_up", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, createdAt: timestamp, updatedAt: timestamp });
-    const source: AgentTask = { id: "task_follow_source", workspaceId: "ws_follow_up", projectId: "proj_follow_up", endpointId: "endpoint_follow_up", prompt: "source", status: "completed", runId: "run_follow_source", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
-    const successor: AgentTask = { ...source, id: "task_follow_successor", prompt: "continue", status: "starting", runId: "run_follow_successor", sourceTaskId: source.id };
+    const source: PersistedAgentTask = { id: "task_follow_source", workspaceId: "ws_follow_up", projectId: "proj_follow_up", endpointId: "endpoint_follow_up", prompt: "source", status: "completed", runId: "run_follow_source", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
+    const successor: PersistedAgentTask = { ...source, id: "task_follow_successor", prompt: "continue", status: "starting", runId: "run_follow_successor", sourceTaskId: source.id };
     await store.createTask(source);
     const linked = await store.createTaskWithActiveReservationAndMessage(successor, { id: "message_link", taskId: source.id, content: successor.prompt, targetTaskId: successor.id, deliveryStatus:"successor_created",createdAt: timestamp });
     assert.equal(linked?.id, successor.id);
@@ -458,7 +458,7 @@ postgresDescribe("postgres product store", () => {
     const lateUsage = await store.findProjectResourceUsage("proj_ledger");
     assert.equal(lateUsage?.providerTokens, 9);
     assert.ok(Math.abs((lateUsage?.providerCost ?? 0) - 0.01) < 1e-9);
-    const task: AgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
+    const task: PersistedAgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
     await store.createTaskWithActiveReservation(task);
     await Promise.all([store.requestTaskFinalization(task.id, "failed", timestamp), store.requestTaskFinalization(task.id, "completed", timestamp)]);
     await Promise.all([store.finalizeTaskAndReleaseActiveReservation(task.id, "failed", timestamp), store.finalizeTaskAndReleaseActiveReservation(task.id, "completed", timestamp)]);
@@ -527,7 +527,7 @@ postgresDescribe("postgres product store", () => {
       createdAt: "2026-07-04T00:03:00.000Z",
       updatedAt: "2026-07-04T00:03:00.000Z"
     };
-    const task: AgentTask = {
+    const task: PersistedAgentTask = {
       id: "task_pg",
       workspaceId: workspace.id,
       projectId: project.id,

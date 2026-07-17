@@ -2450,7 +2450,7 @@ function publicTask(task: PersistedAgentTask): AgentTask {
     runId:task.runId,
     ...(task.sourceTaskId !== undefined ? { sourceTaskId:task.sourceTaskId } : {}),
     executionMode:task.executionMode,
-    sandbox:structuredClone(task.sandbox),
+    sandbox:{ namespace:task.sandbox.namespace },
     ...(task.activeReservation !== undefined ? { activeReservation:task.activeReservation } : {}),
     ...(task.archivedAt !== undefined ? { archivedAt:task.archivedAt } : {}),
     ...(task.deletedAt !== undefined ? { deletedAt:task.deletedAt } : {}),

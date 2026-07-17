@@ -158,7 +158,7 @@ function task(index: number, prompt: string): Task {
     status: "completed",
     runId: `run_${index}`,
     executionMode: "live",
-    sandbox: { namespace: "agentsmith", resources: [] },
+    sandbox: { namespace: "agentsmith" },
     createdAt: `2026-07-12T00:${String(index).padStart(2, "0")}:00.000Z`,
     updatedAt: `2026-07-12T00:${String(index).padStart(2, "0")}:00.000Z`
   };

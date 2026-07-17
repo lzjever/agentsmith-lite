@@ -219,7 +219,7 @@ describe("api product workflow", () => {
     assert.deepEqual(deletedFile, { deleted: true });
     assert.equal(task.status, "completed");
     assert.equal(task.terminalReason, "not_executed");
-    assert.deepEqual(task.sandbox.resources, []);
+    assert.deepEqual(task.sandbox, { namespace: "agentsmith" });
 
     await assertApiError(
       await request("DELETE", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, undefined, cookie, csrf),

@@ -11,7 +11,7 @@ const { TaskList } = await import("../../src/components/tasks/TaskList.js");
 
 afterEach(() => cleanup());
 
-const task = (id: string, sourceTaskId?: string): Task => ({ id, workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", prompt: id === "task_1" ? "Prepare release notes" : "Incorporate review", status: "completed", runId: `run_${id}`, sourceTaskId, executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:01:00.000Z" });
+const task = (id: string, sourceTaskId?: string): Task => ({ id, workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", prompt: id === "task_1" ? "Prepare release notes" : "Incorporate review", status: "completed", runId: `run_${id}`, sourceTaskId, executionMode: "live", sandbox: { namespace: "agentsmith" }, createdAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:01:00.000Z" });
 
 describe("task list model", () => {
   it("uses task state directly and labels linked executions as successors", () => {

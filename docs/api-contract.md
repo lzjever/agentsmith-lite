@@ -23,6 +23,8 @@ Task Conversation has eight routes. The removed transcript and raw `/events` rou
 | `POST /api/v1/tasks/{taskId}/work/{interactionId}/stop` | Stops a stoppable typed background-work interaction. |
 | `POST /api/v1/tasks/{taskId}/cancel` | Cancels the whole task and begins its scoped cleanup. |
 
+Public task list/detail and mutation responses expose `sandbox.namespace` only. Rendered Kubernetes resources, internal mount paths, image references, generated ConfigMaps, and Secret structures remain in the persisted lifecycle model and are never part of the browser contract.
+
 An interaction has stable `id`, monotonic `revision`, `position`, `occurredAt`, and `updatedAt`. Its discriminated `kind` is one of `user_message`, `assistant_message`, `tool`, `background_task`, `task_question`, `task_notice`, `task_result`, `subagent_result`, `file`, `execution_boundary`, or `system_error`; each kind carries its typed status and controlled detail fields. Tool and work execution status is separate from delivery status. File items expose an AgentSmith artifact ID only.
 
 The interaction snapshot contains `items`, history and stream cursors, `historyStatus` (`complete` or `gap`), queued messages, `runState`, runtime reachability, last sync time, and server-calculated capabilities. Capabilities are `sendMessage`, `editQueuedMessage`, `abortTurn`, `cancelTask`, `openTerminal`, and `deleteTask`; clients must use them rather than infer actions from task state.

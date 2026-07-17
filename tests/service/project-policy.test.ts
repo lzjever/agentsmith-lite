@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
-import type { AgentTask, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import type { ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import type { PersistedAgentTask } from "../../packages/ports/src/store.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
@@ -83,7 +84,7 @@ describe("project resource policy", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 2 });
-    const task: AgentTask = { id: "task_duplicate", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "starting", runId: "run_duplicate", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    const task: PersistedAgentTask = { id: "task_duplicate", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "starting", runId: "run_duplicate", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
     await store.createTaskWithActiveReservation(task);
     await assert.rejects(() => store.createTaskWithActiveReservation(task), /Task already exists/);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
@@ -96,7 +97,7 @@ describe("project resource policy", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    const task: AgentTask = { id: "task_intent", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "running", runId: "run_intent", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    const task: PersistedAgentTask = { id: "task_intent", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "running", runId: "run_intent", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
     await store.createTaskWithActiveReservation(task);
     const timestamp = new Date().toISOString();
     const [failed, completed] = await Promise.all([
