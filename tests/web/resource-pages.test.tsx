@@ -329,6 +329,18 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("labels provider request alerts by their actual project or endpoint scope", async () => {
+    const original = snapshotClient();
+    const alert = (id: string, endpointId: string | null): ProjectAlert => ({ id, projectId, type:"provider_requests_limit", status:"active", deliveryStatus:"delivered", endpointId, createdAt:policy.createdAt, updatedAt:policy.updatedAt, resolvedAt:null, dismissedAt:null });
+    apiClient.alerts = async () => [alert("alert_project", null), alert("alert_endpoint", "endpoint_1")];
+    apiClient.projectCapabilities = async () => capabilities;
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      assert.ok(await screen.findByText("Project request limit reached"));
+      assert.ok(screen.getByText("Endpoint request limit reached"));
+    } finally { restoreClient(original); }
+  });
+
   it("does not apply an alert update after switching projects", async () => {
     const original = snapshotClient();
     let resolveTransition: ((value: ProjectAlert) => void) | undefined;

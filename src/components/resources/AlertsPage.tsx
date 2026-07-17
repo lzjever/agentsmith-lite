@@ -42,7 +42,7 @@ import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const labels: Record<ProjectAlert["type"], string> = {
   active_tasks_limit: "Task capacity reached",
-  provider_requests_limit: "Endpoint request quota reached",
+  provider_requests_limit: "Project request limit reached",
   provider_tokens_limit: "Token quota exceeded",
   provider_cost_limit: "Cost quota exceeded",
   project_file_bytes_limit: "File quota reached",
@@ -325,7 +325,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
         title="Dismiss project alert"
         description={
           dismiss
-            ? `Dismiss ${labels[dismiss.type]}? The instance remains in history.`
+            ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
             : ""
         }
         confirmText="Dismiss"
@@ -419,7 +419,7 @@ function AlertInstances({
                 <div>
                   <div className="flex flex-wrap gap-2">
                     <strong className="text-sm text-foreground">
-                      {labels[alert.type]}
+                      {alertLabel(alert)}
                     </strong>
                     <Badge
                       variant={
@@ -552,6 +552,12 @@ function formatDate(value: string) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function alertLabel(alert: ProjectAlert) {
+  return alert.type === "provider_requests_limit" && alert.endpointId
+    ? "Endpoint request limit reached"
+    : labels[alert.type];
 }
 
 function alertElementId(alertId: string) {
