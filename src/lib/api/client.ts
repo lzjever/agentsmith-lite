@@ -11,6 +11,17 @@ export class ApiError extends Error {
   }
 }
 
+const readOnlyMutationMessages = new Set([
+  "Project is archived",
+  "Project is being deleted",
+  "Workspace is archived",
+  "Workspace is being deleted"
+]);
+
+export function isReadOnlyMutationError(error: unknown): error is ApiError {
+  return error instanceof ApiError && (error.status === 403 || (error.status === 409 && readOnlyMutationMessages.has(error.message)));
+}
+
 export class IdempotencyPendingError extends Error {
   constructor(message: string) {
     super(message);

@@ -3,7 +3,7 @@
 import { KeyRound, Plus, RefreshCw, Server } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -79,7 +79,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     }).catch((reason) => {
       if (targetProjectId !== currentProjectId.current || capabilitiesRevision !== capabilitiesLoadRevision.current) return;
       setCapabilities(undefined);
-      setCapabilitiesError(message(reason));
+      setCapabilitiesError(`${message(reason)} Endpoint management is disabled until project permissions can be loaded.`);
       setCapabilitiesState("error");
     });
   }, [projectId]);
@@ -151,8 +151,13 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setDialogOpen(true);
   }
   function denied(reason: unknown) {
-    if (reason instanceof ApiError && reason.status === 403) {
+    if (isReadOnlyMutationError(reason)) {
       setCapabilities((current) => current ? { ...current, canManageEndpoints: false } : current);
+      setCapabilitiesError("Endpoint management access changed. Endpoints are now read-only. Refresh after access or lifecycle status changes.");
+      setDialogOpen(false);
+      setActionProjectId(undefined);
+      setEditing(undefined);
+      setDeleting(undefined);
     }
     return message(reason);
   }
@@ -252,7 +257,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
   const needsCredential = credentialsState === "ready" && credentials.length === 0;
   return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible Chat Completions connections for this project." actions={<><Button variant="quiet" size="icon" aria-label="Refresh endpoints" title="Refresh endpoints" disabled={mutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>{canConfigure ? <Button disabled={mutationBusy} onClick={create}><Plus size={16} />Create endpoint</Button> : null}</>} />}>
     {credentialsState === "error" ? <DependencyError message={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
-    {capabilitiesState === "error" ? <DependencyError message={`${capabilitiesError} Endpoint management is disabled until project permissions can be loaded.`} /> : null}
+    {capabilitiesError ? <DependencyError message={capabilitiesError} /> : null}
     {state === "loading" ? <PageState><span className="text-secondary">Loading endpoints...</span></PageState> : null}
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
     {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before starting a chat or task." : "An administrator can add an endpoint before chat or task work begins."}</p>{needsCredential ? <CredentialsLink /> : canConfigure ? <Button onClick={create}><Plus size={16} />Create endpoint</Button> : null}</div></PageState> : null}
