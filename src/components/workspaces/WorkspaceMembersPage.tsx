@@ -2,7 +2,7 @@
 
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, apiClient, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -82,7 +82,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
   const filtered = useMemo(() => members.filter((member) => `${member.displayName ?? ""} ${member.email} ${member.role}`.toLowerCase().includes(query.trim().toLowerCase())), [members, query]);
 
   async function recoverMutation(reason: unknown, retry: () => void) {
-    const accessDenied = reason instanceof ApiError && reason.status === 403;
+    const accessDenied = isReadOnlyMutationError(reason);
     try {
       await refresh();
     } catch {

@@ -108,12 +108,12 @@ describe("workspace identity UX", () => {
     } finally { apiClient.workspaces = original; }
   });
 
-  it("fails closed after a denied workspace membership mutation", async () => {
+  it("fails closed when the workspace is archived during a membership mutation", async () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
     let workspaceReads = 0;
     apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: workspaceReads++ === 0 } }];
     apiClient.workspaceMembers = async () => [owner];
-    apiClient.addWorkspaceMember = async () => { throw new ApiError(403, "Workspace access denied."); };
+    apiClient.addWorkspaceMember = async () => { throw new ApiError(409, "Workspace is archived"); };
     try {
       render(<WorkspaceMembersPage workspaceId={workspace.id} />);
       await screen.findByRole("button", { name: "Add member" });
@@ -122,7 +122,7 @@ describe("workspace identity UX", () => {
       fireEvent.click(screen.getAllByRole("button", { name: "Add member" }).at(-1)!);
       await screen.findByRole("alert");
       await waitFor(() => assert.ok(workspaceReads >= 2));
-      assert.ok(screen.getByText("Workspace access denied."));
+      assert.ok(screen.getByText("Workspace is archived"));
       assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
       assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
       assert.equal(screen.queryByRole("button", { name: "Add member" }), null);

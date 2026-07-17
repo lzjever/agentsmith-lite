@@ -2,7 +2,7 @@
 
 import { FilePlus2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, apiClient, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -131,11 +131,11 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     applyNavigation(navigation);
   }
   function revokeWriteAccess(reason: unknown) {
-    if (!(reason instanceof ApiError) || reason.status !== 403) return false;
+    if (!isReadOnlyMutationError(reason)) return false;
     setResult((current) => current ? { ...current, canWrite: false } : current);
     setDeleteOpen(false);
     setConflict(false);
-    setError("Context write permission changed. This scope is now read-only.");
+    setError("Context write access changed. This scope is now read-only.");
     mutationKeys.clear("context.save");
     mutationKeys.clear("context.delete");
     return true;
