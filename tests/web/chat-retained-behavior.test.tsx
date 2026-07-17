@@ -276,6 +276,31 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("reuses a conversation metadata key after an unknown network result", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
+    const keys: string[] = [];
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [];
+    apiClient.updateChatThread = (async (_projectId: string, _id: string, _input: unknown, key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { ...threads[0]!, pinnedAt: endpoint.updatedAt };
+    }) as typeof apiClient.updateChatThread;
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      const pin = await screen.findByRole("button", { name: "Pin conversation" });
+      fireEvent.click(pin);
+      await waitFor(() => assert.equal(keys.length, 1));
+      fireEvent.click(pin);
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.equal(keys[1], keys[0]);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("locks conversation directory controls while metadata is being updated", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
     let finishUpdate!: (value: ProjectChatThread) => void;

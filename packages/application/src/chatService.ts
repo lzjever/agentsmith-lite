@@ -43,27 +43,38 @@ export class ChatService {
 
   async createThread(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<ProjectChatThread> {
     const normalizedEndpointId=requireNonEmptyString(endpointId,"chat.endpointId");
-    requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId,projectId,normalizedEndpointId));
-    const create=async(id:string)=>{const existing=await this.store.findProjectChatThread(id);if(existing&&existing.projectId===projectId)return existing;const timestamp=nowIso();const thread=await this.store.createProjectChatThread({id,projectId,endpointId:normalizedEndpointId,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});await this.policies.recordOperation(projectId,userId,"chat.thread.create","accepted",thread.id);return thread;};
+    await this.workspaces.requireProjectForUser(userId,projectId,"write");
+    const create=async(id:string)=>{requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId,projectId,normalizedEndpointId));const existing=await this.store.findProjectChatThread(id);if(existing&&existing.projectId===projectId)return existing;const timestamp=nowIso();const thread=await this.store.createProjectChatThread({id,projectId,endpointId:normalizedEndpointId,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});await this.policies.recordOperation(projectId,userId,"chat.thread.create","accepted",thread.id);return thread;};
     if(!idempotencyKey)return create(newId("chat"));
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-thread.create",key:idempotencyKey,request:{projectId,endpointId:normalizedEndpointId},resourceId:newId("chat"),failureMessage:"Conversation could not be created",run:create});
   }
 
-  async updateThreadMetadata(userId: string, projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<ProjectChatThread> {
-    const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
-    const title = input.title === undefined ? thread.title ?? null : normalizeThreadTitle(input.title);
-    const pinnedAt = input.pinned === undefined ? thread.pinnedAt ?? null : input.pinned ? nowIso() : null;
-    const starredAt = input.starred === undefined ? thread.starredAt ?? null : input.starred ? nowIso() : null;
-    const updated = await this.store.updateProjectChatThreadMetadata(thread.id, { title, pinnedAt, starredAt }, nowIso());
-    if (!updated) throw new NotFoundError("Chat thread not found");
-    await this.policies.recordOperation(projectId, userId, "chat.thread.update", "accepted", thread.id);
-    return updated;
+  async updateThreadMetadata(userId: string, projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }, idempotencyKey?: string): Promise<ProjectChatThread> {
+    await this.workspaces.requireProjectForUser(userId, projectId, "write");
+    const update = async () => {
+      const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
+      const title = input.title === undefined ? thread.title ?? null : normalizeThreadTitle(input.title);
+      const pinnedAt = input.pinned === undefined ? thread.pinnedAt ?? null : input.pinned ? nowIso() : null;
+      const starredAt = input.starred === undefined ? thread.starredAt ?? null : input.starred ? nowIso() : null;
+      const updated = await this.store.updateProjectChatThreadMetadata(thread.id, { title, pinnedAt, starredAt }, nowIso());
+      if (!updated) throw new NotFoundError("Chat thread not found");
+      await this.policies.recordOperation(projectId, userId, "chat.thread.update", "accepted", thread.id);
+      return updated;
+    };
+    if (!idempotencyKey) return update();
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.chat-thread.update", key: idempotencyKey, request: { threadId, input }, resourceId: threadId, failureMessage: "Conversation could not be updated", run: update });
   }
 
-  async deleteThread(userId: string, projectId: string, threadId: string): Promise<void> {
-    const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
-    if (!await this.store.deleteProjectChatThread(thread.id, nowIso())) throw new NotFoundError("Chat thread not found");
-    await this.policies.recordOperation(projectId, userId, "chat.thread.delete", "accepted", thread.id);
+  async deleteThread(userId: string, projectId: string, threadId: string, idempotencyKey?: string): Promise<{ deleted: true }> {
+    await this.workspaces.requireProjectForUser(userId, projectId, "write");
+    const remove = async () => {
+      const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
+      if (!await this.store.deleteProjectChatThread(thread.id, nowIso())) throw new NotFoundError("Chat thread not found");
+      await this.policies.recordOperation(projectId, userId, "chat.thread.delete", "accepted", thread.id);
+      return { deleted: true as const };
+    };
+    if (!idempotencyKey) return remove();
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.chat-thread.delete", key: idempotencyKey, request: { threadId }, resourceId: threadId, failureMessage: "Conversation could not be deleted", run: remove });
   }
 
   async listMessages(userId: string, projectId: string, threadId: string): Promise<ProjectChatMessage[]> {

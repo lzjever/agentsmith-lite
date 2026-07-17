@@ -17,11 +17,31 @@ describe("ChatService", () => {
     const endpoint = await createCredentialEndpoint(services, user.id, project.id);
 
     const thread = await services.chat.createThread(user.id, project.id, endpoint.id, "chat-thread-key");
+    await store.deleteEndpoint(endpoint.id);
     const replayed = await services.chat.createThread(user.id, project.id, endpoint.id, "chat-thread-key");
 
     assert.equal(replayed.id, thread.id);
     assert.deepEqual((await services.chat.listThreads(user.id, project.id)).map((item) => item.id), [thread.id]);
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "chat.thread.create").length, 1);
+  });
+
+  it("replays thread metadata updates and deletion without repeating audit events", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([]) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, user.id, project.id);
+    const thread = await services.chat.createThread(user.id, project.id, endpoint.id);
+
+    const updated = await services.chat.updateThreadMetadata(user.id, project.id, thread.id, { title: "Retry-safe title", pinned: true }, "thread-update-key");
+    assert.deepEqual(await services.chat.updateThreadMetadata(user.id, project.id, thread.id, { title: "Retry-safe title", pinned: true }, "thread-update-key"), updated);
+    assert.deepEqual(await services.chat.deleteThread(user.id, project.id, thread.id, "thread-delete-key"), { deleted: true });
+    assert.deepEqual(await services.chat.deleteThread(user.id, project.id, thread.id, "thread-delete-key"), { deleted: true });
+
+    const events = await store.listProjectAuditEvents(project.id);
+    assert.equal(events.filter((event) => event.action === "chat.thread.update").length, 1);
+    assert.equal(events.filter((event) => event.action === "chat.thread.delete").length, 1);
   });
 
   it("requires project access, resolves the endpoint secret, and passes the resolved key to the client", async () => {

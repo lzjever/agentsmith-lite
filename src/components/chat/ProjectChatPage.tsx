@@ -212,14 +212,17 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
 
   async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<boolean> {
     if (threadMutationBusy) return false;
+    const identity = `${id}:${JSON.stringify(input)}`;
     setThreadMutationBusy(true);
     try {
-      const saved = await apiClient.updateChatThread(projectId, id, input);
+      const saved = await apiClient.updateChatThread(projectId, id, input, mutationKeys.key("chat-thread.update", identity));
+      mutationKeys.complete("chat-thread.update", identity);
       if (!active.current) return false;
       setThreads((current) => orderedThreads(current.map((thread) => thread.id === id ? saved : thread)));
       setActionError("");
       return true;
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-thread.update", identity);
       if (!active.current) return false;
       return failAction(reason);
     } finally {
@@ -231,7 +234,8 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     if (threadMutationBusy) return;
     setThreadMutationBusy(true);
     try {
-      await apiClient.deleteChatThread(projectId, id);
+      await apiClient.deleteChatThread(projectId, id, mutationKeys.key("chat-thread.delete", id));
+      mutationKeys.complete("chat-thread.delete", id);
       if (!active.current) return;
       const remaining = threads.filter((thread) => thread.id !== id);
       setThreads(remaining);
@@ -250,6 +254,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setThreadId(next.id);
       setEndpointId(next.endpointId ?? "");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-thread.delete", id);
       if (!active.current) return;
       throw new Error(message(reason));
     } finally {
