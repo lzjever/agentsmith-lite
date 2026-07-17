@@ -59,6 +59,31 @@ describe("settings deletion", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("closes ownership confirmation when the selected member is no longer eligible", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, transferProjectOwner: apiClient.transferProjectOwner };
+    let memberReads = 0;
+    apiClient.projectSettings = async () => projectSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => {
+      memberReads += 1;
+      const owner = { projectId: "project_1", userId: "owner_1", role: "owner" as const, displayName: "Owner Person", email: "owner@example.test", createdAt: projectSettings.project.createdAt, updatedAt: projectSettings.project.updatedAt };
+      const member = { projectId: "project_1", userId: "member_1", role: "member" as const, displayName: "Member Person", email: "member@example.test", createdAt: projectSettings.project.createdAt, updatedAt: projectSettings.project.updatedAt };
+      return memberReads === 1 ? [owner, member] : [owner];
+    };
+    apiClient.transferProjectOwner = async () => { throw new ApiError(409, "Target must be a different existing project member"); };
+    try {
+      render(<AppRouterContext.Provider value={router([])}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("combobox", { name: "New project owner" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Member Person" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Transfer ownership" })[0]!);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Transfer ownership" })).at(-1)!);
+
+      await waitFor(() => assert.equal(memberReads, 2));
+      await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Transfer project ownership" }), null));
+      assert.ok(screen.getByText("There are no other project members eligible to become owner."));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("restores editable settings after an owner unarchives a project or workspace", async () => {
     const original = { projectSettings: apiClient.projectSettings, workspaceSettings: apiClient.workspaceSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, unarchiveProject: apiClient.unarchiveProject, unarchiveWorkspace: apiClient.unarchiveWorkspace };
     let projectArchived = true;
@@ -112,6 +137,42 @@ describe("settings deletion", () => {
       apiClient.currentIdentity = original.currentIdentity;
       apiClient.deleteProject = original.deleteProject;
     }
+  });
+
+  it("returns to the workspace when ownership changes during project deletion", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, deleteProject: apiClient.deleteProject };
+    const pushed: string[] = [];
+    let revoked = false;
+    apiClient.projectSettings = async () => ({ ...projectSettings, project: { ...projectSettings.project, ownerUserId: revoked ? "owner_2" : "owner_1" } });
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [];
+    apiClient.deleteProject = async () => { revoked = true; throw new ApiError(403, "Project owner access required"); };
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Open project deletion confirmation" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Project name confirmation" }), { target: { value: "Project Alpha" } });
+      fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+      await waitFor(() => assert.deepEqual(pushed, ["/workspaces/workspace_1"]));
+      await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Delete project" }), null));
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("returns to the workspace when project deletion discovers the project is already gone", async () => {
+    const original = { projectSettings: apiClient.projectSettings, currentIdentity: apiClient.currentIdentity, members: apiClient.members, deleteProject: apiClient.deleteProject };
+    const pushed: string[] = [];
+    apiClient.projectSettings = async () => projectSettings;
+    apiClient.currentIdentity = async () => ({ user: { id: "owner_1", email: "owner@example.test" } });
+    apiClient.members = async () => [];
+    apiClient.deleteProject = async () => { throw new ApiError(404, "Project not found"); };
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Open project deletion confirmation" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Project name confirmation" }), { target: { value: "Project Alpha" } });
+      fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+
+      await waitFor(() => assert.deepEqual(pushed, ["/workspaces/workspace_1"]));
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("keeps a deletion continuation available after the page reloads in deleting state", async () => {
