@@ -103,8 +103,8 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   const dirty = Boolean(policy && draft && !samePolicyDraft(draft, policyDraft(policy)));
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft || draft.activeTasksLimit === null || !dirty) return;
-    const input: ProjectPolicyInput = { ...draft, activeTasksLimit: draft.activeTasksLimit };
+    if (!policy || !draft || draft.activeTasksLimit === null || !dirty) return;
+    const input = policyPatch(draft, policyDraft(policy));
     loadRequest.current += 1;
     setSaving(true);
     setError("");
@@ -368,11 +368,26 @@ function samePolicyDraft(left: PolicyDraft, right: PolicyDraft): boolean {
     left.providerCostLimit !== right.providerCostLimit ||
     left.projectFileBytesLimit !== right.projectFileBytesLimit
   ) return false;
+  return sameEndpointWindows(left.endpointWindows, right.endpointWindows);
+}
+
+function policyPatch(draft: PolicyDraft, original: PolicyDraft): ProjectPolicyInput {
+  const input: ProjectPolicyInput = {};
+  if (draft.activeTasksLimit !== original.activeTasksLimit && draft.activeTasksLimit !== null) input.activeTasksLimit = draft.activeTasksLimit;
+  if (draft.providerRequestsLimit !== original.providerRequestsLimit) input.providerRequestsLimit = draft.providerRequestsLimit;
+  if (draft.providerTokensLimit !== original.providerTokensLimit) input.providerTokensLimit = draft.providerTokensLimit;
+  if (draft.providerCostLimit !== original.providerCostLimit) input.providerCostLimit = draft.providerCostLimit;
+  if (draft.projectFileBytesLimit !== original.projectFileBytesLimit) input.projectFileBytesLimit = draft.projectFileBytesLimit;
+  if (!sameEndpointWindows(draft.endpointWindows, original.endpointWindows)) input.endpointWindows = draft.endpointWindows;
+  return input;
+}
+
+function sameEndpointWindows(left: EndpointWindow[], right: EndpointWindow[]): boolean {
   const ordered = (windows: EndpointWindow[]) => [...windows].sort((a, b) =>
     a.endpointId.localeCompare(b.endpointId) || a.metric.localeCompare(b.metric),
   );
-  const leftWindows = ordered(left.endpointWindows);
-  const rightWindows = ordered(right.endpointWindows);
+  const leftWindows = ordered(left);
+  const rightWindows = ordered(right);
   return leftWindows.length === rightWindows.length && leftWindows.every((window, index) => {
     const other = rightWindows[index];
     return other !== undefined && window.endpointId === other.endpointId && window.metric === other.metric && window.limit === other.limit && window.windowSeconds === other.windowSeconds;

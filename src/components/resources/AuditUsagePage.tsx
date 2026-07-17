@@ -53,7 +53,7 @@ export function UsagePage({ projectId }: { projectId: string }) {
       if (endpointId !== "all" && cause instanceof ApiError && cause.status === 404) {
         const query = browserQuery();
         query.delete("endpointId");
-        window.history.replaceState(null, "", `${window.location.pathname}${query.size ? `?${query}` : ""}${window.location.hash}`);
+        replaceBrowserQuery(query);
         setEndpointId("all");
         return;
       }
@@ -70,6 +70,14 @@ export function UsagePage({ projectId }: { projectId: string }) {
   useEffect(() => {
     if (queryProjectId === projectId) void load();
   }, [load, projectId, queryProjectId]);
+
+  function changeEndpoint(nextEndpointId: string) {
+    const query = browserQuery();
+    if (nextEndpointId === "all") query.delete("endpointId");
+    else query.set("endpointId", nextEndpointId);
+    replaceBrowserQuery(query);
+    setEndpointId(nextEndpointId);
+  }
 
   return (
     <PageLayout
@@ -106,7 +114,7 @@ export function UsagePage({ projectId }: { projectId: string }) {
         <UsageView
           overview={usage}
           selectedEndpointId={endpointId}
-          onEndpointChange={setEndpointId}
+          onEndpointChange={changeEndpoint}
         />
       ) : null}
     </PageLayout>
@@ -198,6 +206,14 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     setCursors([undefined]);
   }
 
+  function clearResource() {
+    const query = browserQuery();
+    query.delete("resourceId");
+    replaceBrowserQuery(query);
+    setResourceId("");
+    reset();
+  }
+
   return (
     <PageLayout
       header={
@@ -235,10 +251,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             <Button
               variant="quiet"
               size="sm"
-              onClick={() => {
-                setResourceId("");
-                reset();
-              }}
+              onClick={clearResource}
             >
               <X size={14} />
               Clear instance
@@ -446,6 +459,10 @@ function browserQuery(): URLSearchParams {
   return new URLSearchParams(
     typeof window === "undefined" ? "" : window.location.search,
   );
+}
+
+function replaceBrowserQuery(query: URLSearchParams) {
+  window.history.replaceState(null, "", `${window.location.pathname}${query.size ? `?${query}` : ""}${window.location.hash}`);
 }
 
 function formatDate(value: string) {

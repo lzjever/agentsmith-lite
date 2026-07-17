@@ -17,7 +17,10 @@ const usage: ProjectResourceUsage = { projectId, activeTasks: 1, providerRequest
 const usageOverview: ProjectUsageOverview = { projectId, usage, limits: [{ metric: "activeTasks", current: 1, limit: 2, remaining: 1, window: { kind: "current_gauge", resetAt: null } }, { metric: "providerRequests", current: 4, limit: 10, remaining: 6, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerTokens", current: 50, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerCost", current: 1.25, limit: 3.5, remaining: 2.25, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "projectFileBytes", current: 2048, limit: 2048, remaining: 0, window: { kind: "current_gauge", resetAt: null } }], daily: Array.from({ length: 30 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, "0")}`, requests: index === 29 ? 4 : 0, tokens: index === 29 ? 50 : 0, cost: index === 29 ? 1.25 : 0 })), trendTotals: { requests: 4, tokens: 50, cost: 1.25 }, endpoints: [{ endpointId: "endpoint_1", endpointName: "Primary", requests: 4, tokens: 50, cost: 1.25 }, { endpointId: "endpoint_2", endpointName: "Secondary", requests: 0, tokens: 0, cost: 0 }], selectedEndpointId: null };
 const endpoint: Endpoint = { id: "endpoint_1", projectId, name: "Primary", protocol: "openai_chat_completions", baseUrl: "https://provider.example/v1", model: "model", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.history.replaceState({}, "", "/");
+});
 
 describe("project resource pages", () => {
   it("only saves a changed resource policy and becomes clean after success", async () => {
@@ -125,7 +128,7 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("uses projected policy capability from the first ready render and sends the complete policy update", async () => {
+  it("uses projected policy capability and patches only changed policy fields", async () => {
     const original = snapshotClient();
     const updates: ProjectPolicyInput[] = [];
     apiClient.policy = async () => policy;
@@ -151,7 +154,7 @@ describe("project resource pages", () => {
       fireEvent.change(activeTasks, { target: { value: "5" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 1));
-      assert.deepEqual(updates[0], { activeTasksLimit: 5, providerRequestsLimit: 10, providerTokensLimit: null, providerCostLimit: 3.5, projectFileBytesLimit: 2048, endpointWindows: [] });
+      assert.deepEqual(updates[0], { activeTasksLimit: 5 });
     } finally { restoreClient(original); }
   });
 
@@ -211,7 +214,7 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 1));
       assert.equal(updates[0]?.activeTasksLimit, 6);
-      assert.deepEqual(updates[0]?.endpointWindows, initial.endpointWindows);
+      assert.equal("endpointWindows" in updates[0]!, false);
 
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
       await waitFor(() => assert.equal((screen.getByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement).value, "7"));
@@ -221,7 +224,7 @@ describe("project resource pages", () => {
       fireEvent.change(screen.getByRole("spinbutton", { name: "Primary Requests limit" }), { target: { value: "10" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 2));
-      assert.deepEqual(updates[1]?.endpointWindows, [{ ...refreshed.endpointWindows[0]!, limit: 10 }]);
+      assert.deepEqual(updates[1], { endpointWindows: [{ ...refreshed.endpointWindows[0]!, limit: 10 }] });
     } finally { restoreClient(original); }
   });
 
@@ -427,6 +430,9 @@ describe("project resource pages", () => {
       await screen.findByText(/Showing events for alert instance/);
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
       assert.equal(queries.at(-1)?.resourceId, "alert_1");
+      fireEvent.click(screen.getByRole("button", { name: "Clear instance" }));
+      await waitFor(() => assert.equal(queries.at(-1)?.resourceId, undefined));
+      assert.equal(new URL(window.location.href).searchParams.has("resourceId"), false);
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
       assert.ok(await screen.findByRole("option", { name: "chat.message.send" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));

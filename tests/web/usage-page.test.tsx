@@ -33,6 +33,7 @@ describe("usage page", () => {
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await screen.findByText("No settled provider usage in this period.");
       await waitFor(() => assert.deepEqual(requested, [undefined, "endpoint_2"]));
+      assert.equal(new URL(window.location.href).searchParams.get("endpointId"), "endpoint_2");
     } finally { apiClient.usage = original; }
   });
 
