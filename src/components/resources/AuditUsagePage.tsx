@@ -7,6 +7,7 @@ import {
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api";
 import {
+  ApiError,
   apiClient,
   type ProjectAuditEvent,
   type ProjectUsageOverview,
@@ -47,8 +48,15 @@ export function UsagePage({ projectId }: { projectId: string }) {
       if (revision !== requestRevision.current) return;
       setUsage(loaded);
       setState("ready");
-    } catch {
+    } catch (cause) {
       if (revision !== requestRevision.current) return;
+      if (endpointId !== "all" && cause instanceof ApiError && cause.status === 404) {
+        const query = browserQuery();
+        query.delete("endpointId");
+        window.history.replaceState(null, "", `${window.location.pathname}${query.size ? `?${query}` : ""}${window.location.hash}`);
+        setEndpointId("all");
+        return;
+      }
       setState("error");
     }
   }, [projectId, endpointId]);

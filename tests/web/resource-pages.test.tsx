@@ -103,6 +103,28 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("locks policy fields while a save is in flight", async () => {
+    const original = snapshotClient();
+    let resolveSave!: (value: ProjectResourcePolicy) => void;
+    apiClient.policy = async () => ({ ...policy, endpointWindows: [{ endpointId: endpoint.id, metric: "providerRequests", limit: 4, windowSeconds: 3600 }] });
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.updatePolicy = async () => new Promise((resolve) => { resolveSave = resolve; });
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      const activeTasks = await screen.findByRole("spinbutton", { name: "Active tasks" }) as HTMLInputElement;
+      fireEvent.change(activeTasks, { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.ok(resolveSave));
+
+      assert.equal(activeTasks.disabled, true);
+      assert.equal((screen.getByRole("spinbutton", { name: "Primary Requests limit" }) as HTMLInputElement).disabled, true);
+      assert.equal((screen.getByRole("combobox", { name: "Primary Requests window" }) as HTMLSelectElement).disabled, true);
+
+      await act(async () => resolveSave({ ...policy, activeTasksLimit: 3 }));
+    } finally { restoreClient(original); }
+  });
+
   it("uses projected policy capability from the first ready render and sends the complete policy update", async () => {
     const original = snapshotClient();
     const updates: ProjectPolicyInput[] = [];

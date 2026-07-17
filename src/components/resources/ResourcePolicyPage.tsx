@@ -199,6 +199,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                       min="0"
                       step={limit.step}
                       required={limit.required}
+                      disabled={saving}
                       value={draft[limit.key] ?? ""}
                       placeholder={limit.required ? "Required" : "Unlimited"}
                       onChange={(event) =>
@@ -265,6 +266,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                             type="number"
                             min="0"
                             step={metric.step}
+                            disabled={saving}
                             value={current?.limit ?? ""}
                             placeholder="Unlimited"
                             onChange={(event) =>
@@ -282,7 +284,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                           />
                           <select
                             aria-label={`${endpoint.name} ${metric.label} window`}
-                            disabled={!current}
+                            disabled={saving || !current}
                             value={String(current?.windowSeconds ?? 3600)}
                             onChange={(event) =>
                               setDraft((value) =>

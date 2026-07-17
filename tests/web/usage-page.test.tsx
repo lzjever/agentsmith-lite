@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type ProjectUsageOverview } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectUsageOverview } from "../../src/lib/api/client.js";
 
 installDom();
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -34,6 +34,26 @@ describe("usage page", () => {
       await screen.findByText("No settled provider usage in this period.");
       await waitFor(() => assert.deepEqual(requested, [undefined, "endpoint_2"]));
     } finally { apiClient.usage = original; }
+  });
+
+  it("falls back to all endpoints when a linked endpoint no longer exists", async () => {
+    const original = apiClient.usage;
+    const requested: Array<string | undefined> = [];
+    window.history.replaceState(null, "", "/usage?endpointId=endpoint_deleted");
+    apiClient.usage = async (_projectId, endpointId) => {
+      requested.push(endpointId);
+      if (endpointId) throw new ApiError(404, "Endpoint not found");
+      return overview;
+    };
+    try {
+      render(<UsagePage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "Project limits" });
+      assert.deepEqual(requested, ["endpoint_deleted", undefined]);
+      assert.equal(new URL(window.location.href).searchParams.has("endpointId"), false);
+    } finally {
+      apiClient.usage = original;
+      window.history.replaceState(null, "", "/");
+    }
   });
 });
 
