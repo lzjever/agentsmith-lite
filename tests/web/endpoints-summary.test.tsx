@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
 import { apiClient, type Endpoint, type ProjectCapabilities } from "../../src/lib/api/client.js";
-installDom(); const {act,cleanup,fireEvent,render,screen,waitFor}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
+installDom(); const {act,cleanup,fireEvent,render,screen,waitFor,within}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
 const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText(/1 endpoint configured · 1 configured/);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 describe("endpoint dependencies", () => {
@@ -140,6 +140,29 @@ describe("endpoint dependencies", () => {
       }
 
       await act(async () => finishRecheck(endpoint));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("keeps the endpoint form locked and visible while saving", async () => {
+    const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, updateEndpoint: apiClient.updateEndpoint };
+    let finishSave!: (value: Endpoint) => void;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.credentials = async () => [credential];
+    apiClient.projectCapabilities = async () => manager;
+    apiClient.updateEndpoint = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
+      const dialog = await screen.findByRole("dialog", { name: "Edit endpoint" });
+      fireEvent.change(screen.getByLabelText("Model"), { target: { value: "updated-model" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.ok(finishSave));
+      for (const name of ["Name", "Model", "Timeout"]) assert.equal((screen.getByLabelText(name) as HTMLInputElement).disabled, true, name);
+      fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+      assert.ok(screen.getByRole("dialog", { name: "Edit endpoint" }));
+      await act(async () => finishSave({ ...endpoint, model:"updated-model" }));
     } finally {
       Object.assign(apiClient, original);
     }

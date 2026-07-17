@@ -5,11 +5,13 @@ import { Button } from "../ui/button";
 export function CredentialRow({
   credential,
   canManage,
+  busy,
   onRotate,
   onDelete,
 }: {
   credential: ProjectCredential;
   canManage: boolean;
+  busy: boolean;
   onRotate: () => void;
   onDelete: () => void;
 }) {
@@ -24,8 +26,8 @@ export function CredentialRow({
       </p>
     </div>
     {canManage ? <div className="flex gap-2">
-      <Button size="sm" variant="outline" onClick={onRotate}><RotateCw size={15} />Rotate</Button>
-      <Button size="icon" variant="danger" aria-label={`Delete ${credential.name}`} onClick={onDelete}><Trash2 size={15} /></Button>
+      <Button size="sm" variant="outline" disabled={busy} onClick={onRotate}><RotateCw size={15} />Rotate</Button>
+      <Button size="icon" variant="danger" aria-label={`Delete ${credential.name}`} disabled={busy} onClick={onDelete}><Trash2 size={15} /></Button>
     </div> : null}
   </article>;
 }

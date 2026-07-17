@@ -71,7 +71,7 @@ export function EndpointDialog({
         : [...input.capabilities, capability],
     );
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
       <DialogContent>
         <form onSubmit={onSubmit}>
           <DialogHeader
@@ -100,6 +100,7 @@ export function EndpointDialog({
               Name
               <Input
                 required
+                disabled={saving}
                 value={input.name}
                 onChange={(event) => set("name", event.target.value)}
               />
@@ -108,6 +109,7 @@ export function EndpointDialog({
               Model
               <Input
                 required
+                disabled={saving}
                 value={input.model}
                 onChange={(event) => set("model", event.target.value)}
               />
@@ -117,6 +119,7 @@ export function EndpointDialog({
               <Input
                 required
                 type="url"
+                disabled={saving}
                 readOnly
                 value={input.baseUrl}
               />
@@ -156,6 +159,7 @@ export function EndpointDialog({
                 required
                 type="number"
                 min="1"
+                disabled={saving}
                 value={input.requestTimeoutSecs}
                 onChange={(event) =>
                   set("requestTimeoutSecs", Number(event.target.value))
