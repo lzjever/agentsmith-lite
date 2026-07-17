@@ -177,6 +177,29 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("keeps task content visible when a status refresh fails and offers recovery", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts };
+    const completed: Task = { ...task, status: "completed", terminalReason: "completed", artifactProjectionStatus: "drained", cleanupStatus: "completed", updatedAt: "2026-07-14T00:02:00.000Z" };
+    let reads = 0;
+    apiClient.taskDetail = async () => {
+      reads += 1;
+      if (reads === 2) throw new Error("Task status unavailable");
+      return { task: reads > 2 ? completed : task, capabilities: available };
+    };
+    apiClient.taskArtifacts = async () => [];
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
+      await screen.findByText(`Active · ${task.id}`);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh task" }));
+      await screen.findByText("Task status unavailable");
+      assert.ok(screen.getByText(`Active · ${task.id}`));
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await screen.findByText(`Completed · ${task.id}`);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps conversation readable when artifact and input panels fail", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     apiClient.taskDetail = async () => ({ task, capabilities: available });
@@ -329,7 +352,7 @@ describe("TaskDetailPage terminal occupancy", () => {
       assert.ok(screen.getByText("Artifact publishing delayed"));
       assert.ok(screen.getByText("Artifact storage is temporarily unavailable"));
       assert.ok(screen.getByText(/retry automatically/i));
-      assert.ok(screen.getByText("Artifacts are not fully available yet."));
+      assert.ok(await screen.findByText("Artifacts are not fully available yet."));
     } finally {
       Object.assign(apiClient, original);
     }
