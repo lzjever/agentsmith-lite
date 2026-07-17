@@ -78,7 +78,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canManage || saving || (editing !== null && !alertRuleChanged(value, editing))) return;
+    if (!canManage || saving || busyRuleId !== null || (editing !== null && !alertRuleChanged(value, editing))) return;
     setSaving(true);
     setFormError("");
     try {
@@ -143,7 +143,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   return <section className="mt-8 border-t border-subtle pt-6" aria-label="Alert rules">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="type-title">Alert rules</h2><p className="mt-1 text-sm text-secondary">Choose when project administrators should be notified.</p></div>
-      {canManage ? <Button onClick={openCreate}><Plus size={16} />Add rule</Button> : <span className="text-sm text-secondary">Read-only</span>}
+      {canManage ? <Button disabled={busyRuleId !== null} onClick={openCreate}><Plus size={16} />Add rule</Button> : <span className="text-sm text-secondary">Read-only</span>}
     </div>
     {state === "loading" ? <p className="mt-4 text-sm text-secondary">Loading alert rules...</p> : null}
     {state === "error" ? <div className="mt-4 flex items-center justify-between gap-3 border-y border-subtle py-3" role="alert"><span className="text-sm text-error">Alert rules could not be loaded.</span><Button variant="quiet" onClick={() => void load()}><RefreshCw size={15} />Retry</Button></div> : null}
@@ -152,15 +152,15 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       {rules.map((rule) => <li className="flex items-center justify-between gap-3 py-3" key={rule.id}>
         <span className="min-w-0 text-sm text-foreground"><strong className="block truncate font-medium">{rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</strong><small className="mt-1 block text-secondary">Threshold {rule.threshold ?? 1} · {rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · {scopeLabel(rule, endpoints)}</small></span>
         <div className="flex items-center gap-2">
-          {canManage ? <Button variant="quiet" disabled={busyRuleId === rule.id} onClick={() => void toggle(rule)}>{rule.enabled ? "Enabled" : "Disabled"}</Button> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Test alert rule" disabled={busyRuleId === rule.id} onClick={() => void test(rule)}><FlaskConical size={16} /></Button> : null}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Edit alert rule" onClick={() => openEdit(rule)}><Pencil size={16} /></Button> : null}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Delete alert rule" onClick={() => setRemoving(rule)}><Trash2 size={16} /></Button> : null}
+          {canManage ? <Button variant="quiet" disabled={busyRuleId !== null} onClick={() => void toggle(rule)}>{rule.enabled ? "Enabled" : "Disabled"}</Button> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
+          {canManage ? <Button variant="quiet" size="icon" aria-label="Test alert rule" disabled={busyRuleId !== null} onClick={() => void test(rule)}><FlaskConical size={16} /></Button> : null}
+          {canManage ? <Button variant="quiet" size="icon" aria-label="Edit alert rule" disabled={busyRuleId !== null} onClick={() => openEdit(rule)}><Pencil size={16} /></Button> : null}
+          {canManage ? <Button variant="quiet" size="icon" aria-label="Delete alert rule" disabled={busyRuleId !== null} onClick={() => setRemoving(rule)}><Trash2 size={16} /></Button> : null}
         </div>
       </li>)}
     </ul> : null}
-    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} endpoints={endpoints} saving={saving} canSave={editing === null || alertRuleChanged(value, editing)} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) setFormError(""); }} onChange={setValue} onSubmit={save} />
-    <ConfirmationDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)} title="Delete alert rule" description="This permanently removes the rule from this project." confirmText="Delete" onConfirm={remove} errorContext="Alert rule could not be deleted" />
+    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} endpoints={endpoints} saving={saving} canSave={busyRuleId === null && (editing === null || alertRuleChanged(value, editing))} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) setFormError(""); }} onChange={setValue} onSubmit={save} />
+    <ConfirmationDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)} title="Delete alert rule" description="This permanently removes the rule from this project." confirmText="Delete" confirmDisabled={busyRuleId !== null} onConfirm={remove} errorContext="Alert rule could not be deleted" />
   </section>;
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}

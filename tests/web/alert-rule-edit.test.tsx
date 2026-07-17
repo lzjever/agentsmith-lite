@@ -6,7 +6,7 @@ import { apiClient, type ProjectAlertRule } from "../../src/lib/api/client.js";
 import { toast } from "../../src/components/ui/toast.js";
 
 installDom();
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { AlertRulesPanel } = await import("../../src/components/alerts/AlertRulesPanel.js");
 
 const projectId = "project_1";
@@ -142,6 +142,27 @@ describe("alert rule editing", () => {
       await screen.findByText("Task failure");
       fireEvent.click(screen.getByRole("button", { name: "Test alert rule" }));
       await waitFor(() => assert.deepEqual(successes, ["Rule would not trigger: failure count is 1, threshold 2."]));
+    } finally {
+      restoreClient(original);
+    }
+  });
+
+  it("locks rule management while a rule request is in flight", async () => {
+    const original = snapshotClient();
+    let finish!: (value: { matched: boolean; metric: "failure_count"; value: number; threshold: number; evaluatedAt: string }) => void;
+    apiClient.alertRules = async () => [existing];
+    apiClient.testAlertRule = async () => new Promise((resolve) => { finish = resolve; });
+    try {
+      render(<AlertRulesPanel projectId={projectId} canManage />);
+      await screen.findByText("Task failure");
+      fireEvent.click(screen.getByRole("button", { name: "Test alert rule" }));
+      await waitFor(() => assert.ok(finish));
+
+      for (const name of ["Add rule", "Edit alert rule", "Delete alert rule"]) {
+        assert.equal((screen.getByRole("button", { name }) as HTMLButtonElement).disabled, true);
+      }
+
+      await act(async () => finish({ matched: false, metric: "failure_count", value: 0, threshold: 1, evaluatedAt: "2026-07-12T00:00:00.000Z" }));
     } finally {
       restoreClient(original);
     }
