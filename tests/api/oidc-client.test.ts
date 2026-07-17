@@ -50,11 +50,13 @@ describe("OIDC client backchannel fetch", () => {
       assert.doesNotMatch(request.authorizationUrl, /keycloak\.keycloak\.svc\.cluster\.local/);
 
       const endSessionUrl = new URL(client.createEndSessionUrl({
-        postLogoutRedirectUri: "https://agentsmith.example.test/app/"
+        postLogoutRedirectUri: "https://agentsmith.example.test/app/",
+        idTokenHint: "signed-id-token"
       }));
       assert.equal(endSessionUrl.origin + endSessionUrl.pathname, `${issuerUrl}/protocol/openid-connect/logout`);
       assert.equal(endSessionUrl.searchParams.get("client_id"), "agentsmith-lite");
       assert.equal(endSessionUrl.searchParams.get("post_logout_redirect_uri"), "https://agentsmith.example.test/app/");
+      assert.equal(endSessionUrl.searchParams.get("id_token_hint"), "signed-id-token");
     } finally {
       globalThis.fetch = originalFetch;
     }

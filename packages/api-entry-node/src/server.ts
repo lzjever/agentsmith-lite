@@ -379,10 +379,13 @@ async function routeApi(
   }
 
   if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
+    const logout = await services.auth.logout(sessionId);
     const redirectUrl = auth.authMode === "oidc" && auth.oidcClient
-      ? auth.oidcClient.createEndSessionUrl({ postLogoutRedirectUri: appHomeUrl(req, auth.publicBaseUrl, auth.appBasePath) })
+      ? auth.oidcClient.createEndSessionUrl({
+          postLogoutRedirectUri: appHomeUrl(req, auth.publicBaseUrl, auth.appBasePath),
+          ...(logout.idTokenHint ? { idTokenHint: logout.idTokenHint } : {})
+        })
       : appHomePath(auth.appBasePath);
-    await services.auth.logout(sessionId);
     res.setHeader("set-cookie", [serializeAuthCookie("asl_session", "", sessionCookiePath(auth.appBasePath), 0, auth.secureCookies)]);
     return sendJson(res, 200, { loggedOut: true, redirectUrl });
   }

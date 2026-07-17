@@ -81,7 +81,8 @@ describe("api OIDC auth", () => {
       issuer: "https://keycloak.example.test/realms/agentsmith",
       subject: "keycloak-member-subject",
       email: "OIDC.Member@Example.Test",
-      emailVerified: true
+      emailVerified: true,
+      idToken: "member-id-token"
     });
     assert.match(login.user.id, /^user_oidc_/);
     assert.equal(login.user.email, "oidc.member@example.test");
@@ -172,11 +173,12 @@ describe("api OIDC auth", () => {
     assert.equal(logout.status, 200);
     assert.deepEqual(await logout.json(), {
       loggedOut: true,
-      redirectUrl: "https://idp.example.test/logout?client_id=agentsmith-lite&post_logout_redirect_uri=https%3A%2F%2Fagentsmith.example.test%2Fapp%2F"
+      redirectUrl: "https://idp.example.test/logout?client_id=agentsmith-lite&post_logout_redirect_uri=https%3A%2F%2Fagentsmith.example.test%2Fapp%2F&id_token_hint=member-id-token"
     });
     assert.match(logout.headers.get("set-cookie") ?? "", /asl_session=;.*Max-Age=0/);
     assert.match(logout.headers.get("set-cookie") ?? "", /Path=\/app/);
     assert.equal(oidcCalls.at(-1)?.postLogoutRedirectUri, "https://agentsmith.example.test/app/");
+    assert.equal(oidcCalls.at(-1)?.idTokenHint, "member-id-token");
 
     const oldSession = await fetch(baseUrl + apiPath("/api/v1/me"), {
       headers: { cookie: login.sessionCookie }
@@ -326,10 +328,11 @@ function fakeOidcClient(calls: Array<Record<string, string | undefined>>, princi
       return principal;
     },
     createEndSessionUrl(input) {
-      calls.push({ postLogoutRedirectUri: input.postLogoutRedirectUri });
+      calls.push({ postLogoutRedirectUri: input.postLogoutRedirectUri, idTokenHint: input.idTokenHint });
       return `https://idp.example.test/logout?${new URLSearchParams({
         client_id: "agentsmith-lite",
-        post_logout_redirect_uri: input.postLogoutRedirectUri
+        post_logout_redirect_uri: input.postLogoutRedirectUri,
+        ...(input.idTokenHint ? { id_token_hint: input.idTokenHint } : {})
       })}`;
     }
   };

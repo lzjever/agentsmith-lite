@@ -583,16 +583,19 @@ postgresDescribe("postgres product store", () => {
       id: "sess_pg",
       userId: user.id,
       csrfToken: "csrf_pg",
+      oidcIdToken: "postgres-id-token",
       createdAt: "2026-07-04T00:00:00.000Z",
       expiresAt: "2026-07-04T12:00:00.000Z"
     }), {
       id: "sess_pg",
       userId: user.id,
       csrfToken: "csrf_pg",
+      oidcIdToken: "postgres-id-token",
       createdAt: "2026-07-04T00:00:00.000Z",
       expiresAt: "2026-07-04T12:00:00.000Z"
     });
     assert.equal((await store.findSession("sess_pg"))?.csrfToken, "csrf_pg");
+    assert.equal((await store.findSession("sess_pg"))?.oidcIdToken, "postgres-id-token");
     assert.equal(await store.deleteSession("sess_pg"), true);
     assert.equal(await store.findSession("sess_pg"), null);
     assert.equal(await store.deleteSession("sess_pg"), false);

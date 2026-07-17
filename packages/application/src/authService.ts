@@ -27,6 +27,7 @@ export interface ExternalPrincipal {
   email: string;
   emailVerified?: boolean;
   pictureUrl?: string;
+  idToken?: string;
 }
 
 export class AuthService {
@@ -79,7 +80,7 @@ export class AuthService {
     const storedUser = existing
       ? await this.updateExternalIdentity(existing, principal)
       : await this.resolveExternalUser(userId, principal);
-    const session = await this.createSession(storedUser.id);
+    const session = await this.createSession(storedUser.id, principal.idToken);
     return {
       user: publicUser(storedUser),
       sessionId: session.id,
@@ -124,20 +125,26 @@ export class AuthService {
     }
   }
 
-  async logout(sessionId: string | null): Promise<void> {
+  async logout(sessionId: string | null): Promise<{ idTokenHint?: string }> {
     if (!sessionId) {
       throw new UnauthorizedError();
     }
+    const session = await this.store.findSession(sessionId);
+    if (!session) {
+      throw new UnauthorizedError();
+    }
     await this.store.deleteSession(sessionId);
+    return session.oidcIdToken ? { idTokenHint: session.oidcIdToken } : {};
   }
 
-  private async createSession(userId: string): Promise<AuthSession> {
+  private async createSession(userId: string, oidcIdToken?: string): Promise<AuthSession> {
     const created = new Date();
     const expires = new Date(created.getTime() + 1000 * 60 * 60 * 12);
     return this.store.createSession({
       id: `sess_${randomBytes(18).toString("hex")}`,
       userId,
       csrfToken: `csrf_${randomBytes(18).toString("hex")}`,
+      ...(oidcIdToken ? { oidcIdToken } : {}),
       createdAt: created.toISOString(),
       expiresAt: expires.toISOString()
     });

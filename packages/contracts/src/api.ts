@@ -71,6 +71,7 @@ export interface AuthSession {
   id: string;
   userId: string;
   csrfToken: string;
+  oidcIdToken?: string;
   createdAt: ISODateString;
   expiresAt: ISODateString;
 }

@@ -22,6 +22,7 @@ export interface OidcCallbackInput {
 
 export interface OidcEndSessionInput {
   postLogoutRedirectUri: string;
+  idTokenHint?: string;
 }
 
 export interface OidcClientAdapter {
@@ -104,13 +105,15 @@ class OpenIdConnectClient implements OidcClientAdapter {
       subject: claims.sub,
       email: typeof claims.email === "string" ? claims.email : "",
       emailVerified: claims.email_verified === true,
+      ...(tokens.id_token ? { idToken: tokens.id_token } : {}),
       ...(typeof claims.picture === "string" && claims.picture.trim() ? { pictureUrl: claims.picture.trim() } : {})
     };
   }
 
   createEndSessionUrl(input: OidcEndSessionInput): string {
     return oidc.buildEndSessionUrl(this.config, {
-      post_logout_redirect_uri: input.postLogoutRedirectUri
+      post_logout_redirect_uri: input.postLogoutRedirectUri,
+      ...(input.idTokenHint ? { id_token_hint: input.idTokenHint } : {})
     }).toString();
   }
 }

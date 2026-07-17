@@ -186,9 +186,9 @@ export class PostgresProductStore implements ProductStore {
 
   async createSession(session: AuthSession): Promise<AuthSession> {
     await this.pool.query(
-      `insert into auth_sessions (id, user_id, csrf_token, created_at, expires_at)
-       values ($1, $2, $3, $4, $5)`,
-      [session.id, session.userId, session.csrfToken, session.createdAt, session.expiresAt]
+      `insert into auth_sessions (id, user_id, csrf_token, oidc_id_token, created_at, expires_at)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [session.id, session.userId, session.csrfToken, session.oidcIdToken ?? null, session.createdAt, session.expiresAt]
     );
     return structuredClone(session);
   }
@@ -1418,6 +1418,7 @@ interface AuthSessionRow {
   id: string;
   user_id: string;
   csrf_token: string;
+  oidc_id_token: string | null;
   created_at: unknown;
   expires_at: unknown;
 }
@@ -1593,6 +1594,7 @@ function mapSession(row: AuthSessionRow): AuthSession {
     id: row.id,
     userId: row.user_id,
     csrfToken: row.csrf_token,
+    ...(row.oidc_id_token ? { oidcIdToken: row.oidc_id_token } : {}),
     createdAt: toIso(row.created_at),
     expiresAt: toIso(row.expires_at)
   };
