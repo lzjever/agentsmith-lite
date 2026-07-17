@@ -202,6 +202,26 @@ describe("workspace identity UX", () => {
     }finally{Object.assign(apiClient,original)}
   });
 
+  it("locks every project pin while a pin update is in flight", async () => {
+    const original = { workspaces: apiClient.workspaces, setProjectPinned: apiClient.setProjectPinned };
+    const first = { id:"project_pin_first",workspaceId:workspace.id,name:"First project",pinnedAt:null,taskConcurrencyLimit:2,createdAt:timestamp,updatedAt:timestamp };
+    const second = { ...first, id:"project_pin_second", name:"Second project" };
+    let finish!: (value: typeof first) => void;
+    apiClient.workspaces = async () => [{ ...workspace, projects:[first,second] }];
+    apiClient.setProjectPinned = async () => new Promise((resolve) => { finish = resolve; });
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
+      fireEvent.click((await screen.findAllByRole("button", { name:"Pin First project" }))[0]!);
+      await waitFor(() => assert.ok(finish));
+
+      for (const name of ["Pin First project", "Pin Second project"]) {
+        for (const button of screen.getAllByRole("button", { name })) assert.equal((button as HTMLButtonElement).disabled, true);
+      }
+
+      await act(async () => finish({ ...first, pinnedAt:timestamp }));
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("enters a project immediately after creating it", async () => {
     const original = { workspaces: apiClient.workspaces, createProject: apiClient.createProject };
     const pushed: string[] = [];

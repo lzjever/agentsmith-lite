@@ -91,7 +91,7 @@ export function ProjectsTable({
                 <ButtonPin
                   project={row.original}
                   pinned={Boolean(row.original.pinnedAt)}
-                  busy={pinBusyId === row.original.id}
+                  busy={pinBusyId !== null && pinBusyId !== undefined}
                   onTogglePin={onTogglePin}
                 />
               ),
@@ -145,7 +145,7 @@ export function ProjectsTable({
             project={project}
             key={project.id}
             pinned={Boolean(project.pinnedAt)}
-            busy={pinBusyId === project.id}
+            busy={pinBusyId !== null && pinBusyId !== undefined}
             {...(onTogglePin ? { onTogglePin } : {})}
           />
         ))}
