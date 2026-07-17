@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { Textarea } from "../ui/textarea";
 import { toast } from "../ui/toast";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
 
@@ -27,6 +28,7 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
 }
 
 function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; projectId?: string }) {
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const tabs: ScopeTab[] = projectId ? [
     { scope: "workspace_shared", label: "Workspace shared", description: "Available to members of this workspace." },
@@ -61,7 +63,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       const next = await apiClient.contexts({ workspaceId, scope, ...(projectScope && projectId ? { projectId } : {}) });
       if (!mounted.current || version !== loadVersion.current) return;
       setResult(next); setSelectedKey(next.items[0]?.contextKey); setError(""); setState("ready");
-    } catch (reason) { if (mounted.current && version === loadVersion.current) { setError(message(reason)); setState("error"); } }
+    } catch (reason) { if (mounted.current && version === loadVersion.current) { setError(message(reason, "Context could not be loaded.")); setState("error"); } }
   }, [projectId, projectScope, scope, workspaceId]);
 
   useEffect(() => {
@@ -134,13 +136,18 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     setDeleteOpen(false);
     setConflict(false);
     setError("Context write permission changed. This scope is now read-only.");
+    mutationKeys.clear("context.save");
+    mutationKeys.clear("context.delete");
     return true;
   }
   async function save() {
     if (!result?.canWrite || !normalizedContextKey || saving || deleting) return;
     setSaving(true);
+    const input = { workspaceId, scope, contextKey: normalizedContextKey, content, contentType, ...(selected ? { previousContextKey: selected.contextKey, expectedVersion: selected.version } : {}), ...(projectScope && projectId ? { projectId } : {}) };
+    const identity = JSON.stringify(input);
     try {
-      const saved = await apiClient.saveContext({ workspaceId, scope, contextKey: normalizedContextKey, content, contentType, ...(selected ? { previousContextKey: selected.contextKey, expectedVersion: selected.version } : {}), ...(projectScope && projectId ? { projectId } : {}) });
+      const saved = await apiClient.saveContext(input, mutationKeys.key("context.save", identity));
+      mutationKeys.complete("context.save", identity);
       if (!mounted.current) return;
       setResult((current) => {
         if (!current) return current;
@@ -151,20 +158,24 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         return { ...current, items };
       });
       setSelectedKey(saved.contextKey); setConflict(false); setError(""); toast.success("Context saved");
-    } catch (reason) { if(!mounted.current)return;const accessRevoked = revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.status === 409; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason)); } toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { if(mounted.current)setSaving(false); }
+    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.status === 409; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason, "Context could not be saved.")); } toast.error(nextConflict ? "Context changed elsewhere" : "Context could not be saved"); } finally { if(mounted.current)setSaving(false); }
   }
   async function remove() {
     if (!result?.canWrite || !selected || deleting || saving) return;
     setDeleting(true);
+    const input = { workspaceId, scope, contextKey: selected.contextKey, expectedVersion: selected.version, ...(projectScope && projectId ? { projectId } : {}) };
+    const identity = JSON.stringify(input);
     try {
-      await apiClient.deleteContext({ workspaceId, scope, contextKey: selected.contextKey, expectedVersion: selected.version, ...(projectScope && projectId ? { projectId } : {}) });
+      await apiClient.deleteContext(input, mutationKeys.key("context.delete", identity));
+      mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
       const remaining = result.items.filter((entry) => entry.id !== selected.id);
       setResult({ ...result, items: remaining }); setSelectedKey(remaining[0]?.contextKey); setDeleteOpen(false); setError(""); toast.success("Context deleted");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
       if (revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
-      const detail = message(reason);
+      const detail = message(reason, "Context could not be deleted.");
       setError(detail);
       throw new Error(detail);
     } finally { if(mounted.current)setDeleting(false); }
@@ -184,4 +195,4 @@ function replaceContextScope(scope: ContextScope, defaultScope: ContextScope) {
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
-function message(error: unknown): string { return error instanceof ApiError ? error.message : "Context could not be loaded."; }
+function message(error: unknown, fallback: string): string { return error instanceof ApiError ? error.message : fallback; }

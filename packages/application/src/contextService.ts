@@ -3,6 +3,7 @@ import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 
 export type ContextContentType = ProjectContextContentType;
 
@@ -48,7 +49,7 @@ export class ContextService {
     return { items: entries.map((entry) => toView(entry)), canWrite: access.canWrite };
   }
 
-  async upsert(userId: string, input: UpsertContextEntryInput): Promise<ContextEntryView> {
+  async upsert(userId: string, input: UpsertContextEntryInput, idempotencyKey?: string): Promise<ContextEntryView> {
     const target = normalizeTarget(input);
     await this.authorize(userId, target, "write");
     const contextKey = requireContextKey(input.contextKey);
@@ -56,53 +57,45 @@ export class ContextService {
     const content = requireContent(input.content);
     const contentType = requireContentType(input.contentType);
     if (contentType === "json") validateJson(content);
-    const timestamp = nowIso();
     const ownerUserId = personalOwner(target.scope, userId);
-    const entries = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
-    const existing = entries.find((entry) => entry.contextKey === previousContextKey);
-    if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) {
-      throw new ProductError("A context entry already uses that key", 409);
-    }
-    if (existing) {
-      if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
-      if (existing.version !== input.expectedVersion) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
-      if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing, contentType);
-    }
-    const entry: ProjectContextEntry = {
-      id: existing?.id ?? newId("ctx"),
-      workspaceId: target.workspaceId,
-      projectId: target.projectId,
-      ownerUserId,
-      scope: target.scope,
-      contextKey,
-      content,
-      contentType,
-      version: existing ? existing.version + 1 : 1,
-      createdAt: existing?.createdAt ?? timestamp,
-      updatedAt: timestamp
+    const save = async (resourceId: string) => {
+      const timestamp = nowIso();
+      const entries = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
+      const existing = entries.find((entry) => entry.contextKey === previousContextKey);
+      if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw new ProductError("A context entry already uses that key", 409);
+      if (existing) {
+        if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
+        if (existing.version !== input.expectedVersion) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+        if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing, contentType);
+      }
+      const entry: ProjectContextEntry = {
+        id: existing?.id ?? resourceId, workspaceId: target.workspaceId, projectId: target.projectId, ownerUserId, scope: target.scope,
+        contextKey, content, contentType, version: existing ? existing.version + 1 : 1,
+        createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp
+      };
+      if (!existing) return toView(await this.store.createProjectContextEntry(entry), contentType);
+      const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
+      if (!updated) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      return toView(updated, contentType);
     };
-    if (!existing) return toView(await this.store.createProjectContextEntry(entry), contentType);
-    const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
-    if (!updated) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
-    return toView(updated, contentType);
+    if (!idempotencyKey) return save(newId("ctx"));
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: target.projectId ?? target.workspaceId, operation: target.projectId ? "project.context.save" : "workspace.context.save", key: idempotencyKey, request: { ...target, contextKey, previousContextKey, expectedVersion: input.expectedVersion, content, contentType }, resourceId: newId("ctx"), failureMessage: "Context could not be saved", run: save });
   }
 
-  async delete(userId: string, target: ContextRequestTarget & { contextKey: string; expectedVersion: number }): Promise<void> {
+  async delete(userId: string, target: ContextRequestTarget & { contextKey: string; expectedVersion: number }, idempotencyKey?: string): Promise<{ deleted: true }> {
     const normalized = normalizeTarget(target);
     await this.authorize(userId, normalized, "write");
     const contextKey = requireContextKey(target.contextKey);
-    const entries = await this.store.listProjectContextEntries(
-      normalized.workspaceId,
-      normalized.projectId,
-      normalized.scope,
-      personalOwner(normalized.scope, userId)
-    );
-    const entry = entries.find((candidate) => candidate.contextKey === contextKey);
-    if (!entry) throw new NotFoundError("Context entry not found");
-    if (!Number.isInteger(target.expectedVersion) || target.expectedVersion < 1) throw new ProductError("expectedVersion is required to delete context", 400);
-    if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) {
-      throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
-    }
+    const remove = async () => {
+      const entries = await this.store.listProjectContextEntries(normalized.workspaceId, normalized.projectId, normalized.scope, personalOwner(normalized.scope, userId));
+      const entry = entries.find((candidate) => candidate.contextKey === contextKey);
+      if (!entry) throw new NotFoundError("Context entry not found");
+      if (!Number.isInteger(target.expectedVersion) || target.expectedVersion < 1) throw new ProductError("expectedVersion is required to delete context", 400);
+      if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      return { deleted: true as const };
+    };
+    if (!idempotencyKey) return remove();
+    return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: normalized.projectId ?? normalized.workspaceId, operation: normalized.projectId ? "project.context.delete" : "workspace.context.delete", key: idempotencyKey, request: { ...normalized, contextKey, expectedVersion: target.expectedVersion }, resourceId: contextKey, failureMessage: "Context could not be deleted", run: remove });
   }
 
   async resolveForAgent(userId: string, projectId: string): Promise<string> {

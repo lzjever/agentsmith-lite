@@ -74,6 +74,29 @@ describe("context manager", () => {
     } finally { apiClient.contexts = original.contexts; apiClient.saveContext = original.saveContext; apiClient.deleteContext = original.deleteContext; }
   });
 
+  it("reuses a context save key after an unknown network result", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const keys: string[] = [];
+    apiClient.contexts = async () => ({ items: [], canWrite: true });
+    apiClient.saveContext = (async (input: Parameters<typeof apiClient.saveContext>[0], key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { id: "ctx_retry", workspaceId: input.workspaceId, projectId: input.projectId ?? null, ownerUserId: "user_1", ...input, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    }) as typeof apiClient.saveContext;
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.change(await screen.findByRole("textbox", { name: "Key" }), { target: { value: "my.notes" } });
+      fireEvent.change(screen.getByRole("textbox", { name: "Content" }), { target: { value: "Keep this draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+      assert.match(screen.getByRole("alert").textContent ?? "", /Context could not be saved/);
+      assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "Keep this draft");
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.equal(keys[1], keys[0]);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("confirms a writable context deletion before calling the API", async () => {
     const original = { contexts: apiClient.contexts, deleteContext: apiClient.deleteContext };
     const deleted: Array<Record<string, unknown>> = [];

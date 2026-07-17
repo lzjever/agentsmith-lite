@@ -403,12 +403,11 @@ async function routeApi(
         ...(body.expectedVersion === undefined ? {} : { expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") }),
         content: asString(body.content),
         contentType: asContextContentType(body.contentType)
-      }));
+      }, requireIdempotencyKey(req)));
     }
     if (method === "DELETE") {
       const body = await readJson(req);
-      await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey), expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") });
-      return sendJson(res, 200, { deleted: true });
+      return sendJson(res, 200, await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey), expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") }, requireIdempotencyKey(req)));
     }
   }
 

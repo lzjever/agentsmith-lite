@@ -70,6 +70,23 @@ describe("context service", () => {
     assert.equal(unchanged.contextKey, "notes");
   });
 
+  it("replays context creation, versioned updates, and deletion", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "context-replay-owner", email: "context-replay-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const create = { workspaceId: workspace.id, scope: "workspace_personal" as const, contextKey: "notes", content: "one", contentType: "text" as const };
+
+    const created = await services.contexts.upsert(owner.user.id, create, "context-create-key");
+    assert.deepEqual(await services.contexts.upsert(owner.user.id, create, "context-create-key"), created);
+    const update = { ...create, previousContextKey: "notes", expectedVersion: created.version, content: "two" };
+    const updated = await services.contexts.upsert(owner.user.id, update, "context-update-key");
+    assert.deepEqual(await services.contexts.upsert(owner.user.id, update, "context-update-key"), updated);
+    const remove = { workspaceId: workspace.id, scope: "workspace_personal" as const, contextKey: "notes", expectedVersion: updated.version };
+    assert.deepEqual(await services.contexts.delete(owner.user.id, remove, "context-delete-key"), { deleted: true });
+    assert.deepEqual(await services.contexts.delete(owner.user.id, remove, "context-delete-key"), { deleted: true });
+    assert.deepEqual((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items, []);
+  });
+
   it("resolves effective agent context by key from broad shared defaults to personal project overrides", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });

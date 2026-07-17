@@ -190,7 +190,7 @@ function json<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body
   return request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
-function jsonIdempotent<T>(path: string, method: "POST" | "PATCH" | "DELETE", idempotencyKey: string, body?: unknown): Promise<T> {
+function jsonIdempotent<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", idempotencyKey: string, body?: unknown): Promise<T> {
   return request<T>(path, { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
@@ -269,8 +269,8 @@ export const apiClient = {
     if (input.projectId) query.set("projectId", input.projectId);
     return request<ContextList>(`/context?${query.toString()}`);
   },
-  saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }) => json<ContextEntry>("/context", "PUT", input),
-  deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }) => json<{ deleted: true }>("/context", "DELETE", input),
+  saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }, idempotencyKey: string) => jsonIdempotent<ContextEntry>("/context", "PUT", idempotencyKey, input),
+  deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>("/context", "DELETE", idempotencyKey, input),
   policy: (projectId: string) => request<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`),
   updatePolicy: (projectId: string, input: ProjectPolicyInput, idempotencyKey: string) =>
     jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
