@@ -406,10 +406,19 @@ describe("durable task lifecycle", () => {
   it("owns interactive terminal occupancy and capabilities in the task service", async () => {
     const setup = await createSetup(true);
     const task = await startTask(setup, "terminal-occupancy");
+    const run = await setup.store.sandboxRuns.get(task.runId); assert.ok(run);
+    const staleIdleDeadline = "2000-01-01T00:00:00.000Z";
+    await setup.store.sandboxRuns.updateWithFencing(run.runId, run.fencingToken, {
+      ...run,
+      idleExpiresAt: staleIdleDeadline,
+      fencingToken: run.fencingToken + 1,
+      updatedAt: staleIdleDeadline
+    });
     assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, true);
 
     await setup.services.tasks.openTaskTerminal(setup.userId, task.id);
 
+    assert.ok(Date.parse((await setup.store.sandboxRuns.get(task.runId))?.idleExpiresAt ?? staleIdleDeadline) > Date.now());
     assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, false);
     await assert.rejects(() => setup.services.tasks.openTaskTerminal(setup.userId, task.id), /already open/);
     setup.services.tasks.closeTaskTerminal(task.id);

@@ -186,6 +186,7 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
           const pendingInput:Array<{data:RawData;isBinary:boolean}>=[];
           let pendingInputBytes=0;
           const clearPendingInput=()=>{pendingInput.length=0;pendingInputBytes=0;};
+          const recordActivity=()=>{void services.tasks.recordTaskTerminalActivity(terminalTaskId!);};
           upstream.on("open",()=>{
             for(const frame of pendingInput){
               if(upstream.readyState!==WebSocket.OPEN)break;
@@ -193,8 +194,9 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             }
             clearPendingInput();
           });
-          upstream.on("message",(data,isBinary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
+          upstream.on("message",(data,isBinary)=>{recordActivity();if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
           client.on("message",(data,isBinary)=>{
+            recordActivity();
             if(upstream.readyState===WebSocket.OPEN){upstream.send(data,{binary:isBinary});return;}
             if(upstream.readyState!==WebSocket.CONNECTING)return;
             const frameBytes=rawDataByteLength(data);

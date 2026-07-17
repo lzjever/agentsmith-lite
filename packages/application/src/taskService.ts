@@ -270,6 +270,7 @@ export class BotifiedTaskPortError extends ProductError {
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
   private readonly occupiedTerminalTaskIds = new Set<string>();
+  private readonly terminalActivityRefreshAfter = new Map<string,number>();
   private readonly abortingTaskIds = new Set<string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
 
@@ -506,6 +507,7 @@ export class TaskService {
     try{
       const serviceKey=this.serviceKeyForTask(task);
       const state=await this.readRuntimeState(task,serviceKey);
+      await this.recordTaskTerminalActivity(task.id);
       return{baseUrl:state.baseUrl,serviceKey};
     }catch(error){
       this.occupiedTerminalTaskIds.delete(task.id);
@@ -515,6 +517,22 @@ export class TaskService {
 
   closeTaskTerminal(taskId:string):void{
     this.occupiedTerminalTaskIds.delete(taskId);
+    this.terminalActivityRefreshAfter.delete(taskId);
+  }
+
+  async recordTaskTerminalActivity(taskId:string):Promise<void>{
+    if(!this.occupiedTerminalTaskIds.has(taskId))return;
+    const now=new Date();
+    if((this.terminalActivityRefreshAfter.get(taskId)??0)>now.getTime())return;
+    const idleTimeoutMs=this.liveSandboxIdleTimeoutMs();
+    this.terminalActivityRefreshAfter.set(taskId,now.getTime()+Math.max(100,Math.min(30_000,idleTimeoutMs/4)));
+    try{
+      const task=await this.store.findTask(taskId);
+      if(!task||task.executionMode!=="live"||task.terminalReason||!isActiveTaskStatus(task.status))return;
+      await refreshSandboxRunActivity(this.store,task.runId,{idleTimeoutMs,now});
+    }catch{
+      this.terminalActivityRefreshAfter.delete(taskId);
+    }
   }
 
   async listTaskInputs(userId: string, taskId: string): Promise<TaskInputSnapshotEntry[]> {
