@@ -114,7 +114,7 @@ describe("context manager", () => {
     apiClient.saveContext = async () => { throw new ApiError(409, "Context changed elsewhere. Reload and try again."); };
     try {
       render(<ContextManager workspaceId="workspace_1" />);
-      await screen.findByRole("textbox", { name: "Key" });
+      fireEvent.change(await screen.findByRole("textbox", { name: "Content" }), { target: { value: "two" } });
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
       await screen.findByRole("alert");
       fireEvent.click(screen.getByRole("button", { name: "Reload latest" }));
@@ -129,6 +129,7 @@ describe("context manager", () => {
     apiClient.saveContext = async () => { throw new ApiError(403, "Forbidden"); };
     try {
       render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.change(await screen.findByRole("textbox", { name: "Content" }), { target: { value: "after" } });
       fireEvent.click(await screen.findByRole("button", { name: "Save" }));
       await screen.findByText("Context write permission changed. This scope is now read-only.");
       assert.equal(screen.queryByRole("button", { name: "Save" }), null);
@@ -146,9 +147,12 @@ describe("context manager", () => {
     try {
       render(<ContextManager workspaceId="workspace_1" />);
       const content = await screen.findByRole("textbox", { name: "Content" });
+      const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
       fireEvent.change(content, { target: { value: "after" } });
-      fireEvent.click(screen.getByRole("button", { name: "Save" }));
-      await waitFor(() => assert.equal((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled, false));
+      await waitFor(() => assert.equal(save.disabled, false));
+      fireEvent.click(save);
+      await waitFor(() => assert.equal(save.disabled, true));
       assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "after");
       assert.equal(reads, 1);
       assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
