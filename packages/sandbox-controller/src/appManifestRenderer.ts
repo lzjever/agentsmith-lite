@@ -103,6 +103,10 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 readinessProbe: webHealthProbe(webHealthPath),
                 livenessProbe: webHealthProbe(webHealthPath),
                 startupProbe: webHealthProbe(webHealthPath),
+                resources: {
+                  requests: { cpu: "50m", memory: "128Mi" },
+                  limits: { cpu: "500m", memory: "512Mi" }
+                },
                 env: [{ name: "APP_PUBLIC_BASE_URL", value: publicBaseUrl }]
               }
             ]
@@ -145,6 +149,10 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 readinessProbe: apiHealthProbe(apiHealthPath),
                 livenessProbe: apiHealthProbe(apiHealthPath),
                 startupProbe: apiHealthProbe(apiHealthPath),
+                resources: {
+                  requests: { cpu: "100m", memory: "256Mi" },
+                  limits: { cpu: "1", memory: "1Gi" }
+                },
                 envFrom: [
                   { configMapRef: { name: "agentsmith-lite-config" } },
                   { secretRef: { name: "agentsmith-lite-app-secrets" } }

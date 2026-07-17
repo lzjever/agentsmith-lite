@@ -35,6 +35,32 @@ describe("app manifest rendering", () => {
     }
   });
 
+  it("bounds the core API and Web containers for a single-node installation", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const apiDeployment = manifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
+    const webDeployment = manifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-web"
+    ) as DeploymentResource | undefined;
+    const api = apiDeployment?.spec.template.spec.containers.find((container) => container.name === "api");
+    const web = webDeployment?.spec.template.spec.containers.find((container) => container.name === "web");
+
+    assert.deepEqual(api?.resources, {
+      requests: { cpu: "100m", memory: "256Mi" },
+      limits: { cpu: "1", memory: "1Gi" }
+    });
+    assert.deepEqual(web?.resources, {
+      requests: { cpu: "50m", memory: "128Mi" },
+      limits: { cpu: "500m", memory: "512Mi" }
+    });
+  });
+
   it("requires explicit complete OIDC configuration for production manifests", () => {
     const baseInput = {
       namespace: "agentsmith",
@@ -791,6 +817,10 @@ interface DeploymentResource {
         containers: Array<{
           name: string;
           env?: Array<{ name: string; value: string }>;
+          resources?: {
+            requests: { cpu: string; memory: string };
+            limits: { cpu: string; memory: string };
+          };
           volumeMounts: Array<{ name?: string; mountPath: string; subPath?: string; readOnly?: boolean }>;
           readinessProbe?: HealthProbe;
           livenessProbe?: HealthProbe;
