@@ -105,6 +105,93 @@ describe("retained chat and overview behavior", () => {
     assert.equal((within(editDialog).getByRole("textbox", { name: "Message text" }) as HTMLTextAreaElement).value, "Recoverable message");
   });
 
+  it("removes a conversation that disappeared before its rename completed", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
+    let missing = false;
+    let threadReads = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => { threadReads += 1; return missing ? [] : threads; };
+    apiClient.chatMessages = async () => [];
+    apiClient.updateChatThread = async () => { missing = true; throw new ApiError(404, "Chat thread not found"); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Rename conversation" }));
+      fireEvent.change(await screen.findByRole("textbox", { name: "Conversation title" }), { target: { value: "Missing conversation" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+
+      await waitFor(() => assert.equal(threadReads, 2));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Rename conversation" }), null));
+      assert.equal(screen.queryByRole("button", { name: "Product Q&A" }), null);
+      assert.ok(screen.getByText("No conversations yet."));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("removes a message that disappeared before its edit completed", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, editChatMessage: apiClient.editChatMessage };
+    const target = { id: "message_missing", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original message", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    let missing = false;
+    let messageReads = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => { messageReads += 1; return missing ? [] : [target]; };
+    apiClient.editChatMessage = async () => { missing = true; throw new ApiError(404, "Chat message not found"); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit message" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Message text" }), { target: { value: "Missing update" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+      await waitFor(() => assert.equal(messageReads, 2));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Edit message" }), null));
+      assert.equal(screen.queryByText("Original message"), null);
+      assert.ok(screen.getByText("Start a conversation"));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("keeps an edit draft and retries against refreshed message history", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, editChatMessage: apiClient.editChatMessage };
+    const initial = { id: "message_conflict", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original message", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    let saved = initial;
+    const versions: number[] = [];
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [saved];
+    apiClient.editChatMessage = async (_projectId, _threadId, _messageId, input) => {
+      versions.push(input.expectedVersion);
+      if (versions.length === 1) {
+        saved = { ...saved, content: "Updated elsewhere", version: 2 };
+        throw new ApiError(409, "Chat history changed; reload and try again");
+      }
+      saved = { ...saved, content: input.content, version: 3 };
+      return saved;
+    };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit message" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Message text" }), { target: { value: "My revision" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+      const draft = await screen.findByRole("textbox", { name: "Message text" }) as HTMLTextAreaElement;
+      await waitFor(() => assert.deepEqual(versions, [1]));
+      await screen.findByText("Updated elsewhere");
+      await act(async () => { await Promise.resolve(); });
+      assert.equal(draft.value, "My revision");
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+      await waitFor(() => assert.deepEqual(versions, [1, 2]));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Edit message" }), null));
+      assert.ok(screen.getByText("My revision"));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {
     const original = apiClient.projectOverview;
     apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });

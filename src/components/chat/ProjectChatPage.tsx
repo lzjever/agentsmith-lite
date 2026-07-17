@@ -48,6 +48,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const threadLoadVersion = useRef(0);
   const messageLoadVersion = useRef(0);
   const loadedThreadId = useRef("");
+  const currentThreadId = useRef("");
   const draftingNewThread = useRef(false);
   const mutationKeys = useMutationKeys();
 
@@ -91,26 +92,29 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
-  const loadThreads = useCallback(async () => {
+  const loadThreads = useCallback(async (): Promise<ProjectChatThread[] | null> => {
     const version = ++threadLoadVersion.current;
     setThreadsStatus("loading");
     try {
       const savedThreads = await apiClient.chatThreads(projectId);
-      if (!active.current || version !== threadLoadVersion.current) return;
+      if (!active.current || version !== threadLoadVersion.current) return null;
       setThreads(savedThreads);
       setThreadId((current) => draftingNewThread.current
         ? ""
         : savedThreads.some((thread) => thread.id === current) ? current : (savedThreads[0]?.id ?? ""));
       setThreadsError("");
       setThreadsStatus("ready");
+      return savedThreads;
     } catch (reason) {
-      if (!active.current || version !== threadLoadVersion.current) return;
+      if (!active.current || version !== threadLoadVersion.current) return null;
       setThreadsError(message(reason));
       setThreadsStatus("error");
+      return null;
     }
   }, [projectId]);
 
   const loadMessages = useCallback(async (nextThreadId: string, quiet = false): Promise<ProjectChatMessage[] | null> => {
+    if (currentThreadId.current !== nextThreadId) return null;
     const version = ++messageLoadVersion.current;
     if (!nextThreadId) {
       loadedThreadId.current = "";
@@ -124,18 +128,20 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     if (!quiet) setMessagesStatus("loading");
     try {
       const saved = await apiClient.chatMessages(projectId, nextThreadId);
-      if (!active.current || version !== messageLoadVersion.current) return null;
+      if (!active.current || version !== messageLoadVersion.current || currentThreadId.current !== nextThreadId) return null;
       loadedThreadId.current = nextThreadId;
       setMessages(saved);
       setMessagesStatus("ready");
       return saved;
     } catch (reason) {
-      if (!active.current || version !== messageLoadVersion.current) return null;
+      if (!active.current || version !== messageLoadVersion.current || currentThreadId.current !== nextThreadId) return null;
       setMessagesError(message(reason));
       setMessagesStatus("error");
       return null;
     }
   }, [projectId]);
+
+  currentThreadId.current = threadId;
 
   useEffect(() => {
     void loadEndpoints();
@@ -224,6 +230,10 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-thread.update", identity);
       if (!active.current) return false;
+      if (reason instanceof ApiError && reason.status === 404) {
+        const saved = await loadThreads();
+        if (saved && !saved.some((thread) => thread.id === id)) return true;
+      }
       return failAction(reason);
     } finally {
       if (active.current) setThreadMutationBusy(false);
@@ -256,6 +266,10 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-thread.delete", id);
       if (!active.current) return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        const saved = await loadThreads();
+        if (saved && !saved.some((thread) => thread.id === id)) return;
+      }
       throw new Error(message(reason));
     } finally {
       if (active.current) setThreadMutationBusy(false);
@@ -320,13 +334,16 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       await apiClient.editChatMessage(projectId, threadId, target.id, { content, expectedVersion: target.version }, mutationKeys.key("chat-message.edit", identity));
       mutationKeys.complete("chat-message.edit", identity);
       if (!active.current) return false;
-      await loadMessages(threadId);
-      if (!active.current) return false;
+      if (!await loadMessages(target.threadId)) return false;
       toast.success("Message updated");
       return true;
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-message.edit", identity);
-      if (!active.current) return false;
+      if (!active.current || currentThreadId.current !== target.threadId) return false;
+      if (reason instanceof ApiError && (reason.status === 404 || reason.status === 409)) {
+        const saved = await loadMessages(target.threadId);
+        if (reason.status === 404 && saved && !saved.some((item) => item.id === target.id)) return true;
+      }
       return failAction(reason);
     }
   }
@@ -337,12 +354,15 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       await apiClient.deleteChatMessage(projectId, threadId, target.id, target.version, mutationKeys.key("chat-message.delete", identity));
       mutationKeys.complete("chat-message.delete", identity);
       if (!active.current) return;
-      await loadMessages(threadId);
-      if (!active.current) return;
+      if (!await loadMessages(target.threadId)) return;
       toast.success("Message deleted");
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-message.delete", identity);
-      if (!active.current) return;
+      if (!active.current || currentThreadId.current !== target.threadId) return;
+      if (reason instanceof ApiError && (reason.status === 404 || reason.status === 409)) {
+        const saved = await loadMessages(target.threadId);
+        if (reason.status === 404 && saved && !saved.some((item) => item.id === target.id)) return;
+      }
       throw new Error(message(reason));
     }
   }
