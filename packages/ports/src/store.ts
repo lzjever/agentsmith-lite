@@ -369,7 +369,7 @@ export interface ProductStore {
   createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
   listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
-  deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId">): Promise<boolean>;
+  deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
   createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule>;
   listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;
   updateProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule | null>;

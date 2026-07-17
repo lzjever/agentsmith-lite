@@ -63,6 +63,11 @@ export class ContextService {
     if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) {
       throw new ProductError("A context entry already uses that key", 409);
     }
+    if (existing) {
+      if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
+      if (existing.version !== input.expectedVersion) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing, contentType);
+    }
     const entry: ProjectContextEntry = {
       id: existing?.id ?? newId("ctx"),
       workspaceId: target.workspaceId,
@@ -77,13 +82,12 @@ export class ContextService {
       updatedAt: timestamp
     };
     if (!existing) return toView(await this.store.createProjectContextEntry(entry), contentType);
-    if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
     const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
     if (!updated) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
     return toView(updated, contentType);
   }
 
-  async delete(userId: string, target: ContextRequestTarget & { contextKey: string }): Promise<void> {
+  async delete(userId: string, target: ContextRequestTarget & { contextKey: string; expectedVersion: number }): Promise<void> {
     const normalized = normalizeTarget(target);
     await this.authorize(userId, normalized, "write");
     const contextKey = requireContextKey(target.contextKey);
@@ -94,8 +98,10 @@ export class ContextService {
       personalOwner(normalized.scope, userId)
     );
     const entry = entries.find((candidate) => candidate.contextKey === contextKey);
-    if (!entry || !(await this.store.deleteProjectContextEntry(entry))) {
-      throw new NotFoundError("Context entry not found");
+    if (!entry) throw new NotFoundError("Context entry not found");
+    if (!Number.isInteger(target.expectedVersion) || target.expectedVersion < 1) throw new ProductError("expectedVersion is required to delete context", 400);
+    if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) {
+      throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
     }
   }
 

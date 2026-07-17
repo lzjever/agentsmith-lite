@@ -257,7 +257,7 @@ export const apiClient = {
     return request<ContextList>(`/context?${query.toString()}`);
   },
   saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }) => json<ContextEntry>("/context", "PUT", input),
-  deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string }) => json<{ deleted: true }>("/context", "DELETE", input),
+  deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }) => json<{ deleted: true }>("/context", "DELETE", input),
   policy: (projectId: string) => request<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`),
   updatePolicy: (projectId: string, input: ProjectPolicyInput) =>
     json<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", input),

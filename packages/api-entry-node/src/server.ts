@@ -375,7 +375,7 @@ async function routeApi(
     }
     if (method === "DELETE") {
       const body = await readJson(req);
-      await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey) });
+      await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey), expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") });
       return sendJson(res, 200, { deleted: true });
     }
   }

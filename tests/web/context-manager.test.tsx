@@ -88,6 +88,7 @@ describe("context manager", () => {
       assert.equal(deleted.length, 0);
       fireEvent.click(screen.getByRole("button", { name: "Delete entry" }));
       await waitFor(() => assert.equal(deleted.length, 1));
+      assert.deepEqual(deleted[0], { workspaceId: "workspace_1", scope: "workspace_personal", contextKey: "mine", expectedVersion: 1 });
     } finally { apiClient.contexts = original.contexts; apiClient.deleteContext = original.deleteContext; }
   });
 
@@ -157,6 +158,30 @@ describe("context manager", () => {
       assert.equal(reads, 1);
       assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
       assert.equal(screen.queryByText("Context list unavailable."), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("ignores key padding and keeps entry navigation locked while saving", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const makeEntry = (id: string, content: string) => ({ id, workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_personal" as const, contextKey: id, content, contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" });
+    let finishSave: ((value: ReturnType<typeof makeEntry>) => void) | undefined;
+    apiClient.contexts = async () => ({ items: [makeEntry("first", "First"), makeEntry("second", "Second")], canWrite: true });
+    apiClient.saveContext = async () => new Promise((resolve) => { finishSave = resolve; });
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const key = await screen.findByRole("textbox", { name: "Key" }) as HTMLInputElement;
+      const content = screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+      fireEvent.change(key, { target: { value: "  first  " } });
+      assert.equal(save.disabled, true);
+
+      fireEvent.change(content, { target: { value: "Changed" } });
+      fireEvent.click(save);
+      await waitFor(() => assert.ok(finishSave));
+      assert.equal((screen.getByRole("button", { name: "second text" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("button", { name: "New context entry" }) as HTMLButtonElement).disabled, true);
+
+      await act(async () => finishSave!({ ...makeEntry("first", "Changed"), version: 2 }));
     } finally { Object.assign(apiClient, original); }
   });
 

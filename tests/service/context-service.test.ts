@@ -52,6 +52,22 @@ describe("context service", () => {
     assert.equal(renamed.contextKey, "notes");
     assert.equal(renamed.version, 2);
     await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: 1, contextKey: "notes", content: "stale", contentType: "text" }), status(409));
+    await assert.rejects(() => services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: 1 }), status(409));
+    assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items[0]?.version, 2);
+  });
+
+  it("does not create a new version for a normalized no-op update", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "noop-owner", email: "noop-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const created = await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", content: "one", contentType: "text" });
+
+    const unchanged = await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: created.version, contextKey: "  notes  ", content: "one", contentType: "text" });
+
+    assert.equal(unchanged.version, created.version);
+    assert.equal(unchanged.updatedAt, created.updatedAt);
+    assert.equal(unchanged.contextKey, "notes");
   });
 
   it("resolves effective agent context by key from broad shared defaults to personal project overrides", async () => {
