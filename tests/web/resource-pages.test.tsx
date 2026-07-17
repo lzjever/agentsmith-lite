@@ -45,7 +45,7 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("reuses a resource policy key after an unknown network result", async () => {
+  it("reuses a resource policy key until the request changes", async () => {
     const original = snapshotClient();
     const keys: string[] = [];
     apiClient.policy = async () => policy;
@@ -53,7 +53,7 @@ describe("project resource pages", () => {
     apiClient.endpoints = async () => [];
     apiClient.updatePolicy = (async (_projectId: string, input: ProjectPolicyInput, key: string) => {
       keys.push(key);
-      if (keys.length === 1) throw new Error("connection closed");
+      if (keys.length <= 2) throw new Error("connection closed");
       return { ...policy, ...input };
     }) as typeof apiClient.updatePolicy;
     try {
@@ -64,6 +64,10 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(keys.length, 2));
       assert.equal(keys[1], keys[0]);
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Active tasks" }), { target: { value: "4" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.equal(keys.length, 3));
+      assert.notEqual(keys[2], keys[1]);
     } finally { restoreClient(original); }
   });
 
@@ -486,7 +490,7 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
-  it("reuses an alert rule creation key after an unknown network result", async () => {
+  it("reuses an alert rule creation key until the request changes", async () => {
     const original = snapshotClient();
     const keys: string[] = [];
     let attempts = 0;
@@ -494,7 +498,7 @@ describe("project resource pages", () => {
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [];
     apiClient.endpoints = async () => [];
-    apiClient.createAlertRule = (async (_projectId: string, input: { name?: string; alertType: string; threshold?: number }, key: string) => { keys.push(key); if (++attempts === 1) throw new Error("connection closed"); return { id: "rule_created", projectId, name: input.name, alertType: input.alertType, metric: "active_tasks", condition: "greater_than_or_equal", threshold: input.threshold, windowSeconds: null, scope: { kind: "project" }, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt }; }) as typeof apiClient.createAlertRule;
+    apiClient.createAlertRule = (async (_projectId: string, input: { name?: string; alertType: string; threshold?: number }, key: string) => { keys.push(key); if (++attempts <= 2) throw new Error("connection closed"); return { id: "rule_created", projectId, name: input.name, alertType: input.alertType, metric: "active_tasks", condition: "greater_than_or_equal", threshold: input.threshold, windowSeconds: null, scope: { kind: "project" }, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt }; }) as typeof apiClient.createAlertRule;
     try {
       render(<AlertsPage projectId={projectId} />);
       const rulesTab = await screen.findByRole("tab", { name: "Rules" });
@@ -507,6 +511,10 @@ describe("project resource pages", () => {
       await waitFor(() => assert.equal(attempts, 2));
       assert.ok(keys[0]);
       assert.equal(keys[1], keys[0]);
+      fireEvent.change(screen.getByLabelText("Rule name"), { target: { value: "Retry rule updated" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+      await waitFor(() => assert.equal(attempts, 3));
+      assert.notEqual(keys[2], keys[1]);
     } finally { restoreClient(original); }
   });
 

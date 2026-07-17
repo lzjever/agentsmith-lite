@@ -195,7 +195,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setSaving(true);
     setFormError("");
     try {
-      const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input, mutationKeys.key("endpoint.update", editing.id)) : await apiClient.createEndpoint(projectId, input, mutationKeys.key("endpoint.create", projectId));
+      const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input, mutationKeys.requestKey("endpoint.update", editing.id, input)) : await apiClient.createEndpoint(projectId, input, mutationKeys.requestKey("endpoint.create", projectId, input));
       mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));

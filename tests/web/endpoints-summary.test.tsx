@@ -65,11 +65,11 @@ describe("endpoint dependencies", () => {
     } finally { Object.assign(apiClient,original); }
   });
 
-  it("reuses an endpoint creation key after an unknown network result", async () => {
+  it("reuses an endpoint creation key until the request changes", async () => {
     const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
     const keys:string[]=[];let attempts=0;
     apiClient.endpoints=async()=>[];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;
-    apiClient.createEndpoint=(async(_projectId:string,input:EndpointInput,key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{...endpoint,...input};}) as typeof apiClient.createEndpoint;
+    apiClient.createEndpoint=(async(_projectId:string,input:EndpointInput,key:string)=>{keys.push(key);if(++attempts<=2)throw new Error("connection closed");return{...endpoint,...input};}) as typeof apiClient.createEndpoint;
     try {
       render(<EndpointsPage projectId="project_1" />);
       fireEvent.click((await screen.findAllByRole("button",{name:"Create endpoint"}))[0]!);
@@ -82,6 +82,10 @@ describe("endpoint dependencies", () => {
       fireEvent.click(within(dialog).getByRole("button",{name:"Save"}));
       await waitFor(()=>assert.equal(attempts,2));
       assert.equal(keys[0],keys[1]);assert.ok(keys[0]);
+      fireEvent.change(within(dialog).getByLabelText("Model"),{target:{value:"updated-model"}});
+      fireEvent.click(within(dialog).getByRole("button",{name:"Save"}));
+      await waitFor(()=>assert.equal(attempts,3));
+      assert.notEqual(keys[2],keys[1]);
     } finally { Object.assign(apiClient,original); }
   });
 

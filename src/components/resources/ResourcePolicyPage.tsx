@@ -112,7 +112,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     setSaving(true);
     setError("");
     try {
-      const saved = await apiClient.updatePolicy(projectId, input, mutationKeys.key("project.policy.update", projectId));
+      const saved = await apiClient.updatePolicy(projectId, input, mutationKeys.requestKey("project.policy.update", projectId, input));
       mutationKeys.complete("project.policy.update", projectId);
       if (!active.current) return;
       setPolicy(saved);

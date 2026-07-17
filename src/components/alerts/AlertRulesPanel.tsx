@@ -102,8 +102,8 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     setFormError("");
     try {
       const saved = editing
-        ? await apiClient.updateAlertRule(projectId, editing.id, value, mutationKeys.key("alert-rule.update", `${editing.id}:form`))
-        : await apiClient.createAlertRule(projectId, value, mutationKeys.key("alert-rule.create", projectId));
+        ? await apiClient.updateAlertRule(projectId, editing.id, value, mutationKeys.requestKey("alert-rule.update", `${editing.id}:form`, value))
+        : await apiClient.createAlertRule(projectId, value, mutationKeys.requestKey("alert-rule.create", projectId, value));
       if (editing) mutationKeys.complete("alert-rule.update", `${editing.id}:form`);
       else mutationKeys.complete("alert-rule.create", projectId);
       if (!mounted.current) return;

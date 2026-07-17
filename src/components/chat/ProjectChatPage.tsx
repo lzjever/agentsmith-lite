@@ -185,7 +185,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     setThreadMutationBusy(true);
     setActionError("");
     try {
-      const created = await apiClient.createChatThread(projectId, draftEndpointId, mutationKeys.key("chat-thread.create", projectId));
+      const created = await apiClient.createChatThread(projectId, draftEndpointId, mutationKeys.requestKey("chat-thread.create", projectId, { endpointId: draftEndpointId }));
       mutationKeys.complete("chat-thread.create", projectId);
       if (!active.current) return false;
       setThreads((current) => orderedThreads([created, ...current]));

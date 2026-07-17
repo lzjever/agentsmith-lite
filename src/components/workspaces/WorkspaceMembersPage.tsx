@@ -141,7 +141,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     setBusyUserId("new");
     setMutationError(undefined);
     try {
-      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role, mutationKeys.key("workspace-member.add", workspaceId));
+      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role, mutationKeys.requestKey("workspace-member.add", workspaceId, { email: email.trim(), role }));
       mutationKeys.complete("workspace-member.add", workspaceId);
       if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);

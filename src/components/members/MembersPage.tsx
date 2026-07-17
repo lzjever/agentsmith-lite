@@ -158,7 +158,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setBusyUserId("new");
     setInviteError("");
     try {
-      const added = await apiClient.addMember(projectId, candidateUserId, role, mutationKeys.key("project-member.add", projectId));
+      const added = await apiClient.addMember(projectId, candidateUserId, role, mutationKeys.requestKey("project-member.add", projectId, { candidateUserId, role }));
       mutationKeys.complete("project-member.add", projectId);
       if (!mounted.current) return;
       setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
