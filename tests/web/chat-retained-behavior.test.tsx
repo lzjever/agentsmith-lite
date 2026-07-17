@@ -248,6 +248,34 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("reuses a conversation creation key after an unknown network result", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, createChatThread: apiClient.createChatThread };
+    const keys: string[] = [];
+    let attempts = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [];
+    apiClient.chatMessages = async () => [];
+    apiClient.createChatThread = (async (_projectId: string, _endpointId: string, key: string) => {
+      keys.push(key);
+      if (++attempts === 1) throw new Error("connection closed");
+      return threads[0]!;
+    }) as typeof apiClient.createChatThread;
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      const start = await screen.findByRole("button", { name: "Start conversation" });
+      await waitFor(() => assert.equal((start as HTMLButtonElement).disabled, false));
+      fireEvent.click(start);
+      await waitFor(() => assert.equal(attempts, 1));
+      fireEvent.click(start);
+      await waitFor(() => assert.equal(attempts, 2));
+      assert.equal(keys[0], keys[1]);
+      assert.ok(keys[0]);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("locks conversation directory controls while metadata is being updated", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
     let finishUpdate!: (value: ProjectChatThread) => void;

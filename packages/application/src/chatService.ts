@@ -8,6 +8,7 @@ import { ProjectPolicyService } from "./projectPolicyService.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { CredentialService } from "./credentialService.js";
 import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
+import { runIdempotentMutation } from "./idempotentMutation.js";
 import { ContextService } from "./contextService.js";
 
 export interface ProjectChatSendResult {
@@ -40,12 +41,12 @@ export class ChatService {
     return this.store.searchProjectChatThreads(projectId, query);
   }
 
-  async createThread(userId: string, projectId: string, endpointId: string): Promise<ProjectChatThread> {
-    requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireNonEmptyString(endpointId, "chat.endpointId")));
-    const timestamp = nowIso();
-    const thread = await this.store.createProjectChatThread({ id: newId("chat"), projectId, endpointId, title: null, pinnedAt: null, starredAt: null, deletedAt: null, createdAt: timestamp, updatedAt: timestamp });
-    await this.policies.recordOperation(projectId, userId, "chat.thread.create", "accepted", thread.id);
-    return thread;
+  async createThread(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<ProjectChatThread> {
+    const normalizedEndpointId=requireNonEmptyString(endpointId,"chat.endpointId");
+    requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId,projectId,normalizedEndpointId));
+    const create=async(id:string)=>{const existing=await this.store.findProjectChatThread(id);if(existing&&existing.projectId===projectId)return existing;const timestamp=nowIso();const thread=await this.store.createProjectChatThread({id,projectId,endpointId:normalizedEndpointId,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});await this.policies.recordOperation(projectId,userId,"chat.thread.create","accepted",thread.id);return thread;};
+    if(!idempotencyKey)return create(newId("chat"));
+    return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-thread.create",key:idempotencyKey,request:{projectId,endpointId:normalizedEndpointId},resourceId:newId("chat"),failureMessage:"Conversation could not be created",run:create});
   }
 
   async updateThreadMetadata(userId: string, projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<ProjectChatThread> {

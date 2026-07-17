@@ -238,7 +238,7 @@ export const apiClient = {
   deleteEndpoint: (projectId: string, endpointId: string) =>
     json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "DELETE"),
   chatThreads: (projectId: string, query?: string) => request<ProjectChatThread[]>(`/projects/${encodeURIComponent(projectId)}/chat/threads${query ? `?query=${encodeURIComponent(query)}` : ""}`),
-  createChatThread: (projectId: string, endpointId: string) => json<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads`, "POST", { endpointId }),
+  createChatThread: (projectId: string, endpointId: string, idempotencyKey: string) => jsonIdempotent<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads`, "POST", idempotencyKey, { endpointId }),
   updateChatThread: (projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean;starred?:boolean }) => json<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}`, "PATCH", input),
   deleteChatThread: (projectId: string, threadId: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}`, "DELETE"),
   chatMessages: (projectId: string, threadId: string) => request<ProjectChatMessage[]>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages`),

@@ -333,7 +333,7 @@ describe("api product workflow", () => {
     if (pathname.includes("/tasks") && ["POST","PATCH","DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
-    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname))) {
+    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
       headers["idempotency-key"] = crypto.randomUUID();
     }
     const requestInit: RequestInit = { method, headers };

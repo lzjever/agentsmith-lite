@@ -541,7 +541,7 @@ async function routeApi(
       if (!segments[6] && method === "POST") {
         const body = await readJson(req);
         assertOnlyKeys(body,["endpointId"]);
-        return sendJson(res, 200, await services.chat.createThread(user.id, projectId, asString(body.endpointId)));
+        return sendJson(res, 200, await services.chat.createThread(user.id, projectId, asString(body.endpointId), requireIdempotencyKey(req)));
       }
       if (segments[6] && !segments[7] && method === "PATCH") { const body=await readJson(req);assertOnlyKeys(body,["title","pinned","starred"]); return sendJson(res,200,await services.chat.updateThreadMetadata(user.id,projectId,segments[6],{...(Object.hasOwn(body,"title")?{title:body.title===null?null:asString(body.title)}:{}),...(Object.hasOwn(body,"pinned")?{pinned:asBoolean(body.pinned,"pinned")}:{}) ,...(Object.hasOwn(body,"starred")?{starred:asBoolean(body.starred,"starred")}:{})})); }
       if (segments[6] && !segments[7] && method === "DELETE") { await services.chat.deleteThread(user.id,projectId,segments[6]); return sendJson(res,200,{deleted:true}); }

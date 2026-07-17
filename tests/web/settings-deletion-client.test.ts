@@ -43,6 +43,22 @@ describe("settings deletion API client", () => {
     }
   });
 
+  it("sends an explicit idempotency key for chat thread creation", async () => {
+    const originalFetch = globalThis.fetch;
+    let key: string | null = null;
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url, "http://localhost"), init);
+      key = request.headers.get("idempotency-key");
+      return Response.json({ id: "chat_1" });
+    };
+    try {
+      await apiClient.createChatThread("project_1", "endpoint_1", "chat-thread-key");
+      assert.equal(key, "chat-thread-key");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("sends scoped delete requests with CSRF and preserves API error messages", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ url: string; method: string; csrf: string | null; idempotencyKey: string | null }> = [];

@@ -4,6 +4,7 @@ import { MessagesSquare, RefreshCw, X } from "lucide-react";
 import Link from "next/link";
 import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type ProjectChatMessage, type ProjectChatThread } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { Button } from "../ui/button";
@@ -48,6 +49,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const messageLoadVersion = useRef(0);
   const loadedThreadId = useRef("");
   const draftingNewThread = useRef(false);
+  const mutationKeys = useMutationKeys();
 
   useEffect(() => {
     active.current = true;
@@ -161,6 +163,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
 
   function beginNewThread() {
     if (threadMutationBusy) return;
+    mutationKeys.clear("chat-thread.create");
     draftingNewThread.current = true;
     ++messageLoadVersion.current;
     loadedThreadId.current = "";
@@ -176,13 +179,15 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     setThreadMutationBusy(true);
     setActionError("");
     try {
-      const created = await apiClient.createChatThread(projectId, draftEndpointId);
+      const created = await apiClient.createChatThread(projectId, draftEndpointId, mutationKeys.key("chat-thread.create", projectId));
+      mutationKeys.complete("chat-thread.create", projectId);
       if (!active.current) return false;
       setThreads((current) => orderedThreads([created, ...current]));
       draftingNewThread.current = false;
       setThreadId(created.id);
       return true;
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-thread.create", projectId);
       if (!active.current) return false;
       return failAction(reason);
     } finally {
@@ -194,6 +199,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     if (sending || id === threadId) return;
     const selected = threads.find((thread) => thread.id === id);
     if (!selected) return;
+    mutationKeys.clear("chat-thread.create");
     draftingNewThread.current = false;
     ++messageLoadVersion.current;
     setMessages([]);

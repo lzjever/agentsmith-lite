@@ -55,7 +55,8 @@ describe("project chat threads API", () => {
     assert.equal(missingCredentialProjection?.hasCredentialRef, false);
     assert.equal(missingCredentialProjection?.taskEligible, false);
     await store.deleteEndpoint(missingCredential.id);
-    const first = await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId });
+    const first = await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId }, "thread-create-replay");
+    assert.equal((await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId }, "thread-create-replay")).id, first.id);
     const second = await requestJson("POST", `/api/v1/projects/${projectId}/chat/threads`, { endpointId });
     await sendMessage(first.id, "first");
     const history = await requestJson("GET", `/api/v1/projects/${projectId}/chat/threads/${first.id}/messages`, undefined);
@@ -115,9 +116,9 @@ describe("project chat threads API", () => {
 
   it("updates thread titles and removes deleted threads from the list",async()=>{const thread=await requestJson("POST",`/api/v1/projects/${projectId}/chat/threads`,{endpointId});const renamed=await requestJson("PATCH",`/api/v1/projects/${projectId}/chat/threads/${thread.id}`,{title:"Retained title"});assert.equal(renamed.title,"Retained title");await requestJson("DELETE",`/api/v1/projects/${projectId}/chat/threads/${thread.id}`);const listed=await requestJson("GET",`/api/v1/projects/${projectId}/chat/threads`);assert.equal(listed.some((item:any)=>item.id===thread.id),false);});
 
-  async function requestJson(method: string, pathname: string, body?: unknown) { const result = await request(method, pathname, body); assert.equal(result.response.status, 200, `${method} ${pathname}: ${JSON.stringify(result.body)}`); return result.body as any; }
-  async function request(method: string, pathname: string, body?: unknown, session = cookie, token = csrf): Promise<{ response: Response; body: unknown }> {
-    const response = await fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(session ? { cookie: session } : {}), ...(["POST", "PATCH", "DELETE"].includes(method) && token ? { "x-csrf-token": token } : {}), ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  async function requestJson(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const result = await request(method, pathname, body, cookie, csrf, idempotencyKey); assert.equal(result.response.status, 200, `${method} ${pathname}: ${JSON.stringify(result.body)}`); return result.body as any; }
+  async function request(method: string, pathname: string, body?: unknown, session = cookie, token = csrf, idempotencyKey?: string): Promise<{ response: Response; body: unknown }> {
+    const response = await fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(session ? { cookie: session } : {}), ...(["POST", "PATCH", "DELETE"].includes(method) && token ? { "x-csrf-token": token } : {}), ...(method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname)) ? { "idempotency-key": idempotencyKey ?? crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { response, body: await response.json() };
   }
   async function sendMessage(threadId: string, content: string): Promise<void> {

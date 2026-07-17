@@ -8,6 +8,22 @@ import { ProductError } from "../../packages/domain/src/errors.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("ChatService", () => {
+  it("replays thread creation without duplicating the conversation", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([]) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, user.id, project.id);
+
+    const thread = await services.chat.createThread(user.id, project.id, endpoint.id, "chat-thread-key");
+    const replayed = await services.chat.createThread(user.id, project.id, endpoint.id, "chat-thread-key");
+
+    assert.equal(replayed.id, thread.id);
+    assert.deepEqual((await services.chat.listThreads(user.id, project.id)).map((item) => item.id), [thread.id]);
+    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "chat.thread.create").length, 1);
+  });
+
   it("requires project access, resolves the endpoint secret, and passes the resolved key to the client", async () => {
     const calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
     const services = createApplicationServices({

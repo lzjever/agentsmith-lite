@@ -49,7 +49,7 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.equal(listedUnavailable[0]?.taskEligible, false);
     const blockedThread = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/chat/threads`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken },
+      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": "blocked-thread-create" },
       body: JSON.stringify({ endpointId: endpoint.id })
     });
     assert.equal(blockedThread.status, 409);
