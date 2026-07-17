@@ -20,7 +20,9 @@ import { FetchOpenAICompatibleClient, type OpenAICompatibleClient } from "../../
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import type { OidcClientAdapter } from "./oidcClient.js";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
+
+const MAX_PENDING_TERMINAL_INPUT_BYTES = 64 * 1024;
 
 interface CommonApiServerOptions {
   port: number;
@@ -181,12 +183,36 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
           const release=()=>{if(released)return;released=true;services.tasks.closeTaskTerminal(terminalTaskId!);};
           const upstreamUrl=new URL("/v1/terminal/ws",target.baseUrl.replace(/^http/,"ws"));
           const upstream=new WebSocket(upstreamUrl,{headers:{authorization:`Bearer ${target.serviceKey}`}});
+          const pendingInput:Array<{data:RawData;isBinary:boolean}>=[];
+          let pendingInputBytes=0;
+          const clearPendingInput=()=>{pendingInput.length=0;pendingInputBytes=0;};
+          upstream.on("open",()=>{
+            for(const frame of pendingInput){
+              if(upstream.readyState!==WebSocket.OPEN)break;
+              upstream.send(frame.data,{binary:frame.isBinary});
+            }
+            clearPendingInput();
+          });
           upstream.on("message",(data,isBinary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
-          client.on("message",(data,isBinary)=>{if(upstream.readyState===WebSocket.OPEN)upstream.send(data,{binary:isBinary});});
-          upstream.on("close",()=>{release();client.close();});
-          client.on("close",()=>{release();upstream.close();});
-          client.on("error",()=>{release();upstream.close();client.close();});
-          upstream.on("error",()=>{release();if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
+          client.on("message",(data,isBinary)=>{
+            if(upstream.readyState===WebSocket.OPEN){upstream.send(data,{binary:isBinary});return;}
+            if(upstream.readyState!==WebSocket.CONNECTING)return;
+            const frameBytes=rawDataByteLength(data);
+            if(pendingInputBytes+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){
+              clearPendingInput();
+              release();
+              if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal input exceeded the connection buffer"}));
+              client.close(1009,"Terminal input buffer exceeded");
+              upstream.close();
+              return;
+            }
+            pendingInput.push({data,isBinary});
+            pendingInputBytes+=frameBytes;
+          });
+          upstream.on("close",()=>{clearPendingInput();release();client.close();});
+          client.on("close",()=>{clearPendingInput();release();upstream.close();});
+          client.on("error",()=>{clearPendingInput();release();upstream.close();client.close();});
+          upstream.on("error",()=>{clearPendingInput();release();if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
         });
       }catch{if(terminalAcquired&&terminalTaskId)services.tasks.closeTaskTerminal(terminalTaskId);socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");socket.destroy();}
     })();
@@ -209,6 +235,10 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
 }
 
 type Services = ReturnType<typeof createApplicationServices>;
+
+function rawDataByteLength(data:RawData):number{
+  return Array.isArray(data)?data.reduce((total,part)=>total+part.byteLength,0):data.byteLength;
+}
 
 interface AuthRouteContext {
   authMode: "builtin_admin" | "oidc";

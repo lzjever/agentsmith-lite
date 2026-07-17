@@ -396,6 +396,37 @@ describe("task interactions API", () => {
     await replacementClosed;
   });
 
+  it("forwards terminal input sent while the Botified socket is connecting", async () => {
+    terminalUpstream = new WebSocketServer({ port:0 });
+    await once(terminalUpstream, "listening");
+    const upstreamAddress = terminalUpstream.address();
+    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    const received = new Promise<string>((resolve) => {
+      terminalUpstream!.once("connection", (socket) => socket.once("message", (data) => resolve(String(data))));
+    });
+
+    const store = createLocalInMemoryProductStore();
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:()=>"api-service-key", store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal input", endpointId:auth.endpointId });
+    const task = await store.findTask(created.id as string); assert.ok(task);
+    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
+    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    await once(client, "open");
+    const frame = JSON.stringify({ op:"stdin", data:"ZWNobyByZWFkeQo=" });
+    client.send(frame);
+    const forwarded = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Terminal frame was dropped before upstream connected")), 1_000);
+      void received.then((value) => { clearTimeout(timeout); resolve(value); }, reject);
+    });
+    assert.equal(forwarded, frame);
+    const closed = once(client, "close");
+    client.close();
+    await closed;
+  });
+
   it("retains history while current endpoint, credential, and membership eligibility disable capabilities", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
