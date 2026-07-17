@@ -33,6 +33,32 @@ const { TaskTerminalPanel } = await import("../../src/components/tasks/TaskTermi
 afterEach(() => { cleanup(); sockets.length = 0; });
 
 describe("TaskDetailPage terminal occupancy", () => {
+  it("shows the retained execution and sandbox summary in task details", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const continued: Task = { ...task, sourceTaskId:"task_source", cleanupStatus:"pending" };
+    apiClient.taskDetail = async () => ({ task: continued, capabilities: available });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => snapshot(available);
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      await screen.findByRole("region", { name:"Task conversation workspace" });
+      fireEvent.click(screen.getByText("Task details"));
+
+      assert.ok(screen.getByText("Live sandbox"));
+      assert.ok(screen.getByText(task.endpointId));
+      assert.ok(screen.getByText(task.runId));
+      assert.ok(screen.getByText(task.sandbox.namespace));
+      assert.ok(screen.getByText("Pending"));
+      assert.equal(screen.getByRole("link", { name:"task_source" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks/task_source");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("reconnects while a newly created sandbox is still starting", async () => {
     render(<TaskTerminalPanel taskId="task_starting" />);
     await waitFor(() => assert.equal(sockets.length, 1));

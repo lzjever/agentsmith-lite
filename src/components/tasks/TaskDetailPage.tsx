@@ -208,7 +208,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       {terminalMounted ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} /></div> : null}
       {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
-    <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Task details</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.7fr)_minmax(0,1fr)]"><InputsSection taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} state={inputsState} error={inputsError} onRetry={loadInputs} /><div><h3 className="type-caption text-tertiary">Original prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
+    <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Task details</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(12rem,.6fr)_minmax(14rem,.7fr)_minmax(0,1fr)]"><TaskExecutionSummary task={task} basePath={basePath} /><InputsSection taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} state={inputsState} error={inputsError} onRetry={loadInputs} /><div><h3 className="type-caption text-tertiary">Original prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
     <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This removes the task from the product after its sandbox cleanup is complete." confirmText="Delete task" onConfirm={deleteTask} errorContext="Task could not be deleted" />
     <ConfirmationDialog open={cancelOpen} onOpenChange={setCancelOpen} title="Cancel task?" description="This ends the task and begins cleanup. Stop current turn only interrupts the active agent turn." confirmText="Cancel task" onConfirm={cancelTask} errorContext="Task could not be cancelled" />
   </PageLayout>;
@@ -230,6 +230,14 @@ function InputsSection({ taskId, inputs, selectedPaths, state, error, onRetry }:
   if (state === "loading" && inputs.length === 0) return <p className="py-6 text-center text-sm text-secondary">Loading task inputs...</p>;
   if (state === "error" && inputs.length === 0) return <SectionError title="Task inputs unavailable" message={error} onRetry={onRetry} />;
   return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskInputsPanel taskId={taskId} inputs={inputs} selectedPaths={selectedPaths} /></>;
+}
+
+function TaskExecutionSummary({ task, basePath }: { task: Task; basePath: string }) {
+  return <div><h3 className="type-caption text-tertiary">Execution</h3><dl className="mt-2 grid gap-2 text-sm"><TaskDetailValue label="Mode">{task.executionMode === "live" ? "Live sandbox" : "Dry run"}</TaskDetailValue><TaskDetailValue label="Endpoint"><span className="break-all font-mono text-xs">{task.endpointId}</span></TaskDetailValue><TaskDetailValue label="Run"><span className="break-all font-mono text-xs">{task.runId}</span></TaskDetailValue><TaskDetailValue label="Namespace"><span className="break-all font-mono text-xs">{task.sandbox.namespace}</span></TaskDetailValue>{task.cleanupStatus ? <TaskDetailValue label="Cleanup">{task.cleanupStatus.replaceAll("_", " ").replace(/^./, (value) => value.toUpperCase())}</TaskDetailValue> : null}{task.sourceTaskId ? <TaskDetailValue label="Continued from"><Link className="break-all font-mono text-xs text-foreground hover:underline" href={`${basePath}/${task.sourceTaskId}`}>{task.sourceTaskId}</Link></TaskDetailValue> : null}</dl></div>;
+}
+
+function TaskDetailValue({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2"><dt className="text-tertiary">{label}</dt><dd className="min-w-0 text-secondary">{children}</dd></div>;
 }
 
 function SectionError({ title, message: detail, onRetry }: { title: string; message: string; onRetry: () => Promise<void> }) {
