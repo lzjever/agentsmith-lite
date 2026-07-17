@@ -636,6 +636,7 @@ describe("project resource pages", () => {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
+      await screen.findByText("No audit events match this query.");
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
       assert.equal(queries.at(-1)?.resourceId, "alert_1");
       fireEvent.click(screen.getByRole("button", { name: "Clear instance" }));
@@ -651,6 +652,33 @@ describe("project resource pages", () => {
       assert.ok(screen.getAllByText("Ada Admin").length > 0);
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
+    } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
+  });
+
+  it("keeps linkable audit filters in the URL and visibly labels the time range", async () => {
+    const original = snapshotClient();
+    apiClient.audit = async () => ({ items: [], nextCursor: null });
+    try {
+      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
+      render(<AuditPage projectId={projectId} />);
+      await screen.findByText(/Showing events for alert instance/);
+
+      assert.ok(screen.getByText("From"));
+      assert.ok(screen.getByText("To"));
+
+      fireEvent.click(screen.getByRole("combobox", { name: "Resource type" }));
+      fireEvent.click(await screen.findByRole("option", { name: "task", exact: true }));
+      await waitFor(() => {
+        const query = new URL(window.location.href).searchParams;
+        assert.equal(query.get("resourceKind"), "task");
+        assert.equal(query.has("resourceId"), false);
+      });
+      await screen.findByText("No audit events match this query.");
+
+      fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
+      fireEvent.click(await screen.findByRole("option", { name: "chat.message.send" }));
+      assert.equal(new URL(window.location.href).searchParams.get("action"), "chat.message.send");
+      await screen.findByText("No audit events match this query.");
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
   });
 

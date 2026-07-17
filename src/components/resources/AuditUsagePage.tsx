@@ -264,6 +264,10 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             label="Action"
             value={action}
             onChange={(value) => {
+              const query = browserQuery();
+              if (value === "all") query.delete("action");
+              else query.set("action", value);
+              replaceBrowserQuery(query);
               setAction(value);
               reset();
             }}
@@ -282,30 +286,41 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             label="Resource type"
             value={kind}
             onChange={(value) => {
+              const query = browserQuery();
+              if (value === "all") query.delete("resourceKind");
+              else query.set("resourceKind", value);
+              query.delete("resourceId");
+              replaceBrowserQuery(query);
               setKind(value);
               setResourceId("");
               reset();
             }}
             values={kinds}
           />
-          <Input
-            aria-label="From timestamp"
-            type="datetime-local"
-            value={from}
-            onChange={(event) => {
-              setFrom(event.target.value);
-              reset();
-            }}
-          />
-          <Input
-            aria-label="To timestamp"
-            type="datetime-local"
-            value={to}
-            onChange={(event) => {
-              setTo(event.target.value);
-              reset();
-            }}
-          />
+          <div className="grid gap-1">
+            <span className="text-xs text-secondary">From</span>
+            <Input
+              aria-label="From timestamp"
+              type="datetime-local"
+              value={from}
+              onChange={(event) => {
+                setFrom(event.target.value);
+                reset();
+              }}
+            />
+          </div>
+          <div className="grid gap-1">
+            <span className="text-xs text-secondary">To</span>
+            <Input
+              aria-label="To timestamp"
+              type="datetime-local"
+              value={to}
+              onChange={(event) => {
+                setTo(event.target.value);
+                reset();
+              }}
+            />
+          </div>
         </div>
         {state === "loading" ? (
           <PageState state="loading">Loading audit events...</PageState>
@@ -382,20 +397,23 @@ function Filter({
   values: readonly string[];
 }) {
   return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger aria-label={label}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {values.map((item) => (
-          <SelectItem value={item} key={item}>
-            {item === "all"
-              ? `All ${label.toLowerCase()}s`
-              : item.replaceAll("_", " ")}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="grid gap-1">
+      <span className="text-xs text-secondary">{label}</span>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label={label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {values.map((item) => (
+            <SelectItem value={item} key={item}>
+              {item === "all"
+                ? `All ${label.toLowerCase()}s`
+                : item.replaceAll("_", " ")}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
