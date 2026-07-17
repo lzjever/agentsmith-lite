@@ -60,6 +60,24 @@ describe("task list controls", () => {
     assert.ok(screen.getByRole("checkbox", { name: "Attach brief.md" }));
   });
 
+  it("locks task input navigation and selection while creation is busy", async () => {
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    const files: ProjectFile[] = [
+      { name: "reports", path: "files/reports", type: "directory", updatedAt: "x" },
+      { name: "brief.md", path: "files/brief.md", type: "file", size: 12, mediaType: "text/markdown", updatedAt: "x" },
+    ];
+    const props = { projectId: "project_1", endpoints: [endpoint], projectFiles: files, projectFilesLoading: false, open: true, onClose: () => undefined, onCreate: async () => undefined };
+    const view = render(<TaskCreateDialog {...props} saving={false} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Attach brief.md" }));
+
+    view.rerender(<TaskCreateDialog {...props} saving />);
+
+    for (const button of [screen.getByRole("button", { name: "files" }), screen.getByRole("button", { name: "reports" }), screen.getByTitle("Remove files/brief.md")]) {
+      assert.equal((button as HTMLButtonElement).disabled, true);
+    }
+    assert.equal((screen.getByRole("checkbox", { name: "Attach brief.md" }) as HTMLInputElement).disabled, true);
+  });
+
   it("reuses pending keys for task input uploads and URL notes", async () => {
     const original = { uploadFile: apiClient.uploadFile, createTaskUrlInput: apiClient.createTaskUrlInput, files: apiClient.files };
     const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
