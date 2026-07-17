@@ -408,6 +408,22 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("refreshes an alert instance that changed before acknowledgement", async () => {
+    const original = snapshotClient();
+    const active: ProjectAlert = { id:"alert_changed",projectId,type:"task_failure",status:"active",deliveryStatus:"delivered",createdAt:policy.createdAt,updatedAt:policy.updatedAt,resolvedAt:null,dismissedAt:null };
+    let reads=0;
+    apiClient.alerts=async()=>++reads===1?[active]:[{...active,status:"resolved",resolvedAt:policy.updatedAt}];
+    apiClient.projectCapabilities=async()=>capabilities;
+    apiClient.acknowledgeAlert=async()=>{throw new ApiError(404,"Active project alert not found");};
+    try {
+      render(<AlertsPage projectId={projectId}/>);
+      fireEvent.click(await screen.findByRole("button",{name:"Acknowledge alert"}));
+      await waitFor(()=>assert.equal(reads,2));
+      assert.ok(screen.getByText("resolved"));
+      assert.equal(screen.queryByRole("button",{name:"Retry"}),null);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps alerts readable when management access was removed", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_read_only", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };

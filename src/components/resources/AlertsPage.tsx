@@ -109,11 +109,13 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     const request = ++loadRequest.current;
     try {
       const loaded = await apiClient.alerts(projectId);
-      if (!mounted.current || request !== loadRequest.current) return;
+      if (!mounted.current || request !== loadRequest.current) return false;
       setAlerts(loaded);
+      return true;
     } catch (cause) {
-      if (!mounted.current || request !== loadRequest.current) return;
+      if (!mounted.current || request !== loadRequest.current) return false;
       setError(cause instanceof Error ? cause.message : "Alert instances could not be refreshed.");
+      return false;
     }
   }, [projectId]);
   useEffect(() => {
@@ -159,6 +161,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError) mutationKeys.complete("project.alert.transition", `${alert.id}:${status}`);
+      if (await recoverChangedInstance(cause)) return;
       forbidden(cause);
       throw cause;
     } finally {
@@ -196,6 +199,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError) mutationKeys.complete(action === "ack" ? "project.alert.acknowledge" : "project.alert.silence", identity);
+      if (await recoverChangedInstance(cause)) return;
       if (!forbidden(cause)) setRetry({ alert, action, ...(silencedUntil === undefined ? {} : { silencedUntil }) });
     } finally {
       if (mounted.current) setBusyId(null);
@@ -205,6 +209,15 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
     setAlerts((current) =>
       current.map((item) => (item.id === saved.id ? saved : item)),
     );
+  }
+  async function recoverChangedInstance(cause: unknown) {
+    if (!(cause instanceof ApiError) || cause.status !== 404 || cause.message !== "Active project alert not found") return false;
+    setRetry(null);
+    setDismiss(null);
+    setError("");
+    const refreshed = await refreshInstances();
+    if (mounted.current && refreshed) toast.error("Alert changed elsewhere. Latest state loaded.");
+    return true;
   }
   function revokeAccess(cause?: unknown) {
     mutationKeys.clear("project.alert.transition");
@@ -302,7 +315,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
             />
           </TabsContent>
           <TabsContent value="rules">
-            <AlertRulesPanel projectId={projectId} canManage={canManage} onAccessDenied={revokeAccess} onInstancesChanged={refreshInstances} />
+            <AlertRulesPanel projectId={projectId} canManage={canManage} onAccessDenied={revokeAccess} onInstancesChanged={async () => { await refreshInstances(); }} />
           </TabsContent>
         </Tabs>
       ) : null}
