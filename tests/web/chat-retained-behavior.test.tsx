@@ -51,7 +51,8 @@ describe("retained chat and overview behavior", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Conversation title" }), { target: { value: "Architecture review" } });
     assert.equal(saveTitle.disabled, false);
     fireEvent.click(saveTitle);
-    assert.deepEqual(renamed, [["chat_1", "Architecture review"]]);
+    await waitFor(() => assert.deepEqual(renamed, [["chat_1", "Architecture review"]]));
+    await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Rename conversation" }), null));
     fireEvent.click(screen.getByRole("button", { name: "Delete conversation" }));
     await screen.findByRole("alertdialog", { name: "Delete conversation" });
     fireEvent.click(screen.getAllByRole("button", { name: "Delete conversation" }).at(-1)!);
@@ -82,6 +83,26 @@ describe("retained chat and overview behavior", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete message" }));
     assert.match((await within(dialog).findByRole("alert")).textContent ?? "", /Message could not be deleted: Message changed/);
     assert.ok(screen.getByRole("alertdialog", { name: "Delete message" }));
+  });
+
+  it("keeps rename and edit drafts open when their mutations fail", async () => {
+    const thread = render(<ChatThreadRail threads={threads} endpoints={[endpoint]} selectedThreadId="chat_1" disabled={false} onNewThread={() => undefined} onSelect={() => undefined} onRename={async () => false} onPin={() => undefined} onStar={() => undefined} onDelete={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Rename conversation" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Conversation title" }), { target: { value: "Recoverable title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+    const renameDialog = await screen.findByRole("dialog", { name: "Rename conversation" });
+    assert.match((await within(renameDialog).findByRole("alert")).textContent ?? "", /could not be renamed/i);
+    assert.equal((within(renameDialog).getByRole("textbox", { name: "Conversation title" }) as HTMLInputElement).value, "Recoverable title");
+    thread.unmount();
+
+    const target = { id: "message_1", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    render(<ChatMessageList empty={false} sending={false} messages={[target]} onEdit={async () => false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message text" }), { target: { value: "Recoverable message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+    const editDialog = await screen.findByRole("dialog", { name: "Edit message" });
+    assert.match((await within(editDialog).findByRole("alert")).textContent ?? "", /could not be updated/i);
+    assert.equal((within(editDialog).getByRole("textbox", { name: "Message text" }) as HTMLTextAreaElement).value, "Recoverable message");
   });
 
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {

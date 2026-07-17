@@ -198,15 +198,16 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     setActionError("");
   }
 
-  async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }) {
+  async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<boolean> {
     try {
       const saved = await apiClient.updateChatThread(projectId, id, input);
-      if (!active.current) return;
+      if (!active.current) return false;
       setThreads((current) => orderedThreads(current.map((thread) => thread.id === id ? saved : thread)));
       setActionError("");
+      return true;
     } catch (reason) {
-      if (!active.current) return;
-      failAction(reason);
+      if (!active.current) return false;
+      return failAction(reason);
     }
   }
 
@@ -288,16 +289,17 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     }
   }
 
-  async function editMessage(target: ProjectChatMessage, content: string) {
+  async function editMessage(target: ProjectChatMessage, content: string): Promise<boolean> {
     try {
       await apiClient.editChatMessage(projectId, threadId, target.id, { content, expectedVersion: target.version });
-      if (!active.current) return;
+      if (!active.current) return false;
       await loadMessages(threadId);
-      if (!active.current) return;
+      if (!active.current) return false;
       toast.success("Message updated");
+      return true;
     } catch (reason) {
-      if (!active.current) return;
-      failAction(reason);
+      if (!active.current) return false;
+      return failAction(reason);
     }
   }
 
@@ -381,7 +383,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     onRetry={() => void loadThreads()}
     onSelect={(id) => { selectThread(id); if (mobile) setThreadSheetOpen(false); }}
     onNewThread={() => { beginNewThread(); if (mobile) setThreadSheetOpen(false); }}
-    onRename={(id, title) => void updateThread(id, { title })}
+    onRename={(id, title) => updateThread(id, { title })}
     onPin={(id, pinned) => void updateThread(id, { pinned })}
     onStar={(id, starred) => void updateThread(id, { starred })}
     onDelete={removeThread}
@@ -414,7 +416,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           error={messagesStatus === "error" ? messagesError : ""}
           disabled={!canSend || !historyReady}
           onReload={() => void loadMessages(threadId)}
-          onEdit={(target, content) => void editMessage(target, content)}
+          onEdit={editMessage}
           onDelete={deleteMessage}
           onBranch={(target) => void branchMessage(target)}
           onRetry={(target) => void retryMessage(target)}
