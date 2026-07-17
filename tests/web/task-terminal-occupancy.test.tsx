@@ -176,6 +176,35 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("invalidates retained artifacts when a refresh discovers access was removed", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts };
+    const completed: Task = { ...task, status: "completed", terminalReason: "completed", artifactProjectionStatus: "drained", cleanupStatus: "completed" };
+    const artifact: TaskArtifact = { id: "artifact_1", taskId: task.id, fileId: "file_1", name: "result.txt", bytes: 12, mediaType: "text/plain", createdAt: "2026-07-14T00:01:00.000Z" };
+    let taskReads = 0;
+    let artifactReads = 0;
+    apiClient.taskDetail = async () => {
+      taskReads += 1;
+      if (taskReads === 1) return { task: completed, capabilities: { ...available, cancelTask: false, openTerminal: false } };
+      throw new ApiError(403, "Project access denied");
+    };
+    apiClient.taskArtifacts = async () => {
+      artifactReads += 1;
+      if (artifactReads === 1) return [artifact];
+      throw new ApiError(403, "Project access denied");
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
+      await screen.findByRole("link", { name: "Download result.txt" });
+      fireEvent.click(screen.getByRole("button", { name: "Refresh artifacts" }));
+
+      assert.equal((await screen.findByRole("alert")).textContent, "Project access denied");
+      assert.equal(screen.queryByRole("link", { name: "Download result.txt" }), null);
+      assert.equal(taskReads, 2);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("rejects a task projected for a different project before loading child resources", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs };
     let artifactReads = 0;

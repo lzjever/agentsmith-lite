@@ -100,10 +100,14 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       if (!mounted.current || version !== artifactsLoadVersion.current) return;
       setArtifactsError(message(reason));
       setArtifactsState("error");
+      if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+        setArtifacts([]);
+        await loadTask(true);
+      }
     } finally {
       if (mounted.current && version === artifactsLoadVersion.current) setRefreshingArtifacts(false);
     }
-  }, [taskId]);
+  }, [loadTask, taskId]);
 
   const loadInputs = useCallback(async () => {
     const version = ++inputsLoadVersion.current;
@@ -118,8 +122,12 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       if (!mounted.current || version !== inputsLoadVersion.current) return;
       setInputsError(message(reason));
       setInputsState("error");
+      if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+        setInputs([]);
+        await loadTask(true);
+      }
     }
-  }, [taskId]);
+  }, [loadTask, taskId]);
 
   useEffect(() => {
     mounted.current = true;
