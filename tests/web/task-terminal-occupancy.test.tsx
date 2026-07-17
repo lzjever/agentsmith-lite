@@ -133,6 +133,23 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("rejects a task projected for a different project before loading child resources", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs };
+    let artifactReads = 0;
+    const wrongTask = { ...task, workspaceId: "workspace_other", projectId: "project_other" };
+    apiClient.taskDetail = async () => ({ task: wrongTask, capabilities: available });
+    apiClient.taskArtifacts = async () => { artifactReads += 1; return []; };
+    apiClient.taskInputs = async () => [];
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
+      assert.match((await screen.findByRole("alert")).textContent ?? "", /does not belong to this project/i);
+      assert.equal(artifactReads, 0);
+      assert.equal(screen.queryByText(`Active · ${task.id}`), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the latest task state when an older refresh finishes last", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts };
     const completed: Task = { ...task, status: "completed", terminalReason: "completed", artifactProjectionStatus: "complete", cleanupStatus: "complete", updatedAt: "2026-07-14T00:02:00.000Z" };

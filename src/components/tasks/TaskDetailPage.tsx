@@ -65,6 +65,9 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     try {
       const detail = await apiClient.taskDetail(taskId);
       if (!mounted.current || version !== taskLoadVersion.current) return;
+      if (detail.task.id !== taskId || detail.task.workspaceId !== workspaceId || detail.task.projectId !== projectId) {
+        throw new ApiError(404, "This task does not belong to this project.");
+      }
       setTask(detail.task);
       applyCapabilities(detail.capabilities);
       setTaskState("ready");
@@ -73,7 +76,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       setTaskError(message(reason));
       if (!quiet) setTaskState("error");
     }
-  }, [applyCapabilities, taskId]);
+  }, [applyCapabilities, projectId, taskId, workspaceId]);
 
   const loadArtifacts = useCallback(async (quiet = false) => {
     const version = ++artifactsLoadVersion.current;
@@ -120,11 +123,11 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     void loadTask();
   }, [loadTask]);
   useEffect(() => {
-    void loadArtifacts();
-  }, [loadArtifacts]);
+    if (taskState === "ready") void loadArtifacts();
+  }, [loadArtifacts, taskState]);
   useEffect(() => {
-    if (!artifactsOnly) void loadInputs();
-  }, [artifactsOnly, loadInputs]);
+    if (taskState === "ready" && !artifactsOnly) void loadInputs();
+  }, [artifactsOnly, loadInputs, taskState]);
   useEffect(() => {
     if (!task || !taskNeedsRefresh(task)) return;
     const finalizing = taskFinalizationPresentation(task) !== null;
