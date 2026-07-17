@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskCapabilities } from "../../lib/api/client";
 import { ApiError, apiClient, type Task, type TaskArtifact, type TaskInput } from "../../lib/api/client";
+import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -173,7 +174,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
       mutationKeys.complete("task-delete", taskId);
       if (!mounted.current) return;
-      window.location.assign(basePath);
+      window.location.assign(appPath(basePath));
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError && reason.status === 403) {

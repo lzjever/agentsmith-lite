@@ -3,6 +3,7 @@
 import { Archive, Copy, Ellipsis, Pencil, RotateCcw } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, apiClient, type Task, type TaskCapabilities } from "../../lib/api/client";
+import { appPath } from "../../lib/navigation/app-path";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
@@ -63,7 +64,7 @@ export function TaskLifecycleActions({ task, capabilities, basePath, onRefresh }
         ? await apiClient.retryTask(task.id, mutationKeys.key("task-retry", task.id))
         : await apiClient.duplicateTask(task.id, mutationKeys.key("task-duplicate", task.id));
       mutationKeys.complete(action === "retry" ? "task-retry" : "task-duplicate", task.id);
-      window.location.assign(`${basePath}/${created.id}`);
+      window.location.assign(appPath(`${basePath}/${created.id}`));
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 403) await onRefresh();
       toast.error(message(reason, action === "retry" ? "Task could not be retried." : "Task could not be duplicated."));
