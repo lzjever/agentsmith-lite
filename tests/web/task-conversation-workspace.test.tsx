@@ -99,10 +99,36 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("reports an earlier history failure and lets the user retry it", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    let reads = 0;
+    apiClient.getTaskInteractions = async (_taskId, cursor) => {
+      if (!cursor) return { ...snapshot, nextPageCursor:"older_1", hasMoreBefore:true };
+      reads += 1;
+      if (reads === 1) throw new Error("Earlier history is unavailable");
+      return { ...snapshot, items:[interaction], streamCursor:"older_cursor" };
+    };
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
+    };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name:"Load earlier messages" }));
+      assert.ok(await screen.findByText("Earlier history is unavailable"));
+      fireEvent.click(screen.getByRole("button", { name:"Load earlier messages" }));
+      assert.ok(await screen.findByText("Earlier message"));
+      assert.equal(screen.queryByText("Earlier history is unavailable"), null);
+      assert.equal(reads, 2);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
 });
 
 const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false };
 const snapshot: TaskInteractionSnapshot = { items: [], nextPageCursor: null, hasMoreBefore: false, streamCursor: "cursor_1", historyStatus: "complete", queuedMessages: [], runState: "idle", runtimeReachability: "reachable", lastSyncedAt: "2026-07-15T00:00:00.000Z", capabilities };
+const interaction: TaskInteractionSnapshot["items"][number] = { id:"message_older", revision:1, taskId:"task_1", kind:"assistant_message", title:"Assistant", body:"Earlier message", contentMode:"full", occurredAt:"2026-07-14T00:00:00.000Z", updatedAt:"2026-07-14T00:00:00.000Z", status:"completed" };
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

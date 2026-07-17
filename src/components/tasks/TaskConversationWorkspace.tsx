@@ -29,6 +29,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
   const [error, setError] = useState("");
   const [newActivity, setNewActivity] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const [aborting, setAborting] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
 
@@ -91,11 +92,14 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
     const previousTop = element?.scrollTop ?? 0;
     loadingEarlierRef.current = true;
     setLoadingEarlier(true);
+    setHistoryError("");
     try {
       const older = await apiClient.getTaskInteractions(taskId, snapshot.nextPageCursor);
       setSnapshot((current) => current ? { ...older, items: current.items, queuedMessages: current.queuedMessages, streamCursor: current.streamCursor, runState: current.runState, runtimeReachability: current.runtimeReachability, historyStatus: current.historyStatus, lastSyncedAt: current.lastSyncedAt, capabilities: current.capabilities } : older);
       setItems((current) => upsertTaskInteractions(current, older.items));
       requestAnimationFrame(() => { if (element) element.scrollTop = retainedHistoryScrollTop(previousTop, previousHeight, element.scrollHeight); });
+    } catch (reason) {
+      setHistoryError(reason instanceof Error ? reason.message : "Earlier conversation history could not be loaded.");
     } finally { loadingEarlierRef.current = false; setLoadingEarlier(false); }
   }
 
@@ -152,7 +156,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
   function showNewActivity() { const element = viewport.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" }); setNewActivity(false); }
 
   if (!snapshot) return <section className="grid h-full min-h-0 flex-1 place-items-center border border-border bg-surface-low px-5">{error ? <div className="max-w-md text-center" role="alert"><CircleAlert className="mx-auto size-5 text-error" /><p className="mt-2 text-sm font-medium text-foreground">Conversation could not be loaded.</p><p className="mt-1 break-words text-sm text-secondary">{error}</p><Button className="mt-4" variant="quiet" size="sm" onClick={retry}><RefreshCw size={14} />Retry</Button></div> : <p className="text-sm text-secondary">Loading conversation...</p>}</section>;
-  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace"><TaskRunStatus runState={snapshot.runState} capabilities={snapshot.capabilities} aborting={aborting} onAbort={abort} /><TaskConnectionNotice connection={connection} historyStatus={snapshot.historyStatus} runtimeReachability={snapshot.runtimeReachability} error={error} onRetry={retry} /><div ref={viewport} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5" onScroll={onScroll}>{snapshot.hasMoreBefore ? <div className="mb-4 text-center"><Button variant="quiet" size="sm" disabled={loadingEarlier} onClick={() => void loadEarlier()}>{loadingEarlier ? "Loading..." : "Load earlier messages"}</Button></div> : null}<TaskInteractionList taskId={taskId} items={items} preview={preview} basePath={basePath} onStopWork={stopWork} /></div>{newActivity ? <div className="shrink-0 border-t border-border bg-background py-2 text-center"><Button size="sm" onClick={showNewActivity}><ChevronUp size={14} />New activity</Button></div> : null}<TaskComposer capabilities={snapshot.capabilities} queuedMessages={snapshot.queuedMessages} busy={aborting} onSend={send} onUpdateQueued={updateQueued} onDeleteQueued={deleteQueued} /></section>;
+  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace"><TaskRunStatus runState={snapshot.runState} capabilities={snapshot.capabilities} aborting={aborting} onAbort={abort} /><TaskConnectionNotice connection={connection} historyStatus={snapshot.historyStatus} runtimeReachability={snapshot.runtimeReachability} error={error} onRetry={retry} /><div ref={viewport} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5" onScroll={onScroll}>{snapshot.hasMoreBefore ? <div className="mb-4 text-center">{historyError ? <p className="mb-2 text-sm text-error" role="alert">{historyError}</p> : null}<Button variant="quiet" size="sm" disabled={loadingEarlier} onClick={() => void loadEarlier()}>{loadingEarlier ? "Loading..." : "Load earlier messages"}</Button></div> : null}<TaskInteractionList taskId={taskId} items={items} preview={preview} basePath={basePath} onStopWork={stopWork} /></div>{newActivity ? <div className="shrink-0 border-t border-border bg-background py-2 text-center"><Button size="sm" onClick={showNewActivity}><ChevronUp size={14} />New activity</Button></div> : null}<TaskComposer capabilities={snapshot.capabilities} queuedMessages={snapshot.queuedMessages} busy={aborting} onSend={send} onUpdateQueued={updateQueued} onDeleteQueued={deleteQueued} /></section>;
 }
 
 function applyStreamEvent(event: TaskInteractionStreamEvent, context: { setItems: Dispatch<SetStateAction<TaskInteractionItem[]>>; setPreview: Dispatch<SetStateAction<AssistantPreview>>; setSnapshot: Dispatch<SetStateAction<TaskInteractionSnapshot | undefined>>; setConnection: Dispatch<SetStateAction<ConnectionState>>; setError: Dispatch<SetStateAction<string>>; setNewActivity: Dispatch<SetStateAction<boolean>>; onCapabilities: (capabilities: TaskCapabilities) => void; onRunState: ((runState: TaskInteractionSnapshot["runState"]) => void) | undefined; onArtifactPublished: () => void; authoritativeStateVersion: MutableRefObject<number>; streamCursor: MutableRefObject<string | undefined>; viewport: RefObject<HTMLDivElement | null> }) {
