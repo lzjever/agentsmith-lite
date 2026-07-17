@@ -15,6 +15,8 @@ export function TaskComposer({ capabilities, queuedMessages, busy, onSend, onUpd
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const nextEdit = editDraft.trim();
+  const editChanged = Boolean(editing) && nextEdit !== editing?.content.trim();
 
   async function submit() {
     if (!draft.trim() || busy || submitting || !capabilities.sendMessage) return;
@@ -23,9 +25,9 @@ export function TaskComposer({ capabilities, queuedMessages, busy, onSend, onUpd
     try { await onSend(draft.trim()); setDraft(""); } catch (reason) { setError(errorMessage(reason)); } finally { setSubmitting(false); }
   }
   async function saveEdit() {
-    if (!editing || !editDraft.trim()) return;
+    if (!editing || !nextEdit || !editChanged) return;
     setSaving(true); setError("");
-    try { await onUpdateQueued(editing.id, editDraft.trim()); setEditing(undefined); } catch (reason) { setError(errorMessage(reason)); } finally { setSaving(false); }
+    try { await onUpdateQueued(editing.id, nextEdit); setEditing(undefined); } catch (reason) { setError(errorMessage(reason)); } finally { setSaving(false); }
   }
   async function remove() { if (removing) await onDeleteQueued(removing.id); setRemoving(undefined); }
 
@@ -33,7 +35,7 @@ export function TaskComposer({ capabilities, queuedMessages, busy, onSend, onUpd
     {queuedMessages.length ? <ul className="mb-3 max-h-36 overflow-y-auto divide-y divide-border border-y border-border">{queuedMessages.map((message) => <li key={message.id} className="flex min-w-0 items-start justify-between gap-3 py-2.5"><div className="min-w-0"><p className="break-words text-sm text-foreground">{message.content}</p><p className="mt-1 font-mono text-[10px] uppercase text-tertiary">{message.deliveryStatus.replaceAll("_", " ")}</p></div><div className="flex shrink-0 gap-1">{capabilities.editQueuedMessage && message.editable ? <Button variant="quiet" size="icon" aria-label="Edit queued message" title="Edit queued message" onClick={() => { setEditing(message); setEditDraft(message.content); setError(""); }}><Pencil size={15} /></Button> : null}{capabilities.editQueuedMessage && message.deletable ? <Button variant="quiet" size="icon" aria-label="Delete queued message" title="Delete queued message" onClick={() => setRemoving(message)}><Trash2 size={15} /></Button> : null}</div></li>)}</ul> : null}
     {error ? <p className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}
     <form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); void submit(); }}><textarea aria-label="Message" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} disabled={!capabilities.sendMessage || busy || submitting} placeholder={capabilities.sendMessage ? "Message the task" : "Messaging is unavailable"} rows={2} className="max-h-36 min-h-10 min-w-0 flex-1 resize-y border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-tertiary focus:border-accent disabled:cursor-not-allowed disabled:opacity-60" /><Button type="submit" size="icon" aria-label="Send message" title="Send message" disabled={!capabilities.sendMessage || busy || submitting || !draft.trim()}><Send size={16} /></Button></form>
-    <Dialog open={Boolean(editing)} onOpenChange={(open) => { if (!open && !saving) setEditing(undefined); }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}><DialogHeader title="Edit queued message" description="Only messages the server still accepts can be changed." />{error ? <p className="mx-5 mt-4 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}<div className="px-5 py-5"><textarea aria-label="Queued message" value={editDraft} onChange={(event) => setEditDraft(event.target.value)} className="min-h-28 w-full border border-border bg-background p-3 text-sm text-foreground outline-none focus:border-accent" autoFocus /></div><DialogFooter><Button type="button" variant="quiet" disabled={saving} onClick={() => setEditing(undefined)}>Cancel</Button><Button type="submit" disabled={saving || !editDraft.trim()}>{saving ? "Saving..." : "Save message"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={Boolean(editing)} onOpenChange={(open) => { if (!open && !saving) setEditing(undefined); }}><DialogContent><form onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}><DialogHeader title="Edit queued message" description="Only messages the server still accepts can be changed." />{error ? <p className="mx-5 mt-4 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}<div className="px-5 py-5"><textarea aria-label="Queued message" value={editDraft} onChange={(event) => setEditDraft(event.target.value)} className="min-h-28 w-full border border-border bg-background p-3 text-sm text-foreground outline-none focus:border-accent" autoFocus /></div><DialogFooter><Button type="button" variant="quiet" disabled={saving} onClick={() => setEditing(undefined)}>Cancel</Button><Button type="submit" disabled={saving || !nextEdit || !editChanged}>{saving ? "Saving..." : "Save message"}</Button></DialogFooter></form></DialogContent></Dialog>
     <ConfirmationDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(undefined)} title="Delete queued message?" description="This message has not started delivery and can be removed." confirmText="Delete message" onConfirm={remove} errorContext="Queued message could not be deleted" />
   </section>;
 }

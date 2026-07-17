@@ -10,6 +10,25 @@ const { TaskComposer } = await import("../../src/components/tasks/TaskComposer.j
 afterEach(() => cleanup());
 
 describe("task composer receipts", () => {
+  it("keeps queued message save disabled until the content changes", async () => {
+    let updates = 0;
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => { updates += 1; }} onDeleteQueued={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name:"Edit queued message" }));
+    const editor = await screen.findByRole("textbox", { name:"Queued message" }) as HTMLTextAreaElement;
+    const save = screen.getByRole("button", { name:"Save message" }) as HTMLButtonElement;
+
+    assert.equal(save.disabled, true);
+    fireEvent.submit(editor.closest("form") as HTMLFormElement);
+    assert.equal(updates, 0);
+
+    fireEvent.change(editor, { target:{ value:"Please continue with the review" } });
+    assert.equal(save.disabled, false);
+    fireEvent.change(editor, { target:{ value:" Please continue " } });
+    assert.equal(save.disabled, true);
+    fireEvent.submit(editor.closest("form") as HTMLFormElement);
+    assert.equal(updates, 0);
+  });
+
   it("retains the draft when the server resolves the mutation with a safe failure", async () => {
     render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[]} busy={false} onSend={async () => { throw new Error("Delivery is unavailable."); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
     const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
