@@ -507,7 +507,7 @@ async function routeApi(
     if (segments[4] === "credentials") {
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.credentials.list(user.id, projectId));
       if (!segments[5] && method === "POST") return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req))));
+      if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req)));
       if (segments[5] && method === "DELETE") { const body=await readJson(req);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion")); return sendJson(res, 200, { deleted: true }); }
     }
     if (segments[4] === "endpoints") {

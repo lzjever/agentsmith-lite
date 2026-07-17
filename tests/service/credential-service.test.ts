@@ -5,8 +5,9 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import { ProductError } from "../../packages/domain/src/errors.js";
 
 test("project credentials are write-only, rotate with new AAD version, and bind endpoints", async () => {
+  const store = createInMemoryProductStore();
   const services = createApplicationServices({
-    store: createInMemoryProductStore(),
+    store,
     dataRoot: "/tmp/agentsmith-credential-test",
     builtinAdminPassword: "admin-password",
     providerClient: {
@@ -27,8 +28,12 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Endpoint", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
   assert.equal(endpoint.health?.status, "healthy");
 
-  const rotated = await services.credentials.rotate(user.id, project.id, credential.id, { secret: "second-secret" });
+  const rotate=services.credentials.rotate.bind(services.credentials) as (userId:string,projectId:string,credentialId:string,input:{secret:string},key:string)=>Promise<typeof credential>;
+  const rotated = await rotate(user.id, project.id, credential.id, { secret: "second-secret" }, "credential-rotate-key");
+  const replayedRotation = await rotate(user.id, project.id, credential.id, { secret: "second-secret" }, "credential-rotate-key");
   assert.equal(rotated.version, 2);
+  assert.equal(replayedRotation.version,2);
+  assert.equal((await store.listProjectAuditEvents(project.id)).filter(event=>event.action==="credential.rotate"&&event.status==="accepted").length,1);
   assert.notEqual(rotated.fingerprint, credential.fingerprint);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "second-secret");
   assert.equal((await services.endpoints.requireEndpointForProject(project.id, endpoint.id)).health?.status, "unknown");

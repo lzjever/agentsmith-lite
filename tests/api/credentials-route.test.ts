@@ -30,6 +30,7 @@ test("credential routes never return submitted secret material", async () => {
     assert.doesNotMatch(JSON.stringify(listed), /never-return-this|ciphertext|nonce|authTag|keyId/);
     assert.equal(Object.hasOwn(created, "description"), false);
 
+    const missingRotateKey=await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}/rotate`,{method:"POST",headers:{"content-type":"application/json",cookie,"x-csrf-token":csrfToken},body:JSON.stringify({secret:"rotated-secret"})});assert.equal(missingRotateKey.status,400);
     const rotated = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}/rotate`, { secret: "rotated-secret" }, cookie, csrfToken);
     assert.equal(rotated.version, 2);
     assert.doesNotMatch(JSON.stringify(rotated), /rotated-secret|ciphertext|nonce|authTag|keyId/);
@@ -46,6 +47,6 @@ test("credential routes never return submitted secret material", async () => {
 
 async function post(base: string, pathname: string, body: unknown): Promise<Response> { return fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
 async function json(base: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(isResourceCreation(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, body: JSON.stringify(body) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
-function isResourceCreation(pathname:string):boolean{return pathname==="/api/v1/workspaces"||/^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)}
+function isResourceCreation(pathname:string):boolean{return pathname==="/api/v1/workspaces"||/^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+\/rotate$/.test(pathname)}
 async function get(base: string, pathname: string, cookie: string): Promise<any> { const response = await fetch(base + pathname, { headers: { cookie } }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
 async function requestJson(base: string, pathname: string, method: "DELETE", body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(base + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
