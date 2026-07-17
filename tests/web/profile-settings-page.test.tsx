@@ -92,6 +92,29 @@ describe("profile and settings pages", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("changes the project settings key when the submitted name changes", async () => {
+    const original = { projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
+    const keys: string[] = [];
+    apiClient.projectSettings = async () => settings;
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.updateProjectSettings = (async (_projectId: string, input: { name?: string }, key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { ...settings, project: { ...settings.project, name: input.name ?? settings.project.name } };
+    }) as typeof apiClient.updateProjectSettings;
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Project name" });
+      fireEvent.change(name, { target: { value: "Renamed project" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+      fireEvent.change(name, { target: { value: " Renamed project " } });
+      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.notEqual(keys[1], keys[0]);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps the project name stable while saving and adopts the saved server value", async () => {
     const original = { projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
     let finishSave!: (value: ProjectSettings) => void;

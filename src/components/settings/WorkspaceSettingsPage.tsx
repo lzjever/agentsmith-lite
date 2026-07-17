@@ -81,17 +81,17 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
     event.preventDefault();
     if (!settingsDirty || mutationBusy) return;
     setSaving(true);
+    const input = { name: workspaceName };
     try {
-      const requestIdentity = workspaceName.trim();
-      const saved = await apiClient.updateWorkspaceSettings(workspaceId, { name: workspaceName }, mutationKeys.key("workspace-settings", requestIdentity));
-      mutationKeys.complete("workspace-settings", requestIdentity);
+      const saved = await apiClient.updateWorkspaceSettings(workspaceId, input, mutationKeys.requestKey("workspace-settings", workspaceId, input));
+      mutationKeys.complete("workspace-settings", workspaceId);
       if (!mounted.current) return;
       setData(saved);
       setWorkspaceName(saved.workspace.name);
       notifyDirectoryChanged();
       toast.success("Workspace settings saved.");
     } catch (reason) {
-      if (reason instanceof ApiError) mutationKeys.complete("workspace-settings", workspaceName.trim());
+      if (reason instanceof ApiError) mutationKeys.complete("workspace-settings", workspaceId);
       if (!mounted.current) return;
       toast.error(settingsErrorMessage(reason, "Workspace settings could not be saved."));
       if (isReadOnlyMutationError(reason)) await load();
