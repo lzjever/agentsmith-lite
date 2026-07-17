@@ -86,6 +86,18 @@ test("confirmation dialog keeps a rejected action and its recovery context toget
   assert.equal(screen.queryByRole("alert"), null);
 });
 
+test("confirmation dialog cannot be dismissed while an action is pending", async () => {
+  let rejectAction!: () => void;
+  render(<ConfirmationDialog title="Delete project?" confirmText="Delete" trigger={<button>Open delete</button>} errorContext="Project could not be deleted" onConfirm={() => new Promise((_resolve, reject) => { rejectAction = () => reject(new Error("Cleanup is still pending")); })} />);
+  fireEvent.click(screen.getByRole("button", { name: "Open delete" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  await waitFor(() => assert.ok(rejectAction));
+  fireEvent.keyDown(document, { key:"Escape" });
+  assert.ok(screen.getByRole("alertdialog", { name:"Delete project?" }));
+  await act(async () => rejectAction());
+  assert.equal((await screen.findByRole("alert")).textContent, "Project could not be deleted: Cleanup is still pending");
+});
+
 test("toast container stays within 390px viewport gutters and announces feedback", async () => {
   render(<ToastContainer />);
   await act(async () => toast.success("Endpoint saved", 10_000));
