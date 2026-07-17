@@ -278,16 +278,16 @@ export const apiClient = {
     return payload as {items:ProjectAuditEvent[];nextCursor:string|null};
   },
   files: (projectId: string, path = "files") => request<{ entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`),
-  async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {
+  async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean; idempotencyKey?: string } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {
     if (!csrfToken) await apiClient.currentIdentity();
     const params = new URLSearchParams({ path, ...(options.overwrite ? { overwrite: "true" } : {}) });
     const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
-      method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream" }, body: file
+      method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream", "idempotency-key": options.idempotencyKey ?? newIdempotencyKey("file-upload") }, body: file
     }));
     if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
   },
-  createTaskUrlInput: (projectId:string,url:string) => json<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",{url}),
+  createTaskUrlInput: (projectId:string,url:string,idempotencyKey:string) => jsonIdempotent<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",idempotencyKey,{url}),
   deleteFile: (projectId: string, path: string) => json<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/files`, "DELETE", { path }),
   fileDownloadUrl: (projectId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}`,
   async downloadProjectFile(projectId: string, path: string, signal?: AbortSignal): Promise<Blob> {

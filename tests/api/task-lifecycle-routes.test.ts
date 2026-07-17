@@ -74,13 +74,26 @@ describe("task lifecycle API routes", () => {
   });
 
   it("stores HTTP URL inputs in the fixed project files tree",async()=>{
-    const note=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"});
+    const missing=await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"});assert.equal(missing.status,400);
+    const note=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"},"url-note-key");
+    const replay=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"},"url-note-key");assert.deepEqual(replay,note);
     assert.match(note.path,/^files\/url-inputs\/docs\.example\.test-[a-f0-9-]+\.md$/);
     const download=await request("GET",`/api/v1/projects/${projectId}/files/download?path=${encodeURIComponent(note.path)}`);
     assert.equal(download.status,200);
     assert.equal(await download.text(),"# URL input\n\nhttps://docs.example.test/guide?q=task\n");
-    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"file:///etc/passwd"})).status,400);
-    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://user:secret@example.test/"})).status,400);
+    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"file:///etc/passwd"},"invalid-url-note-1")).status,400);
+    assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://user:secret@example.test/"},"invalid-url-note-2")).status,400);
+    const events=await store.listProjectAuditEvents(projectId);assert.equal(events.filter(event=>event.action==="file.upload"&&event.resourceId===note.path&&event.status==="accepted").length,1);
+  });
+
+  it("requires an idempotency key and replays a file upload",async()=>{
+    const pathname=`/api/v1/projects/${projectId}/files?path=${encodeURIComponent("files/retry-safe.txt")}`;
+    const upload=(bytes:string,key?:string)=>fetch(api.baseUrl+pathname,{method:"PUT",headers:{cookie,"x-csrf-token":csrf,"content-type":"text/plain",...(key?{"idempotency-key":key}:{})},body:bytes});
+    const missing=await upload("first");assert.equal(missing.status,400);assert.deepEqual(await missing.json(),{error:"Idempotency-Key header is required"});
+    const first=await upload("first","file-upload-key");assert.equal(first.status,200);const written=await first.json() as {path:string;bytes:number};
+    const replay=await upload("first","file-upload-key");assert.equal(replay.status,200);assert.deepEqual(await replay.json(),written);
+    const mismatch=await upload("changed","file-upload-key");assert.equal(mismatch.status,409);
+    const events=await store.listProjectAuditEvents(projectId);assert.equal(events.filter(event=>event.action==="file.upload"&&event.resourceId===written.path&&event.status==="accepted").length,1);
   });
 
   it("searches, filters, sorts, paginates, edits, archives, retries, duplicates, and deletes", async () => {

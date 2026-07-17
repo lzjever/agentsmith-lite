@@ -113,11 +113,13 @@ describe("project files browser", () => {
     const original = snapshotClient();
     let attempts = 0;
     const uploaded: string[] = [];
+    const keys: Array<string | undefined> = [];
     apiClient.projectCapabilities = async () => writable;
     apiClient.files = async () => ({ entries: [] });
-    apiClient.uploadFile = async (_projectId, path) => {
+    apiClient.uploadFile = async (_projectId, path, _file, options) => {
       attempts++;
       uploaded.push(path);
+      keys.push(options?.idempotencyKey);
       if (attempts === 1) throw new Error("network unavailable");
       return { path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
     };
@@ -128,6 +130,8 @@ describe("project files browser", () => {
       await screen.findByRole("button", { name: "Retry upload" });
       fireEvent.click(screen.getByRole("button", { name: "Retry upload" }));
       await waitFor(() => assert.deepEqual(uploaded, ["files/brief.txt", "files/brief.txt"]));
+      assert.ok(keys[0]);
+      assert.equal(keys[1], keys[0]);
       await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null));
     } finally { restoreClient(original); }
   });

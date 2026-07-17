@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
@@ -577,6 +577,7 @@ async function routeApi(
     if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
     if (segments[4] === "files") {
       if (segments[5] === "url-note" && method === "POST") {
+        const idempotencyKey = requireIdempotencyKey(req);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const body = await readJson(req);
@@ -585,8 +586,11 @@ async function routeApi(
         const host = inputUrl.hostname.toLowerCase().replace(/[^a-z0-9.-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,80) || "link";
         const filePath = `files/url-inputs/${host}-${randomUUID()}.md`;
         const bytes = Buffer.from(`# URL input\n\n${inputUrl.href}\n`,"utf8");
-        const written = await services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
-        await services.policies.recordOperation(projectId,user.id,"file.upload","accepted",written.path,"file",{filePath:written.path,bytes:written.bytes,mediaType:written.mediaType});
+        const written = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.url-note",idempotencyKey,{projectId,url:inputUrl.href},filePath,async()=>{
+          const saved = await services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
+          await services.policies.recordOperation(projectId,user.id,"file.upload","accepted",saved.path,"file",{filePath:saved.path,bytes:saved.bytes,mediaType:saved.mediaType});
+          return saved;
+        });
         return sendJson(res,200,written);
       }
       if (!segments[5] && method === "GET") {
@@ -595,20 +599,24 @@ async function routeApi(
         return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
       }
       if (!segments[5] && method === "PUT") {
+        const idempotencyKey = requireIdempotencyKey(req);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const filePath = requiredSearchParam(url, "path");
         const overwrite = optionalBooleanSearchParam(url, "overwrite");
         const bytes = await readRawProjectFileBytes(req);
-        const written = await services.files.uploadFileWithAccounting(projectRoot, {
-          path: filePath, bytes, overwrite
-        }, {
-          record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
-        });
-        await services.policies.recordOperation(projectId, user.id, "file.upload", "accepted", written.path, "file", {
-          filePath: written.path,
-          bytes: written.bytes,
-          mediaType: written.mediaType
+        const written = await services.settings.runIdempotentMutation(user.id, projectId, "project.file.upload", idempotencyKey, { projectId, filePath, overwrite, contentSha256:createHash("sha256").update(bytes).digest("base64url") }, filePath, async()=>{
+          const saved = await services.files.uploadFileWithAccounting(projectRoot, {
+            path: filePath, bytes, overwrite
+          }, {
+            record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
+          });
+          await services.policies.recordOperation(projectId, user.id, "file.upload", "accepted", saved.path, "file", {
+            filePath: saved.path,
+            bytes: saved.bytes,
+            mediaType: saved.mediaType
+          });
+          return saved;
         });
         return sendJson(res, 200, written);
       }

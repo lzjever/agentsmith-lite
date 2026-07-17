@@ -2,7 +2,8 @@
 
 import { AlertCircle, ChevronRight, FileText, Folder, FolderUp, Link as LinkIcon, Upload, X } from "lucide-react";
 import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from "react";
-import { apiClient, type Endpoint, type ProjectFile } from "../../lib/api/client";
+import { ApiError, apiClient, type Endpoint, type ProjectFile } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { fileBreadcrumbs, parentFilePath, PROJECT_FILES_ROOT, sortFileEntries } from "../files/fileBrowserState";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -27,6 +28,7 @@ export function TaskCreateDialog({
   onClose: () => void;
   onCreate: (input: TaskCreateValue) => Promise<void>;
 }) {
+  const mutationKeys = useMutationKeys();
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [endpointId, setEndpointId] = useState("");
@@ -45,6 +47,8 @@ export function TaskCreateDialog({
 
   useEffect(() => {
     if (!open) {
+      mutationKeys.clear("task-input.upload");
+      mutationKeys.clear("task-input.url");
       wasOpen.current = false;
       browserLoadVersion.current += 1;
       setBrowserLoading(false);
@@ -96,11 +100,15 @@ export function TaskCreateDialog({
     const uploadPath = browserPathRef.current;
     setUploading(true);
     setError("");
+    const filePath = `${uploadPath}/${file.name}`;
+    const requestIdentity = `${filePath}:${file.size}:${file.lastModified}`;
     try {
-      const written = await apiClient.uploadFile(projectId, `${uploadPath}/${file.name}`, file);
+      const written = await apiClient.uploadFile(projectId, filePath, file, { idempotencyKey: mutationKeys.key("task-input.upload", requestIdentity) });
+      mutationKeys.complete("task-input.upload", requestIdentity);
       setInputPaths((current) => current.includes(written.path) ? current : [...current, written.path]);
       if (browserPathRef.current === uploadPath) await navigate(uploadPath);
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("task-input.upload", requestIdentity);
       setError(errorMessage(reason, "The file could not be uploaded."));
     } finally { setUploading(false); }
   }
@@ -113,13 +121,16 @@ export function TaskCreateDialog({
 
   async function addUrl() {
     if (!projectId || !urlInput.trim()) return;
+    const url = urlInput.trim();
     setAddingUrl(true);
     setError("");
     try {
-      const written = await apiClient.createTaskUrlInput(projectId, urlInput.trim());
+      const written = await apiClient.createTaskUrlInput(projectId, url, mutationKeys.key("task-input.url", url));
+      mutationKeys.complete("task-input.url", url);
       setInputPaths((current) => current.includes(written.path) ? current : [...current, written.path]);
       setUrlInput("");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("task-input.url", url);
       setError(errorMessage(reason, "The URL could not be attached."));
     } finally { setAddingUrl(false); }
   }

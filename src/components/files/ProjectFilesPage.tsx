@@ -3,6 +3,7 @@
 import { ChevronRight, Download, FileText, Folder, FolderUp, Image, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from "../../lib/api/client";
+import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { Button } from "../ui/button";
@@ -29,6 +30,7 @@ export function ProjectFilesPage({ projectId }: { projectId: string }) {
 }
 
 function ProjectFiles({ projectId }: { projectId: string }) {
+  const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const [path, setPath] = useState(PROJECT_FILES_ROOT);
   const [entries, setEntries] = useState<ProjectFile[]>([]);
@@ -114,8 +116,11 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setUploading(true);
     setUploadFailure(undefined);
     setMessage("");
+    const filePath = childFilePath(uploadPath, file.name);
+    const requestIdentity = `${filePath}:${overwrite}:${file.size}:${file.lastModified}`;
     try {
-      const written = await apiClient.uploadFile(projectId, childFilePath(uploadPath, file.name), file, { overwrite });
+      const written = await apiClient.uploadFile(projectId, filePath, file, { overwrite, idempotencyKey: mutationKeys.key("file.upload", requestIdentity) });
+      mutationKeys.complete("file.upload", requestIdentity);
       if (!mounted.current) return;
       const entry: ProjectFile = {
         name: written.path.slice(written.path.lastIndexOf("/") + 1),
@@ -137,6 +142,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       toast.success(overwrite ? "File replaced" : "File uploaded");
     } catch (error) {
       if (!mounted.current) return;
+      if (error instanceof ApiError) mutationKeys.complete("file.upload", requestIdentity);
       if (revokeWriteAccess(error)) return;
       if (!overwrite && error instanceof ApiError && error.status === 409 && error.message === "Project file already exists") {
         setReplaceTarget({ file, path: uploadPath });
