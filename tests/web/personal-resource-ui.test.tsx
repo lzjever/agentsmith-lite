@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import React from "react";
-import { apiClient, type ProjectCapabilities, type ProjectMember, type UserNotification } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectCapabilities, type ProjectMember, type UserNotification } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -120,6 +120,20 @@ describe("personal and resource UI", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("opens a linked notification that was removed before the page marked it read", async () => {
+    const original = { notifications:apiClient.notifications,markNotificationRead:apiClient.markNotificationRead };
+    const pushed:string[]=[];
+    const linked={...notification,linkPath:"/workspaces/workspace_1/projects/project_1/tasks/task_1"};
+    apiClient.notifications=async()=>[linked];
+    apiClient.markNotificationRead=async()=>{throw new ApiError(404,"Notification not found");};
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><NotificationsPage/></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("link",{name:"Task finished"}));
+      await waitFor(()=>assert.deepEqual(pushed,[linked.linkPath]));
+      assert.equal(screen.queryByText("Task finished"),null);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("does not navigate after a pending notification read leaves the page", async () => {
     const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
     const pushed: string[] = [];
@@ -198,6 +212,20 @@ describe("personal and resource UI", () => {
       finishRead({ ...linked, readAt: "2026-07-12T00:01:00.000Z" });
       await waitFor(() => assert.deepEqual(pushed, [linked.linkPath]));
     } finally { Object.assign(apiClient, original); }
+  });
+
+  it("opens a bell link after its notification was removed elsewhere", async () => {
+    const original={notifications:apiClient.notifications,markNotificationRead:apiClient.markNotificationRead};
+    const pushed:string[]=[];
+    const linked={...notification,linkPath:"/workspaces/workspace_1/projects/project_1/tasks/task_1"};
+    apiClient.notifications=async()=>[linked];
+    apiClient.markNotificationRead=async()=>{throw new ApiError(404,"Notification not found");};
+    try {
+      render(<AppRouterContext.Provider value={router(pushed)}><NotificationBell/></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button",{name:"Open notifications"}),{button:0,ctrlKey:false});
+      fireEvent.click(await screen.findByRole("link",{name:/Task finished/}));
+      await waitFor(()=>assert.deepEqual(pushed,[linked.linkPath]));
+    } finally { Object.assign(apiClient,original); }
   });
 
   it("marks all notifications read with one server operation", async () => {

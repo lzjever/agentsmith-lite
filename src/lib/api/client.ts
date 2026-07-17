@@ -47,6 +47,10 @@ export function notificationChangeSource(event: Event): NotificationChangeSource
   return event instanceof CustomEvent ? event.detail?.source : undefined;
 }
 
+export function isMissingNotification(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 404 && error.message === "Notification not found";
+}
+
 export interface CurrentUser { id: string; email: string; displayName?: string; pictureUrl?: string; }
 export type Profile = ProfileResponse;
 export interface SettingsCapabilities { canManageSettings: boolean; }

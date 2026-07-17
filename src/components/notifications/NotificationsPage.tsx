@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Bell, Check, RotateCcw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { apiClient, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
+import { apiClient, isMissingNotification, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
 import { workspaceReturnPath } from "../../lib/navigation/return-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -63,8 +63,16 @@ export function NotificationsPage() {
       setItems((current) => current.map((item) => item.id === id ? saved : item));
       setState("ready");
       return true;
-    } catch {
-      if (mounted.current) setMutationError({ id, action: "read", message: "Notification could not be marked as read." });
+    } catch (reason) {
+      if (!mounted.current) return false;
+      if (isMissingNotification(reason)) {
+        loadRequest.current += 1;
+        setItems((current) => current.filter((item) => item.id !== id));
+        setState("ready");
+        notifyNotificationsChanged("page");
+        return true;
+      }
+      setMutationError({ id, action: "read", message: "Notification could not be marked as read." });
       return false;
     } finally {
       if (mounted.current) setBusy(id, false);

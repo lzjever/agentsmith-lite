@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { apiClient, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
+import { apiClient, isMissingNotification, NOTIFICATIONS_CHANGED_EVENT, notificationChangeSource, notifyNotificationsChanged, type UserNotification } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { DropdownContent, DropdownMenu } from "../ui/dropdown-menu";
 
@@ -80,9 +80,15 @@ export function NotificationBell({ returnTo }: { returnTo?: string }) {
           if (!mounted.current) return false;
           setItems((current) => current.map((value) => value.id === saved.id ? saved : value));
           notifyNotificationsChanged("bell");
-        } catch {
-          if (mounted.current) setError("Notification could not be marked as read.");
-          return false;
+        } catch (reason) {
+          if (!mounted.current) return false;
+          if (isMissingNotification(reason)) {
+            setItems((current) => current.filter((value) => value.id !== item.id));
+            notifyNotificationsChanged("bell");
+          } else {
+            setError("Notification could not be marked as read.");
+            return false;
+          }
         }
       }
       if (!mounted.current) return false;
