@@ -15,6 +15,18 @@ const readOnly: ProjectCapabilities = { ...writable, canWriteFiles: false };
 afterEach(() => cleanup());
 
 describe("project files browser", () => {
+  it("exposes one named upload action instead of a second focusable file input", async () => {
+    const original = snapshotClient();
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [] });
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByRole("button", { name: "Upload" });
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      assert.equal(input.hidden, true);
+    } finally { restoreClient(original); }
+  });
+
   it("commits a successful upload without depending on another listing read", async () => {
     const original = snapshotClient();
     let lists = 0;
