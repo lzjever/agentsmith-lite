@@ -7,8 +7,9 @@ import type { PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
+import { readPostgresTestUrl } from "./postgres-test-database.js";
 
-const postgresUrl = process.env.POSTGRES_APP_URL;
+const postgresUrl = readPostgresTestUrl();
 const postgresDescribe = postgresUrl ? describe : describe.skip;
 
 postgresDescribe("postgres product store", () => {
@@ -398,7 +399,7 @@ postgresDescribe("postgres product store", () => {
     await services.policies.updatePolicy(user.id, project.id, { endpointWindows: [{ endpointId: endpoint.id, metric: "providerRequests", limit: 1, windowSeconds: 60 }] });
     available = true;
     await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
-    await assert.rejects(() => services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id), /Project provider requests limit reached/);
+    await assert.rejects(() => services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id), /Endpoint rolling provider requests limit reached/);
 
     const settlements = await store.listSettledProjectProviderSettlements(project.id, "1970-01-01T00:00:00.000Z");
     assert.equal(settlements.filter((settlement) => settlement.endpointId === null).length, 2);

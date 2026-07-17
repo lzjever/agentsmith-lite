@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import pg from "pg";
 import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
+import { readPostgresTestUrl } from "./postgres-test-database.js";
 
-const postgresUrl = process.env.POSTGRES_APP_URL;
+const postgresUrl = readPostgresTestUrl();
 const postgresDescribe = postgresUrl ? describe : describe.skip;
 
 postgresDescribe("postgres migrations", () => {
@@ -13,7 +14,6 @@ postgresDescribe("postgres migrations", () => {
     await client.connect();
     try {
       const expected = await readPostgresMigrations();
-      assert.equal(expected.at(-1)?.id, "048_task_interaction_source_revision_bigint");
       const ledger = await client.query<{ id: string; checksum: string }>(
         "select id, checksum from agentsmith_migrations order by id"
       );

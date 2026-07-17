@@ -4,8 +4,9 @@ import pg from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import type { ProjectAuditEvent } from "../../packages/contracts/src/api.js";
 import type { AtomicTaskCreateInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskMessage, TaskInteractionChangeInput } from "../../packages/ports/src/store.js";
+import { readPostgresTestUrl } from "./postgres-test-database.js";
 
-const postgresUrl = process.env.POSTGRES_APP_URL;
+const postgresUrl = readPostgresTestUrl();
 const postgresDescribe = postgresUrl ? describe : describe.skip;
 
 postgresDescribe("postgres durable task store", () => {

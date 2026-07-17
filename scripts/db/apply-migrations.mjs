@@ -3,9 +3,16 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
 
-const connectionString = process.env.POSTGRES_APP_URL;
+const testConnectionString = process.env.POSTGRES_TEST_URL;
+const connectionString = testConnectionString ?? process.env.POSTGRES_APP_URL;
 if (!connectionString) {
-  throw new Error("POSTGRES_APP_URL is required for schema bootstrap");
+  throw new Error("POSTGRES_APP_URL or POSTGRES_TEST_URL is required for schema bootstrap");
+}
+if (testConnectionString) {
+  const databaseName = decodeURIComponent(new URL(testConnectionString).pathname.slice(1));
+  if (!databaseName.endsWith("_test")) {
+    throw new Error("POSTGRES_TEST_URL must select a database whose name ends with _test");
+  }
 }
 
 const dir = path.resolve("infra/db/migrations");
