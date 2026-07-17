@@ -11,6 +11,30 @@ const { TaskLifecycleActions } = await import("../../src/components/tasks/TaskLi
 afterEach(() => cleanup());
 
 describe("TaskLifecycleActions", () => {
+  it("keeps rename disabled until the task title changes", async () => {
+    const original = apiClient.editTask;
+    let edits = 0;
+    apiClient.editTask = async () => { edits += 1; return task; };
+    try {
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => undefined} />);
+      fireEvent.pointerDown(screen.getByRole("button", { name:"Task actions" }), { button:0, ctrlKey:false });
+      fireEvent.click(await screen.findByRole("menuitem", { name:"Rename" }));
+      const input = await screen.findByLabelText("Task title") as HTMLInputElement;
+      const save = screen.getByRole("button", { name:"Save title" }) as HTMLButtonElement;
+
+      assert.equal(save.disabled, true);
+      fireEvent.submit(input.closest("form") as HTMLFormElement);
+      assert.equal(edits, 0);
+
+      fireEvent.change(input, { target:{ value:"Investigate production issue" } });
+      assert.equal(save.disabled, false);
+      fireEvent.change(input, { target:{ value:" Investigate " } });
+      assert.equal(save.disabled, true);
+      fireEvent.submit(input.closest("form") as HTMLFormElement);
+      assert.equal(edits, 0);
+    } finally { apiClient.editTask = original; }
+  });
+
   it("renames a task through the product API and refreshes its server state", async () => {
     const original = apiClient.editTask;
     const edits: Array<{ taskId:string; title:string; key:string }> = [];
