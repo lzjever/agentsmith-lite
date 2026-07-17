@@ -18,6 +18,24 @@ const owner: WorkspaceMember = { workspaceId: workspace.id, userId: "owner_1", r
 afterEach(() => cleanup());
 
 describe("workspace identity UX", () => {
+  it("opens workspace creation with a fresh form after cancellation", async () => {
+    const original = apiClient.workspaces;
+    apiClient.workspaces = async () => [workspace];
+    try {
+      render(<WorkspaceDirectoryPage />);
+      const create = await screen.findByRole("button", { name: "New workspace" });
+      await screen.findByText("Workspace");
+      fireEvent.click(create);
+      const name = screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement;
+      fireEvent.change(name, { target: { value: "Discarded workspace" } });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "New workspace" }), null));
+
+      fireEvent.click(create);
+      assert.equal((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value, "");
+    } finally { apiClient.workspaces = original; }
+  });
+
   it("waits for the workspace directory before allowing creation", async () => {
     const original = apiClient.workspaces;
     let finishLoad!: (value: Workspace[]) => void;

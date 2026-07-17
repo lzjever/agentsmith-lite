@@ -68,6 +68,13 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setError("");
+    }
+  }, [open]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextName = name.trim();
