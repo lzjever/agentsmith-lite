@@ -25,6 +25,20 @@ describe("profile and settings services", () => {
     await assert.rejects(() => services.settings.updateWorkspace(admin.user.id, workspace.id, { name: "No" }), (error: unknown) => error instanceof ProductError && error.statusCode === 403);
   });
 
+  it("reports invalid profile fields as client errors", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl-profile-validation", builtinAdminPassword: "admin-password" });
+    const user = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "profile-validation", email: "profile-validation@example.test", emailVerified: true });
+
+    await assert.rejects(
+      () => services.profile.updateProfile(user.user.id, { displayName: "x".repeat(121) }),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 400 && error.message.includes("120 characters or less")
+    );
+    await assert.rejects(
+      () => services.profile.updateProfile(user.user.id, { interests: ["x".repeat(61)] }),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 400
+    );
+  });
+
   it("keeps archived workspace projects readable but rejects every project write capability", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl-archived-workspace", builtinAdminPassword: "admin-password" });
     const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "owner-archived", email: "owner-archived@example.test", emailVerified: true });

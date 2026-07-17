@@ -1,4 +1,5 @@
 import type { ProfileResponse, ProfileUser, StoredUser, UserProfilePreferences } from "../../contracts/src/api.js";
+import { ProductError } from "../../domain/src/errors.js";
 import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 
@@ -39,12 +40,12 @@ export class ProfileService {
 function optionalText(value: unknown, field: string, fallback: string | null, max = 120): string | null {
   if (value === undefined) return fallback;
   if (value === null) return null;
-  if (typeof value !== "string") throw new Error(`${field} must be a string or null`);
+  if (typeof value !== "string") throw new ProductError(`${field} must be a string or null`, 400);
   const trimmed = value.trim();
-  if (trimmed.length > max) throw new Error(`${field} must be ${max} characters or less`);
+  if (trimmed.length > max) throw new ProductError(`${field} must be ${max} characters or less`, 400);
   return trimmed || null;
 }
-function optionalInterests(value: unknown, fallback: string[]): string[] { if(value===undefined)return fallback;if(!Array.isArray(value)||value.length>20||value.some((item)=>typeof item!=="string"||item.trim().length===0||item.trim().length>60))throw new Error("profile.interests must be up to 20 English text values"); return [...new Set(value.map((item)=>item.trim()))]; }
+function optionalInterests(value: unknown, fallback: string[]): string[] { if(value===undefined)return fallback;if(!Array.isArray(value)||value.length>20||value.some((item)=>typeof item!=="string"||item.trim().length===0||item.trim().length>60))throw new ProductError("profile.interests must be up to 20 text values of 60 characters or less",400); return [...new Set(value.map((item)=>item.trim()))]; }
 function emptyPreferences(userId:string,updatedAt:string):UserProfilePreferences{return{userId,displayName:null,timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt}}
 
 function publicUser(user: StoredUser): ProfileUser {
