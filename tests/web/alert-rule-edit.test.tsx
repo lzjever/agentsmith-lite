@@ -54,6 +54,10 @@ describe("alert rule editing", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Edit alert rule" }));
       await screen.findByRole("heading", { name: "Edit alert rule" });
+      const save = screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
+      fireEvent.submit(save.closest("form")!);
+      assert.deepEqual(updates, []);
       const nativeSelect = document.querySelector("select");
       assert.ok(nativeSelect, "Radix Select should render its native form bridge");
       fireEvent.change(nativeSelect, { target: { value: "provider_requests_limit" } });
@@ -88,6 +92,7 @@ describe("alert rule editing", () => {
       render(<AlertRulesPanel projectId={projectId} canManage />);
       await screen.findByText("Task failure");
       fireEvent.click(screen.getByRole("button", { name: "Edit alert rule" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Rule name" }), { target: { value: "Renamed task failure" } });
       fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
       await screen.findByRole("alert");
       assert.ok(screen.getByText("Alert rule could not be updated."));

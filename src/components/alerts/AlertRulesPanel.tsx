@@ -70,16 +70,15 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   }
 
   function openEdit(rule: ProjectAlertRule) {
-    const type = alertRuleType(rule.alertType);
     setEditing(rule);
-    setValue({ name: rule.name ?? type.label, alertType: type.value, metric: type.metric, threshold: rule.threshold ?? 1, windowSeconds: rule.windowSeconds ?? type.defaultWindowSeconds, scope: rule.scope ?? { kind: "project" }, enabled: rule.enabled });
+    setValue(alertRuleFormValue(rule));
     setFormError("");
     setDialogOpen(true);
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canManage || saving) return;
+    if (!canManage || saving || (editing !== null && !alertRuleChanged(value, editing))) return;
     setSaving(true);
     setFormError("");
     try {
@@ -160,9 +159,11 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
         </div>
       </li>)}
     </ul> : null}
-    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} endpoints={endpoints} saving={saving} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) setFormError(""); }} onChange={setValue} onSubmit={save} />
+    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} endpoints={endpoints} saving={saving} canSave={editing === null || alertRuleChanged(value, editing)} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) setFormError(""); }} onChange={setValue} onSubmit={save} />
     <ConfirmationDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)} title="Delete alert rule" description="This permanently removes the rule from this project." confirmText="Delete" onConfirm={remove} errorContext="Alert rule could not be deleted" />
   </section>;
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
 function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpoints.find(endpoint=>endpoint.id===scope.endpointId)?.name??"Endpoint";}
+function alertRuleFormValue(rule: ProjectAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
+function alertRuleChanged(value: AlertRuleFormValue, rule: ProjectAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }

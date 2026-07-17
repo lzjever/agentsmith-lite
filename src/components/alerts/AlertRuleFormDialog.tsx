@@ -25,8 +25,9 @@ export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; met
 
 export interface AlertRuleFormValue { name: string; alertType: ProjectAlertType; metric: AlertRuleMetric; threshold: number; windowSeconds: number | null; scope: { kind: "project" } | { kind: "endpoint"; endpointId: string }; enabled: boolean; }
 
-export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, error, onOpenChange, onChange, onSubmit }: {
+export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, canSave, error, onOpenChange, onChange, onSubmit }: {
   open: boolean; editing: boolean; value: AlertRuleFormValue; endpoints: Endpoint[]; saving: boolean; error: string;
+  canSave: boolean;
   onOpenChange: (open: boolean) => void; onChange: (value: AlertRuleFormValue) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return <Dialog open={open} onOpenChange={(next) => !saving && onOpenChange(next)}><DialogContent><form onSubmit={onSubmit}>
@@ -43,7 +44,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, e
       <Label className="grid gap-2 text-sm text-primary">Scope<Select value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onValueChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} disabled={saving || !supportsEndpointScope(value.alertType)}><SelectTrigger aria-label="Rule scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="project">Entire project</SelectItem>{supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => <SelectItem value={endpoint.id} key={endpoint.id}>{endpoint.name}</SelectItem>) : null}</SelectContent></Select></Label>
       <Label className="flex items-center gap-3 text-sm text-primary"><Checkbox checked={value.enabled} disabled={saving} onChange={(event) => onChange({ ...value, enabled: event.target.checked })} />Enabled</Label>
     </div>
-    <DialogFooter><Button type="button" variant="quiet" disabled={saving} onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={saving}><Save size={15} />{saving ? "Saving..." : editing ? "Save changes" : "Create rule"}</Button></DialogFooter>
+    <DialogFooter><Button type="button" variant="quiet" disabled={saving} onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={saving || !canSave}><Save size={15} />{saving ? "Saving..." : editing ? "Save changes" : "Create rule"}</Button></DialogFooter>
   </form></DialogContent></Dialog>;
 }
 
