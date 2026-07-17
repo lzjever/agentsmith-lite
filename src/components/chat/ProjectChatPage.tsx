@@ -37,6 +37,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const [messagesError, setMessagesError] = useState("");
   const [actionError, setActionError] = useState("");
   const [sending, setSending] = useState(false);
+  const [threadMutationBusy, setThreadMutationBusy] = useState(false);
   const [threadSheetOpen, setThreadSheetOpen] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const streamAbort = useRef<AbortController | null>(null);
@@ -62,8 +63,6 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       const available = await apiClient.endpoints(projectId);
       if (!active.current || version !== endpointLoadVersion.current) return;
       setEndpoints(available);
-      const compatible = available.filter(isChatCompatibleEndpoint);
-      setEndpointId((current) => compatible.some((endpoint) => endpoint.id === current) ? current : (compatible[0]?.id ?? ""));
       setEndpointsError("");
       setEndpointsStatus("ready");
     } catch (reason) {
@@ -145,12 +144,14 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
 
   const selectedThread = threads.find((thread) => thread.id === threadId);
   const compatibleEndpoints = endpoints.filter(isChatCompatibleEndpoint);
-  const selectedEndpointId = selectedThread ? selectedThread.endpointId : endpointId;
+  const draftEndpointId = compatibleEndpoints.some((item) => item.id === endpointId) ? endpointId : (compatibleEndpoints[0]?.id ?? "");
+  const selectedEndpointId = selectedThread ? selectedThread.endpointId : draftEndpointId;
   const endpoint = endpoints.find((item) => item.id === selectedEndpointId);
   const canSend = capabilitiesStatus === "ready" && capabilities?.canSendChat === true;
   const historyReady = messagesStatus === "ready" && loadedThreadId.current === threadId;
 
   function refresh() {
+    if (sending || threadMutationBusy) return;
     void loadEndpoints();
     void loadCapabilities();
     void loadThreads();
@@ -158,6 +159,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   function beginNewThread() {
+    if (threadMutationBusy) return;
     draftingNewThread.current = true;
     ++messageLoadVersion.current;
     loadedThreadId.current = "";
@@ -169,10 +171,11 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   async function startThread(): Promise<boolean> {
-    if (!endpointId || !canSend || sending || endpointsStatus !== "ready") return false;
+    if (!draftEndpointId || !canSend || sending || threadMutationBusy || endpointsStatus !== "ready") return false;
+    setThreadMutationBusy(true);
     setActionError("");
     try {
-      const created = await apiClient.createChatThread(projectId, endpointId);
+      const created = await apiClient.createChatThread(projectId, draftEndpointId);
       if (!active.current) return false;
       setThreads((current) => orderedThreads([created, ...current]));
       draftingNewThread.current = false;
@@ -181,6 +184,8 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (!active.current) return false;
       return failAction(reason);
+    } finally {
+      if (active.current) setThreadMutationBusy(false);
     }
   }
 
@@ -199,6 +204,8 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<boolean> {
+    if (threadMutationBusy) return false;
+    setThreadMutationBusy(true);
     try {
       const saved = await apiClient.updateChatThread(projectId, id, input);
       if (!active.current) return false;
@@ -208,10 +215,14 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (!active.current) return false;
       return failAction(reason);
+    } finally {
+      if (active.current) setThreadMutationBusy(false);
     }
   }
 
   async function removeThread(id: string) {
+    if (threadMutationBusy) return;
+    setThreadMutationBusy(true);
     try {
       await apiClient.deleteChatThread(projectId, id);
       if (!active.current) return;
@@ -234,6 +245,8 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (!active.current) return;
       throw new Error(message(reason));
+    } finally {
+      if (active.current) setThreadMutationBusy(false);
     }
   }
 
@@ -387,7 +400,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     onPin={(id, pinned) => void updateThread(id, { pinned })}
     onStar={(id, starred) => void updateThread(id, { starred })}
     onDelete={removeThread}
-    disabled={!canSend || sending}
+    disabled={!canSend || sending || threadMutationBusy}
   />;
 
   const subtitle = endpoint
@@ -400,7 +413,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           : "Endpoint deleted. Conversation history is read-only."
       : "Choose an endpoint for a new conversation.";
 
-  return <PageLayout contentWidth="full" header={<PageHeader title={selectedThread?.title ?? "Chat"} subtitle={subtitle} actions={<Button variant="quiet" size="icon" aria-label="Refresh chat" title="Refresh chat" disabled={sending} onClick={refresh}><RefreshCw size={17} /></Button>} />}>
+  return <PageLayout contentWidth="full" header={<PageHeader title={selectedThread?.title ?? "Chat"} subtitle={subtitle} actions={<Button variant="quiet" size="icon" aria-label="Refresh chat" title="Refresh chat" disabled={sending || threadMutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>} />}>
     <div className="grid h-[calc(100dvh-12rem)] min-h-[30rem] overflow-hidden border border-border lg:h-[calc(100vh-15rem)] lg:grid-cols-[15rem_minmax(0,1fr)]">
       <div className="hidden min-h-0 lg:block" aria-hidden={threadSheetOpen || undefined}>{threadRail(false)}</div>
       <section className="flex min-h-0 min-w-0 flex-col">
@@ -426,10 +439,10 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
         <ChatComposer
           key={selectedThread?.id ?? "new-conversation"}
           endpoints={compatibleEndpoints}
-          endpointId={endpointId}
+          endpointId={draftEndpointId}
           hasThread={Boolean(selectedThread)}
           fixedEndpoint={selectedThread ? endpoint : undefined}
-          canStartThread={canSend && !sending && !selectedThread && endpointsStatus === "ready"}
+          canStartThread={canSend && !sending && !threadMutationBusy && !selectedThread && endpointsStatus === "ready"}
           onEndpointChange={setEndpointId}
           onStartThread={startThread}
           onSend={send}

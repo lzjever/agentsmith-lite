@@ -220,6 +220,56 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("locks conversation creation while the new thread is being persisted", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, createChatThread: apiClient.createChatThread };
+    let finishCreate!: (value: ProjectChatThread) => void;
+    let creates = 0;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [];
+    apiClient.chatMessages = async () => [];
+    apiClient.createChatThread = async () => { creates += 1; return new Promise((resolve) => { finishCreate = resolve; }); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByRole("button", { name: "Start conversation" });
+      await waitFor(() => assert.equal((screen.getByRole("button", { name: "Start conversation" }) as HTMLButtonElement).disabled, false));
+      const start = screen.getByRole("button", { name: "Start conversation" }) as HTMLButtonElement;
+      fireEvent.click(start);
+      await waitFor(() => assert.ok(finishCreate));
+      assert.equal(start.disabled, true);
+      fireEvent.click(start);
+      assert.equal(creates, 1);
+
+      await act(async () => finishCreate(threads[0]!));
+      await screen.findByLabelText("Thread endpoint fixed");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("locks conversation directory controls while metadata is being updated", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
+    let finishUpdate!: (value: ProjectChatThread) => void;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [];
+    apiClient.updateChatThread = async () => new Promise((resolve) => { finishUpdate = resolve; });
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Pin conversation" }));
+      await waitFor(() => assert.ok(finishUpdate));
+
+      for (const name of ["Refresh chat", "New conversation", "Star conversation", "Pin conversation", "Rename conversation", "Delete conversation"]) {
+        assert.equal((screen.getByRole("button", { name }) as HTMLButtonElement).disabled, true, name);
+      }
+
+      await act(async () => finishUpdate({ ...threads[0]!, pinnedAt: endpoint.updatedAt }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("aborts and clears a project stream when the user switches projects", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     let activeSignal: AbortSignal | undefined;
