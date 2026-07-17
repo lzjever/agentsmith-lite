@@ -175,4 +175,30 @@ describe("policy alert audit completion", () => {
     );
     assert.equal(second.nextCursor, null);
   });
+
+  it("classifies chat thread and message audit resources", async () => {
+    const store = createLocalInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/tmp/asl-chat-audit-resources",
+      builtinAdminPassword: "admin-password",
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+
+    await services.policies.recordOperation(project.id, user.id, "chat.thread.create", "accepted", "chat_1");
+    await services.policies.recordOperation(project.id, user.id, "chat.message.send", "accepted", "chatmsg_1");
+
+    const events = await services.policies.audit(user.id, project.id);
+    assert.deepEqual(
+      events
+        .map((event) => [event.action, event.resourceKind, event.resourceId])
+        .sort(([left], [right]) => String(left).localeCompare(String(right))),
+      [
+        ["chat.message.send", "chat_message", "chatmsg_1"],
+        ["chat.thread.create", "chat_thread", "chat_1"],
+      ],
+    );
+  });
 });

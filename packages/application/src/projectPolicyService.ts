@@ -262,7 +262,21 @@ function providerReservationLimits(policy:ProjectResourcePolicy,usage:ProjectRes
   ].filter((limit):limit is Limit=>limit!==null);
 }
 function providerMetricLimit(metric: "providerRequests" | "providerTokens" | "providerCost"): Limit { return metric === "providerRequests" ? "provider_requests_limit" : metric === "providerTokens" ? "provider_tokens_limit" : "provider_cost_limit"; }
-function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind { return action.startsWith("credential.") ? "credential" : action.startsWith("endpoint.") ? "endpoint" : action.startsWith("membership.") ? "member" : action.startsWith("alert.") ? "alert" : action === "provider.request" ? "provider" : action.startsWith("task.") ? "task" : action === "artifact.project" ? "artifact" : action === "sandbox.failed" ? "sandbox" : action === "file.quota" ? "file_quota" : action.startsWith("file.") ? "file" : "project"; }
+function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind {
+  if (action.startsWith("credential.")) return "credential";
+  if (action.startsWith("endpoint.")) return "endpoint";
+  if (action.startsWith("membership.")) return "member";
+  if (action.startsWith("chat.thread.")) return "chat_thread";
+  if (action.startsWith("chat.message.")) return "chat_message";
+  if (action.startsWith("alert.")) return "alert";
+  if (action === "provider.request") return "provider";
+  if (action.startsWith("task.")) return "task";
+  if (action === "artifact.project") return "artifact";
+  if (action === "sandbox.failed") return "sandbox";
+  if (action === "file.quota") return "file_quota";
+  if (action.startsWith("file.")) return "file";
+  return "project";
+}
 function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdateProjectResourcePolicyInput {
   if (input.activeTasksLimit === null) throw new ProductError("Project active tasks limit cannot be unlimited");
   if(input.endpointWindows){const seen=new Set<string>();for(const window of input.endpointWindows){const key=`${window.endpointId}:${window.metric}`;if(seen.has(key))throw new ProductError("Endpoint policy windows must be unique");seen.add(key);if(!window.endpointId||!["providerRequests","providerTokens","providerCost"].includes(window.metric)||!Number.isFinite(window.limit)||window.limit<0||!Number.isInteger(window.windowSeconds)||window.windowSeconds<60||window.windowSeconds>2592000)throw new ProductError("Endpoint policy window is invalid")}}
