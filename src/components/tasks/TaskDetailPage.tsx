@@ -47,6 +47,8 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const taskLoadVersion = useRef(0);
   const artifactsLoadVersion = useRef(0);
   const inputsLoadVersion = useRef(0);
@@ -151,7 +153,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   }, [loadArtifacts]);
 
   async function cancelTask() {
-    if (!capabilities?.cancelTask || cancelling) return;
+    if (!capabilities?.cancelTask || cancelling || deleting || lifecycleBusy) return;
     setCancelling(true);
     try {
       await apiClient.cancelTask(taskId, mutationKeys.key("task-cancel", taskId));
@@ -172,7 +174,8 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     }
   }
   async function deleteTask() {
-    if (!capabilities?.deleteTask) return;
+    if (!capabilities?.deleteTask || cancelling || deleting || lifecycleBusy) return;
+    setDeleting(true);
     try {
       await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
       mutationKeys.complete("task-delete", taskId);
@@ -186,6 +189,8 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
         await loadTask(true);
       }
       throw reason;
+    } finally {
+      if (mounted.current) setDeleting(false);
     }
   }
 
@@ -194,8 +199,9 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   if (!task) return null;
 
   const finalization = taskFinalizationPresentation(task);
+  const mutationBusy = cancelling || deleting || lifecycleBusy;
   const artifactEmptyMessage = task.artifactProjectionStatus === "failed" || task.artifactProjectionStatus === "pending" || task.artifactProjectionStatus === "draining" ? "Artifacts are not fully available yet." : null;
-  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskResultLabel(task)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" onClick={refresh}><RefreshCw size={17} /></Button>{capabilities && !artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} basePath={basePath} onRefresh={() => loadTask(true)} /> : null}{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={cancelling} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
+  const header = <PageHeader title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskResultLabel(task)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" disabled={mutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>{capabilities && !artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} basePath={basePath} onRefresh={() => loadTask(true)} disabled={cancelling || deleting} onBusyChange={setLifecycleBusy} /> : null}{capabilities?.cancelTask && !artifactsOnly ? <Button variant="danger" disabled={mutationBusy} onClick={() => setCancelOpen(true)}><X size={15} />{cancelling ? "Cancelling..." : "Cancel task"}</Button> : null}{capabilities?.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" disabled={mutationBusy} onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} {...(artifactEmptyMessage ? { emptyMessage:artifactEmptyMessage } : {})} onRetry={loadArtifacts} />;
 
   if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;

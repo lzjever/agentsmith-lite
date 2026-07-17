@@ -213,6 +213,32 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("locks competing task actions while a lifecycle mutation is pending", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, duplicateTask: apiClient.duplicateTask };
+    let duplicateStarted = false;
+    apiClient.taskDetail = async () => ({ task, capabilities: available });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
+    apiClient.duplicateTask = async () => {
+      duplicateStarted = true;
+      return new Promise(() => undefined);
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      await screen.findByText("Conversation could not be loaded.");
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Duplicate" }));
+      await waitFor(() => assert.equal(duplicateStarted, true));
+
+      assert.equal((screen.getByRole("button", { name: "Refresh task" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("button", { name: "Task actions" }) as HTMLButtonElement).disabled, true);
+      assert.equal((screen.getByRole("button", { name: "Cancel task" }) as HTMLButtonElement).disabled, true);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("closes lifecycle confirmation when streamed capabilities revoke access", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
