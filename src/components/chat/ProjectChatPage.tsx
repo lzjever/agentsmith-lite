@@ -422,6 +422,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
         <div ref={messageEnd} />
         {sending ? <Button variant="danger" className="m-3 w-fit" onClick={stop}>Stop</Button> : null}
         <ChatComposer
+          key={selectedThread?.id ?? "new-conversation"}
           endpoints={compatibleEndpoints}
           endpointId={endpointId}
           hasThread={Boolean(selectedThread)}

@@ -44,8 +44,13 @@ describe("retained chat and overview behavior", () => {
     fireEvent.click(screen.getByRole("button",{name:"Star conversation"}));fireEvent.click(screen.getByRole("button",{name:"Pin conversation"}));assert.deepEqual(starred,["chat_1"]);assert.deepEqual(pinned,["chat_1"]);
     fireEvent.click(screen.getByRole("button", { name: "Rename conversation" }));
     await screen.findByRole("dialog", { name: "Rename conversation" });
+    const saveTitle = screen.getByRole("button", { name: "Save title" }) as HTMLButtonElement;
+    assert.equal(saveTitle.disabled, true);
+    fireEvent.submit(saveTitle.closest("form")!);
+    assert.deepEqual(renamed, []);
     fireEvent.change(screen.getByRole("textbox", { name: "Conversation title" }), { target: { value: "Architecture review" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save title" }));
+    assert.equal(saveTitle.disabled, false);
+    fireEvent.click(saveTitle);
     assert.deepEqual(renamed, [["chat_1", "Architecture review"]]);
     fireEvent.click(screen.getByRole("button", { name: "Delete conversation" }));
     await screen.findByRole("alertdialog", { name: "Delete conversation" });
@@ -58,7 +63,7 @@ describe("retained chat and overview behavior", () => {
 
   it("renders versioned message edit, delete, branch, and failed retry actions",async()=>{
     const message={id:"message_1",threadId:"chat_1",sequence:1,version:2,deliveryStatus:"failed" as const,role:"user" as const,content:"Original",createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt};const completed={...message,id:"message_2",sequence:2,version:1,deliveryStatus:"completed" as const,role:"assistant" as const,content:"Completed"};const edits:Array<[string,string]>=[];const deleted:string[]=[];const branched:string[]=[];const retried:string[]=[];
-    render(<ChatMessageList empty={false} sending={false} messages={[message,completed]} onEdit={(item,content)=>edits.push([item.id,content])} onDelete={(item)=>deleted.push(item.id)} onBranch={(item)=>branched.push(item.id)} onRetry={(item)=>retried.push(item.id)}/>);assert.ok(screen.getByText("Provider request failed."));fireEvent.click(screen.getByRole("button",{name:"Retry"}));assert.deepEqual(retried,["message_1"]);fireEvent.click(screen.getByRole("button",{name:"Branch from message"}));assert.deepEqual(branched,["message_2"]);fireEvent.click(screen.getByRole("button",{name:"Edit message"}));await screen.findByRole("dialog",{name:"Edit message"});fireEvent.change(screen.getByRole("textbox",{name:"Message text"}),{target:{value:"Revised"}});fireEvent.click(screen.getByRole("button",{name:"Save message"}));assert.deepEqual(edits,[["message_1","Revised"]]);fireEvent.click(screen.getAllByRole("button",{name:"Delete message"})[0]!);const dialog=await screen.findByRole("alertdialog",{name:"Delete message"});fireEvent.click(within(dialog).getByRole("button",{name:"Delete message"}));await waitFor(()=>assert.deepEqual(deleted,["message_1"]));
+    render(<ChatMessageList empty={false} sending={false} messages={[message,completed]} onEdit={(item,content)=>edits.push([item.id,content])} onDelete={(item)=>deleted.push(item.id)} onBranch={(item)=>branched.push(item.id)} onRetry={(item)=>retried.push(item.id)}/>);assert.ok(screen.getByText("Provider request failed."));fireEvent.click(screen.getByRole("button",{name:"Retry"}));assert.deepEqual(retried,["message_1"]);fireEvent.click(screen.getByRole("button",{name:"Branch from message"}));assert.deepEqual(branched,["message_2"]);fireEvent.click(screen.getByRole("button",{name:"Edit message"}));await screen.findByRole("dialog",{name:"Edit message"});const save=screen.getByRole("button",{name:"Save message"}) as HTMLButtonElement;assert.equal(save.disabled,true);fireEvent.submit(save.closest("form")!);assert.deepEqual(edits,[]);fireEvent.change(screen.getByRole("textbox",{name:"Message text"}),{target:{value:"Revised"}});assert.equal(save.disabled,false);fireEvent.click(save);assert.deepEqual(edits,[["message_1","Revised"]]);fireEvent.click(screen.getAllByRole("button",{name:"Delete message"})[0]!);const dialog=await screen.findByRole("alertdialog",{name:"Delete message"});fireEvent.click(within(dialog).getByRole("button",{name:"Delete message"}));await waitFor(()=>assert.deepEqual(deleted,["message_1"]));
   });
 
   it("keeps chat deletion confirmations open when the server rejects them", async () => {
@@ -208,8 +213,9 @@ describe("retained chat and overview behavior", () => {
     };
     try {
       const view = render(<ProjectChatPage projectId="project_1" />);
-      const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
-      await waitFor(() => assert.equal(composer.disabled, false));
+      await screen.findByRole("textbox", { name: "Message" });
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, false));
+      const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
       fireEvent.change(composer, { target: { value: "Project one question" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await screen.findByText("Project one partial response");
@@ -266,8 +272,9 @@ describe("retained chat and overview behavior", () => {
     apiClient.sendChatMessage = async () => { throw new ApiError(403, "Chat access was revoked."); };
     try {
       render(<ProjectChatPage projectId="project_1" />);
-      const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
-      await waitFor(() => assert.equal(composer.disabled, false));
+      await screen.findByRole("textbox", { name: "Message" });
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, false));
+      const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
       fireEvent.change(composer, { target: { value: "Can I still send?" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await screen.findAllByText("Chat access was revoked.");
@@ -299,8 +306,9 @@ describe("retained chat and overview behavior", () => {
     };
     try {
       render(<ProjectChatPage projectId="project_1" />);
-      const message = await screen.findByRole("textbox", { name: "Message" });
-      await waitFor(() => assert.equal((message as HTMLTextAreaElement).disabled, false));
+      await screen.findByRole("textbox", { name: "Message" });
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, false));
+      const message = screen.getByRole("textbox", { name: "Message" });
       fireEvent.change(message, { target: { value: "hello" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await screen.findByText("partial answer");
@@ -346,6 +354,27 @@ describe("retained chat and overview behavior", () => {
       apiClient.projectCapabilities = original.projectCapabilities;
       apiClient.chatThreads = original.chatThreads;
       apiClient.chatMessages = original.chatMessages;
+    }
+  });
+
+  it("does not carry an unsent draft into another conversation", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    const second = { ...threads[0]!, id: "chat_2", title: "Release notes" };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [...threads, second];
+    apiClient.chatMessages = async () => [];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByRole("textbox", { name: "Message" });
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, false));
+      const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      fireEvent.change(composer, { target: { value: "Draft for product Q&A" } });
+      fireEvent.click(screen.getByRole("button", { name: "Release notes" }));
+      await waitFor(() => assert.equal(screen.getByRole("button", { name: "Release notes" }).getAttribute("aria-current"), "true"));
+      assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value, "");
+    } finally {
+      Object.assign(apiClient, original);
     }
   });
 
