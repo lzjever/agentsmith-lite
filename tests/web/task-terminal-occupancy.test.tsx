@@ -12,7 +12,7 @@ class TestWebSocket {
   closed = false;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   constructor(_url: string) { sockets.push(this); }
   send(_data: string): void {}
   close(): void { this.closed = true; this.readyState = 3; }
@@ -74,12 +74,23 @@ describe("TaskDetailPage terminal occupancy", () => {
     render(<TaskTerminalPanel taskId="task_starting" />);
     await waitFor(() => assert.equal(sockets.length, 1));
 
-    act(() => { sockets[0]?.onerror?.(); sockets[0]?.onclose?.(); });
+    act(() => { sockets[0]?.onerror?.(); sockets[0]?.onclose?.({ code:1006, reason:"" }); });
     await waitFor(() => assert.equal(sockets.length, 2), { timeout: 2_000 });
     act(() => sockets[1]?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ op: "ready" }) })));
 
     assert.ok(await screen.findByText("ready"));
     assert.equal(screen.queryByRole("button", { name: "Reconnect terminal" }), null);
+  });
+
+  it("requires a manual reconnect after the terminal proxy closes an oversized stream", async () => {
+    render(<TaskTerminalPanel taskId="task_buffer_limit" />);
+    await waitFor(() => assert.equal(sockets.length, 1));
+
+    act(() => sockets[0]?.onclose?.({ code:1009, reason:"Terminal output buffer exceeded" }));
+
+    assert.equal(screen.getByRole("alert").textContent, "Terminal output buffer exceeded");
+    assert.ok(screen.getByRole("button", { name:"Reconnect terminal" }));
+    assert.equal(sockets.length, 1);
   });
 
   it("keeps the owner's terminal mounted across occupancy and terminal-state updates until the user leaves", async () => {

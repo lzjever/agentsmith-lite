@@ -53,7 +53,17 @@ export function TaskTerminalPanel({ taskId }: { taskId: string }) {
         if(frame.op==="error"){retryOrFail(frame.message??"Task terminal failed.");socket?.close();}
       };
       socket.onerror=()=>retryOrFail("Task terminal connection failed.");
-      socket.onclose=()=>{if(shellExited)setState("closed");else retryOrFail("Task terminal connection failed.");};
+      socket.onclose=(event)=>{
+        if(shellExited){setState("closed");return;}
+        if(event.code===1009){
+          if(retryTimer)clearTimeout(retryTimer);
+          retryScheduled=false;
+          setError(event.reason||"Task terminal connection exceeded its buffer limit.");
+          setState("error");
+          return;
+        }
+        retryOrFail("Task terminal connection failed.");
+      };
       terminal.onData((data)=>{if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:"stdin",data:encodeBase64(data)}));});
       observer=new ResizeObserver(()=>{fit?.fit();sendSize(socket,terminal);});observer.observe(viewport.current);
     }).catch(()=>{setError("Task terminal could not be loaded.");setState("error");});
