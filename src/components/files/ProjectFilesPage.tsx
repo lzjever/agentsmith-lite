@@ -103,6 +103,15 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setMobileDetailsOpen(true);
   }
 
+  function forgetFile(filePath: string) {
+    previewVersion.current += 1;
+    setDeleteTarget((current) => current?.path === filePath ? undefined : current);
+    setSelected((current) => current?.path === filePath ? undefined : current);
+    setPreview((current) => invalidateFilePreview(current, filePath));
+    setMobileDetailsOpen(false);
+    setEntries((current) => current.filter((entry) => entry.path !== filePath));
+  }
+
   async function revokeWriteAccess(error: unknown) {
     if (!isReadOnlyMutationError(error)) return false;
     setUploadFailure(undefined);
@@ -172,7 +181,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     if (file) void upload(file);
   }
   useEffect(()=>()=>{if(preview?.kind==="image")URL.revokeObjectURL(preview.value);},[preview]);
-  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;const version=++previewVersion.current;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current||version!==previewVersion.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);if(version!==previewVersion.current){URL.revokeObjectURL(value);return;}setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name,path:entry.path};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current||version!==previewVersion.current)return;setPreview({kind:"text",value,name:entry.name,path:entry.path});return;}throw new Error();}catch{if(mounted.current&&version===previewVersion.current)toast.error("Preview is unavailable for this file.");}}
+  async function openPreview(entry:ProjectFile){if(entry.type!=="file")return;const version=++previewVersion.current;try{if(!isPreviewableProjectFile(entry)||(entry.size??0)>maxPreviewBytes)throw new Error();const blob=await apiClient.downloadProjectFile(projectId,entry.path);if(!mounted.current||version!==previewVersion.current)return;if(blob.size>maxPreviewBytes)throw new Error();const mediaType=blob.type||entry.mediaType||"";if(previewImageTypes.has(mediaType)){const value=URL.createObjectURL(blob);if(version!==previewVersion.current){URL.revokeObjectURL(value);return;}setPreview(current=>{if(current?.kind==="image")URL.revokeObjectURL(current.value);return {kind:"image",value,name:entry.name,path:entry.path};});return;}if(previewTextTypes.has(mediaType)||(!mediaType&&/\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))){const value=(await blob.text()).slice(0,16_000);if(!mounted.current||version!==previewVersion.current)return;setPreview({kind:"text",value,name:entry.name,path:entry.path});return;}throw new Error();}catch(error){if(!mounted.current||version!==previewVersion.current)return;if(isMissingFile(error)){forgetFile(entry.path);toast.error("File no longer exists.");return;}toast.error("Preview is unavailable for this file.");}}
 
   async function removeSelectedFile() {
     if (!deleteTarget || uploading || deleting) return;
@@ -180,15 +189,15 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setMessage("");
     const requestIdentity = deleteTarget.path;
     try {
-      await apiClient.deleteFile(projectId, deleteTarget.path, mutationKeys.key("file.delete", requestIdentity));
+      let alreadyMissing = false;
+      await apiClient.deleteFile(projectId, deleteTarget.path, mutationKeys.key("file.delete", requestIdentity)).catch((error) => {
+        if (!isMissingFile(error)) throw error;
+        alreadyMissing = true;
+      });
       mutationKeys.complete("file.delete", requestIdentity);
       if (!mounted.current) return;
-      previewVersion.current += 1;
-      setDeleteTarget(undefined);
-      setSelected((current) => current?.path === deleteTarget.path ? undefined : current);
-      setPreview((current) => invalidateFilePreview(current, deleteTarget.path));
-      setEntries((current) => current.filter((entry) => entry.path !== deleteTarget.path));
-      toast.success("File deleted");
+      forgetFile(deleteTarget.path);
+      toast.success(alreadyMissing ? "File no longer exists" : "File deleted");
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("file.delete", requestIdentity);
@@ -269,6 +278,10 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : error instanceof Error ? error.message : fallback;
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.message === "File not found";
 }
 
 export function formatBytes(bytes: number): string {

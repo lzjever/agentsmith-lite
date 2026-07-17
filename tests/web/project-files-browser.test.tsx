@@ -237,6 +237,24 @@ describe("project files browser", () => {
     } finally { restoreClient(original); }
   });
 
+  it("removes a file that disappeared before deletion completed", async () => {
+    const original = snapshotClient();
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.deleteFile = async () => { throw new ApiError(404, "File not found"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
+      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
+      assert.ok(confirm);
+      await act(async () => { fireEvent.click(confirm); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.equal(screen.queryByRole("alertdialog", { name: "Delete file?" }), null);
+      assert.equal(screen.queryByText("brief.txt"), null);
+    } finally { restoreClient(original); }
+  });
+
   it("reuses a file deletion key after an unknown network result", async () => {
     const original = snapshotClient();
     const keys: string[] = [];
@@ -378,6 +396,20 @@ describe("project files browser", () => {
     apiClient.files=async()=>({entries:[file,{...file,name:"image.png",path:"files/image.png"}]});apiClient.projectCapabilities=async()=>writable;
     globalThis.fetch=async()=>new Response("preview",{headers:{"content-type":"text/plain"}});
     try{render(<ProjectFilesPage projectId="project_1"/>);await screen.findByText("brief.txt");const filter=screen.getByRole("textbox",{name:"Filter files"});assert.match(filter.className,/border-border-input/);fireEvent.change(filter,{target:{value:"image"}});assert.equal(screen.queryByText("brief.txt"),null);assert.ok(screen.getByText("image.png"));fireEvent.click(screen.getByRole("button",{name:"Clear file filter"}));fireEvent.click(screen.getByRole("button",{name:"brief.txt"}));fireEvent.click(screen.getAllByRole("button",{name:"Preview"})[0]!);await screen.findByText("preview");fireEvent.click(screen.getByRole("button",{name:"Close preview"}));}finally{restoreClient(original);globalThis.fetch=originalFetch;}
+  });
+
+  it("removes a file that disappeared before preview", async () => {
+    const original = snapshotClient();
+    apiClient.files = async () => ({ entries: [{ ...file, mediaType:"text/plain" }] });
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.downloadProjectFile = async () => { throw new ApiError(404, "File not found"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name:"Preview" })[0]!);
+      await waitFor(() => assert.equal(screen.queryByText("brief.txt"), null));
+      assert.ok(screen.getByRole("heading", { name:"No files yet" }));
+    } finally { restoreClient(original); }
   });
 
   it("invalidates only the preview bound to a replaced or deleted path", () => {
