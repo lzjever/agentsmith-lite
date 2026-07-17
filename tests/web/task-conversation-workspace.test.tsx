@@ -27,6 +27,28 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("refreshes interaction capabilities when sending discovers the project is read-only", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, sendTaskMessage: apiClient.sendTaskMessage };
+    let reads = 0;
+    apiClient.getTaskInteractions = async () => ({ ...snapshot, capabilities: reads++ === 0 ? capabilities : { ...capabilities, sendMessage: false } });
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    apiClient.sendTaskMessage = async () => { throw new ApiError(409, "Project is archived"); };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
+      fireEvent.change(composer, { target: { value: "Continue" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+      await waitFor(() => assert.equal(reads, 2));
+      assert.equal(composer.disabled, true);
+      assert.ok(screen.getByText("Project is archived"));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the initial snapshot error and Retry reachable", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let attempts = 0;

@@ -112,28 +112,41 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
   async function send(content: string) {
     const identity = `${taskId}:${content}`;
     const stateVersion = authoritativeStateVersion.current;
-    const receipt = await apiClient.sendTaskMessage(taskId, content, mutationKeys.key("task-message", identity));
-    mutationKeys.complete("task-message", identity);
-    applyReceipt(receipt, stateVersion);
-    const safeError = taskMessageReceiptError(receipt);
-    if (safeError) throw new Error(safeError);
+    try {
+      const receipt = await apiClient.sendTaskMessage(taskId, content, mutationKeys.key("task-message", identity));
+      mutationKeys.complete("task-message", identity);
+      applyReceipt(receipt, stateVersion);
+      const safeError = taskMessageReceiptError(receipt);
+      if (safeError) throw new Error(safeError);
+    } catch (reason) { await recoverMutation(reason); throw reason; }
   }
   async function updateQueued(messageId: string, content: string) {
     const identity = `${messageId}:${content}`;
     const stateVersion = authoritativeStateVersion.current;
-    const receipt = await apiClient.updateTaskMessage(taskId, messageId, content, mutationKeys.key("task-message-edit", identity));
-    mutationKeys.complete("task-message-edit", identity);
-    applyReceipt(receipt, stateVersion);
-    const safeError = taskMessageReceiptError(receipt);
-    if (safeError) throw new Error(safeError);
+    try {
+      const receipt = await apiClient.updateTaskMessage(taskId, messageId, content, mutationKeys.key("task-message-edit", identity));
+      mutationKeys.complete("task-message-edit", identity);
+      applyReceipt(receipt, stateVersion);
+      const safeError = taskMessageReceiptError(receipt);
+      if (safeError) throw new Error(safeError);
+    } catch (reason) { await recoverMutation(reason); throw reason; }
   }
   async function deleteQueued(messageId: string) {
     const stateVersion = authoritativeStateVersion.current;
-    const receipt = await apiClient.deleteTaskMessage(taskId, messageId, mutationKeys.key("task-message-delete", messageId));
-    mutationKeys.complete("task-message-delete", messageId);
-    applyReceipt(receipt, stateVersion);
-    const safeError = taskMessageReceiptError(receipt);
-    if (safeError) throw new Error(safeError);
+    try {
+      const receipt = await apiClient.deleteTaskMessage(taskId, messageId, mutationKeys.key("task-message-delete", messageId));
+      mutationKeys.complete("task-message-delete", messageId);
+      applyReceipt(receipt, stateVersion);
+      const safeError = taskMessageReceiptError(receipt);
+      if (safeError) throw new Error(safeError);
+    } catch (reason) { await recoverMutation(reason); throw reason; }
+  }
+  async function recoverMutation(reason: unknown) {
+    if (!(reason instanceof ApiError)) return;
+    if (reason.status === 404) { onUnavailable?.(); return; }
+    if (reason.status !== 403 && reason.status !== 409) return;
+    try { await load(); }
+    catch (refreshReason) { if (refreshReason instanceof ApiError && (refreshReason.status === 403 || refreshReason.status === 404)) onUnavailable?.(); }
   }
   function applyReceipt(receipt: TaskMessageReceipt, stateVersion: number) {
     if (receipt.interaction) {
@@ -151,11 +164,15 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
   }
   async function abort() {
     setAborting(true);
-    try { await apiClient.abortTaskTurn(taskId, mutationKeys.key("task-turn-abort", taskId)); mutationKeys.complete("task-turn-abort", taskId); } finally { setAborting(false); }
+    try { await apiClient.abortTaskTurn(taskId, mutationKeys.key("task-turn-abort", taskId)); mutationKeys.complete("task-turn-abort", taskId); }
+    catch (reason) { await recoverMutation(reason); throw reason; }
+    finally { setAborting(false); }
   }
   async function stopWork(interactionId: string) {
-    await apiClient.stopTaskWork(taskId, interactionId, mutationKeys.key("task-work-stop", interactionId));
-    mutationKeys.complete("task-work-stop", interactionId);
+    try {
+      await apiClient.stopTaskWork(taskId, interactionId, mutationKeys.key("task-work-stop", interactionId));
+      mutationKeys.complete("task-work-stop", interactionId);
+    } catch (reason) { await recoverMutation(reason); throw reason; }
   }
   function retry() { reconnectCount.current = 0; streamCursor.current = undefined; setError(""); setRefreshGeneration((value) => value + 1); }
   function onScroll() { const element = viewport.current; if (!element) return; if (isNearHistoryTop(element.scrollTop)) void loadEarlier(); if (element.scrollHeight - element.scrollTop - element.clientHeight < 96) setNewActivity(false); }
