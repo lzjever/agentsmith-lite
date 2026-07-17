@@ -201,6 +201,32 @@ describe("workspace and shell interactions", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("keeps the active page mounted during a directory refresh", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    let finishRefresh!: (value: Workspace[]) => void;
+    let reads = 0;
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => {
+      reads += 1;
+      return reads === 1 ? [workspace] : new Promise((resolve) => { finishRefresh = resolve; });
+    };
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<DraftHarness />, "/workspaces/ws_1/projects/proj_1/settings", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      const draft = await view.findByRole("textbox", { name: "Unsaved draft" }) as HTMLInputElement;
+      fireEvent.change(draft, { target: { value: "Keep this work" } });
+
+      act(() => window.dispatchEvent(new Event("agentsmith:directory-changed")));
+      await waitFor(() => assert.equal(reads, 2));
+
+      await act(async () => finishRefresh([workspace]));
+      assert.equal((view.getByRole("textbox", { name: "Unsaved draft" }) as HTMLInputElement).value, "Keep this work");
+    } finally {
+      finishRefresh?.([workspace]);
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
     const tasks = view.getByRole("link", { name: "Tasks" });
@@ -213,6 +239,11 @@ describe("workspace and shell interactions", () => {
 function ProjectDialogHarness() {
   const [open, setOpen] = useState(true);
   return <CreateProjectDialog workspaceId={workspace.id} open={open} onOpenChange={setOpen} onCreated={() => undefined} />;
+}
+
+function DraftHarness() {
+  const [draft, setDraft] = useState("");
+  return <label>Unsaved draft<input aria-label="Unsaved draft" value={draft} onChange={(event) => setDraft(event.target.value)} /></label>;
 }
 
 function renderShell(children: React.ReactNode, pathname: string, params: Record<string, string>, workspaceId?: string) {

@@ -48,9 +48,9 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
     }
   }
 
-  async function loadDirectory() {
+  async function loadDirectory(preservePage = false) {
     const request = ++directoryRequest.current;
-    setDirectoryState("loading");
+    if (!preservePage) setDirectoryState("loading");
     try {
       const listed = await apiClient.workspaces();
       if (!mounted.current || request !== directoryRequest.current) return;
@@ -58,7 +58,6 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
       setDirectoryState("ready");
     } catch {
       if (!mounted.current || request !== directoryRequest.current) return;
-      setWorkspaces([]);
       setDirectoryState("error");
     }
   }
@@ -71,7 +70,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
       setUser(undefined);
       setStatus("login");
     };
-    const refreshDirectory = () => { void loadDirectory(); };
+    const refreshDirectory = () => { void loadDirectory(true); };
     window.addEventListener(SESSION_EXPIRED_EVENT, expireSession);
     window.addEventListener(DIRECTORY_CHANGED_EVENT, refreshDirectory);
     return () => {
@@ -117,7 +116,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
         : <ShellRecoveryState title="Project unavailable" detail="This project does not exist in this workspace or you no longer have permission to access it." projectsHref={`/workspaces/${workspace.id}/projects`} retry={loadDirectory} />
       : null;
   const profileReturnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  return <TooltipProvider><div className="min-h-screen bg-background"><Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} /><div className="flex min-h-[calc(100vh-2.75rem)]"><aside className={`hidden shrink-0 flex-col border-r border-border bg-panel transition-[width] duration-200 md:flex ${collapsed ? "w-[var(--sidebar-width-collapsed)]" : "w-[var(--sidebar-width)]"}`}><ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} /><Button variant="quiet" size="icon" className="m-3 self-end" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</Button></aside><Sheet open={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen}><SheetContent aria-describedby={undefined}><div className="border-b border-border px-4 py-3"><span className="font-display text-lg text-foreground">AgentSmith</span>{workspace && project ? <div className="mt-3"><ProjectSwitcher workspace={workspace} project={project} mobile onSelect={(id) => router.push(`/workspaces/${workspace.id}/projects/${id}/overview`)} onViewAll={() => router.push(`/workspaces/${workspace.id}/projects`)} /></div> : null}</div><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /><ThemeToggle mobile /></SheetContent></Sheet><main className="min-w-0 flex-1">{directoryState === "error" ? <DirectoryNotice onRetry={loadDirectory} /> : null}{contextError ?? children}</main></div><ToastContainer /></div></TooltipProvider>;
+  return <TooltipProvider><div className="min-h-screen bg-background"><Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} /><div className="flex min-h-[calc(100vh-2.75rem)]"><aside className={`hidden shrink-0 flex-col border-r border-border bg-panel transition-[width] duration-200 md:flex ${collapsed ? "w-[var(--sidebar-width-collapsed)]" : "w-[var(--sidebar-width)]"}`}><ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} /><Button variant="quiet" size="icon" className="m-3 self-end" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</Button></aside><Sheet open={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen}><SheetContent aria-describedby={undefined}><div className="border-b border-border px-4 py-3"><span className="font-display text-lg text-foreground">AgentSmith</span>{workspace && project ? <div className="mt-3"><ProjectSwitcher workspace={workspace} project={project} mobile onSelect={(id) => router.push(`/workspaces/${workspace.id}/projects/${id}/overview`)} onViewAll={() => router.push(`/workspaces/${workspace.id}/projects`)} /></div> : null}</div><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /><ThemeToggle mobile /></SheetContent></Sheet><main className="min-w-0 flex-1">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</main></div><ToastContainer /></div></TooltipProvider>;
 }
 
 function ShellLoadingFrame() {
