@@ -301,6 +301,34 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("reuses a message edit key while retaining the draft after an unknown result", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, editChatMessage: apiClient.editChatMessage };
+    const message = { id: "message_edit_retry", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    const keys: string[] = [];
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [message];
+    apiClient.editChatMessage = (async (_projectId: string, _threadId: string, _messageId: string, input: { content: string; expectedVersion: number }, key: string) => {
+      keys.push(key);
+      if (keys.length === 1) throw new Error("connection closed");
+      return { ...message, content: input.content, version: 2 };
+    }) as typeof apiClient.editChatMessage;
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit message" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Message text" }), { target: { value: "Revised" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+      await waitFor(() => assert.equal(keys.length, 1));
+      assert.equal((screen.getByRole("textbox", { name: "Message text" }) as HTMLTextAreaElement).value, "Revised");
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+      await waitFor(() => assert.equal(keys.length, 2));
+      assert.equal(keys[1], keys[0]);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("locks conversation directory controls while metadata is being updated", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, updateChatThread: apiClient.updateChatThread };
     let finishUpdate!: (value: ProjectChatThread) => void;

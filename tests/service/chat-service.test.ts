@@ -44,6 +44,32 @@ describe("ChatService", () => {
     assert.equal(events.filter((event) => event.action === "chat.thread.delete").length, 1);
   });
 
+  it("replays versioned message edits, deletion, and branching without duplicating effects", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([{ role: "assistant", content: "answer" }]) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, user.id, project.id);
+    const thread = await services.chat.createThread(user.id, project.id, endpoint.id);
+    await services.chat.sendMessage(user.id, project.id, thread.id, "original");
+    const history = await services.chat.listMessages(user.id, project.id, thread.id);
+    const userMessage = history.find((message) => message.role === "user")!;
+    const assistantMessage = history.find((message) => message.role === "assistant")!;
+
+    const branch = await services.chat.branchMessage(user.id, project.id, thread.id, assistantMessage.id, assistantMessage.version, "message-branch-key");
+    assert.deepEqual(await services.chat.branchMessage(user.id, project.id, thread.id, assistantMessage.id, assistantMessage.version, "message-branch-key"), branch);
+    const edited = await services.chat.editMessage(user.id, project.id, thread.id, userMessage.id, userMessage.version, "revised", "message-edit-key");
+    assert.deepEqual(await services.chat.editMessage(user.id, project.id, thread.id, userMessage.id, userMessage.version, "revised", "message-edit-key"), edited);
+    assert.deepEqual(await services.chat.deleteMessage(user.id, project.id, thread.id, edited.id, edited.version, "message-delete-key"), { deleted: true });
+    assert.deepEqual(await services.chat.deleteMessage(user.id, project.id, thread.id, edited.id, edited.version, "message-delete-key"), { deleted: true });
+
+    const events = await store.listProjectAuditEvents(project.id);
+    assert.equal(events.filter((event) => event.action === "chat.message.branch").length, 1);
+    assert.equal(events.filter((event) => event.action === "chat.message.edit").length, 1);
+    assert.equal(events.filter((event) => event.action === "chat.message.delete").length, 1);
+  });
+
   it("requires project access, resolves the endpoint secret, and passes the resolved key to the client", async () => {
     const calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
     const services = createApplicationServices({

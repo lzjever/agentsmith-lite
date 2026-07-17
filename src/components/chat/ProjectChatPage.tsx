@@ -315,35 +315,43 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   async function editMessage(target: ProjectChatMessage, content: string): Promise<boolean> {
+    const identity = `${target.id}:${target.version}:${content}`;
     try {
-      await apiClient.editChatMessage(projectId, threadId, target.id, { content, expectedVersion: target.version });
+      await apiClient.editChatMessage(projectId, threadId, target.id, { content, expectedVersion: target.version }, mutationKeys.key("chat-message.edit", identity));
+      mutationKeys.complete("chat-message.edit", identity);
       if (!active.current) return false;
       await loadMessages(threadId);
       if (!active.current) return false;
       toast.success("Message updated");
       return true;
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-message.edit", identity);
       if (!active.current) return false;
       return failAction(reason);
     }
   }
 
   async function deleteMessage(target: ProjectChatMessage) {
+    const identity = `${target.id}:${target.version}`;
     try {
-      await apiClient.deleteChatMessage(projectId, threadId, target.id, target.version);
+      await apiClient.deleteChatMessage(projectId, threadId, target.id, target.version, mutationKeys.key("chat-message.delete", identity));
+      mutationKeys.complete("chat-message.delete", identity);
       if (!active.current) return;
       await loadMessages(threadId);
       if (!active.current) return;
       toast.success("Message deleted");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-message.delete", identity);
       if (!active.current) return;
       throw new Error(message(reason));
     }
   }
 
   async function branchMessage(target: ProjectChatMessage) {
+    const identity = `${target.id}:${target.version}`;
     try {
-      const branch = await apiClient.branchChatMessage(projectId, threadId, target.id, target.version);
+      const branch = await apiClient.branchChatMessage(projectId, threadId, target.id, target.version, mutationKeys.key("chat-message.branch", identity));
+      mutationKeys.complete("chat-message.branch", identity);
       if (!active.current) return;
       setThreads((current) => orderedThreads([branch, ...current]));
       ++messageLoadVersion.current;
@@ -356,6 +364,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setActionError("");
       toast.success("Conversation branched");
     } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("chat-message.branch", identity);
       if (!active.current) return;
       failAction(reason);
     }
