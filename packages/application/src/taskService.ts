@@ -1007,12 +1007,24 @@ export class TaskService {
         if(delivered?.startIntentStatus==="dispatched")await this.syncTaskTimeline(delivered,{updateRunLifecycle:false,preserveTerminalStatus:true});
       } catch (error) {
         if ((claimed.artifactProjectionAttemptCount ?? 0) < MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS) throw error;
+        await this.failUnconfirmedTaskStart(claimed);
         await this.markTaskInteractionHistoryGap(claimed.id);
       }
       await this.projectSandboxArtifactFiles(claimed);
       if(claimed.terminalReason==="failed")await this.policies.evaluateTaskFailure(claimed.projectId,claimed.endpointId);
       if(!await this.store.completeTaskArtifactProjection({id:task.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task artifact drain fence changed",409);
     }catch(error){await this.store.failTaskArtifactProjection({id:task.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
+  }
+
+  private async failUnconfirmedTaskStart(task: PersistedAgentTask): Promise<void> {
+    if (task.startIntentStatus !== "dispatching" || !task.startClaimToken) return;
+    const failed = await this.store.failTaskStart({
+      id: task.id,
+      claimToken: task.startClaimToken,
+      safeError: "Initial prompt delivery could not be confirmed before runtime cleanup",
+      updatedAt: nowIso()
+    });
+    if (failed) await this.persistInitialPromptInteraction(failed);
   }
 
   private async markTaskInteractionHistoryGap(taskId: string): Promise<void> {

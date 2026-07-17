@@ -484,13 +484,13 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.store.findTask(task.id))?.startIntentStatus, "dispatched");
   });
 
-  it("finishes expired cleanup after bounded uncertain start reconciliation", async () => {
+  it("finishes cancelled cleanup after bounded uncertain start reconciliation", async () => {
     const setup = await createSetup(true);
     setup.botified.throwAfterAcceptOnce = true;
-    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "expire uncertain start" }, "create-expired-uncertain");
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "cancel uncertain start" }, "create-cancelled-uncertain");
     await setup.services.tasks.syncActiveTasksOnce();
     assert.equal((await setup.store.findTask(task.id))?.startIntentStatus, "dispatching");
-    await setup.services.tasks.finalizeTaskForRunCleanup(task.id, "expired");
+    await setup.services.tasks.finalizeTaskForRunCleanup(task.id, "cancelled");
     setup.botified.queryError = new Error("delivery query remains unreachable");
 
     await setup.services.tasks.syncActiveTasksOnce();
@@ -500,11 +500,16 @@ describe("durable task lifecycle", () => {
 
     const settled = await setup.store.findTask(task.id);
     const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(settled?.terminalReason, "cancelled");
     assert.equal(settled?.artifactProjectionStatus, "drained");
     assert.equal(settled?.cleanupStatus, "completed");
     assert.equal(settled?.artifactProjectionAttemptCount, 3);
+    assert.equal(settled?.startIntentStatus, "failed");
     assert.equal(interactions.historyStatus, "gap");
     assert.equal(interactions.runState, "terminal");
+    const initial = interactions.items.find((item) => item.kind === "user_message");
+    assert.equal(initial?.kind, "user_message");
+    assert.equal(initial?.status, "failed");
     assert.equal(setup.botified.posts.length, 1);
     assert.equal(setup.port.resources.length, 0);
   });
