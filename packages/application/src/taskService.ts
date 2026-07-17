@@ -560,9 +560,14 @@ export class TaskService {
     const filePath = path.resolve(snapshotRoot, ...entry.path.split("/"));
     assertPathInside(snapshotRoot, filePath, "Task input path is outside the snapshot");
     try {
+      const bytes = await readRegularFileWithoutFollowingSymlink(filePath);
+      const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      if (bytes.byteLength !== entry.size || digest !== entry.digest) {
+        throw new ProductError("Task input snapshot no longer matches its manifest", 409);
+      }
       return {
         input: { path: entry.path, name: path.posix.basename(entry.path), bytes: entry.size, sha256: entry.digest.replace(/^sha256:/, "") },
-        bytes: await readRegularFileWithoutFollowingSymlink(filePath)
+        bytes
       };
     } catch (error) {
       if (isNotFound(error)) throw new ProductError("Task input file not found", 404);

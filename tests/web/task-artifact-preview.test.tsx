@@ -75,6 +75,29 @@ describe("task artifact previews", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Text" }));
     assert.ok(screen.getByText("result.json"));
   });
+
+  it("keeps oversized artifacts downloadable without loading them into a preview", () => {
+    render(<TaskArtifactsPanel taskId="task_1" artifacts={[
+      { ...image, id:"large-image", name:"large.png", bytes:8 * 1024 * 1024 + 1 },
+      { ...image, id:"large-text", name:"large.txt", mediaType:"text/plain", bytes:512 * 1024 + 1, previewText:null }
+    ]} />);
+
+    assert.equal(Boolean(screen.queryByRole("button", { name:"View large.png" })), false);
+    assert.equal(Boolean(screen.queryByRole("button", { name:"Preview" })), false);
+    assert.ok(screen.getByRole("link", { name:"Download large.png" }));
+    assert.ok(screen.getByRole("link", { name:"Download large.txt" }));
+  });
+
+  it("rejects an image preview response larger than its declared safe size", async () => {
+    const original = apiClient.downloadTaskArtifact;
+    apiClient.downloadTaskArtifact = async () => ({ size:8 * 1024 * 1024 + 1, type:"image/png" }) as Blob;
+    try {
+      render(<TaskArtifactsPanel taskId="task_1" artifacts={[image]} />);
+      fireEvent.click(screen.getByRole("button", { name:"View diagram.png" }));
+      assert.ok(await screen.findByText("Image preview is too large."));
+      assert.equal(Boolean(screen.queryByRole("img", { name:"diagram.png" })), false);
+    } finally { apiClient.downloadTaskArtifact = original; }
+  });
 });
 
 function installDom() { const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" }); Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, HTMLInputElement: dom.window.HTMLInputElement, HTMLFormElement: dom.window.HTMLFormElement, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true }); Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator }); Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent }); if (!("scrollIntoView" in dom.window.HTMLElement.prototype)) Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} }); if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } }); }

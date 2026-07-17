@@ -162,10 +162,13 @@ describe("durable task lifecycle", () => {
     await writeFile(source, "original");
     const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "use input", inputPaths: ["files/input.txt"] }, "create-input-snapshot");
     await writeFile(source, "changed");
-    assert.equal(await readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "inputs", "files", "input.txt"), "utf8"), "original");
+    const snapshotPath = path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "inputs", "files", "input.txt");
+    assert.equal(await readFile(snapshotPath, "utf8"), "original");
     const inputs=await setup.services.tasks.listTaskInputs(setup.userId,task.id);
     assert.deepEqual(inputs.map((input)=>({path:input.path,name:input.name,bytes:input.bytes})),[{path:"files/input.txt",name:"input.txt",bytes:8}]);
     assert.equal((await setup.services.tasks.downloadTaskInput(setup.userId,task.id,"files/input.txt")).bytes.toString("utf8"),"original");
+    await writeFile(snapshotPath, "tampered");
+    await assert.rejects(() => setup.services.tasks.downloadTaskInput(setup.userId,task.id,"files/input.txt"), /no longer matches its manifest/);
     const terminal=await setup.services.tasks.openTaskTerminal(setup.userId,task.id);
     assert.equal(terminal.serviceKey,"service-key");
     assert.match(terminal.baseUrl,/^http:\/\//);
