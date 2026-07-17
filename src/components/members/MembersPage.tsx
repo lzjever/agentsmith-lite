@@ -62,8 +62,9 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const refreshMembers = useCallback(async () => {
     const request = ++memberRequest.current;
     const listed = await apiClient.members(projectId);
-    if (!mounted.current || request !== memberRequest.current) return;
+    if (!mounted.current || request !== memberRequest.current) return undefined;
     setMembers(listed);
+    return listed;
   }, [projectId]);
 
   const load = useCallback(async () => {
@@ -160,7 +161,15 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       toast.success("Member role updated");
     } catch (reason) {
       if (!mounted.current) return;
-      setRoleError({ userId: member.userId, message: denied(reason) });
+      const detail = denied(reason);
+      let refreshed: ProjectMember[] | undefined;
+      try { refreshed = await refreshMembers(); } catch {}
+      if (!mounted.current) return;
+      if (refreshed?.some((item) => item.userId === member.userId && item.role === nextRole)) {
+        toast.success("Member role updated");
+        return;
+      }
+      setRoleError({ userId: member.userId, message: detail });
     } finally {
       if (mounted.current) setBusyUserId(undefined);
     }
@@ -168,17 +177,28 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
 
   async function removeMember() {
     if (!removing || !canManage || busyUserId !== undefined) return;
-    setBusyUserId(removing.userId);
+    const member = removing;
+    setBusyUserId(member.userId);
     try {
-      await apiClient.removeMember(projectId, removing.userId);
+      await apiClient.removeMember(projectId, member.userId);
       if (!mounted.current) return;
-      setMembers((items) => removeMemberById(items, removing.userId));
+      setMembers((items) => removeMemberById(items, member.userId));
       setRemoving(undefined);
       toast.success("Member removed");
       void loadCandidates();
     } catch (reason) {
       if (!mounted.current) return;
-      throw new Error(denied(reason));
+      const detail = denied(reason);
+      let refreshed: ProjectMember[] | undefined;
+      try { refreshed = await refreshMembers(); } catch {}
+      if (!mounted.current) return;
+      if (refreshed && !refreshed.some((item) => item.userId === member.userId)) {
+        setRemoving(undefined);
+        toast.success("Member removed");
+        void loadCandidates();
+        return;
+      }
+      throw new Error(detail);
     } finally {
       if (mounted.current) setBusyUserId(undefined);
     }

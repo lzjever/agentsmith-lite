@@ -5,7 +5,7 @@ import React from "react";
 import { ApiError, apiClient, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../src/lib/api/client.js";
 
 installDom();
-const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { MembersPage } = await import("../../src/components/members/MembersPage.js");
 
 const projectId = "project_1";
@@ -155,9 +155,45 @@ describe("project member eligibility", () => {
       assert.equal(candidateReads, 0);
     } finally { restoreClient(original); }
   });
+
+  it("reconciles a role change when the response is lost after commit", async () => {
+    const original = snapshotClient();
+    const member: ProjectMember = { ...owner, userId: "member_1", role: "member", displayName: "Member One", email: "member@example.test" };
+    let listed = [owner, member];
+    apiClient.members = async () => listed;
+    apiClient.workspaceMembers = async () => [workspaceOwner];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.changeMember = async () => { listed = [owner, { ...member, role: "admin" }]; throw new ApiError(503, "Response lost"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      const roleControl = (await screen.findAllByRole("combobox", { name: "Role for Member One" }))[0]!;
+      fireEvent.click(roleControl);
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      await waitFor(() => assert.match(screen.getAllByRole("combobox", { name: "Role for Member One" })[0]!.textContent ?? "", /Admin/));
+      assert.equal(screen.queryByText("Response lost"), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("reconciles a removal when the response is lost after commit", async () => {
+    const original = snapshotClient();
+    const member: ProjectMember = { ...owner, userId: "member_1", role: "member", displayName: "Member One", email: "member@example.test" };
+    let listed = [owner, member];
+    apiClient.members = async () => listed;
+    apiClient.workspaceMembers = async () => [workspaceOwner, { ...candidate, userId: member.userId, displayName: member.displayName, email: member.email }];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.removeMember = async () => { listed = [owner]; throw new ApiError(503, "Response lost"); };
+    try {
+      render(<MembersPage workspaceId={workspaceId} projectId={projectId} />);
+      fireEvent.click((await screen.findAllByRole("button", { name: "Remove Member One" }))[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Remove member" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Remove member" }));
+      await waitFor(() => assert.equal(screen.queryByText("Member One"), null));
+      assert.equal(screen.queryByRole("alertdialog", { name: "Remove member" }), null);
+    } finally { restoreClient(original); }
+  });
 });
 
-function snapshotClient() { return { members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, projectCapabilities: apiClient.projectCapabilities, addMember: apiClient.addMember, changeMember: apiClient.changeMember }; }
+function snapshotClient() { return { members: apiClient.members, workspaceMembers: apiClient.workspaceMembers, projectCapabilities: apiClient.projectCapabilities, addMember: apiClient.addMember, changeMember: apiClient.changeMember, removeMember: apiClient.removeMember }; }
 function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
