@@ -108,30 +108,30 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
-  const loadMessages = useCallback(async (nextThreadId: string): Promise<boolean> => {
+  const loadMessages = useCallback(async (nextThreadId: string, quiet = false): Promise<ProjectChatMessage[] | null> => {
     const version = ++messageLoadVersion.current;
     if (!nextThreadId) {
       loadedThreadId.current = "";
       setMessages([]);
       setMessagesError("");
       setMessagesStatus("idle");
-      return true;
+      return [];
     }
     if (loadedThreadId.current !== nextThreadId) setMessages([]);
     setMessagesError("");
-    setMessagesStatus("loading");
+    if (!quiet) setMessagesStatus("loading");
     try {
       const saved = await apiClient.chatMessages(projectId, nextThreadId);
-      if (!active.current || version !== messageLoadVersion.current) return false;
+      if (!active.current || version !== messageLoadVersion.current) return null;
       loadedThreadId.current = nextThreadId;
       setMessages(saved);
       setMessagesStatus("ready");
-      return true;
+      return saved;
     } catch (reason) {
-      if (!active.current || version !== messageLoadVersion.current) return false;
+      if (!active.current || version !== messageLoadVersion.current) return null;
       setMessagesError(message(reason));
       setMessagesStatus("error");
-      return false;
+      return null;
     }
   }, [projectId]);
 
@@ -268,11 +268,23 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       const stopped = isAbort(reason);
       setMessages((current) => current.filter((item) => item.id !== `stream-${threadId}`));
       await loadMessages(threadId);
-      if (stopped) return true;
+      if (stopped) {
+        await reconcileStoppedMessage(threadId);
+        return true;
+      }
       return failAction(reason);
     } finally {
       streamAbort.current = null;
       if (active.current) setSending(false);
+    }
+  }
+
+  async function reconcileStoppedMessage(targetThreadId: string): Promise<void> {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await wait(150);
+      if (!active.current || loadedThreadId.current !== targetThreadId) return;
+      const saved = await loadMessages(targetThreadId, true);
+      if (!saved || !saved.some((item) => item.deliveryStatus === "pending" || item.deliveryStatus === "response_pending")) return;
     }
   }
 
@@ -449,6 +461,7 @@ function Notice({ children, error = false, action, onAction }: { children: React
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : "The chat request could not be completed."; }
 function isAbort(error: unknown): boolean { return error instanceof DOMException ? error.name === "AbortError" : error instanceof Error && error.name === "AbortError"; }
+function wait(milliseconds: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
 function orderedThreads(threads: ProjectChatThread[]): ProjectChatThread[] { return [...threads].sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || right.updatedAt.localeCompare(left.updatedAt)); }
 function latestConfirmedMessageId(messages: ProjectChatMessage[]): string | null { return messages.filter((item) => !item.id.startsWith("pending-") && !item.id.startsWith("stream-")).reduce<ProjectChatMessage | undefined>((latest, item) => !latest || item.sequence > latest.sequence ? item : latest, undefined)?.id ?? null; }
 function isChatCompatibleEndpoint(endpoint: Endpoint): boolean { return endpoint.hasCredentialRef && endpoint.health?.status === "healthy" && endpoint.capabilities.includes("text"); }

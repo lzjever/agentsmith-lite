@@ -285,7 +285,13 @@ describe("retained chat and overview behavior", () => {
     apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
     const secondThread={...threads[0]!,id:"chat_2",title:"Second conversation"};apiClient.chatThreads = async () => [...threads,secondThread];
     let historyReads = 0;
-    apiClient.chatMessages = async () => historyReads++ === 0 ? [] : [{ id: "message_1", threadId: "chat_1", role: "user", content: "hello", createdAt: endpoint.createdAt }];
+    const stoppedMessage = { id: "message_1", threadId: "chat_1", sequence: 1, version: 2, role: "user" as const, content: "hello", deliveryStatus: "stopped" as const, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    apiClient.chatMessages = async () => {
+      historyReads += 1;
+      if (historyReads === 1) return [];
+      if (historyReads === 2) return [{ ...stoppedMessage, version: 1, deliveryStatus: "response_pending" as const }];
+      return [stoppedMessage];
+    };
     apiClient.sendChatMessage = async (_projectId, _threadId, _content, _afterMessageId, signal, onDelta) => {
       onDelta("partial answer");
       await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Aborted", "AbortError")); }, { once: true }));
@@ -303,7 +309,10 @@ describe("retained chat and overview behavior", () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
       await waitFor(() => assert.equal(aborted, true));
       await screen.findAllByText("hello");
-      assert.ok(historyReads >= 2);
+      assert.equal(screen.queryByText("Refreshing conversation..."), null);
+      await screen.findByText("Generation stopped.");
+      assert.ok(screen.getByRole("button", { name: "Retry" }));
+      assert.ok(historyReads >= 3);
       await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value, ""));
     } finally {
       apiClient.endpoints = original.endpoints;
