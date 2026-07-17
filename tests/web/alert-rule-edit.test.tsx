@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type ProjectAlertRule } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectAlertRule } from "../../src/lib/api/client.js";
 import { toast } from "../../src/components/ui/toast.js";
 
 installDom();
@@ -167,16 +167,45 @@ describe("alert rule editing", () => {
       restoreClient(original);
     }
   });
+
+  it("removes a rule that disappeared before it was toggled", async () => {
+    const original = snapshotClient();
+    apiClient.alertRules = async () => [existing];
+    apiClient.updateAlertRule = async () => { throw new ApiError(404, "Alert rule not found"); };
+    try {
+      render(<AlertRulesPanel projectId={projectId} canManage />);
+      const toggle = await screen.findByRole("button", { name:"Enabled" });
+      await act(async () => { fireEvent.click(toggle); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.equal(screen.queryByText("Task failure"), null);
+      assert.ok(screen.getByText("No alert rules configured."));
+    } finally { restoreClient(original); }
+  });
+
+  it("treats deletion of an already missing rule as complete", async () => {
+    const original = snapshotClient();
+    apiClient.alertRules = async () => [existing];
+    apiClient.deleteAlertRule = async () => { throw new ApiError(404, "Alert rule not found"); };
+    try {
+      render(<AlertRulesPanel projectId={projectId} canManage />);
+      fireEvent.click(await screen.findByRole("button", { name:"Delete alert rule" }));
+      await screen.findByRole("alertdialog", { name:"Delete alert rule" });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name:"Delete" })); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.equal(screen.queryByRole("alertdialog", { name:"Delete alert rule" }), null);
+      assert.equal(screen.queryByText("Task failure"), null);
+      assert.ok(screen.getByText("No alert rules configured."));
+    } finally { restoreClient(original); }
+  });
 });
 
 function snapshotClient() {
-  return { alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule, testAlertRule: apiClient.testAlertRule, success: toast.success, error: toast.error };
+  return { alertRules: apiClient.alertRules, createAlertRule: apiClient.createAlertRule, updateAlertRule: apiClient.updateAlertRule, deleteAlertRule: apiClient.deleteAlertRule, testAlertRule: apiClient.testAlertRule, success: toast.success, error: toast.error };
 }
 
 function restoreClient(original: ReturnType<typeof snapshotClient>) {
   apiClient.alertRules = original.alertRules;
   apiClient.createAlertRule = original.createAlertRule;
   apiClient.updateAlertRule = original.updateAlertRule;
+  apiClient.deleteAlertRule = original.deleteAlertRule;
   apiClient.testAlertRule = original.testAlertRule;
   toast.success = original.success;
   toast.error = original.error;

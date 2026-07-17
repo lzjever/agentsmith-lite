@@ -67,6 +67,19 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     toast.error(message);
   }
 
+  function forgetMissingRule(reason: unknown, ruleId: string) {
+    if (!isMissingRule(reason)) return false;
+    setRules((current) => current.filter((rule) => rule.id !== ruleId));
+    if (editing?.id === ruleId) {
+      setDialogOpen(false);
+      setEditing(null);
+    }
+    if (removing?.id === ruleId) setRemoving(null);
+    void onInstancesChanged?.();
+    toast.error("Alert rule no longer exists.");
+    return true;
+  }
+
   function openCreate() {
     mutationKeys.clear("alert-rule.create");
     setEditing(null);
@@ -102,6 +115,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "alert-rule.update" : "alert-rule.create", editing ? `${editing.id}:form` : projectId);
+      if (editing && forgetMissingRule(reason, editing.id)) return;
       const message = editing ? "Alert rule could not be updated." : "Alert rule could not be created.";
       if (!isReadOnlyMutationError(reason)) setFormError(message);
       mutationFailed(reason, message);
@@ -125,25 +139,30 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("alert-rule.update", `${rule.id}:toggle:${!rule.enabled}`);
+      if (forgetMissingRule(reason, rule.id)) return;
       mutationFailed(reason, "Alert rule could not be updated.");
     } finally {
       if (mounted.current) setBusyRuleId(null);
     }
   }
-  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null)return;setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
+  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null)return;setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
 
   async function remove() {
     if (!removing || !canManage || busyRuleId !== null) return;
     setBusyRuleId(removing.id);
     try {
-      await apiClient.deleteAlertRule(projectId, removing.id, mutationKeys.key("alert-rule.delete", removing.id));
+      let alreadyMissing = false;
+      await apiClient.deleteAlertRule(projectId, removing.id, mutationKeys.key("alert-rule.delete", removing.id)).catch((error) => {
+        if (!isMissingRule(error)) throw error;
+        alreadyMissing = true;
+      });
       mutationKeys.complete("alert-rule.delete", removing.id);
       if (!mounted.current) return;
       setRules((current) => current.filter((item) => item.id !== removing.id));
       await onInstancesChanged?.();
       if (!mounted.current) return;
       setRemoving(null);
-      toast.success("Alert rule deleted.");
+      toast.success(alreadyMissing ? "Alert rule no longer exists." : "Alert rule deleted.");
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("alert-rule.delete", removing.id);
@@ -181,3 +200,4 @@ function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/864
 function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpoints.find(endpoint=>endpoint.id===scope.endpointId)?.name??"Endpoint";}
 function alertRuleFormValue(rule: ProjectAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
 function alertRuleChanged(value: AlertRuleFormValue, rule: ProjectAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }
+function isMissingRule(error:unknown):boolean{return error instanceof ApiError&&error.status===404&&error.message==="Alert rule not found";}
