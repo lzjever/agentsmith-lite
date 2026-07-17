@@ -122,6 +122,40 @@ describe("endpoint dependencies", () => {
     } finally { Object.assign(apiClient,original); }
   });
 
+  it("removes an endpoint that disappeared before its health check", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,recheckEndpoint:apiClient.recheckEndpoint };
+    apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;
+    apiClient.recheckEndpoint=async()=>{throw new ApiError(404,"Endpoint not found");};
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Check health for DeepSeek"}))[0]!);
+      await screen.findByRole("heading",{name:"No endpoints configured"});
+      assert.equal(screen.queryAllByText("DeepSeek").length,0);
+    } finally { Object.assign(apiClient,original); }
+  });
+
+  it("clears a credential that disappeared while preserving an endpoint draft", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
+    let credentialReads=0;
+    apiClient.endpoints=async()=>[];apiClient.credentials=async()=>++credentialReads===1?[credential]:[];apiClient.projectCapabilities=async()=>manager;
+    apiClient.createEndpoint=async()=>{throw new ApiError(404,"Credential not found");};
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Create endpoint"}))[0]!);
+      const dialog=await screen.findByRole("dialog",{name:"Create endpoint"});
+      fireEvent.change(within(dialog).getByLabelText("Name"),{target:{value:"Provider draft"}});
+      fireEvent.change(within(dialog).getByLabelText("Model"),{target:{value:"draft-model"}});
+      fireEvent.change(document.querySelector("select")!,{target:{value:credential.id}});
+      fireEvent.click(within(dialog).getByRole("button",{name:"Save"}));
+
+      await waitFor(()=>assert.equal(credentialReads,2));
+      assert.equal((within(dialog).getByLabelText("Name") as HTMLInputElement).value,"Provider draft");
+      assert.equal((within(dialog).getByLabelText("Model") as HTMLInputElement).value,"draft-model");
+      assert.equal((document.querySelector("select") as HTMLSelectElement).value,"");
+      assert.equal((within(dialog).getByRole("button",{name:"Save"}) as HTMLButtonElement).disabled,true);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("closes project-scoped actions and ignores an old save after switching projects", async () => {
     const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, updateEndpoint: apiClient.updateEndpoint };
     let finishSave!: (value: Endpoint) => void;

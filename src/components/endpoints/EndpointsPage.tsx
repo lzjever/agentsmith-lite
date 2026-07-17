@@ -61,6 +61,9 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     void apiClient.credentials(projectId).then((listed) => {
       if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
       setCredentials(listed);
+      setInput((current) => current.credentialId && !listed.some((credential) => credential.id === current.credentialId)
+        ? { ...current, credentialId: "", baseUrl: "" }
+        : current);
       setCredentialsState("ready");
     }).catch((reason) => {
       if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
@@ -168,6 +171,22 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     }
     return message(reason);
   }
+  function forgetMissingEndpoint(reason: unknown, endpointId: string) {
+    if (!isMissing(reason, "Endpoint not found")) return false;
+    setEndpoints((items) => removeEndpoint(items, endpointId));
+    if (editing?.id === endpointId) {
+      setDialogOpen(false);
+      setActionProjectId(undefined);
+      setEditing(undefined);
+    }
+    if (deleting?.id === endpointId) setDeleting(undefined);
+    return true;
+  }
+  function refreshMissingCredential(reason: unknown) {
+    if (!isMissing(reason, "Credential not found")) return false;
+    loadDependencies();
+    return true;
+  }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canConfigure || mutationBusy || actionProjectId !== projectId || input.capabilities.length === 0 || (editing !== undefined && !endpointInputChanged(input, editing))) return;
@@ -186,6 +205,11 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
+      if (editing && forgetMissingEndpoint(reason, editing.id)) {
+        toast.error("Endpoint was removed elsewhere.");
+        return;
+      }
+      refreshMissingCredential(reason);
       setFormError(denied(reason));
     } finally {
       if (revision === projectRevision.current) setSaving(false);
@@ -211,6 +235,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
       setModels([]);
+      refreshMissingCredential(reason);
       setFormError(denied(reason));
     } finally {
       if (projectEpoch === projectRevision.current && revision === discoveryRevision.current) setDiscovering(false);
@@ -230,6 +255,10 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("endpoint.recheck", endpoint.id);
       if (revision !== projectRevision.current) return;
+      if (forgetMissingEndpoint(reason, endpoint.id)) {
+        toast.error("Endpoint was removed elsewhere.");
+        return;
+      }
       toast.error(denied(reason));
     } finally {
       if (revision === projectRevision.current) setCheckingId(undefined);
@@ -249,6 +278,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError && deleting) mutationKeys.complete("endpoint.delete", deleting.id);
       if (revision !== projectRevision.current) return;
+      if (forgetMissingEndpoint(reason, deleting.id)) return;
       throw new Error(denied(reason));
     } finally {
       if (revision === projectRevision.current) setSaving(false);
@@ -284,6 +314,10 @@ function DependencyError({ message: detail }: { message: string }) {
 
 function message(error: unknown) {
   return error instanceof ApiError ? error.message : error instanceof Error ? error.message : "The endpoint request could not be completed.";
+}
+
+function isMissing(error: unknown, detail: string) {
+  return error instanceof ApiError && error.status === 404 && error.message === detail;
 }
 
 function endpointInputChanged(input: EndpointInput, endpoint: Endpoint): boolean {
