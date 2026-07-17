@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleAlert, Loader2, Square } from "lucide-react";
+import { CheckCircle2, CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
 import { useState } from "react";
 import type { TaskCapabilities, TaskInteractionSnapshot } from "../../lib/api/client";
 import { Button } from "../ui/button";
@@ -14,7 +14,9 @@ export function TaskRunStatus({ runState, capabilities, aborting, onAbort }: { r
     try { await onAbort(); }
     catch (reason) { setAbortError(reason instanceof Error ? reason.message : "Current turn could not be stopped."); }
   }
-  return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Loader2 className={`size-4 shrink-0 text-icon-default ${active ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{runStateLabel(runState)}</p></div>{capabilities.abortTurn ? <Button variant="quiet" size="sm" disabled={aborting} onClick={() => void abort()}><Square size={14} />{aborting ? "Stopping..." : "Stop current turn"}</Button> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
+  const Icon = runState === "terminal" ? CheckCircle2 : runState === "idle" ? CircleDot : Loader2;
+  const iconLabel = runState === "terminal" ? "Task complete" : runState === "idle" ? "Task ready" : "Task in progress";
+  return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Icon role="img" aria-label={iconLabel} className={`size-4 shrink-0 ${runState === "terminal" ? "text-success" : "text-icon-default"} ${active ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{runStateLabel(runState)}</p></div>{capabilities.abortTurn ? <Button variant="quiet" size="sm" disabled={aborting} onClick={() => void abort()}><Square size={14} />{aborting ? "Stopping..." : "Stop current turn"}</Button> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
 }
 
 export function TaskConnectionNotice({ connection, historyStatus, runtimeReachability, error, onRetry }: { connection: "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered"; historyStatus: TaskInteractionSnapshot["historyStatus"]; runtimeReachability: TaskInteractionSnapshot["runtimeReachability"]; error: string; onRetry: () => void }) {
