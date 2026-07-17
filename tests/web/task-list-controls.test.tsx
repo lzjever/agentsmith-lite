@@ -78,6 +78,14 @@ describe("task list controls", () => {
     assert.equal((screen.getByRole("checkbox", { name: "Attach brief.md" }) as HTMLInputElement).disabled, true);
   });
 
+  it("exposes one named upload action in the task dialog", () => {
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    render(<TaskCreateDialog projectId="project_1" canWriteFiles endpoints={[endpoint]} projectFiles={[]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async () => undefined} />);
+
+    assert.equal(screen.getAllByRole("button", { name: "Upload and attach" }).length, 1);
+    assert.equal((document.querySelector('input[type="file"]') as HTMLInputElement).hidden, true);
+  });
+
   it("reuses pending keys for task input uploads and URL notes", async () => {
     const original = { uploadFile: apiClient.uploadFile, createTaskUrlInput: apiClient.createTaskUrlInput, files: apiClient.files };
     const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
