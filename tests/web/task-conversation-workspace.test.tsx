@@ -104,6 +104,31 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("removes a deleted queued message from the durable conversation", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, deleteTaskMessage: apiClient.deleteTaskMessage };
+    const queued = { id: "message_queued", content: "Queued instruction", deliveryStatus: "pending" as const, editable: true, deletable: true, updatedAt: "2026-07-15T00:00:01.000Z" };
+    const queuedInteraction = { ...interaction, id: "interaction_queued", kind: "user_message" as const, title: "You", body: queued.content, status: "queued" as const };
+    const editableCapabilities = { ...capabilities, editQueuedMessage: true };
+    let reads = 0;
+    apiClient.getTaskInteractions = async () => reads++ === 0
+      ? { ...snapshot, items: [queuedInteraction], queuedMessages: [queued], capabilities: editableCapabilities }
+      : { ...snapshot, items: [], queuedMessages: [], capabilities: editableCapabilities };
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    apiClient.deleteTaskMessage = async () => ({ messageId: queued.id, disposition: "accepted_by_active_run", targetTaskId: "task_1", duplicate: false, queuedMessage: null, interaction: null, capabilities: editableCapabilities });
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete queued message" }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete message" }));
+
+      await waitFor(() => assert.equal(reads, 2));
+      await waitFor(() => assert.equal(screen.queryByText("Queued instruction"), null));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the initial snapshot error and Retry reachable", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let attempts = 0;

@@ -38,7 +38,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
     onCapabilities(next.capabilities);
     onRunState?.(next.runState);
     streamCursor.current = next.streamCursor;
-    setItems((current) => upsertTaskInteractions(current, next.items));
+    setItems(next.items);
   }, [onCapabilities, onRunState]);
 
   const load = useCallback(async () => {
@@ -139,6 +139,7 @@ export function TaskConversationWorkspace({ taskId, basePath, onCapabilities, on
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
+      await load();
     } catch (reason) { mutationKeys.completeApiFailure(reason, "task-message-delete", messageId); const recovered = await recoverMutation(reason); if (reason instanceof ApiError && reason.status === 404 && recovered) return; throw reason; }
   }
   async function recoverMutation(reason: unknown): Promise<boolean> {
