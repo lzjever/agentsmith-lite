@@ -23,6 +23,7 @@ describe("task list controls", () => {
     render(<TaskList page={{ items: tasks, total: 10, nextCursor: "cursor-2" }} basePath="/workspaces/ws/projects/project/tasks" query={{ archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 }} pageIndex={0} onQueryChange={(query) => queries.push(query)} onNext={() => { next += 1; }} onPrevious={() => undefined} />);
 
     assert.equal(screen.getByRole("link", { name: /Release checklist/ }).getAttribute("href"), "/workspaces/ws/projects/project/tasks/task_9");
+    assert.equal(screen.getByRole("combobox", { name: "Task archive" }).textContent, "Not archived");
     fireEvent.change(screen.getByRole("textbox", { name: "Search tasks" }), { target: { value: "release" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply task search" }));
     assert.deepEqual(queries[0], { archived: "exclude", sort: "updated_at", direction: "desc", limit: 25, search: "release", cursor: undefined });

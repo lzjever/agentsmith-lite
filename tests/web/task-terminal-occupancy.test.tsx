@@ -107,6 +107,7 @@ describe("TaskDetailPage terminal occupancy", () => {
 
       await screen.findByText(`Cancelled · Archived · ${task.id}`);
       assert.ok(screen.getByText("This task is archived. Its conversation, inputs, and artifacts remain available."));
+      assert.ok(screen.getByText("Task was cancelled"));
     } finally {
       Object.assign(apiClient, original);
     }
@@ -165,7 +166,7 @@ describe("TaskDetailPage terminal occupancy", () => {
       assert.equal(screen.getByRole("region", { name: "Task terminal" }), ownerTerminal);
       assert.equal(sockets.length, 1);
       assert.ok(screen.getByText(`Active · ${task.id}`));
-      assert.ok(screen.getByText("Task run is complete"));
+      assert.ok(screen.getByText("Task run ended"));
 
       fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
       await waitFor(() => assert.equal(screen.queryByRole("tab", { name: "Terminal" }), null));

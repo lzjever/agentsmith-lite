@@ -11,7 +11,11 @@ export function endpointInputForEdit(endpoint: Endpoint): EndpointInput {
 }
 
 export function endpointSummary(endpoints: Endpoint[]): string {
-  return `${endpoints.length} ${endpoints.length === 1 ? "endpoint" : "endpoints"} configured`;
+  const missingCredentials = endpoints.filter((endpoint) => !endpoint.hasCredentialRef).length;
+  const configured = `${endpoints.length} ${endpoints.length === 1 ? "endpoint" : "endpoints"} configured`;
+  return missingCredentials === 0
+    ? configured
+    : `${configured} · ${missingCredentials} missing ${missingCredentials === 1 ? "credential" : "credentials"}`;
 }
 
 export function endpointSupportsTasks(endpoint: Endpoint): boolean {

@@ -12,12 +12,20 @@ afterEach(() => cleanup());
 
 describe("TaskRunStatus", () => {
   it("uses completed and active run icons that match the server-owned state", () => {
-    const view = render(<TaskRunStatus runState="terminal" capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+    const view = render(<TaskRunStatus runState="terminal" taskResult={{ status:"completed", terminalReason:"completed" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
     assert.ok(screen.getByRole("img", { name:"Task complete" }));
 
     view.rerender(<TaskRunStatus runState="running" capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
     const active = screen.getByRole("img", { name:"Task in progress" });
     assert.match(active.getAttribute("class") ?? "", /animate-spin/);
+  });
+
+  it("does not present a cancelled terminal task as successful", () => {
+    render(<TaskRunStatus runState="terminal" taskResult={{ status:"cancelled", terminalReason:"cancelled" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+
+    assert.ok(screen.getByRole("img", { name:"Task cancelled" }));
+    assert.ok(screen.getByText("Task was cancelled"));
+    assert.equal(screen.queryByText("Task run is complete"), null);
   });
 });
 
