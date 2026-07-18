@@ -385,22 +385,24 @@ describe("project resource policy", () => {
     assert.equal(events.filter((event) => event.action === "alert.resolve").length, 1);
   });
 
-  it("projects audit actor identity from one membership read with an id fallback", async () => {
+  it("retains audit actor identity after the actor is no longer a project member", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-audit-actors", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const former = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "former-auditor", email: "former@example.test", emailVerified: true });
     await services.profile.updateProfile(user.id, { displayName: "Policy Owner" });
+    await services.profile.updateProfile(former.user.id, { displayName: "Former Member" });
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 4 });
-    await store.appendProjectAuditEvent({ id: "removed_actor", projectId: project.id, actorId: "former_user", action: "task.failed", status: "accepted", resourceKind: "task", resourceId: "task_1", createdAt: new Date().toISOString() });
+    await store.appendProjectAuditEvent({ id: "removed_actor", projectId: project.id, actorId: former.user.id, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: "task_1", createdAt: new Date().toISOString() });
     const original = store.listProjectMemberships.bind(store);
     let membershipReads = 0;
     store.listProjectMemberships = async (id) => { membershipReads += 1; return original(id); };
 
     const events = await services.policies.audit(user.id, project.id);
     assert.equal(membershipReads, 1);
-    assert.deepEqual(events.map((event) => [event.actorId, event.actorDisplayName, event.actorEmail]), [["former_user", null, null],[user.id, "Policy Owner", user.email]]);
+    assert.deepEqual(events.map((event) => [event.actorId, event.actorDisplayName, event.actorEmail]), [[former.user.id, "Former Member", former.user.email],[user.id, "Policy Owner", user.email]]);
   });
 
   it("filters an exact audit resource before applying pagination", async () => {

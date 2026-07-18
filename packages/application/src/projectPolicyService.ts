@@ -87,7 +87,14 @@ export class ProjectPolicyService {
       this.store.queryProjectAuditEvents(projectId, query??{limit:100}),
       this.store.listProjectMemberships(projectId)
     ]);
-    const actors = new Map(members.map((member) => [member.userId, member]));
+    const actors = new Map(members.map((member) => [member.userId, { displayName: member.displayName, email: member.email }]));
+    const missingActorIds = new Set(events.items.flatMap((event) => event.actorId && !actors.has(event.actorId) ? [event.actorId] : []));
+    for (const actorId of missingActorIds) {
+      const actor = await this.store.findUserById(actorId);
+      if (!actor) continue;
+      const profile = await this.store.findUserProfilePreferences(actorId);
+      actors.set(actorId, { displayName: profile?.displayName ?? null, email: actor.email });
+    }
     const items=events.items.map((event) => {
       const actor = event.actorId ? actors.get(event.actorId) : undefined;
       return { ...event,detail:safeAuditDetail(event.detail), actorDisplayName: actor?.displayName ?? null, actorEmail: actor?.email ?? null };
