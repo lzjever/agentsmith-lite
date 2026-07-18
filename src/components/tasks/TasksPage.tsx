@@ -205,13 +205,14 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const endpointGuidance = taskEndpointGuidance(endpoints);
   const canCreate = capabilitiesState === "ready" && capabilities?.canCreateTasks === true;
   const createReady = canCreate && endpointsState === "ready" && compatibleEndpoints.length > 0;
+  const subtitle = canCreate ? "Create and follow Botified work for this project." : "Follow Botified work for this project.";
 
   function refresh() {
     void load();
     loadCreateDependencies();
   }
 
-  return <PageLayout header={<PageHeader title="Tasks" subtitle="Create and follow Botified work for this project." actions={<><Button variant="quiet" size="icon" aria-label="Refresh tasks" title="Refresh tasks" onClick={refresh}><RefreshCw size={17} /></Button>{canCreate ? <Button onClick={() => setDialogOpen(true)} disabled={!createReady}><Plus size={17} />Create task</Button> : null}</>} />}>
+  return <PageLayout header={<PageHeader title="Tasks" subtitle={subtitle} actions={<><Button variant="quiet" size="icon" aria-label="Refresh tasks" title="Refresh tasks" onClick={refresh}><RefreshCw size={17} /></Button>{canCreate ? <Button onClick={() => setDialogOpen(true)} disabled={!createReady}><Plus size={17} />Create task</Button> : null}</>} />}>
     {error ? <div className="border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}
     {endpointsState === "error" ? <DependencyError>{endpointsError} Task creation is disabled until endpoints can be loaded.</DependencyError> : null}
     {capabilitiesState === "error" ? <DependencyError>{capabilitiesError} Task creation is disabled until project permissions can be loaded.</DependencyError> : null}

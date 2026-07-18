@@ -14,6 +14,26 @@ afterEach(() => {
 });
 
 describe("tasks page loading", () => {
+  it("describes task work according to the projected create capability", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
+    const manager: ProjectCapabilities = { ...readOnly, canCreateTasks: true };
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async () => [];
+    apiClient.projectCapabilities = async (projectId) => projectId === "project_1" ? readOnly : manager;
+    try {
+      const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      await screen.findByText("Your project access is read-only.");
+      assert.ok(screen.getByText("Follow Botified work for this project.", { exact: true }));
+
+      view.rerender(<TasksPageContent workspaceId="workspace_1" projectId="project_2" navigate={() => undefined} />);
+      await screen.findByRole("button", { name: "Create task" });
+      assert.ok(screen.getByText("Create and follow Botified work for this project.", { exact: true }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("uses the task list URL as the filter source and restores it on browser navigation", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
     const calls: Array<Parameters<typeof apiClient.tasks>[1]> = [];
