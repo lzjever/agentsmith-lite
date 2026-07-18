@@ -91,6 +91,27 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
+  it("makes an archived task explicit while retaining its saved workspace", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const archived: Task = { ...task, status: "cancelled", archivedAt: "2026-07-14T01:00:00.000Z" };
+    const readOnly = { ...available, sendMessage: false, cancelTask: false, openTerminal: false, archiveTask: false };
+    apiClient.taskDetail = async () => ({ task: archived, capabilities: readOnly });
+    apiClient.taskArtifacts = async () => [];
+    apiClient.taskInputs = async () => [];
+    apiClient.getTaskInteractions = async () => ({ ...snapshot(readOnly), runState: "terminal" });
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+
+      await screen.findByText(`Cancelled · Archived · ${task.id}`);
+      assert.ok(screen.getByText("This task is archived. Its conversation, inputs, and artifacts remain available."));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("reconnects while a newly created sandbox is still starting", async () => {
     render(<TaskTerminalPanel taskId="task_starting" />);
     await waitFor(() => assert.equal(sockets.length, 1));
