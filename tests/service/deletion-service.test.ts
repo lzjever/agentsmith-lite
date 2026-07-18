@@ -22,6 +22,13 @@ describe("deletion lifecycle", () => {
     await store.appendProjectAuditEvent({id:"audit_proj_1",projectId:first.id,actorId:"owner",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:first.id,createdAt:"2026-01-01T00:00:00.000Z"});
     await store.createUserNotification({id:"notification_first",userId:"owner",type:"project_alert",title:"First project",body:null,projectId:first.id,resourceKind:"alert",resourceId:"alert_first",linkPath:`/projects/${first.id}/alerts`,readAt:null,createdAt:"2026-01-01T00:00:00.000Z"},"first-project-alert");
     await store.createUserNotification({id:"notification_second",userId:"owner",type:"project_alert",title:"Second project",body:null,projectId:second.id,resourceKind:"alert",resourceId:"alert_second",linkPath:`/projects/${second.id}/alerts`,readAt:null,createdAt:"2026-01-01T00:00:00.000Z"},"second-project-alert");
+    await store.createProjectChatThread({id:"chat_first",projectId:first.id,endpointId:null,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"});
+    await store.appendProjectChatMessages([{id:"chatmsg_first",threadId:"chat_first",sequence:1,version:1,deliveryStatus:"completed",role:"user",content:"Delete with project",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"}]);
+    await store.upsertActiveProjectAlert({id:"alert_first",projectId:first.id,type:"task_failure",status:"active",deliveryStatus:"not_configured",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z",resolvedAt:null,dismissedAt:null});
+    assert.ok(await store.reserveProjectProviderSettlement({id:"settlement_first",projectId:first.id,taskId:null,endpointId:null,reservedTokens:0,reservedCost:0,reservedAt:"2026-01-01T00:00:00.000Z",expiresAt:"2026-01-01T00:01:00.000Z"}));
+    await store.markProjectProviderSettlementDispatched("settlement_first","2026-01-01T00:00:00.000Z");
+    await store.markProjectProviderSettlementDelivered("settlement_first","2026-01-01T00:00:00.000Z");
+    await store.settleProjectProviderSettlement("settlement_first",{tokens:1,cost:0.01},"2026-01-01T00:00:00.000Z");
     const tasks = { async stopTasksForProjectDeletion() {} } as never;
     const deletion = new DeletionService(store, tasks, root);
 
@@ -30,6 +37,10 @@ describe("deletion lifecycle", () => {
     assert.equal(await store.findProject(first.id), null);
     assert.deepEqual(await store.listProjectAuditEvents(first.id), []);
     assert.deepEqual((await store.listUserNotifications("owner")).map((notification) => notification.id), ["notification_second"]);
+    assert.equal(await store.findProjectChatThread("chat_first"),null);
+    assert.deepEqual(await store.listProjectChatMessages("chat_first"),[]);
+    assert.deepEqual(await store.listProjectAlerts(first.id),[]);
+    assert.deepEqual(await store.listSettledProjectProviderSettlements(first.id,"2025-01-01T00:00:00.000Z"),[]);
     await assert.rejects(access(path.join(root, first.rootPath, "only-first.txt")));
     await access(path.join(root, second.rootPath, "only-second.txt"));
   });

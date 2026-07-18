@@ -289,6 +289,12 @@ export class InMemoryProductStore implements ProductStore {
     this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId)));
     this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId)));
     this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id));
+    const projectThreadIds=new Set([...this.chatThreads.values()].filter((thread)=>thread.projectId===id).map((thread)=>thread.id));
+    for(const threadId of projectThreadIds)this.chatThreads.delete(threadId);
+    this.chatMessages.splice(0,this.chatMessages.length,...this.chatMessages.filter((message)=>!projectThreadIds.has(message.threadId)));
+    for(const [messageId,response] of this.stagedChatResponses)if(projectThreadIds.has(response.threadId))this.stagedChatResponses.delete(messageId);
+    for(const [key,value] of this.providerSettlements)if(value.projectId===id)this.providerSettlements.delete(key);
+    for(const [key,value] of this.alerts)if(value.projectId===id)this.alerts.delete(key);
     for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key);
     for(const [key,value] of this.memberships)if(value.projectId===id){this.memberships.delete(key);this.projectPins.delete(key);}
     for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key);
