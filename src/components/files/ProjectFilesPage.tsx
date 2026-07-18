@@ -13,7 +13,7 @@ import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Skeleton } from "../ui/skeleton";
 import { toast } from "../ui/toast";
-import { childFilePath, fileBreadcrumbs, fileBrowserDisplay, parentFilePath, PROJECT_FILES_ROOT, showFileDetails, sortFileEntries } from "./fileBrowserState";
+import { childFilePath, fileBreadcrumbs, fileBrowserDisplay, normalizeFileBrowserPath, parentFilePath, PROJECT_FILES_ROOT, showFileDetails, sortFileEntries } from "./fileBrowserState";
 
 type BrowserState = "loading" | "ready" | "error";
 const previewImageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -33,6 +33,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const [path, setPath] = useState(PROJECT_FILES_ROOT);
+  const [pathReady, setPathReady] = useState(false);
   const [entries, setEntries] = useState<ProjectFile[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<BrowserState>("loading");
@@ -84,16 +85,34 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     };
   }, []);
   useEffect(() => {
-    void load();
-  }, [load]);
+    function restorePath() {
+      const restored = normalizeFileBrowserPath(new URLSearchParams(window.location.search).get("path"));
+      previewVersion.current += 1;
+      currentPath.current = restored;
+      setSelected(undefined);
+      setPreview(null);
+      setMobileDetailsOpen(false);
+      setPath(restored);
+      replaceFileBrowserPath(restored);
+      setPathReady(true);
+    }
+    restorePath();
+    window.addEventListener("popstate", restorePath);
+    return () => window.removeEventListener("popstate", restorePath);
+  }, []);
+  useEffect(() => {
+    if (pathReady) void load();
+  }, [load, pathReady]);
 
   function navigate(nextPath: string) {
+    const normalized = normalizeFileBrowserPath(nextPath);
     previewVersion.current += 1;
-    currentPath.current = nextPath;
+    currentPath.current = normalized;
     setSelected(undefined);
     setPreview(null);
     setMobileDetailsOpen(false);
-    setPath(nextPath);
+    replaceFileBrowserPath(normalized);
+    setPath(normalized);
   }
 
   function select(entry: ProjectFile) {
@@ -282,6 +301,13 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function isMissingFile(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.message === "File not found";
+}
+
+function replaceFileBrowserPath(path: string) {
+  const params = new URLSearchParams(window.location.search);
+  if (path === PROJECT_FILES_ROOT) params.delete("path");
+  else params.set("path", path);
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
 }
 
 export function formatBytes(bytes: number): string {

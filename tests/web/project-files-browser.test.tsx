@@ -12,9 +12,60 @@ const file: ProjectFile = { name: "brief.txt", path: "files/brief.txt", type: "f
 const writable: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
 const readOnly: ProjectCapabilities = { ...writable, canWriteFiles: false };
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 describe("project files browser", () => {
+  it("opens a nested directory from the URL without first loading the root", async () => {
+    const original = snapshotClient();
+    const paths: string[] = [];
+    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: [] }; };
+    apiClient.projectCapabilities = async () => readOnly;
+    window.history.replaceState(null, "", "/files?path=files%2Freports");
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "This folder is empty" });
+      assert.deepEqual(paths, ["files/reports"]);
+      assert.ok(screen.getByRole("button", { name: "reports" }));
+    } finally { restoreClient(original); }
+  });
+
+  it("keeps directory navigation in the URL and restores it on browser navigation", async () => {
+    const original = snapshotClient();
+    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
+    const paths: string[] = [];
+    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: path === "files" ? [folder] : [] }; };
+    apiClient.projectCapabilities = async () => readOnly;
+    window.history.replaceState(null, "", "/files");
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "reports" }));
+      await screen.findByRole("heading", { name: "This folder is empty" });
+      assert.equal(window.location.search, "?path=files%2Freports");
+
+      window.history.replaceState(null, "", "/files");
+      await act(async () => window.dispatchEvent(new window.PopStateEvent("popstate")));
+      await screen.findByRole("button", { name: "reports" });
+      assert.equal(paths.at(-1), "files");
+    } finally { restoreClient(original); }
+  });
+
+  it("normalizes an unsafe file URL to the project files root", async () => {
+    const original = snapshotClient();
+    const paths: string[] = [];
+    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: [] }; };
+    apiClient.projectCapabilities = async () => readOnly;
+    window.history.replaceState(null, "", "/files?path=..%2Fsecrets");
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "No files yet" });
+      assert.deepEqual(paths, ["files"]);
+      assert.equal(window.location.search, "");
+    } finally { restoreClient(original); }
+  });
+
   it("exposes one named upload action instead of a second focusable file input", async () => {
     const original = snapshotClient();
     apiClient.projectCapabilities = async () => writable;

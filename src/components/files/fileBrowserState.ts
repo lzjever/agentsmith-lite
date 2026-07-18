@@ -2,6 +2,15 @@ import type { ProjectFile } from "../../lib/api/client.js";
 
 export const PROJECT_FILES_ROOT = "files";
 
+export function normalizeFileBrowserPath(input: string | null | undefined): string {
+  if (!input || input.includes("\\")) return PROJECT_FILES_ROOT;
+  const segments = input.split("/");
+  if (segments[0] !== PROJECT_FILES_ROOT || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    return PROJECT_FILES_ROOT;
+  }
+  return segments.join("/");
+}
+
 export interface FileBreadcrumb {
   label: string;
   path: string;
