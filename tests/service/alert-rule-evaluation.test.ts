@@ -115,6 +115,32 @@ describe("alert rule evaluation", () => {
       /only supports project scope/,
     );
   });
+
+  it("fills a partially failed in-product notification delivery on the next evaluation", async () => {
+    const { store, services, owner, project } = await setup("notification-retry");
+    const { user: admin } = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "notification-admin", email: "notification-admin@example.test", emailVerified: true });
+    await store.upsertProjectMembership({ projectId: project.id, userId: admin.id, role: "admin", createdAt: project.createdAt, updatedAt: project.updatedAt });
+    const rule = await services.alertRules.create(owner.id, project.id, { name: "Active task", alertType: "active_tasks_limit", threshold: 1 });
+    const createNotification = store.createUserNotification.bind(store);
+    let failAdmin = true;
+    store.createUserNotification = async (notification, dedupeKey) => {
+      if (notification.userId === admin.id && failAdmin) throw new Error("notification write unavailable");
+      return createNotification(notification, dedupeKey);
+    };
+
+    await services.policies.reserveTask(project.id, owner.id, "task_1");
+    const failed = (await store.listProjectAlerts(project.id)).find((alert) => alert.ruleId === rule.id && alert.status === "active");
+    assert.equal(failed?.deliveryStatus, "failed");
+    assert.equal((await services.notifications.list(owner.id)).length, 1);
+    assert.equal((await services.notifications.list(admin.id)).length, 0);
+
+    failAdmin = false;
+    await services.policies.reserveTask(project.id, owner.id, "task_2");
+    const delivered = (await store.listProjectAlerts(project.id)).find((alert) => alert.id === failed?.id);
+    assert.equal(delivered?.deliveryStatus, "delivered");
+    assert.equal((await services.notifications.list(owner.id)).length, 1);
+    assert.equal((await services.notifications.list(admin.id)).length, 1);
+  });
 });
 
 async function setup(subject: string) {

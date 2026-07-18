@@ -51,7 +51,7 @@ export async function evaluateProjectAlertRules(
       resolvedAt: null,
       dismissedAt: null,
     });
-    if (alert.deliveryStatus !== "pending" || isSilenced(alert, timestamp)) continue;
+    if (isSilenced(alert, timestamp)) continue;
     const title = `Project alert: ${alertLabel(type)}`;
     const body = project ? `${project.name}: ${alertLabel(type)}.` : `A project reported ${alertLabel(type)}.`;
     const linkPath = project ? `/workspaces/${project.workspaceId}/projects/${project.id}/alerts?alertId=${encodeURIComponent(alert.id)}` : null;
@@ -75,7 +75,7 @@ export async function evaluateProjectAlertRules(
     await store.updateProjectAlertDeliveryStatus(
       projectId,
       alert.id,
-      deliveries.some((delivery) => delivery.status === "fulfilled") ? "delivered" : "failed",
+      deliveries.length > 0 && deliveries.every((delivery) => delivery.status === "fulfilled") ? "delivered" : "failed",
       timestamp,
     );
   }
