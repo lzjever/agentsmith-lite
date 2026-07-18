@@ -48,7 +48,7 @@ describe("project chat threads API", () => {
   it("projects endpoint task eligibility and preserves thread history order", async () => {
     const configured = await store.findEndpoint(endpointId);
     assert.ok(configured);
-    const missingCredential = await store.createEndpoint({ ...configured, id: "endpoint_missing_credential", credentialId: "" });
+    const missingCredential = await store.createEndpoint({ ...configured, id: "endpoint_missing_credential", name: "Missing credential", credentialId: "" });
     const endpoints = await requestJson("GET", `/api/v1/projects/${projectId}/endpoints`, undefined);
     assert.equal(endpoints.find((endpoint: { id: string }) => endpoint.id === endpointId)?.taskEligible, true);
     const missingCredentialProjection = endpoints.find((endpoint: { id: string }) => endpoint.id === missingCredential.id);

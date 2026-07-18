@@ -173,7 +173,7 @@ describe("ChatService", () => {
     const imageOnly = await createCredentialEndpoint(services, user.id, project.id, { capabilities: ["image"] });
     await assert.rejects(() => services.chat.createThread(user.id, project.id, imageOnly.id), /text capability/);
 
-    const text = await createCredentialEndpoint(services, user.id, project.id);
+    const text = await createCredentialEndpoint(services, user.id, project.id, { name: "Text endpoint" });
     const thread = await services.chat.createThread(user.id, project.id, text.id);
     await store.updateEndpoint({ ...text, capabilities: ["image"], updatedAt: new Date().toISOString() });
     await assert.rejects(() => services.chat.sendMessage(user.id, project.id, thread.id, "hello"), /text capability/);

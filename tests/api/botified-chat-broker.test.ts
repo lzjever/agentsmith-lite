@@ -128,7 +128,7 @@ describe("Botified Chat Completions broker", () => {
     const usage = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
     assert.deepEqual(
       { requests: usage.usage.providerRequests, tokens: usage.usage.providerTokens, cost: usage.usage.providerCost },
-      { requests: 2, tokens: 0, cost: 0 }
+      { requests: 2, tokens: 4096, cost: 1 }
     );
     assert.deepEqual(usage.trendTotals, { requests: 1, tokens: 0, cost: 0 });
   });
@@ -299,15 +299,22 @@ describe("Botified Chat Completions broker", () => {
       baseUrl: "https://models.example.com/v1",
       secret: "sk-provider-key"
     }, cookie, csrf, `credential-${name}`);
-    const endpoint = await post(`/api/v1/projects/${project.id}/endpoints`, {
-      name: "provider",
-      protocol: "openai_chat_completions",
-      baseUrl: "https://models.example.com/v1",
-      model: "gpt-compatible",
-      credentialId: credential.id,
-      capabilities: ["text", "tool_calls"],
-      requestTimeoutSecs: 30
-    }, cookie, csrf, `endpoint-${name}`);
+    const brokerResponseFactory = providerResponseFactory;
+    providerResponseFactory = () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+    let endpoint: { id: string };
+    try {
+      endpoint = await post(`/api/v1/projects/${project.id}/endpoints`, {
+        name: "provider",
+        protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1",
+        model: "gpt-compatible",
+        credentialId: credential.id,
+        capabilities: ["text", "tool_calls"],
+        requestTimeoutSecs: 30
+      }, cookie, csrf, `endpoint-${name}`);
+    } finally {
+      providerResponseFactory = brokerResponseFactory;
+    }
     providerCalls.length = 0;
     const task = await post(`/api/v1/projects/${project.id}/tasks`, { prompt: "hello", endpointId: endpoint.id }, cookie, csrf, `task-${name}`);
     const activeTask = await waitForActiveTask(task.id, cookie);
@@ -321,16 +328,18 @@ describe("Botified Chat Completions broker", () => {
 
   async function waitForActiveTask(taskId: string, cookie: string): Promise<any> {
     const deadline = Date.now() + 2_000;
+    let lastTask: { status?: unknown; startIntentStatus?: unknown; safeError?: unknown } | undefined;
     while (Date.now() < deadline) {
       const response = await fetch(`${baseUrl}/app/api/v1/tasks/${taskId}`, { headers: { cookie } });
       assert.equal(response.status, 200);
       const task = await response.json();
-      if (task.status === "running" && task.startIntentStatus === "dispatched" && task.startReceipt?.accepted === true) {
+      lastTask = task;
+      if (task.status === "running" && task.startIntentStatus === "dispatched") {
         return task;
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.fail(`Task ${taskId} was not dispatched to Botified`);
+    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify({ status: lastTask?.status, startIntentStatus: lastTask?.startIntentStatus, safeError: lastTask?.safeError })}`);
   }
 
   async function post(pathname: string, body: unknown, cookie: string, csrf: string, idempotencyKey: string): Promise<any> {

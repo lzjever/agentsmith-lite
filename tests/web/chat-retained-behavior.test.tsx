@@ -661,6 +661,38 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("waits for a stopped retry to settle before unlocking the conversation", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, retryChatMessage: apiClient.retryChatMessage };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    let historyReads = 0;
+    const stoppedMessage = { id: "message_1", threadId: "chat_1", sequence: 1, version: 2, role: "user" as const, content: "retry me", deliveryStatus: "stopped" as const, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    apiClient.chatMessages = async () => {
+      historyReads += 1;
+      if (historyReads === 1) return [stoppedMessage];
+      if (historyReads === 2) return [{ ...stoppedMessage, deliveryStatus: "pending" as const }];
+      return [stoppedMessage];
+    };
+    apiClient.retryChatMessage = async (_projectId, _threadId, _messageId, _expectedVersion, signal, onDelta) => {
+      onDelta("partial retry");
+      await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+      throw new Error("unreachable");
+    };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Generation stopped.");
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByText("partial retry");
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      await waitFor(() => assert.ok(historyReads >= 3));
+      await screen.findByText("Generation stopped.");
+      assert.ok(screen.getByRole("button", { name: "Retry" }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("clears the previous thread immediately while the selected thread loads", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
     let resolveSecond: ((messages: any[]) => void) | undefined;

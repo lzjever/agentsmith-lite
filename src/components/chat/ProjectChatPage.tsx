@@ -406,9 +406,14 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       void loadThreads();
     } catch (reason) {
       if (!active.current) return;
+      const stopped = isAbort(reason);
       setMessages((current) => current.filter((item) => item.id !== `stream-${threadId}`));
       await loadMessages(threadId);
-      if (!isAbort(reason)) failAction(reason);
+      if (stopped) {
+        await reconcileStoppedMessage(threadId);
+        return;
+      }
+      failAction(reason);
     } finally {
       streamAbort.current = null;
       if (active.current) setSending(false);
