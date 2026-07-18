@@ -12,12 +12,11 @@ import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormV
 const initialType = alertRuleTypes[0]!;
 const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
 
-export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstancesChanged }: { projectId: string; canManage: boolean; onAccessDenied?: (reason: unknown) => void; onInstancesChanged?: () => Promise<void> }) {
+export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccessDenied, onInstancesChanged }: { projectId: string; endpoints?: Endpoint[]; canManage: boolean; onAccessDenied?: (reason: unknown) => void; onInstancesChanged?: () => Promise<void> }) {
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ProjectAlertRule | null>(null);
@@ -30,10 +29,9 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     const request = ++loadRequest.current;
     setState("loading");
     try {
-      const [listed, endpointList] = await Promise.all([apiClient.alertRules(projectId), apiClient.endpoints(projectId).catch(() => [])]);
+      const listed = await apiClient.alertRules(projectId);
       if (!mounted.current || request !== loadRequest.current) return;
       setRules(listed);
-      setEndpoints(endpointList);
       setState("ready");
     } catch {
       if (!mounted.current || request !== loadRequest.current) return;

@@ -358,10 +358,35 @@ describe("project resource pages", () => {
     const alert = (id: string, endpointId: string | null): ProjectAlert => ({ id, projectId, type:"provider_requests_limit", status:"active", deliveryStatus:"delivered", endpointId, createdAt:policy.createdAt, updatedAt:policy.updatedAt, resolvedAt:null, dismissedAt:null });
     apiClient.alerts = async () => [alert("alert_project", null), alert("alert_endpoint", "endpoint_1")];
     apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [endpoint];
     try {
       render(<AlertsPage projectId={projectId} />);
       assert.ok(await screen.findByText("Project request limit reached"));
       assert.ok(screen.getByText("Endpoint request limit reached"));
+      assert.equal(screen.getByRole("link", { name: "Primary" }).getAttribute("href"), "endpoints");
+      assert.equal(screen.queryByText(/Endpoint endpoint_1/), null);
+    } finally { restoreClient(original); }
+  });
+
+  it("routes each alert type to the operation that can investigate it", async () => {
+    const original = snapshotClient();
+    const alert = (id: string, type: ProjectAlert["type"], endpointId?: string): ProjectAlert => ({ id, projectId, type, status: "active", deliveryStatus: "delivered", ...(endpointId ? { endpointId } : {}), createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null });
+    apiClient.alerts = async () => [
+      alert("endpoint_failure", "endpoint_failure", endpoint.id),
+      alert("provider_failure", "provider_failure", endpoint.id),
+      alert("task_failure", "task_failure", endpoint.id),
+      alert("sandbox_failure", "sandbox_failure")
+    ];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [endpoint];
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      await screen.findByText("Endpoint failure");
+      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "endpoints");
+      assert.equal(screen.getByRole("link", { name: "View provider failures" }).getAttribute("href"), "audit?action=provider.request&status=rejected");
+      assert.equal(screen.getByRole("link", { name: "Open tasks" }).getAttribute("href"), "tasks");
+      assert.equal(screen.getByRole("link", { name: "View sandbox failures" }).getAttribute("href"), "audit?action=sandbox.failed&status=accepted");
+      assert.equal(screen.getAllByRole("link", { name: "View alert history" }).length, 4);
     } finally { restoreClient(original); }
   });
 
@@ -784,8 +809,8 @@ describe("project resource pages", () => {
       render(<AlertsPage projectId={projectId} />);
       await screen.findByText("Task failure");
       assert.ok(screen.getByText("Linked instance"));
-      assert.equal(screen.getByRole("link", { name: "Investigate usage" }).getAttribute("href"), "usage?endpointId=endpoint_1");
-      assert.equal(screen.getByRole("link", { name: "View related audit" }).getAttribute("href"), "audit?resourceKind=alert&resourceId=history_1");
+      assert.equal(screen.getByRole("link", { name: "Open tasks" }).getAttribute("href"), "tasks");
+      assert.equal(screen.getByRole("link", { name: "View alert history" }).getAttribute("href"), "audit?resourceKind=alert&resourceId=history_1");
       fireEvent.click(screen.getByRole("button", { name: "Resolve alert" }));
       await waitFor(() => assert.deepEqual(transitions, ["history_1:resolved"]));
       assert.ok(screen.getByText("resolved"));
