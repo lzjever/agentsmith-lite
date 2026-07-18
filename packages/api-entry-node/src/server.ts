@@ -24,6 +24,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 const MAX_PENDING_TERMINAL_INPUT_BYTES = 64 * 1024;
 const MAX_PENDING_TERMINAL_OUTPUT_BYTES = 256 * 1024;
+const MAX_JSON_BODY_BYTES = 1_048_576;
 
 interface CommonApiServerOptions {
   port: number;
@@ -1142,14 +1143,36 @@ function contentDispositionFilename(input: string): string {
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const contentLength = firstHeaderValue(req.headers["content-length"]);
+  if (contentLength !== undefined) {
+    const declaredBytes = Number(contentLength);
+    if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
+      throw new ProductError("Content-Length must be a non-negative integer");
+    }
+    if (declaredBytes > MAX_JSON_BODY_BYTES) {
+      throw new ProductError("JSON request body exceeds the 1 MiB limit", 413);
+    }
+  }
+
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let tooLarge = false;
   for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(bytes);
+  }
+  if (tooLarge) {
+    throw new ProductError("JSON request body exceeds the 1 MiB limit", 413);
   }
   if (chunks.length === 0) {
     return {};
   }
-  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  const parsed = JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8")) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new ProductError("JSON object body is required");
   }

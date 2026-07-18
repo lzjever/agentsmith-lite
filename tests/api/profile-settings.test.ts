@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -58,6 +59,30 @@ describe("profile and settings API", () => {
     assert.deepEqual(failed.body, { error: "Project deletion is still pending" });
     assert.equal((await store.findProject(failingProjectId))?.lifecycleStatus, "deleting");
   });
+  it("rejects oversized JSON bodies before buffering them", async () => {
+    const declared = await rawJsonRequest({ "content-length": String(1_048_577) });
+    assert.equal(declared.status, 413);
+
+    const streamed = await rawJsonRequest({}, Buffer.alloc(1_048_577, 0x20));
+    assert.deepEqual(streamed.body, { error: "JSON request body exceeds the 1 MiB limit" });
+    assert.equal(streamed.status, 413);
+  });
   async function call(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const creationKey = method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)) ? crypto.randomUUID() : undefined; const response = await fetch(`${api.baseUrl}${pathname}`, { method, headers: { ...(cookie ? { cookie, "x-csrf-token": csrf } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }), ...(idempotencyKey || creationKey ? { "idempotency-key": idempotencyKey ?? creationKey! } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { response, body: await response.json() as any }; }
   async function json(method: string, pathname: string, body?: unknown, idempotencyKey?: string) { const result = await call(method, pathname, body, idempotencyKey); assert.equal(result.response.status, 200); return result.body; }
+  async function rawJsonRequest(headers: Record<string, string>, body?: Buffer): Promise<{ status: number; body: unknown }> {
+    const target = new URL("/api/v1/auth/login", api.baseUrl);
+    return new Promise((resolve, reject) => {
+      const request = httpRequest(target, { method: "POST", agent: false, headers: { "connection": "close", "content-type": "application/json", ...headers } }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: response.statusCode ?? 0, body: text ? JSON.parse(text) as unknown : undefined });
+        });
+      });
+      request.on("error", reject);
+      if (body) request.write(body);
+      request.end();
+    });
+  }
 });
