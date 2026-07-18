@@ -19,6 +19,12 @@ describe("user menu sign out", () => {
     assert.equal(item.getAttribute("href"), "/workspaces/workspace_1/context?scope=workspace_personal");
   });
 
+  it("does not nest the current profile route as its own return path", async () => {
+    render(<UserMenu user={{ id: "user_1", email: "owner@example.test" }} returnTo="/app/profile?returnTo=%2Fapp%2Fworkspaces%2Fworkspace_1" />);
+    openMenu();
+    assert.equal((await screen.findByRole("menuitem", { name: "Profile" })).getAttribute("href"), "/profile");
+  });
+
   it("serializes sign out attempts and lets the user retry after a failure", async () => {
     const originalLogout = apiClient.logout;
     const originalError = toast.error;

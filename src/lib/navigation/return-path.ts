@@ -12,3 +12,8 @@ export function workspaceReturnPath(
     : value;
   return route.startsWith("/workspaces/") ? route : "/";
 }
+
+export function isCurrentAppPage(value: string | undefined, pagePath: string): boolean {
+  const pathname = value?.split(/[?#]/, 1)[0];
+  return pathname === pagePath || pathname?.endsWith(pagePath) === true;
+}

@@ -163,6 +163,16 @@ describe("personal and resource UI", () => {
     } finally { apiClient.notifications = original; }
   });
 
+  it("does not nest the current notifications route as its own return path", async () => {
+    const original = apiClient.notifications;
+    apiClient.notifications = async () => [];
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationBell returnTo="/app/notifications?returnTo=%2Fapp%2Fworkspaces%2Fworkspace_1" /></AppRouterContext.Provider>);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open notifications" }), { button: 0, ctrlKey: false });
+      assert.equal((await screen.findByRole("link", { name: "View all notifications" })).getAttribute("href"), "/notifications");
+    } finally { apiClient.notifications = original; }
+  });
+
   it("reloads the global bell after an external notification mutation", async () => {
     const original = apiClient.notifications;
     let reads = 0;
