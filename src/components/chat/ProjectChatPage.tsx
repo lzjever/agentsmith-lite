@@ -453,7 +453,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
         ? "Loading endpoint details..."
         : endpointsStatus === "error"
           ? "Endpoint details unavailable. Conversation history remains available."
-          : "Endpoint deleted. Conversation history is read-only."
+          : "Endpoint deleted. Sending is unavailable."
       : "Choose an endpoint for a new conversation.";
 
   return <PageLayout contentWidth="full" header={<PageHeader title={selectedThread?.title ?? "Chat"} subtitle={subtitle} actions={<Button variant="quiet" size="icon" aria-label="Refresh chat" title="Refresh chat" disabled={sending || threadMutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>} />}>
@@ -509,7 +509,9 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       {endpointsStatus === "loading" ? <Notice>Loading compatible endpoints...</Notice> : null}
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
       {endpointsStatus === "ready" && selectedThread && endpoint && !endpointReady ? <Notice>This conversation&apos;s endpoint is unavailable. Recheck it before sending. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
-      {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
+      {endpointsStatus === "ready" && selectedThread && !endpoint && compatibleEndpoints.length > 0 ? <Notice action="Start new conversation" onAction={beginNewThread}>This conversation&apos;s endpoint was deleted. Its saved messages remain available.</Notice> : null}
+      {endpointsStatus === "ready" && selectedThread && !endpoint && compatibleEndpoints.length === 0 ? <Notice>This conversation&apos;s endpoint was deleted. Its saved messages remain available. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
+      {endpointsStatus === "ready" && !selectedThread && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
       {actionError ? isProviderQuotaError(actionError.code)
         ? <Notice error><strong>Provider quota reached.</strong> Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href="policy">Open resource policy</Link>.</Notice>
         : <Notice error>{actionError.message}</Notice> : null}

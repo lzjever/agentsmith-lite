@@ -307,6 +307,26 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("offers a new conversation when a retained thread lost its endpoint", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => [{ ...threads[0]!, endpointId: null }];
+    apiClient.chatMessages = async () => [{ id: "retained_message", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed", role: "assistant", content: "Retained answer", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Retained answer");
+      assert.ok(screen.getByText("Endpoint deleted. Sending is unavailable."));
+      assert.equal((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled, true);
+
+      fireEvent.click(screen.getByRole("button", { name: "Start new conversation" }));
+      assert.ok(screen.getByRole("combobox", { name: "Chat endpoint" }));
+      assert.equal((screen.getByRole("button", { name: "Start conversation" }) as HTMLButtonElement).disabled, false);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps an explicit new-conversation draft when the thread list arrives late", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages };
     let resolveThreads!: (value: ProjectChatThread[]) => void;
