@@ -127,6 +127,26 @@ describe("FetchOpenAICompatibleClient", () => {
     );
   });
 
+  it("keeps the timeout active while a streaming response body is being read", { timeout: 1_000 }, async () => {
+    const encoder = new TextEncoder();
+    const providerFetch: typeof fetch = async (_url, init) => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n"));
+        init?.signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+      }
+    }), { headers: { "content-type": "text/event-stream" } });
+
+    await assertProviderError(
+      () => new FetchOpenAICompatibleClient(providerFetch).streamChat!(
+        endpointFixture({ requestTimeoutSecs: 0.02 as never }),
+        [{ role: "user", content: "hi" }],
+        { apiKey: "sk-stream-timeout-secret", onDelta: () => undefined }
+      ),
+      504,
+      "sk-stream-timeout-secret"
+    );
+  });
+
   it("maps provider rate limits to ProductError 429 without leaking the api key", async () => {
     const baseUrl = await serve(async (_req, res) => {
       sendJson(res, 429, { error: { message: "provider says sk-rate-limit-secret" } });

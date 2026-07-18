@@ -92,22 +92,60 @@ export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
     const controller = new AbortController();
     const onExternalAbort = () => controller.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
-    const timeout = setTimeout(() => controller.abort(), timeoutSecs * 1000);
+    if (externalSignal?.aborted) controller.abort();
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    };
+    const timeout = setTimeout(() => {
+      controller.abort();
+      release();
+    }, timeoutSecs * 1000);
     try {
       const response = await this.providerFetch(url, { ...init, redirect: "error", signal: controller.signal });
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
         throw providerStatusError(response.status);
       }
-      return response;
+      if (!response.body) {
+        release();
+        return response;
+      }
+      return responseWithLifecycle(response, release, (error) => externalSignal?.aborted ? error : sanitizeProviderError(error));
     } catch (error) {
+      release();
       if (externalSignal?.aborted) throw error;
       throw sanitizeProviderError(error);
-    } finally {
-      clearTimeout(timeout);
-      externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
+}
+
+function responseWithLifecycle(response: Response, release: () => void, sanitizeBodyError: (error: unknown) => unknown): Response {
+  const reader = response.body!.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          release();
+          controller.close();
+        } else {
+          controller.enqueue(value);
+        }
+      } catch (error) {
+        release();
+        controller.error(sanitizeBodyError(error));
+      }
+    },
+    async cancel(reason) {
+      release();
+      await reader.cancel(reason);
+    }
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 export interface ProviderNetworkPolicy {
