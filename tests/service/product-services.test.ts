@@ -64,6 +64,19 @@ describe("product services", () => {
     );
   });
 
+  it("bounds workspace and project names at the product boundary", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    const oversized = "x".repeat(161);
+
+    await assert.rejects(() => services.workspaces.createWorkspace(owner.user.id, { name: oversized }), /workspace\.name must be 160 characters or less/);
+    await assert.rejects(() => services.workspaces.createProject(owner.user.id, workspace.id, { name: oversized }), /project\.name must be 160 characters or less/);
+    await assert.rejects(() => services.settings.updateWorkspace(owner.user.id, workspace.id, { name: oversized }), /workspace\.name must be 160 characters or less/);
+    await assert.rejects(() => services.settings.updateProject(owner.user.id, project.id, { name: oversized }), /project\.name must be 160 characters or less/);
+  });
+
   it("revokes built-in admin sessions on logout", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({

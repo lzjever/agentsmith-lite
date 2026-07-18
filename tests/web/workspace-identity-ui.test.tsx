@@ -27,6 +27,7 @@ describe("workspace identity UX", () => {
       await screen.findByText("Workspace");
       fireEvent.click(create);
       const name = screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement;
+      assert.equal(name.maxLength, 160);
       fireEvent.change(name, { target: { value: "Discarded workspace" } });
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "New workspace" }), null));

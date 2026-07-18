@@ -87,6 +87,7 @@ describe("workspace and shell interactions", () => {
       const view = render(<ProjectDialogHarness />);
       const dialog = await view.findByRole("dialog", { name: "New project" });
       await waitFor(() => assert.equal(dialog.contains(document.activeElement), true));
+      assert.equal((view.getByLabelText("Project name") as HTMLInputElement).maxLength, 160);
       fireEvent.change(view.getByLabelText("Project name"), { target: { value: "Taken" } });
       fireEvent.click(view.getByRole("button", { name: "Create project" }));
       await waitFor(() => assert.equal(view.getByRole("alert").textContent, "Project name is unavailable"));

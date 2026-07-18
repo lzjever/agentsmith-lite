@@ -1,10 +1,16 @@
 import { ProductError } from "./errors.js";
 
-export function requireNonEmptyString(value: unknown, field: string): string {
+export const PRODUCT_NAME_MAX_LENGTH = 160;
+
+export function requireNonEmptyString(value: unknown, field: string, maxLength?: number): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ProductError(`${field} is required`);
   }
-  return value.trim();
+  const normalized = value.trim();
+  if (maxLength !== undefined && normalized.length > maxLength) {
+    throw new ProductError(`${field} must be ${maxLength} characters or less`);
+  }
+  return normalized;
 }
 
 export function requirePositiveInteger(value: unknown, field: string, fallback: number): number {
@@ -16,4 +22,3 @@ export function requirePositiveInteger(value: unknown, field: string, fallback: 
   }
   return value;
 }
-

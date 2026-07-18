@@ -1,7 +1,7 @@
 import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, ProjectListProjection, ProjectOverviewAction, ProjectOverviewProjection, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
-import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
+import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService, type ProjectAccessSnapshot, type ProjectPermission } from "./authorizationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
@@ -15,7 +15,7 @@ export class WorkspaceService {
   ) {}
 
   async createWorkspace(userId: string, input: CreateWorkspaceInput, idempotencyKey?: string): Promise<Workspace> {
-    const name = requireNonEmptyString(input.name, "workspace.name");
+    const name = requireNonEmptyString(input.name, "workspace.name", PRODUCT_NAME_MAX_LENGTH);
     const timestamp = nowIso();
     const create = async (id: string) => {
       const existing = await this.store.findWorkspace(id);
@@ -28,7 +28,7 @@ export class WorkspaceService {
 
   async createProject(userId: string, workspaceId: string, input: CreateProjectInput, idempotencyKey?: string): Promise<Project> {
     await this.authorization.requireWorkspaceProjectCreation(userId, workspaceId);
-    const name = requireNonEmptyString(input.name, "project.name");
+    const name = requireNonEmptyString(input.name, "project.name", PRODUCT_NAME_MAX_LENGTH);
     const taskConcurrencyLimit = requirePositiveInteger(input.taskConcurrencyLimit, "project.taskConcurrencyLimit", 2);
     const timestamp = nowIso();
     const create = async (id: string) => {

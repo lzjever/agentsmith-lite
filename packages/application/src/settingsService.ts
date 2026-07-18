@@ -2,7 +2,7 @@ import type { Project, ProjectAuditAction, Workspace } from "../../contracts/src
 import { ForbiddenError, NotFoundError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { ProductError } from "../../domain/src/errors.js";
-import { requireNonEmptyString } from "../../domain/src/validation.js";
+import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src/validation.js";
 import type { ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
@@ -17,7 +17,7 @@ export class SettingsService {
   }
   async updateWorkspace(userId: string, workspaceId: string, input: { name?: unknown }) {
     const workspace = await this.requireWorkspaceAdmin(userId, workspaceId);
-    const updated = await this.store.updateWorkspaceName(workspace.id, input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name"), nowIso());
+    const updated = await this.store.updateWorkspaceName(workspace.id, input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name", PRODUCT_NAME_MAX_LENGTH), nowIso());
     if (!updated) throw new NotFoundError("Workspace not found");
     return { workspace: updated, capabilities: { canManageSettings: true } };
   }
@@ -31,7 +31,7 @@ export class SettingsService {
   }
   async updateProject(userId: string, projectId: string, input: { name?: unknown }) {
     const project = await this.authorization.requireProject(userId, projectId, "admin");
-    const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name"), nowIso());
+    const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name", PRODUCT_NAME_MAX_LENGTH), nowIso());
     if (!updated) throw new NotFoundError("Project not found");
     const [capabilities, workspaceLifecycleStatus] = await Promise.all([
       this.projectCapabilities(userId, projectId),
