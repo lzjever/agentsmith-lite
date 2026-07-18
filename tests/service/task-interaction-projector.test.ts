@@ -101,6 +101,17 @@ describe("canonical Botified timeline parsing", () => {
 });
 
 describe("task interaction projection", () => {
+  it("projects the command field emitted by the Botified timeline", () => {
+    const projected = projectBotified(canonicalEvent(
+      1,
+      "command_execution.completed",
+      { tool_call_id: "call-command", command: "printf 'done\\n'", output_tail: "done\n", exit_code: 0 },
+      "command_execution"
+    ));
+
+    assert.equal(field(projected, "command"), "printf 'done\\n'");
+  });
+
   it("projects every public high-value interaction kind from canonical or product sources", () => {
     const cases: Array<[BotifiedTimelineEvent, string]> = [
       [canonicalEvent(1, "input.accepted", { input_id: "input-1", source: "user", text: "hello" }), "user_message"],

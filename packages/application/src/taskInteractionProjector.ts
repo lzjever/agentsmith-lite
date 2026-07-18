@@ -353,7 +353,7 @@ function projectTool(
     ? "running"
     : source.event.type === "command_execution.completed" ? "completed" : "failed";
   const executionStatus = monotonicExecution(old?.executionStatus, incomingStatus, TOOL_TERMINAL);
-  const summary = optionalRedacted(stringField(data, "arguments_summary"), redaction);
+  const summary = optionalRedacted(stringField(data, "command") ?? stringField(data, "arguments_summary"), redaction);
   const output = source.event.type === "command_execution.failed"
     ? textBody(data, ["failure_reason", "error", "output_tail"], [], redaction)
     : textBody(data, ["output_tail", "output", "summary"], [], redaction);
