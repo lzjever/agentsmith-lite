@@ -103,12 +103,15 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   }
 
   const lifecycleStatus=data?.project.lifecycleStatus??"active";
+  const workspaceLifecycleStatus=data?.workspaceLifecycleStatus??"active";
+  const workspaceActive=workspaceLifecycleStatus==="active";
   const archived=lifecycleStatus==="archived";
   const isActive=lifecycleStatus==="active";
   const isOwner = data?.project.ownerUserId === user?.id;
   const canDelete = isOwner;
   const canArchive=data?.capabilities.canManageSettings===true&&isActive;
-  const canRestore=isOwner&&archived;
+  const canRestore=isOwner&&archived&&workspaceActive;
+  const showLifecycle=canArchive||(isOwner&&archived);
   const canTransferOwnership=isOwner&&isActive&&data?.capabilities.canManageSettings===true;
   const mutationBusy=saving||lifecycleBusy||ownerBusy||deleteBusy;
   const settingsDirty = data !== undefined && projectName.trim() !== data.project.name;
@@ -176,12 +179,12 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     {state === "loading" ? <PageState state="loading">Loading project settings...</PageState> : null}
     {state === "error" ? <SettingsLoadError message={loadError} onRetry={() => void load()} backHref={`/workspaces/${workspaceId}/projects/${projectId}/overview`} backLabel="Back to project" /> : null}
     {state === "ready" && data ? <>
-      <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{lifecycleMessage("project",lifecycleStatus)}</p>
+      <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus,workspaceLifecycleStatus)}</p>
       <form onSubmit={submit} className="grid gap-5 border-y border-subtle py-5">
         <label className="grid gap-2 text-sm"><span>Project name</span><Input name="name" value={projectName} onChange={(event) => setProjectName(event.target.value)} disabled={mutationBusy||!data.capabilities.canManageSettings||!isActive} /></label>
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" disabled={mutationBusy || !settingsDirty}><Save size={16} />{saving ? "Saving..." : "Save project"}</Button> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
       </form>
-      {canArchive||canRestore?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p><Button className="mt-4" variant="outline" disabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)}><Archive size={16}/>{archived?"Unarchive project":"Archive project"}</Button></section>:null}
+      {showLifecycle?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p>{archived&&!workspaceActive?<p className="mt-4 text-sm text-secondary">Restore the workspace before unarchiving this project.</p>:<Button className="mt-4" variant="outline" disabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)}><Archive size={16}/>{archived?"Unarchive project":"Archive project"}</Button>}</section>:null}
       {canArchive?<ConfirmationDialog open={archiveOpen} onOpenChange={(open)=>{setArchiveOpen(open);if(!open)mutationKeys.clear("project-archive");}} title="Archive project" description="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." confirmText="Archive project" confirmDisabled={mutationBusy} onConfirm={setArchive}/>:null}
       {isOwner?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Transfer ownership</h2><p className="mt-1 text-sm text-secondary">Choose an existing project member as the new owner.</p>{memberState==="loading"?<p className="mt-4 text-sm text-secondary" role="status">Loading eligible project members...</p>:null}{memberState==="error"?<div className="mt-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">Project members could not be loaded.</span><Button variant="quiet" size="sm" aria-label="Retry member loading" disabled={mutationBusy} onClick={()=>void loadMembers()}><RefreshCw size={14}/>Retry</Button></div>:null}{memberState==="ready"&&ownerCandidates.length === 0 ? <p className="mt-4 text-sm text-secondary" role="status">There are no other project members eligible to become owner.</p> : null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><div className="grid w-64 gap-2"><Label htmlFor="project-owner-target">New project owner</Label><Select value={ownerTargetEligible?ownerTarget:""} onValueChange={setOwnerTarget} disabled={!canTransferOwnership||mutationBusy}><SelectTrigger id="project-owner-target"><SelectValue placeholder="Select a member" /></SelectTrigger><SelectContent>{ownerCandidates.map(member=><SelectItem key={member.userId} value={member.userId}>{memberLabel(member)}</SelectItem>)}</SelectContent></Select></div><Button variant="outline" disabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} onClick={()=>setOwnerOpen(true)}>Transfer ownership</Button></div>:null}</section>:null}
       {isOwner?<ConfirmationDialog open={ownerOpen&&ownerTargetEligible} onOpenChange={(open)=>{setOwnerOpen(open);if(!open)mutationKeys.clear("project-owner-transfer");}} title="Transfer project ownership" description="The current owner becomes an administrator." confirmText="Transfer ownership" variant="default" confirmDisabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} onConfirm={transferOwner}/>:null}
@@ -201,4 +204,4 @@ function settingsErrorMessage(error: unknown, fallback: string): string {
 }
 
 function memberLabel(member: ProjectMember): string { return member.displayName || member.email || member.userId; }
-function lifecycleMessage(kind:"project"|"workspace",status:"active"|"archived"|"deleting"){return status==="active"?`${kind[0]!.toUpperCase()+kind.slice(1)} status: Active.`:status==="archived"?`This ${kind} is archived and read-only.`:`This ${kind} is being deleted. Changes are unavailable.`;}
+function projectLifecycleMessage(status:"active"|"archived"|"deleting",workspaceStatus:ProjectSettings["workspaceLifecycleStatus"]){return status==="archived"?"This project is archived and read-only.":status==="deleting"?"This project is being deleted. Changes are unavailable.":workspaceStatus==="archived"?"This project is read-only because its workspace is archived.":workspaceStatus==="deleting"?"This project is read-only because its workspace is being deleted.":"Project status: Active.";}

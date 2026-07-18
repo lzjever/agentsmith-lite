@@ -55,7 +55,7 @@ export interface CurrentUser { id: string; email: string; displayName?: string; 
 export type Profile = ProfileResponse;
 export interface SettingsCapabilities { canManageSettings: boolean; }
 export interface WorkspaceSettings { workspace: Workspace; capabilities: SettingsCapabilities; }
-export interface ProjectSettings { project: Project; capabilities: SettingsCapabilities; }
+export interface ProjectSettings { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: SettingsCapabilities; }
 export interface Project { id: string; workspaceId: string; name: string; ownerUserId?: string; lifecycleStatus?: "active" | "archived" | "deleting"; pinnedAt?: string | null; taskConcurrencyLimit: number; createdAt: string; updatedAt: string; }
 export interface Workspace { id: string; name: string; ownerUserId?: string; owner?: { displayName: string | null; email: string }; memberRole?: WorkspaceMemberRole; lifecycleStatus?: "active" | "archived" | "deleting"; projects: Project[]; capabilities: { canCreateProject: boolean; canManageMembers: boolean }; createdAt: string; updatedAt: string; }
 export type MemberRole = "owner" | "admin" | "member" | "viewer";
@@ -64,7 +64,7 @@ export type WorkspaceMemberRole = "owner" | "admin" | "member" | "viewer";
 export interface WorkspaceMember { workspaceId: string; userId: string; role: WorkspaceMemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
 export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; canCancelTasks: boolean; canSendChat: boolean; }
 export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
-export interface ProjectOverview { project: Project; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; chatReadyEndpointCount: number; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
+export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; chatReadyEndpointCount: number; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
 export type EndpointCapability = "text" | "image" | "tool_calls";
 export type Endpoint = PublicModelEndpoint;
 export interface EndpointModelDiscovery { models: string[]; health: { status: "healthy" | "unavailable" | "unknown"; checkedAt: string | null; errorCategory: "auth" | "network" | "upstream" | "timeout" | "rate_limit" | "unknown" | null }; }

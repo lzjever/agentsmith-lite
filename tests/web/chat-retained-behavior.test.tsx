@@ -194,7 +194,7 @@ describe("retained chat and overview behavior", () => {
 
   it("uses projected capabilities to hide management entry points and state read-only access", async () => {
     const original = apiClient.projectOverview;
-    apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });
+    apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},workspaceLifecycleStatus:"active",capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByText("This project is available for viewing.");
@@ -214,12 +214,24 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("explains when an active project is read-only because its workspace is archived", async () => {
+    const original = apiClient.projectOverview;
+    apiClient.projectOverview = async () => ({ ...overviewProjection("project_1", "workspace_1", "Project Owner"), workspaceLifecycleStatus: "archived" });
+    try {
+      render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
+      await screen.findByText("This project is read-only because its workspace is archived.");
+      assert.ok(screen.getByText("Restore the workspace before changing this project or starting new work."));
+    } finally {
+      apiClient.projectOverview = original;
+    }
+  });
+
   it("loads one coherent overview projection and retries it as a whole", async () => {
     const original = apiClient.projectOverview;
     let reads = 0;
     apiClient.projectOverview = async () => {
       if (reads++ === 0) throw new ApiError(503, "Project overview is temporarily unavailable.");
-      return {project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},capabilities:{...readOnly,canManageEndpoints:true,canManageMembers:true,canCreateTasks:true,canSendChat:true},owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"owner",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:["start_chat","create_task","add_collaborator"]};
+      return {project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},workspaceLifecycleStatus:"active",capabilities:{...readOnly,canManageEndpoints:true,canManageMembers:true,canCreateTasks:true,canSendChat:true},owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"owner",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:["start_chat","create_task","add_collaborator"]};
     };
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
@@ -748,7 +760,7 @@ describe("retained chat and overview behavior", () => {
 });
 
 function overviewProjection(projectId: string, workspaceId: string, ownerName: string): ProjectOverview {
-  return { project: { id: projectId, workspaceId, name: `Project ${projectId}`, lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, capabilities: readOnly, owner: { displayName: ownerName, email: `${projectId}@example.test` }, memberRole: "viewer", chatReadyEndpointCount: 0, taskReadyEndpointCount: 0, recommendedActions: [] };
+  return { project: { id: projectId, workspaceId, name: `Project ${projectId}`, lifecycleStatus: "active", taskConcurrencyLimit: 2, createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }, workspaceLifecycleStatus: "active", capabilities: readOnly, owner: { displayName: ownerName, email: `${projectId}@example.test` }, memberRole: "viewer", chatReadyEndpointCount: 0, taskReadyEndpointCount: 0, recommendedActions: [] };
 }
 
 function installDom(): void {

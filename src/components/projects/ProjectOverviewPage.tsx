@@ -60,6 +60,8 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
   const readOnly = overview !== undefined && !Object.values(overview.capabilities).some(Boolean);
   const noUsableEndpoint = overview !== undefined && !readOnly && overview.chatReadyEndpointCount === 0;
   const lifecycleStatus = overview?.project.lifecycleStatus ?? (overview ? "active" : undefined);
+  const workspaceLifecycleStatus = overview?.workspaceLifecycleStatus ?? "active";
+  const workspaceReadOnly = lifecycleStatus === "active" && workspaceLifecycleStatus !== "active";
   const headerSubtitle = overview?.owner
     ? `Owner: ${memberLabel(overview.owner)} · Your access: ${roleLabel(overview.memberRole)} · Status: ${lifecycleLabel(lifecycleStatus)}`
     : state === "loading" ? "Loading project status..." : "Project status is unavailable.";
@@ -70,13 +72,13 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Project overview unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
     {state === "ready" && overview ? <div className="space-y-6">
       <Link href={`/workspaces/${workspaceId}`} className="inline-flex items-center gap-2 text-sm text-secondary no-underline hover:text-foreground"><ArrowLeft size={16} />Back to workspace</Link>
-      <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{lifecycleMessage(lifecycleStatus)}</p>
+      <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)}</p>
       <section className="grid gap-8 border-t border-subtle pt-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(20rem,1fr)]">
         <div className="space-y-8">
           <section className="space-y-3">
             <p className="type-caption text-tertiary">{primaryStep ? "Next step" : readOnly ? "Read-only" : "Project"}</p>
-            <h2 className="type-section-heading">{primaryStep ? primaryStep.label : readOnly ? "This project is available for viewing." : noUsableEndpoint ? "No usable endpoint is available." : "This project is ready for work."}</h2>
-            <p className="type-body-ui max-w-2xl text-secondary">{primaryStep ? primaryStep.description : readOnly ? "You can open the project surfaces available to you." : noUsableEndpoint ? "Ask a project administrator to configure a healthy endpoint." : "Choose a project surface to continue."}</p>
+            <h2 className="type-section-heading">{primaryStep ? primaryStep.label : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Workspace archived" : "Workspace deletion in progress" : readOnly ? "This project is available for viewing." : noUsableEndpoint ? "No usable endpoint is available." : "This project is ready for work."}</h2>
+            <p className="type-body-ui max-w-2xl text-secondary">{primaryStep ? primaryStep.description : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Restore the workspace before changing this project or starting new work." : "Workspace deletion must finish before this project is no longer available." : readOnly ? "You can open the project surfaces available to you." : noUsableEndpoint ? "Ask a project administrator to configure a healthy endpoint." : "Choose a project surface to continue."}</p>
           </section>
           {secondarySteps.length ? <section><p className="type-caption text-tertiary">Then</p><div className="mt-3 divide-y divide-subtle border-y border-subtle">{secondarySteps.map((step, index) => <Link key={step.href} href={`${base}/${step.href}`} className="group flex items-start justify-between gap-4 py-4 text-foreground no-underline"><span><span className="type-caption text-tertiary">Step {index + 2}</span><strong className="mt-1 block font-medium">{step.label}</strong><span className="mt-1 block text-sm text-secondary">{step.description}</span></span><ArrowRight size={16} className="mt-2 shrink-0 text-icon-default group-hover:translate-x-0.5" /></Link>)}</div></section> : null}
         </div>
@@ -89,4 +91,4 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
 function memberLabel(member: { displayName: string | null; email: string }): string { return member.displayName || member.email || "Project owner"; }
 function roleLabel(role: ProjectMember["role"]): string { return role[0]!.toUpperCase() + role.slice(1); }
 function lifecycleLabel(status: Project["lifecycleStatus"]): string { return status ? status[0]!.toUpperCase() + status.slice(1) : "Unknown"; }
-function lifecycleMessage(status: Project["lifecycleStatus"]): string { return status === "archived" ? "This project is archived and read-only." : status === "deleting" ? "This project is being deleted. Changes are unavailable." : status === "active" ? "Project status: Active." : "Project status: Unknown."; }
+function projectLifecycleMessage(status: Project["lifecycleStatus"], workspaceStatus: ProjectOverview["workspaceLifecycleStatus"]): string { return status === "archived" ? "This project is archived and read-only." : status === "deleting" ? "This project is being deleted. Changes are unavailable." : workspaceStatus === "archived" ? "This project is read-only because its workspace is archived." : workspaceStatus === "deleting" ? "This project is read-only because its workspace is being deleted." : status === "active" ? "Project status: Active." : "Project status: Unknown."; }

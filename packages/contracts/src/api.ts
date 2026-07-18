@@ -55,6 +55,7 @@ export interface ProjectCapabilities {
 export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
 export interface ProjectOverviewProjection {
   project: Project;
+  workspaceLifecycleStatus: "active" | "archived" | "deleting";
   capabilities: ProjectCapabilities;
   owner: MembershipIdentity | null;
   memberRole: ProjectMembershipRole;

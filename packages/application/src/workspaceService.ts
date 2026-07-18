@@ -1,6 +1,6 @@
 import type { CreateProjectInput, CreateWorkspaceInput, Project, ProjectCapabilities, ProjectListProjection, ProjectOverviewAction, ProjectOverviewProjection, Workspace, WorkspaceWithProjects } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import { ProductError } from "../../domain/src/errors.js";
+import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService, type ProjectPermission } from "./authorizationService.js";
@@ -71,11 +71,13 @@ export class WorkspaceService {
 
   async projectOverview(userId: string, projectId: string): Promise<ProjectOverviewProjection> {
     const project = await this.authorization.requireProject(userId, projectId, "view");
-    const [capabilities, memberships, endpoints] = await Promise.all([
+    const [capabilities, memberships, endpoints, workspace] = await Promise.all([
       this.authorization.projectCapabilities(userId, projectId),
       this.store.listProjectMemberships(projectId),
-      this.store.listEndpointsForProject(projectId)
+      this.store.listEndpointsForProject(projectId),
+      this.store.findWorkspace(project.workspaceId)
     ]);
+    if (!workspace) throw new NotFoundError("Workspace not found");
     const membership = memberships.find((candidate) => candidate.userId === userId);
     if (!membership) throw new ProductError("Project membership changed while loading the overview", 409);
 
@@ -90,6 +92,7 @@ export class WorkspaceService {
     const owner = memberships.find((candidate) => candidate.role === "owner");
     return {
       project,
+      workspaceLifecycleStatus: workspace.lifecycleStatus ?? "active",
       capabilities,
       owner: owner ? { displayName: owner.displayName, email: owner.email } : null,
       memberRole: membership.role,

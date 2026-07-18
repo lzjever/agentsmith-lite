@@ -91,7 +91,9 @@ describe("product services", () => {
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Overview" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
 
-    assert.deepEqual((await services.workspaces.projectOverview(owner.user.id, project.id)).recommendedActions, ["configure_endpoint", "add_collaborator"]);
+    const initial = await services.workspaces.projectOverview(owner.user.id, project.id);
+    assert.equal(initial.workspaceLifecycleStatus, "active");
+    assert.deepEqual(initial.recommendedActions, ["configure_endpoint", "add_collaborator"]);
 
     const timestamp = new Date().toISOString();
     await store.createProjectCredential({ id: "credential_overview", projectId: project.id, name: "Credential", type: "api_key", baseUrl: "https://models.example.test/v1", fingerprint: "fingerprint", version: 1, keyId: "test", nonce: Buffer.alloc(12), ciphertext: Buffer.from("ciphertext"), authTag: Buffer.alloc(16), createdAt: timestamp, lastRotatedAt: null, updatedAt: timestamp });
@@ -103,6 +105,10 @@ describe("product services", () => {
     const viewer = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "overview-viewer", email: "overview-viewer@example.test", emailVerified: true });
     await store.upsertProjectMembership({ projectId: project.id, userId: viewer.user.id, role: "viewer", createdAt: timestamp, updatedAt: timestamp });
     assert.deepEqual((await services.workspaces.projectOverview(viewer.user.id, project.id)).recommendedActions, []);
+
+    await services.settings.archiveWorkspace(owner.user.id, workspace.id);
+    assert.equal((await services.workspaces.projectOverview(owner.user.id, project.id)).workspaceLifecycleStatus, "archived");
+    assert.equal((await services.settings.project(owner.user.id, project.id)).workspaceLifecycleStatus, "archived");
   });
 
   it("logs in a verified external principal as a stable local user", async () => {

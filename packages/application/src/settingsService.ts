@@ -23,14 +23,21 @@ export class SettingsService {
   }
   async project(userId: string, projectId: string) {
     const project = await this.authorization.requireProject(userId, projectId);
-    const capabilities = await this.projectCapabilities(userId, projectId);
-    return { project, capabilities };
+    const [capabilities, workspaceLifecycleStatus] = await Promise.all([
+      this.projectCapabilities(userId, projectId),
+      this.projectWorkspaceLifecycleStatus(project.workspaceId)
+    ]);
+    return { project, workspaceLifecycleStatus, capabilities };
   }
   async updateProject(userId: string, projectId: string, input: { name?: unknown }) {
     const project = await this.authorization.requireProject(userId, projectId, "admin");
     const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name"), nowIso());
     if (!updated) throw new NotFoundError("Project not found");
-    return { project: updated, capabilities: await this.projectCapabilities(userId, projectId) };
+    const [capabilities, workspaceLifecycleStatus] = await Promise.all([
+      this.projectCapabilities(userId, projectId),
+      this.projectWorkspaceLifecycleStatus(project.workspaceId)
+    ]);
+    return { project: updated, workspaceLifecycleStatus, capabilities };
   }
   async archiveWorkspace(userId:string,workspaceId:string){const workspace=await this.requireWorkspaceAdmin(userId,workspaceId);return this.requireWorkspaceState(await this.store.setWorkspaceLifecycleStatus(workspace.id,"archived",nowIso()))}
   async unarchiveWorkspace(userId:string,workspaceId:string){const workspace=await this.requireWorkspaceOwner(userId,workspaceId);return this.requireWorkspaceState(await this.store.setWorkspaceLifecycleStatus(workspace.id,"active",nowIso()))}
@@ -82,6 +89,7 @@ export class SettingsService {
   private async projectCapabilities(userId: string, projectId: string) {
     return { canManageSettings: (await this.authorization.projectCapabilities(userId, projectId)).canManagePolicy };
   }
+  private async projectWorkspaceLifecycleStatus(workspaceId:string){const workspace=await this.store.findWorkspace(workspaceId);if(!workspace)throw new NotFoundError("Workspace not found");return workspace.lifecycleStatus??"active"}
 }
 
 type ProjectLifecycleAuditAction = Extract<ProjectAuditAction, "project.archive" | "project.unarchive">;
