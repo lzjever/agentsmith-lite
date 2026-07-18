@@ -53,10 +53,14 @@ describe("workspace memberships", () => {
     assert.equal(await store.updateManagedWorkspaceMembershipRole(workspace.id,viewer.user.id,"member",new Date().toISOString()),"owner");
     assert.equal((await store.findWorkspaceMembership(workspace.id,viewer.user.id))?.role,"owner");
 
+    for(const project of [firstProject,secondProject])await store.createUserNotification({id:`notice_${project.id}`,userId:member.user.id,type:"project_alert",title:"Project alert",body:"Membership will be removed",projectId:project.id,resourceKind:"alert",resourceId:`alert_${project.id}`,linkPath:`/projects/${project.id}/alerts`,readAt:null,createdAt:"2026-07-11T00:00:00.000Z"});
+    await store.createUserNotification({id:"notice_workspace_owner",userId:owner.user.id,type:"project_alert",title:"Owner alert",body:"Retain",projectId:firstProject.id,resourceKind:"alert",resourceId:"alert_owner",linkPath:`/projects/${firstProject.id}/alerts`,readAt:null,createdAt:"2026-07-11T00:00:00.000Z"});
     await services.workspaceMemberships.remove(admin.user.id,workspace.id,member.user.id);
     assert.equal(await store.findWorkspaceMembership(workspace.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(firstProject.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(secondProject.id,member.user.id),null);
+    assert.deepEqual(await store.listUserNotifications(member.user.id),[]);
+    assert.deepEqual((await store.listUserNotifications(owner.user.id)).map((item)=>item.id),["notice_workspace_owner"]);
     for (const projectId of [firstProject.id, secondProject.id]) {
       const removals = (await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "membership.remove");
       assert.deepEqual(removals.map((event) => [event.actorId, event.resourceKind, event.resourceId, event.status]), [[admin.user.id, "member", member.user.id, "accepted"]]);

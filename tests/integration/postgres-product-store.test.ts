@@ -57,6 +57,12 @@ postgresDescribe("postgres product store", () => {
     await store.upsertWorkspaceMembership({workspaceId:"ws_membership",userId:"user_membership_target",role:"member",createdAt:timestamp,updatedAt:timestamp});
     assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");
     await store.upsertProjectMembershipForWorkspaceMember({...membership,projectId:"proj_membership_two",role:"viewer"});
+    await store.createUserNotification({id:"notification_project_membership_target",userId:"user_membership_target",type:"project_alert",title:"Target",body:null,projectId:"proj_membership_one",resourceKind:"alert",resourceId:"alert_project_target",linkPath:"/target",readAt:null,createdAt:timestamp});
+    await store.createUserNotification({id:"notification_project_membership_owner",userId:"user_membership_owner",type:"project_alert",title:"Owner",body:null,projectId:"proj_membership_one",resourceKind:"alert",resourceId:"alert_project_owner",linkPath:"/owner",readAt:null,createdAt:timestamp});
+    assert.equal(await store.deleteManagedProjectMembership("proj_membership_one","user_membership_target"),"deleted");
+    assert.deepEqual(await store.listUserNotifications("user_membership_target"),[]);
+    assert.deepEqual((await store.listUserNotifications("user_membership_owner")).map((item)=>item.id),["notification_project_membership_owner"]);
+    assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");
 
     assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_owner"),"owner");
     assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_owner"))?.role,"owner");
@@ -66,12 +72,15 @@ postgresDescribe("postgres product store", () => {
     assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_target"))?.role,"member");
     assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_target"))?.role,"member");
     assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_target","user_membership_owner",timestamp));
+    for(const projectId of ["proj_membership_one","proj_membership_two"])await store.createUserNotification({id:`notification_workspace_membership_${projectId}`,userId:"user_membership_target",type:"project_alert",title:"Workspace target",body:null,projectId,resourceKind:"alert",resourceId:`alert_${projectId}`,linkPath:"/target",readAt:null,createdAt:timestamp});
     const revoked=await store.revokeWorkspaceMembership("ws_membership","user_membership_target");
     assert.ok(typeof revoked==="object");
     assert.deepEqual([...revoked.revokedProjectIds].sort(),["proj_membership_one","proj_membership_two"]);
     assert.equal(await store.findWorkspaceMembership("ws_membership","user_membership_target"),null);
     assert.equal(await store.findProjectMembership("proj_membership_one","user_membership_target"),null);
     assert.equal(await store.findProjectMembership("proj_membership_two","user_membership_target"),null);
+    assert.deepEqual(await store.listUserNotifications("user_membership_target"),[]);
+    assert.deepEqual((await store.listUserNotifications("user_membership_owner")).map((item)=>item.id),["notification_project_membership_owner"]);
   });
 
   it("keeps project pins user-scoped and removes them with membership", async () => {
