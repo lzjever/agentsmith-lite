@@ -181,8 +181,9 @@ describe("ChatService", () => {
     assert.deepEqual((await services.chat.listMessages(user.id, project.id, thread.id)).map((message) => [message.role, message.content]), [["user", content]]);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
     assert.deepEqual(providerUsage(current), { requests: 2, tokens: 4096, cost: 1 });
+    assert.deepEqual(await store.listActiveProjectAlerts(project.id), []);
     const audit = (await store.listProjectAuditEvents(project.id)).slice(setupAudit.length);
-    assert.deepEqual(audit.map((event) => [event.action, event.status]), [["chat.message.send", "accepted"], ["provider.request", "accepted"], ["provider.request", "rejected"], ["chat.message.stop", "accepted"]]);
+    assert.deepEqual(audit.map((event) => [event.action, event.status]), [["chat.message.send", "accepted"], ["provider.request", "accepted"], ["chat.message.stop", "accepted"]]);
     assert.equal(JSON.stringify(audit).includes(content), false);
   });
 

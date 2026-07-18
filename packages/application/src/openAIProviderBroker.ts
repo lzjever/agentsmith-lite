@@ -9,10 +9,10 @@ interface ProviderCallContext {
   apiKey: string;
   actorId: string | null;
   taskId?: string | null;
+  signal?: AbortSignal;
 }
 
 interface StreamProviderCallContext extends ProviderCallContext {
-  signal?: AbortSignal;
   onDelta: (content: string) => void;
 }
 
@@ -79,7 +79,10 @@ export class OpenAIProviderBroker {
       result = await call();
     } catch (error) {
       await this.policies.markProviderUnknown(settlementId);
-      await this.policies.recordProviderFailure(context.endpoint.projectId, context.actorId, context.settlementEndpointId, providerFailureCategory(error));
+      const stoppedByCaller = context.signal?.aborted === true && isAbortError(error);
+      if (!stoppedByCaller) {
+        await this.policies.recordProviderFailure(context.endpoint.projectId, context.actorId, context.settlementEndpointId, providerFailureCategory(error));
+      }
       if (error instanceof ProductError || isAbortError(error)) throw error;
       throw new ProductError("OpenAI-compatible provider request failed", 502);
     }
