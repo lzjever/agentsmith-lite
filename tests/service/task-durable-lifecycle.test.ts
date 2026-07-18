@@ -139,7 +139,7 @@ describe("durable task lifecycle", () => {
     const setup = await createSetup(false);
     const configured = await setup.store.findEndpoint(setup.endpointId);
     assert.ok(configured);
-    const endpoint = await setup.store.createEndpoint({ ...configured, id: "endpoint_missing_credential", credentialId: "", updatedAt: new Date().toISOString() });
+    const endpoint = await setup.store.createEndpoint({ ...configured, id: "endpoint_missing_credential", name: "Missing credential endpoint", credentialId: "", updatedAt: new Date().toISOString() });
 
     await assert.rejects(
       () => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: endpoint.id, prompt: "must fail before creating a task" }, "create-missing-credential"),
@@ -200,6 +200,20 @@ describe("durable task lifecycle", () => {
       assert.equal(input.bytes.toString("utf8"), "retained original");
       assert.equal(derived.sourceTaskId, source.id);
     }
+  });
+
+  it("removes successor linkage when its source task is deleted", async () => {
+    const setup = await createSetup(false);
+    const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, {
+      endpointId: setup.endpointId,
+      prompt: "source to delete"
+    }, "create-deleted-source");
+    const successor = await setup.services.tasks.duplicateTask(setup.userId, source.id, "duplicate-deleted-source");
+
+    assert.equal(successor.sourceTaskId, source.id);
+    await setup.services.tasks.deleteTask(setup.userId, source.id, "delete-source-with-successor");
+
+    assert.equal((await setup.services.tasks.getTaskDetail(setup.userId, successor.id)).task.sourceTaskId, null);
   });
 
   it("snapshots effective context into the Botified task workspace", async () => {

@@ -167,6 +167,9 @@ postgresDescribe("postgres durable task store", () => {
 
   it("atomically deletes terminal task data and releases artifact usage", async () => {
     await store.createTaskAtomically(liveCreate("task_delete_data", "run_delete_data"));
+    const successor = liveCreate("task_delete_successor", "run_delete_successor");
+    successor.task.sourceTaskId = "task_delete_data";
+    await store.createTaskAtomically(successor);
     await store.finalizeTaskLifecycle(finalizeInput("task_delete_data", "completed", "audit-delete-data-terminal", "task.completed"));
     const artifact = { id:"artifact_delete_data",taskId:"task_delete_data",fileId:"file_delete_data",name:"result.txt",bytes:4,sha256:"sha",mediaType:"text/plain",previewText:"test",createdAt:timestamp };
     await store.persistTaskArtifactProjection({projectId:"project_task",artifact,auditEvent:{id:"audit-delete-data-artifact",projectId:"project_task",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:artifact.id,createdAt:timestamp},updatedAt:timestamp});
@@ -182,6 +185,7 @@ postgresDescribe("postgres durable task store", () => {
     assert.deepEqual(await store.listTaskMessages("task_delete_data"), []);
     assert.deepEqual(await store.listTaskInteractionChanges("task_delete_data",0,10), []);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state","task_delete_data"), null);
+    assert.equal((await store.findTask("task_delete_successor"))?.sourceTaskId, null);
   });
 
   function liveCreate(taskId: string, runId: string): AtomicTaskCreateInput {

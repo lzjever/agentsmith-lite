@@ -668,6 +668,9 @@ export class InMemoryProductStore implements ProductStore {
     await this.jsonDocs.delete("sandbox_run_state", current.runId);
     const usage = this.usage.get(current.projectId);
     if (usage) this.usage.set(current.projectId, clone({ ...usage, projectFileBytes: Math.max(0, usage.projectFileBytes - releasedArtifactBytes), updatedAt: deletedAt }));
+    for (const [id, candidate] of this.tasks) {
+      if (candidate.sourceTaskId === taskId) this.tasks.set(id, clone({ ...candidate, sourceTaskId: null, updatedAt: deletedAt }));
+    }
     const task = { ...current, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
     this.tasks.set(taskId, clone(task));
     return { task: clone(task), releasedArtifactBytes };

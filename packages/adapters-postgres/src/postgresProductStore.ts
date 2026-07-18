@@ -837,6 +837,7 @@ export class PostgresProductStore implements ProductStore {
       await client.query("delete from agent_task_artifacts where task_id=$1", [taskId]);
       await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)", [taskId,current.run_id]);
       await client.query("update project_resource_usage set project_file_bytes=greatest(0,project_file_bytes-$2),updated_at=$3 where project_id=$1", [current.project_id,releasedArtifactBytes,deletedAt]);
+      await client.query("update agent_tasks set source_task_id=null,updated_at=$2 where source_task_id=$1", [taskId,deletedAt]);
       const updated = await client.query<AgentTaskRow>("update agent_tasks set deleted_at=coalesce(deleted_at,$2),updated_at=$2 where id=$1 returning *", [taskId,deletedAt]);
       return { task: mapTask(updated.rows[0]!), releasedArtifactBytes };
     });
