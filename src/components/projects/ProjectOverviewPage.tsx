@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, Bell, ClipboardList, FileKey, FileText, Gauge, MessageSquare, Server, Settings, SlidersHorizontal, Users, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bell, ClipboardList, FileKey, FileText, Gauge, MessageSquare, NotebookTabs, Server, Settings, SlidersHorizontal, Users, Wrench, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type ProjectMember, type ProjectOverview, type ProjectOverviewAction } from "../../lib/api/client";
@@ -13,8 +13,8 @@ type Surface = { href: string; label: string; icon: LucideIcon };
 type NextStep = Surface & { description: string };
 
 const surfaceGroups: Array<{ label: string; surfaces: Surface[] }> = [
-  { label: "Execution", surfaces: [{ href: "chat", label: "Chat", icon: MessageSquare }, { href: "tasks", label: "Tasks", icon: Wrench }, { href: "files", label: "Files", icon: FileText }, { href: "usage", label: "Usage", icon: Gauge }] },
-  { label: "Develop", surfaces: [{ href: "context", label: "Context", icon: FileText }, { href: "endpoints", label: "Endpoints", icon: Server }, { href: "credentials", label: "Credentials", icon: FileKey }] },
+  { label: "Use", surfaces: [{ href: "chat", label: "Chat", icon: MessageSquare }, { href: "tasks", label: "Tasks", icon: Wrench }, { href: "files", label: "Files", icon: FileText }, { href: "context", label: "Context", icon: NotebookTabs }, { href: "usage", label: "Usage", icon: Gauge }] },
+  { label: "Develop", surfaces: [{ href: "endpoints", label: "Endpoints", icon: Server }, { href: "credentials", label: "Credentials", icon: FileKey }] },
   { label: "Manage", surfaces: [{ href: "members", label: "Members", icon: Users }, { href: "policy", label: "Resource policy", icon: SlidersHorizontal }, { href: "alerts", label: "Alerts", icon: Bell }, { href: "audit", label: "Audit", icon: ClipboardList }, { href: "settings", label: "Settings", icon: Settings }] }
 ];
 

@@ -218,9 +218,10 @@ describe("retained chat and overview behavior", () => {
       assert.ok(screen.getByText("Owner: Project Owner · Your access: Viewer · Status: Active"));
       assert.equal(screen.queryByRole("link", { name: "Configure an endpoint" }), null);
       assert.equal(screen.queryByRole("link", { name: "Invite collaborators" }), null);
-      assert.ok(screen.getByText("Execution"));
+      assert.ok(screen.getByText("Use"));
       assert.ok(screen.getByText("Develop"));
       assert.ok(screen.getByText("Manage"));
+      assert.equal(screen.getByRole("link", { name: "Context" }).closest("section")?.querySelector("h3")?.textContent, "Use");
       assert.ok(screen.getByRole("link", { name: "Endpoints" }));
       assert.ok(screen.getByRole("link", { name: "Members" }));
       assert.ok(screen.getByRole("link", { name: "Resource policy" }));
