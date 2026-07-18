@@ -3,7 +3,7 @@ import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
-import { EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
+import { CredentialVersionConflictError, EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 import { CredentialService } from "./credentialService.js";
@@ -34,7 +34,7 @@ export class EndpointService {
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    const create=async(id:string)=>{const existing=await this.store.findEndpoint(id);if(existing&&existing.projectId===projectId)return existing;const candidate={...endpoint,id};let created:ModelEndpoint;try{validateOpenAICompatibleEndpoint(candidate);await this.requireUniqueName(projectId,candidate.name);await this.requireCredentialBinding(projectId,candidate.credentialId,candidate.baseUrl);created=await this.store.createEndpoint(await this.validate(candidate,userId,null));}catch(error){const failure=error instanceof EndpointNameConflictError?endpointNameConflict():error;const health=endpointValidationHealth(failure);if(health)await this.endpointFailure(projectId,userId,"endpoint.create",candidate.id,healthAuditDetail(health),null);else await this.audit(projectId,userId,"endpoint.create",candidate.id,"rejected");throw failure;}await this.audit(projectId,userId,"endpoint.create",created.id,"accepted",healthAuditDetail(created.health));return created;};
+    const create=async(id:string)=>{const existing=await this.store.findEndpoint(id);if(existing&&existing.projectId===projectId)return existing;const candidate={...endpoint,id};let created:ModelEndpoint;try{validateOpenAICompatibleEndpoint(candidate);await this.requireUniqueName(projectId,candidate.name);await this.requireCredentialBinding(projectId,candidate.credentialId,candidate.baseUrl);const validated=await this.validate(candidate,userId,null);created=await this.store.createEndpoint(validated.endpoint,validated.credentialVersion);}catch(error){const failure=error instanceof EndpointNameConflictError?endpointNameConflict():error instanceof CredentialVersionConflictError?credentialChangedDuringValidation():error;const health=endpointValidationHealth(failure);if(health)await this.endpointFailure(projectId,userId,"endpoint.create",candidate.id,healthAuditDetail(health),null);else await this.audit(projectId,userId,"endpoint.create",candidate.id,"rejected");throw failure;}await this.audit(projectId,userId,"endpoint.create",created.id,"accepted",healthAuditDetail(created.health));return created;};
     if(!idempotencyKey)return create(endpoint.id);
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.endpoint.create",key:idempotencyKey,request:{projectId,...input},resourceId:endpoint.id,failureMessage:"Endpoint could not be created",run:create});
   }
@@ -64,7 +64,8 @@ export class EndpointService {
         validateOpenAICompatibleEndpoint(endpoint);
         await this.requireUniqueName(projectId, endpoint.name, endpoint.id);
         await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
-        const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id), existing.updatedAt);
+        const validated = await this.validate(endpoint, userId, endpoint.id);
+        const stored = await this.store.updateEndpoint(validated.endpoint, existing.updatedAt, validated.credentialVersion);
         if (!stored) {
           const current = await this.store.findEndpoint(endpointId);
           if (current?.projectId === projectId) throw new ProductError("Endpoint changed by another request. Refresh and try again.", 409);
@@ -72,7 +73,7 @@ export class EndpointService {
         }
         updated = stored;
       } catch (error) {
-        const failure = error instanceof EndpointNameConflictError ? endpointNameConflict() : error;
+        const failure = error instanceof EndpointNameConflictError ? endpointNameConflict() : error instanceof CredentialVersionConflictError ? credentialChangedDuringValidation() : error;
         const health = endpointValidationHealth(failure);
         if (health) await this.endpointFailure(projectId, userId, "endpoint.update", endpointId, healthAuditDetail(health));
         else await this.audit(projectId, userId, "endpoint.update", endpointId, "rejected");
@@ -131,11 +132,17 @@ export class EndpointService {
     const recheck = async (): Promise<ModelEndpoint> => {
       const existing = await this.requireEndpointForProject(projectId, endpointId);
       const checked = await this.healthFor(existing, userId, existing.id);
-      const updated = await this.store.updateEndpointHealth(existing.id, projectId, checked, nextEndpointUpdatedAt(existing.updatedAt), existing.updatedAt);
+      let updated: ModelEndpoint | null;
+      try {
+        updated = await this.store.updateEndpointHealth(existing.id, projectId, checked.health, nextEndpointUpdatedAt(existing.updatedAt), existing.updatedAt, checked.credentialVersion);
+      } catch (error) {
+        if (error instanceof CredentialVersionConflictError) throw credentialChangedDuringValidation();
+        throw error;
+      }
       if (!updated) return this.requireEndpointForProject(projectId, endpointId);
-      if (checked.status === "unavailable") await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked));
+      if (checked.health.status === "unavailable") await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked.health));
       else {
-        await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked));
+        await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked.health));
         await recoverProjectAlerts(this.store, projectId, "endpoint_failure", endpointId);
       }
       return updated;
@@ -167,6 +174,10 @@ export class EndpointService {
 
   async requireCredentialEndpointForUser(userId: string, projectId: string, endpointId: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "write");
+    return this.requireHealthyCredentialEndpoint(projectId, endpointId);
+  }
+
+  async requireHealthyCredentialEndpoint(projectId: string, endpointId: string): Promise<ModelEndpoint> {
     const endpoint = await this.requireEndpointForProject(projectId, endpointId);
     if (endpoint.health?.status !== "healthy") {
       throw new ProductError("Endpoint is unavailable. Recheck it before use.", 409);
@@ -186,20 +197,20 @@ export class EndpointService {
     if ((await this.store.listEndpointsForProject(projectId)).some((endpoint) => endpoint.id !== excludeId && endpoint.name.trim().toLocaleLowerCase("en-US") === normalized)) throw endpointNameConflict();
   }
 
-  private async validate(endpoint: ModelEndpoint, actorId: string, settlementEndpointId: string | null): Promise<ModelEndpoint> {
-    const health = await this.healthFor(endpoint, actorId, settlementEndpointId);
-    if (health.status !== "healthy") throw new EndpointValidationError(health);
-    return { ...endpoint, health };
+  private async validate(endpoint: ModelEndpoint, actorId: string, settlementEndpointId: string | null): Promise<{endpoint:ModelEndpoint;credentialVersion:number}> {
+    const checked = await this.healthFor(endpoint, actorId, settlementEndpointId);
+    if (checked.health.status !== "healthy") throw new EndpointValidationError(checked.health);
+    return { endpoint:{ ...endpoint, health:checked.health }, credentialVersion:checked.credentialVersion };
   }
 
   private discoveryProbe(projectId: string, input: DiscoverEndpointModelsInput): ModelEndpoint {
     return { id: "endpoint_probe", projectId, name: "probe", protocol: "openai_chat_completions", baseUrl: requireNonEmptyString(input.baseUrl, "endpoint.baseUrl"), model: "probe", credentialId: requireNonEmptyString(input.credentialId, "endpoint.credentialId"), capabilities: ["text"], requestTimeoutSecs: input.requestTimeoutSecs, createdAt: nowIso(), updatedAt: nowIso() };
   }
 
-  private async healthFor(endpoint: ModelEndpoint, actorId: string | null, settlementEndpointId: string | null): Promise<EndpointHealth> {
+  private async healthFor(endpoint: ModelEndpoint, actorId: string | null, settlementEndpointId: string | null): Promise<{health:EndpointHealth;credentialVersion:number}> {
     const credential = await this.credentials.resolve(endpoint.projectId, endpoint.credentialId);
     const result = await this.provider.validateEndpoint({ endpoint, settlementEndpointId, apiKey: credential.apiKey, actorId });
-    return this.checkedHealth(result.status === "healthy" ? { status: "healthy", checkedAt: null, errorCategory: null } : { status: "unavailable", checkedAt: null, errorCategory: result.errorCategory });
+    return { health:this.checkedHealth(result.status === "healthy" ? { status: "healthy", checkedAt: null, errorCategory: null } : { status: "unavailable", checkedAt: null, errorCategory: result.errorCategory }), credentialVersion:credential.version };
   }
 
   private checkedHealth(health: EndpointHealth): EndpointHealth {
@@ -217,6 +228,7 @@ class EndpointValidationError extends ProductError {
 
 function endpointValidationHealth(error:unknown):EndpointHealth|undefined{return error instanceof EndpointValidationError?error.health:undefined}
 function endpointNameConflict(): ProductError { return new ProductError("An endpoint already uses that name", 409); }
+function credentialChangedDuringValidation(): ProductError { return new ProductError("Credential changed during endpoint validation. Retry the request.", 409); }
 
 function nextEndpointUpdatedAt(previous: string): string {
   const previousTime = Date.parse(previous);

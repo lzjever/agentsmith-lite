@@ -112,6 +112,21 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.services.tasks.authorizeBotifiedChatCompletion(task.id, task.runId, "service-key")).actorId, setup.userId);
   });
 
+  it("stops task interactions and provider authorization after credential rotation", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "credential-rotation");
+
+    await setup.services.credentials.rotate(setup.userId, setup.projectId, setup.credentialId, { secret: "rotated-secret" });
+
+    const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.equal(interactions.capabilities.sendMessage, false);
+    assert.equal(interactions.capabilities.openTerminal, false);
+    await assert.rejects(
+      () => setup.services.tasks.authorizeBotifiedChatCompletion(task.id, task.runId, "service-key"),
+      /Endpoint is unavailable/
+    );
+  });
+
   it("attributes a terminal successor to the member who sent its message", async () => {
     const setup = await createSetup(false);
     const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "finished source" }, "create-terminal-source");

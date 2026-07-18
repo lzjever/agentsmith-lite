@@ -24,7 +24,7 @@ import type {
   Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
 } from "../../contracts/src/api.js";
 import { PROFILE_GREETING_PREFERENCES, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
-import { EndpointNameConflictError } from "../../ports/src/store.js";
+import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import type {
   AcquireLeaseInput,
   AcquireLeaseResult,
@@ -546,9 +546,11 @@ export class PostgresProductStore implements ProductStore {
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { const rows=await this.queryRows<{id:string;project_id:string;base_url:string;api_key_secret_ref:string}>("select id,project_id,base_url,api_key_secret_ref from model_endpoints where credential_id is null and api_key_secret_ref is not null"); return rows.map((row)=>({endpointId:row.id,projectId:row.project_id,baseUrl:row.base_url,secretRef:row.api_key_secret_ref})); }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const result=await this.pool.query("update model_endpoints e set credential_id=$2, api_key_secret_ref=null from project_credentials c where e.id=$1 and e.credential_id is null and c.id=$2 and c.project_id=e.project_id",[endpointId,credentialId]); return result.rowCount===1; }
 
-  async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
+  async createEndpoint(endpoint: ModelEndpoint, expectedCredentialVersion?: number): Promise<ModelEndpoint> {
     try {
-      await this.pool.query(
+      await transaction(this.pool, async (client) => {
+      if (expectedCredentialVersion !== undefined) await lockCredentialVersion(client, endpoint.projectId, endpoint.credentialId, expectedCredentialVersion);
+      await client.query(
       `insert into model_endpoints (
          id, project_id, name, protocol, base_url, model, credential_id,
          capabilities, request_timeout_secs, health_status, health_checked_at, health_error_category, created_at, updated_at
@@ -571,6 +573,7 @@ export class PostgresProductStore implements ProductStore {
         endpoint.updatedAt
       ]
       );
+      });
     } catch (error) {
       if (isConstraintError(error, "model_endpoints_project_name_unique")) throw new EndpointNameConflictError();
       throw error;
@@ -578,10 +581,12 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(endpoint);
   }
 
-  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
+  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null> {
     let rows: ModelEndpointRow[];
     try {
-      rows = await this.queryRows<ModelEndpointRow>(
+      rows = await transaction(this.pool, async (client) => {
+      if (expectedCredentialVersion !== undefined) await lockCredentialVersion(client, endpoint.projectId, endpoint.credentialId, expectedCredentialVersion);
+      return (await client.query<ModelEndpointRow>(
       `update model_endpoints
        set name = $2, protocol = $3, base_url = $4, model = $5, credential_id=$6,
            capabilities = $7::jsonb, request_timeout_secs = $8, health_status=$9, health_checked_at=$10, health_error_category=$11, updated_at = $12
@@ -602,7 +607,8 @@ export class PostgresProductStore implements ProductStore {
         endpoint.updatedAt,
         expectedUpdatedAt ?? null
       ]
-      );
+      )).rows;
+      });
     } catch (error) {
       if (isConstraintError(error, "model_endpoints_project_name_unique")) throw new EndpointNameConflictError();
       throw error;
@@ -610,14 +616,21 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }
 
-  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
-    const rows = await this.queryRows<ModelEndpointRow>(
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null> {
+    const rows = await transaction(this.pool, async (client) => {
+      if (expectedCredentialVersion !== undefined) {
+        const endpoint = await client.query<{credential_id:string}>("select credential_id from model_endpoints where id=$1 and project_id=$2", [id,projectId]);
+        if (!endpoint.rows[0]) return [];
+        await lockCredentialVersion(client, projectId, endpoint.rows[0].credential_id, expectedCredentialVersion);
+      }
+      return (await client.query<ModelEndpointRow>(
       `update model_endpoints
        set health_status=$3, health_checked_at=$4, health_error_category=$5, updated_at=$6
        where id=$1 and project_id=$2 and ($7::timestamptz is null or updated_at=$7::timestamptz)
        returning *`,
       [id, projectId, health.status, health.checkedAt, health.errorCategory, updatedAt, expectedUpdatedAt ?? null]
-    );
+    )).rows;
+    });
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }
 
@@ -1295,6 +1308,11 @@ async function transaction<T>(pool: PgPool, callback: (client: PoolClient) => Pr
   } finally {
     client.release();
   }
+}
+
+async function lockCredentialVersion(client: PoolClient, projectId: string, credentialId: string, expectedVersion: number): Promise<void> {
+  const credential = await client.query<{version:number}>("select version from project_credentials where id=$1 and project_id=$2 for share", [credentialId,projectId]);
+  if (credential.rows[0]?.version !== expectedVersion) throw new CredentialVersionConflictError();
 }
 
 async function reserveActiveTaskWithClient(client: PoolClient, projectId: string, updatedAt: string): Promise<boolean> {

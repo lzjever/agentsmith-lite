@@ -504,6 +504,36 @@ postgresDescribe("postgres product store", () => {
     );
   });
 
+  it("rejects endpoint health validated against a credential version that rotated before commit", async () => {
+    let validationStarted!: () => void;
+    let finishValidation!: () => void;
+    const started = new Promise<void>((resolve) => { validationStarted = resolve; });
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password",
+      providerClient: {
+        async completeChat() { throw new Error("not used"); },
+        async validateEndpoint() {
+          validationStarted();
+          return new Promise<{status:"healthy"}>((resolve) => { finishValidation = () => resolve({ status:"healthy" }); });
+        }
+      }
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name:"Credential race" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name:"Credential race" });
+    const credential = await services.credentials.create(user.id, project.id, { name:"Provider", baseUrl:"https://models.example.test/v1", secret:"first-secret" });
+
+    const creating = services.endpoints.createEndpoint(user.id, project.id, { name:"Provider", protocol:"openai_chat_completions", baseUrl:credential.baseUrl, model:"model", credentialId:credential.id, capabilities:["text"], requestTimeoutSecs:30 });
+    await started;
+    await services.credentials.rotate(user.id, project.id, credential.id, { secret:"second-secret" });
+    finishValidation();
+
+    await assert.rejects(creating, /Credential changed during endpoint validation/);
+    assert.deepEqual(await store.listEndpointsForProject(project.id), []);
+  });
+
   it("settles provider token/cost overage and opens the corresponding project alerts", async () => {
     const timestamp = "2026-07-04T00:00:00.000Z";
     await store.createUser({ id: "user_settlement", email: "settlement@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });

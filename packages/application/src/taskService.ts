@@ -803,7 +803,7 @@ export class TaskService {
       const run=await this.store.sandboxRuns.get(task.runId);
       if(!run||run.taskId!==task.id)throw new ProductError("Task sandbox runtime state not found",409);
       if(run.phase==="starting"){
-        const endpoint=await this.endpoints.requireEndpointForProject(task.projectId,task.endpointId);
+        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
         requireTaskEndpointCapabilities(endpoint);
         await this.startLiveSandbox({endpoint,task,run,serviceKey});
         await this.claimLiveRunForPrompt(run.runId);
@@ -965,7 +965,7 @@ export class TaskService {
   private async prepareSuccessorCreate(source: PersistedAgentTask, message: PersistedTaskMessage): Promise<AtomicTaskCreateInput> {
     const project = await this.store.findProject(source.projectId);
     if (!project) throw new ProductError("Task project not found", 409);
-    const endpoint = await this.endpoints.requireEndpointForProject(source.projectId, source.endpointId);
+    const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(source.projectId, source.endpointId);
     return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"", createdByUserId:message.actorId??source.createdByUserId??null });
   }
 
@@ -1823,7 +1823,7 @@ export class TaskService {
     if (!isActiveBotifiedTask(task.status)) {
       throw new ProductError("Botified task is not active", 409);
     }
-    const endpoint = await this.endpoints.requireEndpointForProject(task.projectId, task.endpointId);
+    const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(task.projectId, task.endpointId);
     requireTaskEndpointCapabilities(endpoint);
     const credentials = this.config.credentials;
     if (!credentials) throw new ProductError("Credential service is not configured", 500);
@@ -2346,12 +2346,9 @@ export class TaskService {
 
   private async taskExecutionEligible(task: PersistedAgentTask): Promise<boolean> {
     if (task.deletedAt || task.archivedAt) return false;
-    const endpoint = await this.store.findEndpoint(task.endpointId);
-    if (!endpoint || endpoint.projectId !== task.projectId || TASK_ENDPOINT_CAPABILITIES.some((capability) => !endpoint.capabilities.includes(capability))) return false;
-    const credential = await this.store.findProjectCredential(endpoint.credentialId);
-    if (!credential || credential.projectId !== task.projectId) return false;
     try {
-      return normalizeOpenAICompatibleBaseUrl(endpoint.baseUrl) === normalizeOpenAICompatibleBaseUrl(credential.baseUrl, 500);
+      const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(task.projectId, task.endpointId);
+      return !TASK_ENDPOINT_CAPABILITIES.some((capability) => !endpoint.capabilities.includes(capability));
     } catch {
       return false;
     }

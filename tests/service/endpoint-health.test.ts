@@ -30,6 +30,37 @@ test("endpoint save validates with the bound write-only credential and exposes o
   assert.equal((await store.findProjectResourceUsage(project.id))?.providerRequests, 1);
 });
 
+test("endpoint validation cannot commit after its credential is rotated", async () => {
+  let validationStarted!: () => void;
+  let finishValidation!: () => void;
+  const started = new Promise<void>((resolve) => { validationStarted = resolve; });
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store,
+    dataRoot: "/tmp/agentsmith-endpoint-credential-race",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => {
+        validationStarted();
+        return new Promise<{ status: "healthy" }>((resolve) => { finishValidation = () => resolve({ status: "healthy" }); });
+      }
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" });
+
+  const creating = services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  await started;
+  await services.credentials.rotate(user.id, project.id, credential.id, { secret: "second-secret" });
+  finishValidation();
+
+  await assert.rejects(creating, /Credential changed during endpoint validation/);
+  assert.deepEqual(await services.endpoints.listEndpoints(user.id, project.id), []);
+});
+
 test("endpoint names stay unique within a project across concurrent creates and renames", async () => {
   const store = createInMemoryProductStore();
   const services = createApplicationServices({

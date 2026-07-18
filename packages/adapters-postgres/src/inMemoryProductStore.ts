@@ -23,7 +23,7 @@ import type {
   UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, TaskSummary, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
-import { EndpointNameConflictError } from "../../ports/src/store.js";
+import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import type {
   AcquireLeaseInput,
   AcquireLeaseResult,
@@ -491,27 +491,30 @@ export class InMemoryProductStore implements ProductStore {
     return true;
   }
 
-  async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
+  async createEndpoint(endpoint: ModelEndpoint, expectedCredentialVersion?: number): Promise<ModelEndpoint> {
+    this.requireCredentialVersion(endpoint.credentialId, expectedCredentialVersion);
     this.requireEndpointCredentialProject(endpoint);
     if (this.endpointNameExists(endpoint)) throw new EndpointNameConflictError();
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
   }
 
-  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
+  async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null> {
     const current = this.endpoints.get(endpoint.id);
     if (!current || expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) {
       return null;
     }
+    this.requireCredentialVersion(endpoint.credentialId, expectedCredentialVersion);
     this.requireEndpointCredentialProject(endpoint);
     if (this.endpointNameExists(endpoint, endpoint.id)) throw new EndpointNameConflictError();
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
   }
 
-  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
+  async updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null> {
     const current = this.endpoints.get(id);
     if (!current || current.projectId !== projectId || expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) return null;
+    this.requireCredentialVersion(current.credentialId, expectedCredentialVersion);
     const updated = { ...current, health: clone(health), updatedAt };
     this.endpoints.set(id, clone(updated));
     return clone(updated);
@@ -521,6 +524,10 @@ export class InMemoryProductStore implements ProductStore {
     if (!endpoint.credentialId) return;
     const credential = this.credentials.get(endpoint.credentialId);
     if (!credential || credential.projectId !== endpoint.projectId) throw new Error("Endpoint credential must belong to the same project");
+  }
+
+  private requireCredentialVersion(credentialId: string, expectedVersion?: number): void {
+    if (expectedVersion !== undefined && this.credentials.get(credentialId)?.version !== expectedVersion) throw new CredentialVersionConflictError();
   }
 
   private endpointNameExists(endpoint: ModelEndpoint, excludeId?: string): boolean {

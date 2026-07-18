@@ -326,6 +326,9 @@ export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_c
 export class EndpointNameConflictError extends Error {
   constructor() { super("Endpoint name already exists"); }
 }
+export class CredentialVersionConflictError extends Error {
+  constructor() { super("Credential version changed"); }
+}
 export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
 export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
 export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
@@ -441,9 +444,9 @@ export interface ProductStore {
   listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>>;
   bindEndpointCredential(endpointId: string, credentialId: string): Promise<boolean>;
 
-  createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint>;
-  updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null>;
-  updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string): Promise<ModelEndpoint | null>;
+  createEndpoint(endpoint: ModelEndpoint, expectedCredentialVersion?: number): Promise<ModelEndpoint>;
+  updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null>;
+  updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null>;
   deleteEndpoint(id: string): Promise<DeleteEndpointResult>;
   listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]>;
   findEndpoint(id: string): Promise<ModelEndpoint | null>;
