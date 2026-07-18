@@ -433,6 +433,38 @@ postgresDescribe("postgres product store", () => {
     assert.equal(validationCalls, 3);
   });
 
+  it("enforces project endpoint name uniqueness across concurrent creates and renames", async () => {
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password",
+      providerClient: {
+        async completeChat() { throw new Error("not used"); },
+        async validateEndpoint() { return { status: "healthy" as const }; }
+      }
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Endpoint names" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Endpoint names" });
+    const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "provider-secret" });
+    const input = (name: string) => ({ name, protocol: "openai_chat_completions" as const, baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text" as const], requestTimeoutSecs: 30 });
+
+    const created = await Promise.allSettled([
+      services.endpoints.createEndpoint(user.id, project.id, input("Primary")),
+      services.endpoints.createEndpoint(user.id, project.id, input(" primary "))
+    ]);
+    assert.equal(created.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = created.find((result) => result.status === "rejected");
+    assert.match(String(rejected?.status === "rejected" ? rejected.reason : ""), /endpoint already uses that name/i);
+
+    const primary = (await services.endpoints.listEndpoints(user.id, project.id))[0]!;
+    const secondary = await services.endpoints.createEndpoint(user.id, project.id, input("Secondary"));
+    await assert.rejects(
+      () => services.endpoints.updateEndpoint(user.id, project.id, secondary.id, { ...input(primary.name.toUpperCase()), credentialId: credential.id }),
+      /endpoint already uses that name/i
+    );
+  });
+
   it("settles provider token/cost overage and opens the corresponding project alerts", async () => {
     const timestamp = "2026-07-04T00:00:00.000Z";
     await store.createUser({ id: "user_settlement", email: "settlement@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });

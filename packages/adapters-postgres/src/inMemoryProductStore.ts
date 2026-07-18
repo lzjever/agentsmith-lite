@@ -23,6 +23,7 @@ import type {
   UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, TaskSummary, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { EndpointNameConflictError } from "../../ports/src/store.js";
 import type {
   AcquireLeaseInput,
   AcquireLeaseResult,
@@ -443,6 +444,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
     this.requireEndpointCredentialProject(endpoint);
+    if (this.endpointNameExists(endpoint)) throw new EndpointNameConflictError();
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
   }
@@ -453,6 +455,7 @@ export class InMemoryProductStore implements ProductStore {
       return null;
     }
     this.requireEndpointCredentialProject(endpoint);
+    if (this.endpointNameExists(endpoint, endpoint.id)) throw new EndpointNameConflictError();
     this.endpoints.set(endpoint.id, clone(endpoint));
     return clone(endpoint);
   }
@@ -469,6 +472,11 @@ export class InMemoryProductStore implements ProductStore {
     if (!endpoint.credentialId) return;
     const credential = this.credentials.get(endpoint.credentialId);
     if (!credential || credential.projectId !== endpoint.projectId) throw new Error("Endpoint credential must belong to the same project");
+  }
+
+  private endpointNameExists(endpoint: ModelEndpoint, excludeId?: string): boolean {
+    const name = endpoint.name.trim().toLocaleLowerCase("en-US");
+    return [...this.endpoints.values()].some((candidate) => candidate.id !== excludeId && candidate.projectId === endpoint.projectId && candidate.name.trim().toLocaleLowerCase("en-US") === name);
   }
 
   async deleteEndpoint(id: string): Promise<DeleteEndpointResult> {

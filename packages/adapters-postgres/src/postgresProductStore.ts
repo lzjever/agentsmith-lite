@@ -24,6 +24,7 @@ import type {
   Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
 } from "../../contracts/src/api.js";
 import { PROFILE_GREETING_PREFERENCES, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { EndpointNameConflictError } from "../../ports/src/store.js";
 import type {
   AcquireLeaseInput,
   AcquireLeaseResult,
@@ -514,7 +515,8 @@ export class PostgresProductStore implements ProductStore {
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const result=await this.pool.query("update model_endpoints e set credential_id=$2, api_key_secret_ref=null from project_credentials c where e.id=$1 and e.credential_id is null and c.id=$2 and c.project_id=e.project_id",[endpointId,credentialId]); return result.rowCount===1; }
 
   async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
-    await this.pool.query(
+    try {
+      await this.pool.query(
       `insert into model_endpoints (
          id, project_id, name, protocol, base_url, model, credential_id,
          capabilities, request_timeout_secs, health_status, health_checked_at, health_error_category, created_at, updated_at
@@ -536,12 +538,18 @@ export class PostgresProductStore implements ProductStore {
         endpoint.createdAt,
         endpoint.updatedAt
       ]
-    );
+      );
+    } catch (error) {
+      if (isConstraintError(error, "model_endpoints_project_name_unique")) throw new EndpointNameConflictError();
+      throw error;
+    }
     return structuredClone(endpoint);
   }
 
   async updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string): Promise<ModelEndpoint | null> {
-    const rows = await this.queryRows<ModelEndpointRow>(
+    let rows: ModelEndpointRow[];
+    try {
+      rows = await this.queryRows<ModelEndpointRow>(
       `update model_endpoints
        set name = $2, protocol = $3, base_url = $4, model = $5, credential_id=$6,
            capabilities = $7::jsonb, request_timeout_secs = $8, health_status=$9, health_checked_at=$10, health_error_category=$11, updated_at = $12
@@ -562,7 +570,11 @@ export class PostgresProductStore implements ProductStore {
         endpoint.updatedAt,
         expectedUpdatedAt ?? null
       ]
-    );
+      );
+    } catch (error) {
+      if (isConstraintError(error, "model_endpoints_project_name_unique")) throw new EndpointNameConflictError();
+      throw error;
+    }
     return rows[0] ? mapEndpoint(rows[0]) : null;
   }
 
@@ -1773,6 +1785,7 @@ function mapAlert(row: ProjectAlertRow): ProjectAlert { return { id: row.id, pro
 function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
 function nullableNumber(value: string | number | null): number | null { return value === null ? null : Number(value); }
 function isUniqueConstraintError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23505"; }
+function isConstraintError(error: unknown, constraint: string): boolean { return isUniqueConstraintError(error) && typeof error === "object" && error !== null && "constraint" in error && error.constraint === constraint; }
 
 function mapLease(row: RuntimeLeaseRow | undefined): LeaseRecord {
   if (!row) {

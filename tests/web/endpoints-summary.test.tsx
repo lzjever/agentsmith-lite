@@ -7,6 +7,28 @@ installDom(); const {act,cleanup,fireEvent,render,screen,waitFor,within}=await i
 const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText(/1 endpoint configured · 1 configured/);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 describe("endpoint dependencies", () => {
+  it("blocks a duplicate endpoint name while allowing an endpoint to keep its own name", async () => {
+    const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
+    let creates = 0;
+    apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;
+    apiClient.createEndpoint=async()=>{creates += 1;return endpoint;};
+    try {
+      render(<EndpointsPage projectId="project_1" />);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Create endpoint"}))[0]!);
+      let dialog=await screen.findByRole("dialog",{name:"Create endpoint"});
+      fireEvent.change(within(dialog).getByLabelText("Name"),{target:{value:" deepseek "}});
+      assert.ok(within(dialog).getByText("An endpoint already uses this name."));
+      assert.equal((within(dialog).getByRole("button",{name:"Save"}) as HTMLButtonElement).disabled,true);
+      fireEvent.submit(within(dialog).getByRole("button",{name:"Save"}).closest("form")!);
+      assert.equal(creates,0);
+      fireEvent.click(within(dialog).getByRole("button",{name:"Cancel"}));
+
+      fireEvent.click(screen.getAllByRole("button",{name:"Edit DeepSeek"})[0]!);
+      dialog=await screen.findByRole("dialog",{name:"Edit endpoint"});
+      assert.equal(within(dialog).queryByText("An endpoint already uses this name."),null);
+    } finally { Object.assign(apiClient,original); }
+  });
+
   it("becomes read-only when the project is archived during endpoint creation", async () => {
     const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
     apiClient.endpoints=async()=>[];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>manager;

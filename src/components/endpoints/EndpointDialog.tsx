@@ -35,6 +35,7 @@ export function EndpointDialog({
   models,
   canSubmit,
   canSave,
+  nameConflict,
   error,
   credentials,
   onDiscoverModels,
@@ -51,6 +52,7 @@ export function EndpointDialog({
   models: string[];
   canSubmit: boolean;
   canSave: boolean;
+  nameConflict: boolean;
   error: string;
   credentials: ProjectCredential[];
   onDiscoverModels: () => void;
@@ -96,7 +98,7 @@ export function EndpointDialog({
             </div>
           ) : null}
           <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
-            <label>
+            <label className="grid gap-1">
               Name
               <Input
                 required
@@ -104,6 +106,7 @@ export function EndpointDialog({
                 value={input.name}
                 onChange={(event) => set("name", event.target.value)}
               />
+              {nameConflict ? <span className="text-xs text-error">An endpoint already uses this name.</span> : null}
             </label>
             <label>
               Model

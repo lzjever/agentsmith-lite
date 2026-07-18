@@ -139,6 +139,8 @@ postgresDescribe("postgres migrations", () => {
       assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "agent_tasks")?.definition ?? "", /FOREIGN KEY \(endpoint_id\).*model_endpoints\(id\)(?!.*SET NULL)/i);
       assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "project_chat_threads")?.definition ?? "", /ON DELETE SET NULL/i);
       assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "project_provider_settlements")?.definition ?? "", /ON DELETE SET NULL/i);
+      const endpointIndexes = await client.query<{ indexname: string; indexdef: string }>("select indexname,indexdef from pg_indexes where schemaname='public' and tablename='model_endpoints'");
+      assert.match(endpointIndexes.rows.find((row) => row.indexname === "model_endpoints_project_name_unique")?.indexdef ?? "", /unique.*project_id.*lower\(btrim\(name\)\)/i);
 
       const legacyAliasColumn = await client.query<{ is_nullable: string }>(`
         select is_nullable

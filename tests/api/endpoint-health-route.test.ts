@@ -36,6 +36,13 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.equal(endpoint.health.status, "healthy");
     assert.equal(endpoint.credentialId, credential.id);
     assert.doesNotMatch(JSON.stringify(endpoint), /never-return-this|ciphertext|authTag|nonce|keyId/);
+    const duplicate = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ name: " provider ", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model-b", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 })
+    });
+    assert.equal(duplicate.status, 409);
+    assert.match(await duplicate.text(), /An endpoint already uses that name/);
     const persistedDiscovery = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/models`, { endpointId: endpoint.id, baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }, cookie, csrfToken);
     assert.deepEqual(persistedDiscovery.models, ["model-b", "model-a"]);
 

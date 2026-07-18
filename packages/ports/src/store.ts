@@ -321,6 +321,10 @@ export interface PostgresLeaseStore {
 
 export type DeleteEndpointResult = "deleted" | "not_found" | "referenced_by_tasks";
 export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_conflict" | "referenced_by_endpoints";
+
+export class EndpointNameConflictError extends Error {
+  constructor() { super("Endpoint name already exists"); }
+}
 export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
 export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
 export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";

@@ -3,7 +3,7 @@ import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
-import type { ProductStore } from "../../ports/src/store.js";
+import { EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 import { CredentialService } from "./credentialService.js";
@@ -34,7 +34,7 @@ export class EndpointService {
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    const create=async(id:string)=>{const existing=await this.store.findEndpoint(id);if(existing&&existing.projectId===projectId)return existing;const candidate={...endpoint,id};let created:ModelEndpoint;try{validateOpenAICompatibleEndpoint(candidate);await this.requireCredentialBinding(projectId,candidate.credentialId,candidate.baseUrl);created=await this.store.createEndpoint(await this.validate(candidate,userId,null));}catch(error){const health=endpointValidationHealth(error);if(health)await this.endpointFailure(projectId,userId,"endpoint.create",candidate.id,healthAuditDetail(health),null);else await this.audit(projectId,userId,"endpoint.create",candidate.id,"rejected");throw error;}await this.audit(projectId,userId,"endpoint.create",created.id,"accepted",healthAuditDetail(created.health));return created;};
+    const create=async(id:string)=>{const existing=await this.store.findEndpoint(id);if(existing&&existing.projectId===projectId)return existing;const candidate={...endpoint,id};let created:ModelEndpoint;try{validateOpenAICompatibleEndpoint(candidate);await this.requireUniqueName(projectId,candidate.name);await this.requireCredentialBinding(projectId,candidate.credentialId,candidate.baseUrl);created=await this.store.createEndpoint(await this.validate(candidate,userId,null));}catch(error){const failure=error instanceof EndpointNameConflictError?endpointNameConflict():error;const health=endpointValidationHealth(failure);if(health)await this.endpointFailure(projectId,userId,"endpoint.create",candidate.id,healthAuditDetail(health),null);else await this.audit(projectId,userId,"endpoint.create",candidate.id,"rejected");throw failure;}await this.audit(projectId,userId,"endpoint.create",created.id,"accepted",healthAuditDetail(created.health));return created;};
     if(!idempotencyKey)return create(endpoint.id);
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.endpoint.create",key:idempotencyKey,request:{projectId,...input},resourceId:endpoint.id,failureMessage:"Endpoint could not be created",run:create});
   }
@@ -62,6 +62,7 @@ export class EndpointService {
       let updated: ModelEndpoint;
       try {
         validateOpenAICompatibleEndpoint(endpoint);
+        await this.requireUniqueName(projectId, endpoint.name, endpoint.id);
         await this.requireCredentialBinding(projectId, endpoint.credentialId, endpoint.baseUrl);
         const stored = await this.store.updateEndpoint(await this.validate(endpoint, userId, endpoint.id), existing.updatedAt);
         if (!stored) {
@@ -71,10 +72,11 @@ export class EndpointService {
         }
         updated = stored;
       } catch (error) {
-        const health = endpointValidationHealth(error);
+        const failure = error instanceof EndpointNameConflictError ? endpointNameConflict() : error;
+        const health = endpointValidationHealth(failure);
         if (health) await this.endpointFailure(projectId, userId, "endpoint.update", endpointId, healthAuditDetail(health));
         else await this.audit(projectId, userId, "endpoint.update", endpointId, "rejected");
-        throw error;
+        throw failure;
       }
       await this.audit(projectId, userId, "endpoint.update", endpointId, "accepted", healthAuditDetail(updated.health));
       return updated;
@@ -179,6 +181,11 @@ export class EndpointService {
     if (normalizeOpenAICompatibleBaseUrl(baseUrl) !== credential.baseUrl) throw new ProductError("Endpoint baseUrl does not match the credential binding");
   }
 
+  private async requireUniqueName(projectId: string, name: string, excludeId?: string): Promise<void> {
+    const normalized = name.trim().toLocaleLowerCase("en-US");
+    if ((await this.store.listEndpointsForProject(projectId)).some((endpoint) => endpoint.id !== excludeId && endpoint.name.trim().toLocaleLowerCase("en-US") === normalized)) throw endpointNameConflict();
+  }
+
   private async validate(endpoint: ModelEndpoint, actorId: string, settlementEndpointId: string | null): Promise<ModelEndpoint> {
     const health = await this.healthFor(endpoint, actorId, settlementEndpointId);
     if (health.status !== "healthy") throw new EndpointValidationError(health);
@@ -209,6 +216,7 @@ class EndpointValidationError extends ProductError {
 }
 
 function endpointValidationHealth(error:unknown):EndpointHealth|undefined{return error instanceof EndpointValidationError?error.health:undefined}
+function endpointNameConflict(): ProductError { return new ProductError("An endpoint already uses that name", 409); }
 
 function nextEndpointUpdatedAt(previous: string): string {
   const previousTime = Date.parse(previous);

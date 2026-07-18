@@ -30,6 +30,40 @@ test("endpoint save validates with the bound write-only credential and exposes o
   assert.equal((await store.findProjectResourceUsage(project.id))?.providerRequests, 1);
 });
 
+test("endpoint names stay unique within a project across concurrent creates and renames", async () => {
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store,
+    dataRoot: "/tmp/agentsmith-endpoint-name-uniqueness",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => ({ status: "healthy" })
+    }
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
+  const input = (name: string) => ({ name, protocol: "openai_chat_completions" as const, baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text" as const], requestTimeoutSecs: 30 });
+
+  const concurrent = await Promise.allSettled([
+    services.endpoints.createEndpoint(user.id, project.id, input("Primary")),
+    services.endpoints.createEndpoint(user.id, project.id, input(" primary "))
+  ]);
+  assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+  const rejectedCreate = concurrent.find((result) => result.status === "rejected");
+  assert.match(String(rejectedCreate?.status === "rejected" ? rejectedCreate.reason : ""), /endpoint already uses that name/i);
+
+  const first = (await services.endpoints.listEndpoints(user.id, project.id))[0]!;
+  const second = await services.endpoints.createEndpoint(user.id, project.id, input("Secondary"));
+  await assert.rejects(
+    () => services.endpoints.updateEndpoint(user.id, project.id, second.id, { ...input(first.name.toUpperCase()), credentialId: credential.id }),
+    /endpoint already uses that name/i
+  );
+  assert.equal((await services.endpoints.requireEndpointForProject(project.id, second.id)).name, "Secondary");
+});
+
 test("endpoint save rejects a sanitized validation failure without persisting an unusable endpoint", async () => {
   const store = createInMemoryProductStore();
   const services = createApplicationServices({
