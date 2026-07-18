@@ -405,8 +405,8 @@ describe("project resource policy", () => {
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-audit-actors", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const former = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "former-auditor", email: "former@example.test", emailVerified: true });
-    await services.profile.updateProfile(user.id, { displayName: "Policy Owner" });
-    await services.profile.updateProfile(former.user.id, { displayName: "Former Member" });
+    await services.profile.updateProfile(user.id, { displayName: "Policy Owner", expectedUpdatedAt: (await services.profile.getProfile(user.id)).preferences.updatedAt });
+    await services.profile.updateProfile(former.user.id, { displayName: "Former Member", expectedUpdatedAt: (await services.profile.getProfile(former.user.id)).preferences.updatedAt });
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 4 });

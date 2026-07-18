@@ -17,8 +17,13 @@ describe("profile and settings API", () => {
     assert.equal(profile.user.email, "admin@agentsmith-lite.local");
     assert.equal("oidcIssuer" in profile.user, false);
     assert.equal("oidcSubject" in profile.user, false);
-    const updatedProfile = await json("PATCH", "/api/v1/me/profile", { displayName: "Admin", timezone: "UTC" });
+    const updatedProfile = await json("PATCH", "/api/v1/me/profile", { displayName: "Admin", timezone: "UTC", expectedUpdatedAt: profile.preferences.updatedAt });
     assert.equal(updatedProfile.preferences.displayName, "Admin");
+    const staleProfile = await call("PATCH", "/api/v1/me/profile", { displayName: "Stale", expectedUpdatedAt: profile.preferences.updatedAt });
+    assert.equal(staleProfile.response.status, 409);
+    assert.deepEqual(staleProfile.body, { error: "Profile changed elsewhere. Reload and try again." });
+    const identityMutation = await call("PATCH", "/api/v1/me/profile", { email: "other@example.test", expectedUpdatedAt: updatedProfile.preferences.updatedAt });
+    assert.equal(identityMutation.response.status, 400);
     const currentIdentity = await json("GET", "/api/v1/me");
     assert.equal(currentIdentity.user.displayName, "Admin");
 

@@ -4,7 +4,7 @@ import { ArrowLeft, Save, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
-import { apiClient, notifyIdentityChanged, type Profile, type ProfileGreetingPreference } from "../../lib/api/client";
+import { ApiError, apiClient, notifyIdentityChanged, type Profile, type ProfileGreetingPreference } from "../../lib/api/client";
 import { workspaceReturnPath } from "../../lib/navigation/return-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -55,15 +55,18 @@ export function ProfilePage() {
     if (!dirty) return;
     setSaving(true);
     try {
-      const saved = await apiClient.updateProfile({ displayName: optionalText(draft.displayName), timezone: optionalText(draft.timezone), bio: optionalText(draft.bio), jobTitle: optionalText(draft.jobTitle), company: optionalText(draft.company), greetingPreference: greeting === unsetGreeting ? null : greeting, interests: draft.interests.split(",").map((value) => value.trim()).filter(Boolean) });
+      const saved = await apiClient.updateProfile({ displayName: optionalText(draft.displayName), timezone: optionalText(draft.timezone), bio: optionalText(draft.bio), jobTitle: optionalText(draft.jobTitle), company: optionalText(draft.company), greetingPreference: greeting === unsetGreeting ? null : greeting, interests: draft.interests.split(",").map((value) => value.trim()).filter(Boolean), expectedUpdatedAt: profile!.preferences.updatedAt });
       if (!mounted.current) return;
       setProfile(saved);
       setDraft(profileDraft(saved));
       setGreeting(profileGreeting(saved));
       notifyIdentityChanged();
       toast.success("Profile saved.");
-    } catch {
-      if (mounted.current) toast.error("Profile could not be saved.");
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409 && reason.message === "Profile changed elsewhere. Reload and try again.") {
+        await load();
+        if (mounted.current) toast.error("Profile changed elsewhere. Latest values loaded.");
+      } else if (mounted.current) toast.error("Profile could not be saved.");
     } finally {
       if (mounted.current) setSaving(false);
     }

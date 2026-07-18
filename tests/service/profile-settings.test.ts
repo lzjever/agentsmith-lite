@@ -15,7 +15,8 @@ describe("profile and settings services", () => {
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: admin.user.email }, "member");
     await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
 
-    const profile = await services.profile.updateProfile(owner.user.id, { displayName: "Owner", timezone: "UTC" });
+    const initialProfile = await services.profile.getProfile(owner.user.id);
+    const profile = await services.profile.updateProfile(owner.user.id, { displayName: "Owner", timezone: "UTC", expectedUpdatedAt: initialProfile.preferences.updatedAt });
     assert.equal(profile.user.email, "owner@example.test");
     assert.equal(profile.user.pictureUrl, "https://idp.test/owner.png");
     assert.equal("oidcIssuer" in profile.user, false);
@@ -29,20 +30,35 @@ describe("profile and settings services", () => {
   it("reports invalid profile fields as client errors", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl-profile-validation", builtinAdminPassword: "admin-password" });
     const user = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "profile-validation", email: "profile-validation@example.test", emailVerified: true });
+    const expectedUpdatedAt = (await services.profile.getProfile(user.user.id)).preferences.updatedAt;
 
     await assert.rejects(
-      () => services.profile.updateProfile(user.user.id, { displayName: "x".repeat(121) }),
+      () => services.profile.updateProfile(user.user.id, { displayName: "x".repeat(121), expectedUpdatedAt }),
       (error: unknown) => error instanceof ProductError && error.statusCode === 400 && error.message.includes("120 characters or less")
     );
     await assert.rejects(
-      () => services.profile.updateProfile(user.user.id, { interests: ["x".repeat(61)] }),
+      () => services.profile.updateProfile(user.user.id, { interests: ["x".repeat(61)], expectedUpdatedAt }),
       (error: unknown) => error instanceof ProductError && error.statusCode === 400
     );
-    assert.equal((await services.profile.updateProfile(user.user.id, { greetingPreference: "professional" })).preferences.greetingPreference, "professional");
+    const saved = await services.profile.updateProfile(user.user.id, { greetingPreference: "professional", expectedUpdatedAt });
+    assert.equal(saved.preferences.greetingPreference, "professional");
     await assert.rejects(
-      () => services.profile.updateProfile(user.user.id, { greetingPreference: "concise" }),
+      () => services.profile.updateProfile(user.user.id, { greetingPreference: "concise", expectedUpdatedAt: saved.preferences.updatedAt }),
       (error: unknown) => error instanceof ProductError && error.statusCode === 400 && error.message === "profile.greetingPreference is invalid"
     );
+  });
+
+  it("rejects a stale profile form without overwriting newer preferences", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl-profile-conflict", builtinAdminPassword: "admin-password" });
+    const user = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "profile-conflict", email: "profile-conflict@example.test", emailVerified: true });
+    const initial = await services.profile.getProfile(user.user.id);
+    const first = await services.profile.updateProfile(user.user.id, { displayName: "First", expectedUpdatedAt: initial.preferences.updatedAt });
+
+    await assert.rejects(
+      () => services.profile.updateProfile(user.user.id, { displayName: "Stale", expectedUpdatedAt: initial.preferences.updatedAt }),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 409 && error.message === "Profile changed elsewhere. Reload and try again."
+    );
+    assert.equal((await services.profile.getProfile(user.user.id)).preferences.displayName, first.preferences.displayName);
   });
 
   it("keeps archived workspace projects readable but rejects every project write capability", async () => {

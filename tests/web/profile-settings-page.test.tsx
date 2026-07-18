@@ -51,6 +51,7 @@ describe("profile and settings pages", () => {
       assert.equal(saveProfile.disabled, false);
       fireEvent.click(saveProfile);
       await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal((updates[0] as { expectedUpdatedAt?: string }).expectedUpdatedAt, profile.preferences.updatedAt);
       assert.equal(identityChanges, 1);
       view.unmount();
       render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
@@ -156,6 +157,22 @@ describe("profile and settings pages", () => {
       await act(async () => finishSave({ ...profile, preferences: { ...profile.preferences, displayName: "Canonical owner" } }));
       assert.equal(displayName.value, "Canonical owner");
       assert.equal(displayName.disabled, false);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("loads the latest profile after a stale form is rejected", async () => {
+    const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile };
+    const latest = { ...profile, preferences: { ...profile.preferences, displayName: "Newer profile", updatedAt: "2026-07-11T00:01:00.000Z" } };
+    let reads = 0;
+    apiClient.profile = async () => { reads += 1; return reads === 1 ? profile : latest; };
+    apiClient.updateProfile = async () => { throw new ApiError(409, "Profile changed elsewhere. Reload and try again."); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
+      const displayName = await screen.findByRole("textbox", { name: "Display name" }) as HTMLInputElement;
+      fireEvent.change(displayName, { target: { value: "My stale edit" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      await waitFor(() => assert.equal(displayName.value, "Newer profile"));
+      assert.equal(reads, 2);
     } finally { Object.assign(apiClient, original); }
   });
 

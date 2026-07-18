@@ -353,7 +353,7 @@ export interface ProductStore {
   findUserByOidcSubject(issuer: string, subject: string): Promise<StoredUser | null>;
   findUserById(id: string): Promise<StoredUser | null>;
   findUserProfilePreferences(userId: string): Promise<UserProfilePreferences | null>;
-  upsertUserProfilePreferences(value: UserProfilePreferences): Promise<UserProfilePreferences>;
+  upsertUserProfilePreferences(value: UserProfilePreferences, expectedUpdatedAt: string | null): Promise<UserProfilePreferences | null>;
   createUserNotification(value: UserNotification, dedupeKey?: string): Promise<UserNotification>;
   listUserNotifications(userId: string, unreadOnly?: boolean): Promise<UserNotification[]>;
   markUserNotificationRead(id: string, userId: string, readAt: string): Promise<UserNotification | null>;

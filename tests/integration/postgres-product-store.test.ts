@@ -406,8 +406,13 @@ postgresDescribe("postgres product store", () => {
     const updatedAt = "2026-07-04T00:01:00.000Z";
     assert.equal((await store.updateWorkspaceName("ws_profile", "New", updatedAt))?.createdAt, timestamp);
     assert.equal((await store.updateProjectName("proj_profile", "New", updatedAt))?.createdAt, timestamp);
-    await store.upsertUserProfilePreferences({ userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt });
-    assert.deepEqual(await store.findUserProfilePreferences("user_profile"), { userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt });
+    const profile = { userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt };
+    assert.equal((await store.upsertUserProfilePreferences(profile, null))?.displayName, "Profile");
+    assert.equal(await store.upsertUserProfilePreferences({ ...profile, displayName: "Duplicate" }, null), null);
+    const nextProfile = { ...profile, displayName: "Updated profile", updatedAt: "2026-07-04T00:02:00.000Z" };
+    assert.equal((await store.upsertUserProfilePreferences(nextProfile, updatedAt))?.displayName, "Updated profile");
+    assert.equal(await store.upsertUserProfilePreferences({ ...nextProfile, displayName: "Stale" }, updatedAt), null);
+    assert.deepEqual(await store.findUserProfilePreferences("user_profile"), nextProfile);
   });
 
   it("persists at most one concurrent task when its active reservation is limited", async () => {

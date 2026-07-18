@@ -19,7 +19,7 @@ describe("project membership authorization", () => {
     const viewer = await services.auth.loginExternalPrincipal({ issuer, subject: "viewer", email: "viewer@example.test", emailVerified: true });
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
-    await store.upsertUserProfilePreferences({ userId: member.user.id, displayName: "Member display", timezone: null, bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt: new Date().toISOString() });
+    await store.upsertUserProfilePreferences({ userId: member.user.id, displayName: "Member display", timezone: null, bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt: new Date().toISOString() }, null);
 
     assert.equal((await store.findProjectMembership(project.id, owner.user.id))?.role, "owner");
     assert.equal((await services.authorization.requireProject(owner.user.id, project.id, "admin")).id, project.id);

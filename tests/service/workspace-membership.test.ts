@@ -12,8 +12,8 @@ describe("workspace memberships", () => {
     const member=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"member",email:"member@example.test",emailVerified:true});
     const viewer=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"viewer",email:"viewer@example.test",emailVerified:true});
     const workspace=await services.workspaces.createWorkspace(owner.user.id,{name:"Workspace"});
-    await store.upsertUserProfilePreferences({userId:owner.user.id,displayName:"Owner display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()});
-    await store.upsertUserProfilePreferences({userId:member.user.id,displayName:"Member display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()});
+    await store.upsertUserProfilePreferences({userId:owner.user.id,displayName:"Owner display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()},null);
+    await store.upsertUserProfilePreferences({userId:member.user.id,displayName:"Member display",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:new Date().toISOString()},null);
     const ownerWorkspace = (await services.workspaces.listWorkspaces(owner.user.id))[0];
     assert.equal(ownerWorkspace?.capabilities.canManageMembers,true);
     assert.deepEqual([ownerWorkspace?.owner, ownerWorkspace?.memberRole], [{ displayName: "Owner display", email: owner.user.email }, "owner"]);

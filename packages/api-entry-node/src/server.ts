@@ -406,7 +406,7 @@ async function routeApi(
   }
   if (url.pathname === "/api/v1/me/profile") {
     if (method === "GET") return sendJson(res, 200, await services.profile.getProfile(user.id));
-    if (method === "PATCH") return sendJson(res, 200, await services.profile.updateProfile(user.id, await readJson(req)));
+    if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["displayName","timezone","bio","jobTitle","company","greetingPreference","interests","expectedUpdatedAt"]);return sendJson(res, 200, await services.profile.updateProfile(user.id, {...body,expectedUpdatedAt:body.expectedUpdatedAt}));}
   }
   if (url.pathname === "/api/v1/notifications" && method === "GET") return sendJson(res, 200, await services.notifications.list(user.id, url.searchParams.get("unread") === "true"));
   if (url.pathname === "/api/v1/notifications/read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markAllRead(user.id));

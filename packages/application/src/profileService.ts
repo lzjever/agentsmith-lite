@@ -1,6 +1,5 @@
 import { PROFILE_GREETING_PREFERENCES, type ProfileGreetingPreference, type ProfileResponse, type ProfileUser, type StoredUser, type UserProfilePreferences } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
-import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 
 export class ProfileService {
@@ -13,9 +12,11 @@ export class ProfileService {
     return { user: publicUser(user), preferences };
   }
 
-  async updateProfile(userId: string, input: { displayName?: unknown; timezone?: unknown; bio?: unknown; jobTitle?: unknown; company?: unknown; greetingPreference?: unknown; interests?: unknown }): Promise<ProfileResponse> {
+  async updateProfile(userId: string, input: { displayName?: unknown; timezone?: unknown; bio?: unknown; jobTitle?: unknown; company?: unknown; greetingPreference?: unknown; interests?: unknown; expectedUpdatedAt: unknown }): Promise<ProfileResponse> {
     const user = await this.requireUser(userId);
     const previous = await this.store.findUserProfilePreferences(userId);
+    const currentUpdatedAt = previous?.updatedAt ?? user.updatedAt;
+    if (expectedTimestamp(input.expectedUpdatedAt) !== currentUpdatedAt) throw profileChangedElsewhere();
     const preferences = await this.store.upsertUserProfilePreferences({
       userId,
       displayName: optionalText(input.displayName, "profile.displayName", previous?.displayName ?? null),
@@ -25,8 +26,9 @@ export class ProfileService {
       company: optionalText(input.company, "profile.company", previous?.company ?? null),
       greetingPreference: optionalGreetingPreference(input.greetingPreference, previous?.greetingPreference ?? null),
       interests: optionalInterests(input.interests, previous?.interests ?? []),
-      updatedAt: nowIso()
-    });
+      updatedAt: nextTimestamp(currentUpdatedAt)
+    }, previous?.updatedAt ?? null);
+    if (!preferences) throw profileChangedElsewhere();
     return { user: publicUser(user), preferences };
   }
 
@@ -36,6 +38,13 @@ export class ProfileService {
     return user;
   }
 }
+
+function expectedTimestamp(value: unknown): string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new ProductError("profile.expectedUpdatedAt must be an ISO timestamp", 400);
+  return new Date(value).toISOString();
+}
+function nextTimestamp(previous: string): string { return new Date(Math.max(Date.now(), Date.parse(previous) + 1)).toISOString(); }
+function profileChangedElsewhere(): ProductError { return new ProductError("Profile changed elsewhere. Reload and try again.", 409); }
 
 function optionalText(value: unknown, field: string, fallback: string | null, max = 120): string | null {
   if (value === undefined) return fallback;

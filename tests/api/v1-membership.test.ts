@@ -28,7 +28,7 @@ describe("v1 project membership API", () => {
       createdAt: "2026-07-11T00:00:00.000Z",
       updatedAt: "2026-07-11T00:00:00.000Z"
     });
-    await store.upsertUserProfilePreferences({ userId: "user_member", displayName: "Member display", timezone: null, bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt: "2026-07-11T00:00:00.000Z" });
+    await store.upsertUserProfilePreferences({ userId: "user_member", displayName: "Member display", timezone: null, bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt: "2026-07-11T00:00:00.000Z" }, null);
     await store.createUser({
       id: "user_oidc_member",
       email: "oidc-member@example.test",
