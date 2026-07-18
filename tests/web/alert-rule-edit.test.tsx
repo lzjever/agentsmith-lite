@@ -77,6 +77,21 @@ describe("alert rule editing", () => {
     }
   });
 
+  it("preserves a valid custom evaluation window while editing", async () => {
+    const original = snapshotClient();
+    apiClient.alertRules = async () => [{ ...existing, windowSeconds: 5400 }];
+    try {
+      render(<AlertRulesPanel projectId={projectId} canManage />);
+      await screen.findByText((_content, node) => node?.tagName === "SMALL" && node.textContent?.includes("5400 second window") === true);
+      fireEvent.click(screen.getByRole("button", { name: "Edit alert rule" }));
+      const window = await screen.findByRole("combobox", { name: "Evaluation window" });
+      assert.equal(window.textContent, "5400 seconds (current)");
+      assert.equal((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled, true);
+    } finally {
+      restoreClient(original);
+    }
+  });
+
   it("keeps a failed edit in context and allows a clear retry", async () => {
     const original = snapshotClient();
     const errors: string[] = [];
