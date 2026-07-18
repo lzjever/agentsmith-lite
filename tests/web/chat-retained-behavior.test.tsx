@@ -31,6 +31,15 @@ describe("retained chat and overview behavior", () => {
     assert.match(writes[0]!, /const ok = true/);
   });
 
+  it("keeps message actions visible on touch-sized screens", () => {
+    const message = { id: "message_1", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Review this", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    render(<ChatMessageList empty={false} sending={false} messages={[message]} onEdit={() => undefined} />);
+
+    const action = screen.getByRole("button", { name: "Edit message" });
+    assert.equal(action.classList.contains("opacity-100"), true);
+    assert.equal(action.classList.contains("sm:opacity-0"), true);
+  });
+
   it("searches titles and confirms rename and deletion with dialogs", async () => {
     const renamed: Array<[string, string]> = [];
     const deleted: string[] = [];
