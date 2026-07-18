@@ -35,6 +35,11 @@ const endpointMetrics = [
   { value: "providerTokens", label: "Tokens", step: "1" },
   { value: "providerCost", label: "Cost", step: "any" },
 ] as const;
+const endpointWindowOptions = [
+  { value: 3600, label: "1 hour" },
+  { value: 86400, label: "24 hours" },
+  { value: 604800, label: "7 days" },
+] as const;
 export function ResourcePolicyPage({ projectId }: { projectId: string }) {
   return <ProjectResourcePolicyPage key={projectId} projectId={projectId} />;
 }
@@ -315,10 +320,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                             }
                             className="h-9 border border-input bg-input px-2 text-sm"
                           >
-                            <option value="">No window</option>
-                            <option value="3600">1 hour</option>
-                            <option value="86400">24 hours</option>
-                            <option value="604800">7 days</option>
+                            <option value="" disabled>No window</option>
+                            {current && !endpointWindowOptions.some((option) => option.value === current.windowSeconds) ? (
+                              <option value={current.windowSeconds}>{windowLabel(current.windowSeconds)}</option>
+                            ) : null}
+                            {endpointWindowOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                           </select>
                         </>
                       ) : (

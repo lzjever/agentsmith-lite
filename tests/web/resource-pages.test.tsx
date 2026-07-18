@@ -58,6 +58,7 @@ describe("project resource pages", () => {
       assert.equal(window.disabled, true);
       assert.equal(window.options[0]?.text, "No window");
       assert.equal(window.options[0]?.value, "");
+      assert.equal(window.options[0]?.disabled, true);
 
       fireEvent.change(limit, { target: { value: "5" } });
       assert.equal(window.value, "3600");
@@ -66,6 +67,26 @@ describe("project resource pages", () => {
       fireEvent.change(limit, { target: { value: "" } });
       assert.equal(window.value, "");
       assert.equal(window.disabled, true);
+    } finally { restoreClient(original); }
+  });
+
+  it("preserves a valid custom endpoint rolling window", async () => {
+    const original = snapshotClient();
+    const updates: ProjectPolicyInput[] = [];
+    apiClient.policy = async () => ({ ...policy, endpointWindows: [{ endpointId: endpoint.id, metric: "providerRequests", limit: 5, windowSeconds: 120 }] });
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.updatePolicy = async (_projectId, input) => { updates.push(input); return { ...policy, ...input }; };
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      const window = await screen.findByRole("combobox", { name: "Primary Requests window" }) as HTMLSelectElement;
+      assert.equal(window.value, "120");
+      assert.equal(window.selectedOptions[0]?.text, "120 seconds");
+
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Active tasks" }), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal("endpointWindows" in updates[0]!, false);
     } finally { restoreClient(original); }
   });
 
