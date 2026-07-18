@@ -549,9 +549,10 @@ describe("retained chat and overview behavior", () => {
   it("refreshes stale endpoint eligibility after a send is rejected", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     const unavailable = { ...endpoint, health: { status: "unavailable" as const, checkedAt: endpoint.updatedAt, errorCategory: "auth" as const } };
+    const fallback = { ...endpoint, id: "endpoint_2", name: "Healthy fallback" };
     let endpointReads = 0;
     let rejected = false;
-    apiClient.endpoints = async () => { endpointReads += 1; return rejected ? [unavailable] : [endpoint]; };
+    apiClient.endpoints = async () => { endpointReads += 1; return rejected ? [unavailable, fallback] : [endpoint, fallback]; };
     apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
     apiClient.chatThreads = async () => threads;
     apiClient.chatMessages = async () => [];

@@ -508,6 +508,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       {capabilitiesStatus === "ready" && !canSend ? <Notice>Your project access is read-only.</Notice> : null}
       {endpointsStatus === "loading" ? <Notice>Loading compatible endpoints...</Notice> : null}
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
+      {endpointsStatus === "ready" && selectedThread && endpoint && !endpointReady ? <Notice>This conversation&apos;s endpoint is unavailable. Recheck it before sending. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
       {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
       {actionError ? <Notice error>{actionError}</Notice> : null}
     </div>
