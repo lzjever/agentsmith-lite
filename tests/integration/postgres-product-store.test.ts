@@ -120,11 +120,13 @@ postgresDescribe("postgres product store", () => {
     await store.createWorkspace({ id:"ws_project_delete",name:"Delete",ownerUserId:"user_project_delete",createdAt:timestamp,updatedAt:timestamp });
     await store.createProject({ id:"proj_project_delete",workspaceId:"ws_project_delete",name:"Delete",ownerUserId:"user_project_delete",rootPath:"workspaces/ws_project_delete/projects/proj_project_delete",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
     await store.appendProjectAuditEvent({id:"audit_project_delete",projectId:"proj_project_delete",actorId:"user_project_delete",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:"proj_project_delete",createdAt:timestamp});
+    await store.createUserNotification({id:"notification_project_delete",userId:"user_project_delete",type:"project_alert",title:"Delete project alert",body:null,projectId:"proj_project_delete",resourceKind:"alert",resourceId:"alert_project_delete",linkPath:"/deleted-project",readAt:null,createdAt:timestamp},"notification-project-delete");
     await store.beginProjectDeletion("proj_project_delete",timestamp);
 
     assert.equal(await store.deleteProjectDependenciesAndProject("proj_project_delete"),true);
     assert.equal(await store.findProject("proj_project_delete"),null);
     assert.deepEqual(await store.listProjectAuditEvents("proj_project_delete"),[]);
+    assert.deepEqual(await store.listUserNotifications("user_project_delete"),[]);
   });
 
   it("filters project audit events by exact resource before pagination", async () => {

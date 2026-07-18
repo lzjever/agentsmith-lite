@@ -20,6 +20,8 @@ describe("deletion lifecycle", () => {
     await writeFile(path.join(root, first.rootPath, "only-first.txt"), "x");
     await writeFile(path.join(root, second.rootPath, "only-second.txt"), "x");
     await store.appendProjectAuditEvent({id:"audit_proj_1",projectId:first.id,actorId:"owner",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:first.id,createdAt:"2026-01-01T00:00:00.000Z"});
+    await store.createUserNotification({id:"notification_first",userId:"owner",type:"project_alert",title:"First project",body:null,projectId:first.id,resourceKind:"alert",resourceId:"alert_first",linkPath:`/projects/${first.id}/alerts`,readAt:null,createdAt:"2026-01-01T00:00:00.000Z"},"first-project-alert");
+    await store.createUserNotification({id:"notification_second",userId:"owner",type:"project_alert",title:"Second project",body:null,projectId:second.id,resourceKind:"alert",resourceId:"alert_second",linkPath:`/projects/${second.id}/alerts`,readAt:null,createdAt:"2026-01-01T00:00:00.000Z"},"second-project-alert");
     const tasks = { async stopTasksForProjectDeletion() {} } as never;
     const deletion = new DeletionService(store, tasks, root);
 
@@ -27,6 +29,7 @@ describe("deletion lifecycle", () => {
 
     assert.equal(await store.findProject(first.id), null);
     assert.deepEqual(await store.listProjectAuditEvents(first.id), []);
+    assert.deepEqual((await store.listUserNotifications("owner")).map((notification) => notification.id), ["notification_second"]);
     await assert.rejects(access(path.join(root, first.rootPath, "only-first.txt")));
     await access(path.join(root, second.rootPath, "only-second.txt"));
   });
