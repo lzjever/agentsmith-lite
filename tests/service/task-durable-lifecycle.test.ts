@@ -552,6 +552,27 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.services.tasks.taskInteractions(setup.userId, task.id)).capabilities.openTerminal, true);
   });
 
+  it("makes retained task history read-only when its workspace is archived", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "archived-workspace-capabilities");
+
+    await setup.store.setWorkspaceLifecycleStatus(setup.workspaceId, "archived", new Date().toISOString());
+
+    const snapshot = await setup.services.tasks.taskInteractions(setup.userId, task.id);
+    assert.deepEqual(snapshot.capabilities, {
+      sendMessage: false,
+      editQueuedMessage: false,
+      abortTurn: false,
+      cancelTask: false,
+      openTerminal: false,
+      editTask: false,
+      retryTask: false,
+      duplicateTask: false,
+      archiveTask: false,
+      deleteTask: false
+    });
+  });
+
   it("reconciles a crashed accepted start by delivery key without a second post", async () => {
     const setup = await createSetup(true);
     setup.botified.throwAfterAcceptOnce = true;

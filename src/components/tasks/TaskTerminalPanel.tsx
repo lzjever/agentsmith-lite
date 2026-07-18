@@ -8,7 +8,7 @@ import { Button } from "../ui/button";
 type TerminalState = "connecting" | "ready" | "closed" | "error";
 const AUTO_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
-export function TaskTerminalPanel({ taskId }: { taskId: string }) {
+export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; active?: boolean }) {
   const viewport = useRef<HTMLDivElement>(null);
   const terminalInstance=useRef<import("@xterm/xterm").Terminal|null>(null);
   const fitInstance=useRef<import("@xterm/addon-fit").FitAddon|null>(null);
@@ -54,6 +54,7 @@ export function TaskTerminalPanel({ taskId }: { taskId: string }) {
       };
       socket.onerror=()=>retryOrFail("Task terminal connection failed.");
       socket.onclose=(event)=>{
+        if(event.code===1008){shellExited=true;if(retryTimer)clearTimeout(retryTimer);retryScheduled=false;setError(event.reason||"Task terminal access changed.");setState("error");return;}
         if(shellExited){setState("closed");return;}
         if(event.code===1009){
           if(retryTimer)clearTimeout(retryTimer);
@@ -69,6 +70,12 @@ export function TaskTerminalPanel({ taskId }: { taskId: string }) {
     }).catch(()=>{setError("Task terminal could not be loaded.");setState("error");});
     return()=>{disposed=true;if(retryTimer)clearTimeout(retryTimer);observer?.disconnect();if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:"cancel"}));socket?.close();terminal?.dispose();terminalInstance.current=null;fitInstance.current=null;socketInstance.current=null;};
   },[generation,taskId]);
+
+  useEffect(()=>{
+    if(!active)return;
+    const frame=requestAnimationFrame(()=>fitTerminal());
+    return()=>cancelAnimationFrame(frame);
+  },[active]);
 
   function fitTerminal(){fitInstance.current?.fit();sendSize(socketInstance.current,terminalInstance.current);terminalInstance.current?.focus();}
 

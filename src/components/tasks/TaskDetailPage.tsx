@@ -41,7 +41,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const [artifactsError, setArtifactsError] = useState("");
   const [inputsError, setInputsError] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>(artifactsOnly ? "artifacts" : "conversation");
-  const [terminalMounted, setTerminalMounted] = useState(false);
+  const [terminalStarted, setTerminalStarted] = useState(false);
   const [refreshingArtifacts, setRefreshingArtifacts] = useState(false);
   const [conversationKey, setConversationKey] = useState(0);
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -228,16 +228,16 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{taskRefreshError}{archivedNotice}{finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section></PageLayout>;
 
   const showArtifacts = artifactsState !== "ready" || artifacts.length > 0 || artifactEmptyMessage !== null;
-  const showTerminal = capabilities?.openTerminal || terminalMounted;
+  const showTerminal = capabilities?.openTerminal || terminalStarted;
   return <PageLayout header={header} contentWidth="full">
     <Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>
     {taskRefreshError}
     {archivedNotice}
     {finalization ? <TaskFinalizationNotice presentation={finalization} /> : null}
-    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => { setTerminalMounted(false); setMode("conversation"); }}>Conversation</WorkspaceTab>{showTerminal ? <WorkspaceTab active={mode === "terminal"} onClick={() => { setTerminalMounted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</WorkspaceTab> : null}{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => { setTerminalMounted(false); setMode("artifacts"); }} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
+    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</WorkspaceTab>{showTerminal ? <WorkspaceTab active={mode === "terminal"} onClick={() => { setTerminalStarted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</WorkspaceTab> : null}{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => setMode("artifacts")} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
     <div className="grid h-[clamp(24rem,calc(100dvh-20rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden md:h-[clamp(24rem,calc(100dvh-12rem),48rem)] xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
       <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} basePath={basePath} taskResult={{status:task.status,terminalReason:task.terminalReason}} onCapabilities={applyCapabilities} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
-      {terminalMounted ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} /></div> : null}
+      {terminalStarted ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
       {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
     <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Task details</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(12rem,.6fr)_minmax(14rem,.7fr)_minmax(0,1fr)]"><TaskExecutionSummary task={task} basePath={basePath} /><InputsSection taskId={taskId} inputs={inputs} selectedPaths={task.inputPaths ?? []} state={inputsState} error={inputsError} onRetry={loadInputs} /><div><h3 className="type-caption text-tertiary">Original prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>

@@ -367,7 +367,7 @@ describe("task interactions API", () => {
 
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:()=>"api-service-key", store });
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:()=>"api-service-key", terminalAccessRecheckMs:20, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal occupancy", endpointId:auth.endpointId });
     const task = await store.findTask(created.id as string); assert.ok(task);
@@ -384,9 +384,14 @@ describe("task interactions API", () => {
     assert.equal(secondStatus, 403);
     assert.equal(first.readyState, WebSocket.OPEN);
 
-    const firstClosed = once(first, "close");
-    first.terminate();
-    await firstClosed;
+    const revoked = once(first, "close");
+    await store.setWorkspaceLifecycleStatus(auth.workspaceId, "archived", new Date().toISOString());
+    const [code, reason] = await within(revoked, 500, "Terminal stayed open after workspace access changed");
+    assert.equal(code, 1008);
+    assert.equal(String(reason), "Task terminal access changed");
+    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).capabilities.openTerminal, false);
+
+    await store.setWorkspaceLifecycleStatus(auth.workspaceId, "active", new Date().toISOString());
     await waitForTerminalCapability(auth, task.id, true);
 
     const replacement = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
@@ -763,6 +768,7 @@ async function createProjectWithEndpoint(baseUrl: string) {
   });
 
   return {
+    workspaceId: workspace.id as string,
     projectId: project.id as string,
     endpointId: endpoint.id as string,
     cookie,
@@ -778,6 +784,18 @@ async function rejectedWebSocketStatus(url:string,cookie:string):Promise<number>
     socket.once("open",()=>{socket.close();reject(new Error("Terminal WebSocket unexpectedly opened"));});
     socket.once("error",()=>undefined);
   });
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function waitForTerminalCapability(auth:Awaited<ReturnType<typeof createProjectWithEndpoint>>,taskId:string,expected:boolean):Promise<void>{

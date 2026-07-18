@@ -10,11 +10,12 @@ class TestWebSocket {
   static readonly OPEN = 1;
   readyState = TestWebSocket.OPEN;
   closed = false;
+  readonly sent: string[] = [];
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
   constructor(_url: string) { sockets.push(this); }
-  send(_data: string): void {}
+  send(data: string): void { this.sent.push(data); }
   close(): void { this.closed = true; this.readyState = 3; }
 }
 
@@ -136,6 +137,16 @@ describe("TaskDetailPage terminal occupancy", () => {
     assert.equal(sockets.length, 1);
   });
 
+  it("stops reconnecting when terminal access is revoked", async () => {
+    render(<TaskTerminalPanel taskId="task_revoked" />);
+    await waitFor(() => assert.equal(sockets.length, 1));
+
+    act(() => sockets[0]?.onclose?.({ code:1008, reason:"Task terminal access changed" }));
+
+    assert.equal(screen.getByRole("alert").textContent, "Task terminal access changed");
+    assert.equal(sockets.length, 1);
+  });
+
   it("keeps the owner's terminal mounted across occupancy and terminal-state updates until the user leaves", async () => {
     const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
@@ -149,13 +160,15 @@ describe("TaskDetailPage terminal occupancy", () => {
     };
 
     try {
-      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
+      const view = render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
       const terminalTab = await screen.findByRole("tab", { name: "Terminal" });
       assert.equal(screen.queryByRole("region", { name: "Task terminal" }), null);
       assert.equal(sockets.length, 0);
 
       fireEvent.click(terminalTab);
       const ownerTerminal = screen.getByRole("region", { name: "Task terminal" });
+      const terminalContainer = ownerTerminal.parentElement;
+      assert.ok(terminalContainer);
       await waitFor(() => assert.equal(sockets.length, 1));
 
       act(() => { for (const event of stateEvents("running", occupied)) receive?.(event); });
@@ -169,10 +182,20 @@ describe("TaskDetailPage terminal occupancy", () => {
       assert.ok(screen.getByText("Task run ended"));
 
       fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
-      await waitFor(() => assert.equal(screen.queryByRole("tab", { name: "Terminal" }), null));
-      assert.equal(screen.queryByRole("region", { name: "Task terminal" }), null);
+      assert.match(terminalContainer.className, /\bhidden\b/);
+      assert.equal(ownerTerminal.isConnected, true);
+      assert.equal(sockets[0]?.closed, false);
+
+      const resizeCount = sentOperations(sockets[0]!, "resize");
+      fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+      await waitFor(() => assert.ok(sentOperations(sockets[0]!, "resize") > resizeCount));
+      assert.equal(screen.getByRole("region", { name: "Task terminal" }), ownerTerminal);
+      assert.equal(sockets.length, 1);
+
+      view.unmount();
       assert.equal(ownerTerminal.isConnected, false);
       assert.equal(sockets[0]?.closed, true);
+      assert.equal(sentOperations(sockets[0]!, "cancel"), 1);
     } finally {
       Object.assign(apiClient, original);
     }
@@ -452,6 +475,13 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 });
+
+function sentOperations(socket: TestWebSocket, operation: string): number {
+  return socket.sent.filter((frame) => {
+    try { return (JSON.parse(frame) as { op?: string }).op === operation; }
+    catch { return false; }
+  }).length;
+}
 
 const available: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false };
 const occupied: TaskCapabilities = { ...available, openTerminal: false };

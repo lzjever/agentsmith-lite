@@ -5,6 +5,14 @@ import type { ProductStore } from "../../ports/src/store.js";
 
 export type ProjectPermission = "view" | "write" | "admin";
 export type WorkspacePermission = "view" | "write" | "admin";
+export interface ProjectAccessSnapshot {
+  project: Project;
+  workspace: Workspace;
+  membershipRole: ProjectMembershipRole;
+  canWrite: boolean;
+  canAdmin: boolean;
+  writableLifecycle: boolean;
+}
 
 const permissions: Record<ProjectMembershipRole, readonly ProjectPermission[]> = {
   owner: ["view", "write", "admin"],
@@ -18,34 +26,46 @@ export class AuthorizationService {
   constructor(private readonly store: ProductStore) {}
 
   async requireProject(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {
-    const project = await this.requireProjectMembership(userId, projectId, permission);
+    const access = await this.projectAccess(userId, projectId);
+    this.requireProjectPermission(access, permission);
+    const { project, workspace } = access;
     if (permission !== "view" && project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") {
       throw new ProductError(project.lifecycleStatus === "deleting" ? "Project is being deleted" : "Project is archived", 409);
     }
-    if (permission !== "view") await this.requireProjectWorkspaceActive(project);
+    if (permission !== "view" && workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active") {
+      throw new ProductError(workspace.lifecycleStatus === "deleting" ? "Workspace is being deleted" : "Workspace is archived", 409);
+    }
     return project;
   }
 
   async requireProjectMembership(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {
+    const access = await this.projectAccess(userId, projectId);
+    this.requireProjectPermission(access, permission);
+    return access.project;
+  }
+
+  async projectAccess(userId: string, projectId: string): Promise<ProjectAccessSnapshot> {
     const project = await this.store.findProject(projectId);
-    if (!project) {
-      throw new NotFoundError("Project not found");
-    }
+    if (!project) throw new NotFoundError("Project not found");
     const membership = await this.store.findProjectMembership(projectId, userId);
-    if (!membership || !permissions[membership.role].includes(permission)) {
-      throw new ForbiddenError("Project access denied");
-    }
-    return project;
+    if (!membership) throw new ForbiddenError("Project access denied");
+    const workspace = await this.store.findWorkspace(project.workspaceId);
+    if (!workspace) throw new NotFoundError("Workspace not found");
+    const projectActive = project.lifecycleStatus === undefined || project.lifecycleStatus === "active";
+    const workspaceActive = workspace.lifecycleStatus === undefined || workspace.lifecycleStatus === "active";
+    return {
+      project,
+      workspace,
+      membershipRole: membership.role,
+      canWrite: permissions[membership.role].includes("write"),
+      canAdmin: permissions[membership.role].includes("admin"),
+      writableLifecycle: projectActive && workspaceActive
+    };
   }
 
   async projectCapabilities(userId: string, projectId: string): Promise<ProjectCapabilities> {
-    const project = await this.requireProject(userId, projectId, "view");
-    const membership = await this.store.findProjectMembership(project.id, userId);
-    const canManage = membership?.role === "owner" || membership?.role === "admin";
-    const canWrite = membership?.role === "owner" || membership?.role === "admin" || membership?.role === "member";
-    const workspace = await this.store.findWorkspace(project.workspaceId);
-    if (!workspace) throw new NotFoundError("Workspace not found");
-    if ((project.lifecycleStatus !== undefined && project.lifecycleStatus !== "active") || (workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active")) {
+    const access = await this.projectAccess(userId, projectId);
+    if (!access.writableLifecycle) {
       return {
         canManageEndpoints: false,
         canManageMembers: false,
@@ -57,13 +77,13 @@ export class AuthorizationService {
       };
     }
     return {
-      canManageEndpoints: canManage,
-      canManageMembers: canManage,
-      canManagePolicy: canManage,
-      canWriteFiles: canWrite,
-      canCreateTasks: canWrite,
-      canCancelTasks: canWrite,
-      canSendChat: canWrite
+      canManageEndpoints: access.canAdmin,
+      canManageMembers: access.canAdmin,
+      canManagePolicy: access.canAdmin,
+      canWriteFiles: access.canWrite,
+      canCreateTasks: access.canWrite,
+      canCancelTasks: access.canWrite,
+      canSendChat: access.canWrite
     };
   }
 
@@ -103,5 +123,9 @@ export class AuthorizationService {
     if (workspace.lifecycleStatus !== undefined && workspace.lifecycleStatus !== "active") {
       throw new ProductError(workspace.lifecycleStatus === "deleting" ? "Workspace is being deleted" : "Workspace is archived", 409);
     }
+  }
+
+  private requireProjectPermission(access: ProjectAccessSnapshot, permission: ProjectPermission): void {
+    if (!permissions[access.membershipRole].includes(permission)) throw new ForbiddenError("Project access denied");
   }
 }

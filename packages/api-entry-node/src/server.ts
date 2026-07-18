@@ -51,6 +51,7 @@ interface CommonApiServerOptions {
   taskMaintenanceLeaseMs?: number;
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
+  terminalAccessRecheckMs?: number;
   store?: ProductStore;
 }
 
@@ -133,6 +134,8 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     ...(options.liveSandbox ? { liveSandbox: options.liveSandbox } : {})
   };
   const services = createApplicationServices(serviceOptions);
+  const terminalAccessRecheckMs=options.terminalAccessRecheckMs??1_000;
+  if(!Number.isFinite(terminalAccessRecheckMs)||terminalAccessRecheckMs<=0)throw new Error("terminalAccessRecheckMs must be positive");
   await services.credentials.importLegacyAliasesFromEnvironment(process.env);
   const appBasePath = appBasePathFromOptions(options.publicBaseUrl, options.publicBasePath);
 
@@ -175,13 +178,16 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
         const match=routed?.pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/terminal\/ws$/);
         if(!match)throw new ProductError("Route not found",404);
         if(options.publicBaseUrl&&req.headers.origin&&new URL(req.headers.origin).origin!==new URL(options.publicBaseUrl).origin)throw new ProductError("Terminal origin is not allowed",403);
-        const principal=await services.auth.requireSessionPrincipal(getCookie(req,"asl_session"));
+        const sessionCookie=getCookie(req,"asl_session");
+        const principal=await services.auth.requireSessionPrincipal(sessionCookie);
         terminalTaskId=decodeURIComponent(match[1]!);
         const target=await services.tasks.openTaskTerminal(principal.user.id,terminalTaskId);
         terminalAcquired=true;
         terminalSockets.handleUpgrade(req,socket,head,(client)=>{
           let released=false;
-          const release=()=>{if(released)return;released=true;services.tasks.closeTaskTerminal(terminalTaskId!);};
+          let accessCheckRunning=false;
+          let accessTimer:ReturnType<typeof setInterval>|undefined;
+          const release=()=>{if(released)return;released=true;if(accessTimer)clearInterval(accessTimer);services.tasks.closeTaskTerminal(terminalTaskId!);};
           const upstreamUrl=new URL("/v1/terminal/ws",target.baseUrl.replace(/^http/,"ws"));
           const upstream=new WebSocket(upstreamUrl,{headers:{authorization:`Bearer ${target.serviceKey}`}});
           const pendingInput:Array<{data:RawData;isBinary:boolean}>=[];
@@ -193,6 +199,22 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             if(client.readyState===WebSocket.OPEN)client.close(1009,reason);
             upstream.close();
           };
+          const recheckAccess=async()=>{
+            if(released||accessCheckRunning)return;
+            accessCheckRunning=true;
+            try{
+              const currentPrincipal=await services.auth.requireSessionPrincipal(sessionCookie);
+              if(currentPrincipal.user.id!==principal.user.id)throw new ProductError("Terminal session identity changed",403);
+              await services.tasks.validateTaskTerminalAccess(principal.user.id,terminalTaskId!);
+            }
+            catch{
+              clearPendingInput();
+              release();
+              if(client.readyState===WebSocket.OPEN)client.close(1008,"Task terminal access changed");
+              upstream.close();
+            }finally{accessCheckRunning=false;}
+          };
+          accessTimer=setInterval(()=>void recheckAccess(),terminalAccessRecheckMs);
           const recordActivity=()=>{void services.tasks.recordTaskTerminalActivity(terminalTaskId!);};
           upstream.on("open",()=>{
             for(const frame of pendingInput){

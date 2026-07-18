@@ -539,9 +539,7 @@ export class TaskService {
   }
 
   async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
-    const task=await this.requireTaskForUser(userId,taskId,"write");
-    if(task.executionMode!=="live"||!isActiveTaskStatus(task.status))throw new ProductError("Task terminal is available while the sandbox is running",409);
-    if(!await this.taskExecutionEligible(task))throw new ProductError("Task terminal is no longer available for this task",409);
+    const task=await this.requireTaskTerminalAccess(userId,taskId);
     if(this.occupiedTerminalTaskIds.has(task.id))throw new ProductError("Task terminal is already open",409);
     this.occupiedTerminalTaskIds.add(task.id);
     try{
@@ -553,6 +551,10 @@ export class TaskService {
       this.occupiedTerminalTaskIds.delete(task.id);
       throw error;
     }
+  }
+
+  async validateTaskTerminalAccess(userId:string,taskId:string):Promise<void>{
+    await this.requireTaskTerminalAccess(userId,taskId);
   }
 
   closeTaskTerminal(taskId:string):void{
@@ -1297,6 +1299,13 @@ export class TaskService {
     const task=await this.store.findTask(taskId);
     if(!task)throw new ProductError("Task not found",404);
     await this.workspaces.requireProjectForUser(userId,task.projectId,permission);
+    return task;
+  }
+
+  private async requireTaskTerminalAccess(userId:string,taskId:string):Promise<PersistedAgentTask>{
+    const task=await this.requireTaskForUser(userId,taskId,"write");
+    if(task.executionMode!=="live"||!isActiveTaskStatus(task.status))throw new ProductError("Task terminal is available while the sandbox is running",409);
+    if(!await this.taskExecutionEligible(task))throw new ProductError("Task terminal is no longer available for this task",409);
     return task;
   }
 
@@ -2313,12 +2322,11 @@ export class TaskService {
   }
 
   private async taskCapabilities(userId: string, task: PersistedAgentTask, knownRunState?: TaskRunState, queued: PersistedTaskMessage[] = []): Promise<TaskCapabilities> {
-    const [membership, project, executionEligible] = await Promise.all([
-      this.store.findProjectMembership(task.projectId, userId),
-      this.store.findProject(task.projectId),
+    const [projectAccess, executionEligible] = await Promise.all([
+      this.workspaces.projectAccessForUser(userId, task.projectId),
       this.taskExecutionEligible(task)
     ]);
-    const canWrite = Boolean(project && (project.lifecycleStatus === undefined || project.lifecycleStatus === "active") && membership && ["owner","admin","member"].includes(membership.role));
+    const canWrite = projectAccess.canWrite && projectAccess.writableLifecycle;
     const retained = !task.deletedAt && !task.archivedAt;
     const canInteract = canWrite && retained && executionEligible;
     const runState = knownRunState ?? (await this.taskRuntimePresentation(task)).runState;

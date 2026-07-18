@@ -3,7 +3,7 @@ import { newId, nowIso } from "../../domain/src/ids.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import type { ProductStore } from "../../ports/src/store.js";
-import { AuthorizationService, type ProjectPermission } from "./authorizationService.js";
+import { AuthorizationService, type ProjectAccessSnapshot, type ProjectPermission } from "./authorizationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 
@@ -67,6 +67,10 @@ export class WorkspaceService {
 
   async projectCapabilities(userId: string, projectId: string): Promise<ProjectCapabilities> {
     return this.authorization.projectCapabilities(userId, projectId);
+  }
+
+  async projectAccessForUser(userId: string, projectId: string): Promise<ProjectAccessSnapshot> {
+    return this.authorization.projectAccess(userId, projectId);
   }
 
   async projectOverview(userId: string, projectId: string): Promise<ProjectOverviewProjection> {
