@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ ! -f dist/packages/sandbox-controller/src/appDeployPlan.js ] || [ ! -f dist/packages/sandbox-controller/src/appImageLock.js ]; then
-  npm run build >/dev/null
+  npm run build:api >/dev/null
 fi
 
 args=(--out "$out" --timeout "$timeout")

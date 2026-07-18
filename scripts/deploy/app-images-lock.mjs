@@ -15,7 +15,7 @@ if (!lockFile) {
 
 if (!existsSync(parserPath)) {
   console.error(`missing built app images.lock parser: ${parserPath}`);
-  console.error("Run npm run build before using scripts that validate app images.lock files.");
+  console.error("Run npm run build:api before using scripts that validate app images.lock files.");
   process.exit(1);
 }
 

@@ -34,7 +34,7 @@ read_images_lock() {
     exit 2
   fi
   if [ ! -f "$repo_root/dist/packages/sandbox-controller/src/appImageLock.js" ]; then
-    (cd "$repo_root" && npm run build >/dev/null)
+    (cd "$repo_root" && npm run build:api >/dev/null)
   fi
 
   if ! parsed="$(node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file")"; then

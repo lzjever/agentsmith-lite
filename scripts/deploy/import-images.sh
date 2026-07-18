@@ -121,7 +121,7 @@ validate_images_lock() {
   local refs
 
   if [ ! -f "$repo_root/dist/packages/sandbox-controller/src/appImageLock.js" ]; then
-    (cd "$repo_root" && npm run build >/dev/null)
+    (cd "$repo_root" && npm run build:api >/dev/null)
   fi
   refs="$(node "$repo_root/scripts/deploy/app-images-lock.mjs" "$lock_file")"
   app_image_ref="$(printf '%s\n' "$refs" | sed -n '1p')"
