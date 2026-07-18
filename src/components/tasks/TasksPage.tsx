@@ -154,7 +154,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
 
   function changeQuery(next: TaskListQuery) {
     const normalized = { ...next, cursor: undefined, limit: next.limit ?? 25 };
-    replaceTaskQuery(normalized);
+    writeTaskQuery(normalized, "push");
     setQuery(normalized);
     setCursors([undefined]);
     setPageIndex(0);
@@ -256,6 +256,10 @@ function taskQueryFromLocation(): TaskListQuery {
 }
 
 function replaceTaskQuery(query: TaskListQuery) {
+  writeTaskQuery(query, "replace");
+}
+
+function writeTaskQuery(query: TaskListQuery, navigation: "push" | "replace") {
   const params = new URLSearchParams(window.location.search);
   for (const key of ["search", "status", "archived", "sort", "direction"]) params.delete(key);
   if (query.search) params.set("search", query.search);
@@ -265,5 +269,8 @@ function replaceTaskQuery(query: TaskListQuery) {
     params.set("sort", query.sort ?? "updated_at");
     params.set("direction", query.direction ?? "desc");
   }
-  window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
+  const href = `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (navigation === "push" && href !== current) window.history.pushState(window.history.state, "", href);
+  else window.history.replaceState(window.history.state, "", href);
 }

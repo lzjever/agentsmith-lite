@@ -45,10 +45,20 @@ describe("tasks page loading", () => {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
       await screen.findByText("No tasks yet");
       assert.equal(window.location.search, "");
+      const historyLength = window.history.length;
 
       fireEvent.change(screen.getByRole("textbox", { name: "Search tasks" }), { target: { value: "  incident  " } });
       fireEvent.click(screen.getByRole("button", { name: "Apply task search" }));
       await waitFor(() => assert.equal(window.location.search, "?search=incident"));
+      assert.equal(window.history.length, historyLength + 1);
+
+      await act(async () => {
+        const wentBack = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+        window.history.back();
+        await wentBack;
+      });
+      await waitFor(() => assert.equal(window.location.search, ""));
+      assert.equal((screen.getByRole("textbox", { name: "Search tasks" }) as HTMLInputElement).value, "");
     } finally {
       Object.assign(apiClient, original);
     }
