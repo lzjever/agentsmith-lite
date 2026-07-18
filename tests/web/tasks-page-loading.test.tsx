@@ -8,9 +8,52 @@ installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { TasksPageContent } = await import("../../src/components/tasks/TasksPage.js");
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 describe("tasks page loading", () => {
+  it("uses the task list URL as the filter source and restores it on browser navigation", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const calls: Array<Parameters<typeof apiClient.tasks>[1]> = [];
+    apiClient.tasks = async (_projectId, query) => { calls.push(query); return { items: [], total: 0, nextCursor: null }; };
+    apiClient.endpoints = async () => [];
+    apiClient.projectCapabilities = async () => ({ canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false });
+    window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=failed&archived=include&sort=title&direction=asc&search=release");
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      await waitFor(() => assert.equal(calls.length, 1));
+      assert.deepEqual(calls[0], { statuses: ["failed"], archived: "include", sort: "title", direction: "asc", search: "release", limit: 25 });
+
+      window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=running");
+      await act(async () => window.dispatchEvent(new window.PopStateEvent("popstate")));
+      await waitFor(() => assert.equal(calls.at(-1)?.statuses?.[0], "running"));
+      assert.deepEqual(calls.at(-1), { statuses: ["running"], archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 });
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("writes task search changes to the URL and omits default filters", async () => {
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
+    apiClient.endpoints = async () => [];
+    apiClient.projectCapabilities = async () => ({ canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false });
+    window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=unknown&sort=title&direction=desc");
+    try {
+      render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
+      await screen.findByText("No tasks yet");
+      assert.equal(window.location.search, "");
+
+      fireEvent.change(screen.getByRole("textbox", { name: "Search tasks" }), { target: { value: "  incident  " } });
+      fireEvent.click(screen.getByRole("button", { name: "Apply task search" }));
+      await waitFor(() => assert.equal(window.location.search, "?search=incident"));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("links managers to endpoint configuration when task creation is blocked", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });

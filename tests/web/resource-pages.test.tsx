@@ -384,7 +384,7 @@ describe("project resource pages", () => {
       await screen.findByText("Endpoint failure");
       assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "endpoints");
       assert.equal(screen.getByRole("link", { name: "View provider failures" }).getAttribute("href"), "audit?action=provider.request&status=rejected");
-      assert.equal(screen.getByRole("link", { name: "Open tasks" }).getAttribute("href"), "tasks");
+      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "tasks?status=failed");
       assert.equal(screen.getByRole("link", { name: "View sandbox failures" }).getAttribute("href"), "audit?action=sandbox.failed&status=accepted");
       assert.equal(screen.getAllByRole("link", { name: "View alert history" }).length, 4);
     } finally { restoreClient(original); }
@@ -809,7 +809,7 @@ describe("project resource pages", () => {
       render(<AlertsPage projectId={projectId} />);
       await screen.findByText("Task failure");
       assert.ok(screen.getByText("Linked instance"));
-      assert.equal(screen.getByRole("link", { name: "Open tasks" }).getAttribute("href"), "tasks");
+      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "tasks?status=failed");
       assert.equal(screen.getByRole("link", { name: "View alert history" }).getAttribute("href"), "audit?resourceKind=alert&resourceId=history_1");
       fireEvent.click(screen.getByRole("button", { name: "Resolve alert" }));
       await waitFor(() => assert.deepEqual(transitions, ["history_1:resolved"]));

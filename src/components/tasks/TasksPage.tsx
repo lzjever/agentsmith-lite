@@ -4,7 +4,7 @@ import { Plus, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectCapabilities, type ProjectFile, type TaskListPage, type TaskListQuery, type TaskStatus } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -17,6 +17,8 @@ import { useTaskMutationKeys } from "./task-mutation-key";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
 const initialQuery: TaskListQuery = { archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 };
+const taskStatuses: TaskStatus[] = ["queued", "starting", "running", "stopping", "completed", "failed", "expired", "cleaned", "cancelled"];
+const taskSorts = new Set(["updated_at:desc", "created_at:asc", "title:asc", "status:asc"]);
 type DependencyState = "loading" | "ready" | "error";
 
 export function TasksPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
@@ -43,6 +45,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const [endpointsError, setEndpointsError] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const [query, setQuery] = useState<TaskListQuery>(initialQuery);
+  const [queryReady, setQueryReady] = useState(false);
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
   const [pageIndex, setPageIndex] = useState(0);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -56,6 +59,19 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const cursor = cursors[pageIndex];
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => {
+    function restoreQuery() {
+      const restored = taskQueryFromLocation();
+      setQuery(restored);
+      setCursors([undefined]);
+      setPageIndex(0);
+      replaceTaskQuery(restored);
+      setQueryReady(true);
+    }
+    restoreQuery();
+    window.addEventListener("popstate", restoreQuery);
+    return () => window.removeEventListener("popstate", restoreQuery);
+  }, []);
 
   const loadEndpoints = useCallback(async () => {
     const endpointsVersion = ++endpointsLoadVersion.current;
@@ -111,7 +127,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     }
   }, [cursor, projectId, query]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (queryReady) void load(); }, [load, queryReady]);
   useEffect(() => { loadCreateDependencies(); }, [loadCreateDependencies]);
   useEffect(() => {
     if (!dialogOpen) return;
@@ -137,7 +153,9 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   }, [load, page.items]);
 
   function changeQuery(next: TaskListQuery) {
-    setQuery({ ...next, cursor: undefined, limit: next.limit ?? 25 });
+    const normalized = { ...next, cursor: undefined, limit: next.limit ?? 25 };
+    replaceTaskQuery(normalized);
+    setQuery(normalized);
     setCursors([undefined]);
     setPageIndex(0);
   }
@@ -215,4 +233,37 @@ function isTaskEndpointDrift(error: unknown): boolean {
     error.status === 404 && (error.message === "Endpoint not found" || error.message === "Credential not found")
     || error.status === 409 && error.message === "Endpoint is unavailable. Recheck it before use."
   );
+}
+
+function taskQueryFromLocation(): TaskListQuery {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("status");
+  const archived = params.get("archived");
+  const sort = params.get("sort");
+  const direction = params.get("direction");
+  const search = params.get("search")?.trim();
+  const sortPair = `${sort ?? "updated_at"}:${direction ?? "desc"}`;
+  const validSortPair = taskSorts.has(sortPair) ? sortPair : "updated_at:desc";
+  const [validSort, validDirection] = validSortPair.split(":") as [NonNullable<TaskListQuery["sort"]>, NonNullable<TaskListQuery["direction"]>];
+  return {
+    ...(status && taskStatuses.includes(status as TaskStatus) ? { statuses: [status as TaskStatus] } : {}),
+    archived: archived === "include" || archived === "only" ? archived : "exclude",
+    sort: validSort,
+    direction: validDirection,
+    ...(search ? { search } : {}),
+    limit: 25
+  };
+}
+
+function replaceTaskQuery(query: TaskListQuery) {
+  const params = new URLSearchParams(window.location.search);
+  for (const key of ["search", "status", "archived", "sort", "direction"]) params.delete(key);
+  if (query.search) params.set("search", query.search);
+  if (query.statuses?.[0]) params.set("status", query.statuses[0]);
+  if (query.archived && query.archived !== "exclude") params.set("archived", query.archived);
+  if (query.sort !== "updated_at" || query.direction !== "desc") {
+    params.set("sort", query.sort ?? "updated_at");
+    params.set("direction", query.direction ?? "desc");
+  }
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
 }
