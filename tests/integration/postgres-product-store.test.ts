@@ -66,7 +66,9 @@ postgresDescribe("postgres product store", () => {
     assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_target"))?.role,"member");
     assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_target"))?.role,"member");
     assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_target","user_membership_owner",timestamp));
-    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_target"),"revoked");
+    const revoked=await store.revokeWorkspaceMembership("ws_membership","user_membership_target");
+    assert.ok(typeof revoked==="object");
+    assert.deepEqual([...revoked.revokedProjectIds].sort(),["proj_membership_one","proj_membership_two"]);
     assert.equal(await store.findWorkspaceMembership("ws_membership","user_membership_target"),null);
     assert.equal(await store.findProjectMembership("proj_membership_one","user_membership_target"),null);
     assert.equal(await store.findProjectMembership("proj_membership_two","user_membership_target"),null);

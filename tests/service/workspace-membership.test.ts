@@ -57,6 +57,10 @@ describe("workspace memberships", () => {
     assert.equal(await store.findWorkspaceMembership(workspace.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(firstProject.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(secondProject.id,member.user.id),null);
+    for (const projectId of [firstProject.id, secondProject.id]) {
+      const removals = (await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "membership.remove");
+      assert.deepEqual(removals.map((event) => [event.actorId, event.resourceKind, event.resourceId, event.status]), [[admin.user.id, "member", member.user.id, "accepted"]]);
+    }
     await assert.rejects(()=>services.authorization.requireProject(member.user.id,firstProject.id,"view"),status(403));
   });
   it("accepts only one concurrent workspace membership add",async()=>{

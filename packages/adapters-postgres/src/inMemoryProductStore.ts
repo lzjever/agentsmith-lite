@@ -226,9 +226,10 @@ export class InMemoryProductStore implements ProductStore {
     if(!membership)return "not_found" as const;
     const ownsProject=[...this.projects.values()].some((project)=>project.workspaceId===workspaceId&&(project.ownerUserId===userId||this.memberships.get(membershipKey(project.id,userId))?.role==="owner"));
     if(membership.role==="owner"||ownsProject)return "owner" as const;
-    for(const [projectMembershipKey,projectMembership] of this.memberships){const project=this.projects.get(projectMembership.projectId);if(project?.workspaceId===workspaceId&&projectMembership.userId===userId){this.memberships.delete(projectMembershipKey);this.projectPins.delete(projectMembershipKey);}}
+    const revokedProjectIds:string[]=[];
+    for(const [projectMembershipKey,projectMembership] of this.memberships){const project=this.projects.get(projectMembership.projectId);if(project?.workspaceId===workspaceId&&projectMembership.userId===userId){revokedProjectIds.push(projectMembership.projectId);this.memberships.delete(projectMembershipKey);this.projectPins.delete(projectMembershipKey);}}
     this.workspaceMemberships.delete(key);
-    return "revoked" as const;
+    return {revokedProjectIds};
   }
 
   async createProject(project: Project): Promise<Project> {

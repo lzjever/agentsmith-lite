@@ -328,6 +328,7 @@ export class EndpointNameConflictError extends Error {
 export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
 export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
 export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
+export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner";
 export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
 export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
 
@@ -371,7 +372,7 @@ export interface ProductStore {
   createWorkspaceMembership(membership: WorkspaceMembership): Promise<CreateWorkspaceMembershipResult>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
   updateManagedWorkspaceMembershipRole(workspaceId: string, userId: string, role: ManagedWorkspaceMembershipRole, updatedAt: string): Promise<ManagedWorkspaceMembershipUpdateResult>;
-  revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<"revoked" | "not_found" | "owner">;
+  revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<RevokeWorkspaceMembershipResult>;
 
   createProject(project: Project): Promise<Project>;
   listProjectsForWorkspace(workspaceId: string): Promise<Project[]>;
