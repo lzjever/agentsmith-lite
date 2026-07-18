@@ -50,6 +50,13 @@ describe("project membership authorization", () => {
     assert.deepEqual((await store.listUserNotifications(owner.user.id)).map((item) => item.id), ["notice_retained_project_owner"]);
     await store.createUserNotification({ id: "notice_late_after_project_removal", userId: viewer.user.id, type: "project_alert", title: "Late project alert", body: "Must stay hidden", projectId: project.id, resourceKind: "alert", resourceId: "alert_late_viewer", linkPath: `/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-11T00:00:01.000Z" });
     assert.deepEqual(await store.listUserNotifications(viewer.user.id), []);
+    await assert.rejects(() => services.notifications.markRead(viewer.user.id, "notice_late_after_project_removal"), status(404));
+    await services.notifications.markAllRead(viewer.user.id);
+    await services.notifications.dismiss(viewer.user.id, "notice_late_after_project_removal");
+    const restoredAt = new Date().toISOString();
+    await store.upsertProjectMembership({ projectId: project.id, userId: viewer.user.id, role: "viewer", createdAt: restoredAt, updatedAt: restoredAt });
+    assert.deepEqual((await store.listUserNotifications(viewer.user.id)).map((item) => [item.id, item.readAt]), [["notice_late_after_project_removal", null]]);
+    await store.deleteProjectMembership(project.id, viewer.user.id);
 
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.actorId, event.resourceId, event.status]), [
       ["membership.add", owner.user.id, member.user.id, "rejected"],
