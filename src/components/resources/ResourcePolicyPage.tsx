@@ -300,7 +300,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                           <select
                             aria-label={`${endpoint.name} ${metric.label} window`}
                             disabled={saving || !current}
-                            value={String(current?.windowSeconds ?? 3600)}
+                            value={current ? String(current.windowSeconds) : ""}
                             onChange={(event) =>
                               setDraft((value) =>
                                 value
@@ -315,6 +315,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                             }
                             className="h-9 border border-input bg-input px-2 text-sm"
                           >
+                            <option value="">No window</option>
                             <option value="3600">1 hour</option>
                             <option value="86400">24 hours</option>
                             <option value="604800">7 days</option>

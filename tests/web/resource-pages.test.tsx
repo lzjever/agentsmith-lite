@@ -45,6 +45,30 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("shows no rolling window until an endpoint limit is configured", async () => {
+    const original = snapshotClient();
+    apiClient.policy = async () => policy;
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [endpoint];
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      const limit = await screen.findByRole("spinbutton", { name: "Primary Requests limit" });
+      const window = screen.getByRole("combobox", { name: "Primary Requests window" }) as HTMLSelectElement;
+      assert.equal(window.value, "");
+      assert.equal(window.disabled, true);
+      assert.equal(window.options[0]?.text, "No window");
+      assert.equal(window.options[0]?.value, "");
+
+      fireEvent.change(limit, { target: { value: "5" } });
+      assert.equal(window.value, "3600");
+      assert.equal(window.disabled, false);
+
+      fireEvent.change(limit, { target: { value: "" } });
+      assert.equal(window.value, "");
+      assert.equal(window.disabled, true);
+    } finally { restoreClient(original); }
+  });
+
   it("reuses a resource policy key until the request changes", async () => {
     const original = snapshotClient();
     const keys: string[] = [];
