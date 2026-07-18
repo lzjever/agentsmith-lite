@@ -110,7 +110,7 @@ describe("workspace identity UX", () => {
       await act(async () => finishFirst([workspace]));
       assert.ok(screen.getAllByText("Second project").length > 0);
       assert.equal(screen.queryByText("Workspace"), null);
-      assert.ok(screen.getByText("Owner: Second Owner · Your access: Viewer"));
+      assert.ok(screen.getByText("Second workspace · Owner: Second Owner · Your access: Viewer"));
     } finally { apiClient.workspaces = original; }
   });
 
@@ -124,7 +124,8 @@ describe("workspace identity UX", () => {
       assert.equal(screen.queryByText("owner_1"), null);
       directory.unmount();
       render(<AppRouterContext.Provider value={router()}><WorkspaceProjectsEntryPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
-      await screen.findByText("Owner: Owner Person · Your access: Viewer");
+      await screen.findByRole("heading", { name: "Projects" });
+      assert.ok(screen.getByText(/Workspace · Owner: Owner Person/));
     } finally { apiClient.workspaces = original; }
   });
 
@@ -471,10 +472,11 @@ describe("workspace identity UX", () => {
       fireEvent.click(screen.getByRole("button", { name: "Create project" }));
       await waitFor(() => assert.equal(createStarted, true));
       view.rerender(<AppRouterContext.Provider value={router(pushed)}><WorkspaceProjectsEntryPage workspaceId={second.id} /></AppRouterContext.Provider>);
-      await screen.findByRole("heading", { name: second.name });
+      await screen.findByText(/Second workspace · Owner:/);
       await act(async () => finishCreate(created));
       assert.deepEqual(pushed, []);
-      assert.ok(screen.getByRole("heading", { name: second.name }));
+      assert.ok(screen.getByRole("heading", { name: "Projects" }));
+      assert.ok(screen.getByText(/Second workspace · Owner:/));
     } finally { Object.assign(apiClient, original); }
   });
 
