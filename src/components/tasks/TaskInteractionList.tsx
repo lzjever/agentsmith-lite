@@ -39,7 +39,7 @@ function TaskInteractionItemView({ taskId, item, basePath, onStopWork }: { taskI
 }
 
 function UserMessage({ item }: { item: Extract<TaskInteractionItem, { kind: "user_message" }> }) {
-  return <li><article className="border-l-2 border-border bg-background px-4 py-3"><ItemHeader title="You" timestamp={item.occurredAt} status={item.status} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
+  return <li><article className="border-l-2 border-border bg-background px-4 py-3"><ItemHeader title={item.title||"Project member"} timestamp={item.occurredAt} status={item.status} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
 }
 
 function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind: "assistant_message" }> }) {

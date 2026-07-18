@@ -25,6 +25,28 @@ describe("ChatService", () => {
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "chat.thread.create").length, 1);
   });
 
+  it("keeps conversations private between members of the same project", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([]) });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "chat-owner", email: "chat-owner@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "chat-member", email: "chat-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, owner.user.id, project.id);
+    await store.upsertProjectMembership({ projectId: project.id, userId: member.user.id, role: "member", createdAt: project.createdAt, updatedAt: project.updatedAt });
+
+    const ownerThread = await services.chat.createThread(owner.user.id, project.id, endpoint.id);
+    assert.deepEqual(await services.chat.listThreads(member.user.id, project.id), []);
+    await assert.rejects(
+      () => services.chat.listMessages(member.user.id, project.id, ownerThread.id),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 404
+    );
+
+    const memberThread = await services.chat.createThread(member.user.id, project.id, endpoint.id);
+    assert.deepEqual((await services.chat.listThreads(owner.user.id, project.id)).map((thread) => thread.id), [ownerThread.id]);
+    assert.deepEqual((await services.chat.listThreads(member.user.id, project.id)).map((thread) => thread.id), [memberThread.id]);
+  });
+
   it("replays thread metadata updates and deletion without repeating audit events", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([]) });
@@ -57,7 +79,10 @@ describe("ChatService", () => {
     const userMessage = history.find((message) => message.role === "user")!;
     const assistantMessage = history.find((message) => message.role === "assistant")!;
 
+    await services.chat.updateThreadMetadata(user.id, project.id, thread.id, { title: "x".repeat(200) });
     const branch = await services.chat.branchMessage(user.id, project.id, thread.id, assistantMessage.id, assistantMessage.version, "message-branch-key");
+    assert.equal(branch.title?.length, 200);
+    assert.equal(branch.title?.endsWith(" branch"), true);
     assert.deepEqual(await services.chat.branchMessage(user.id, project.id, thread.id, assistantMessage.id, assistantMessage.version, "message-branch-key"), branch);
     const edited = await services.chat.editMessage(user.id, project.id, thread.id, userMessage.id, userMessage.version, "revised", "message-edit-key");
     assert.deepEqual(await services.chat.editMessage(user.id, project.id, thread.id, userMessage.id, userMessage.version, "revised", "message-edit-key"), edited);
@@ -340,6 +365,26 @@ describe("ChatService", () => {
   it("retries a failed persisted user message without duplicating provider history",async()=>{
     let attempts=0;const histories:ChatMessage[][]=[];const client:OpenAICompatibleClient={async validateEndpoint(){return{status:"healthy" as const};},async completeChat(endpoint,messages){attempts++;histories.push(messages);if(attempts===1)throw new ProductError("provider unavailable",502);return{message:{role:"assistant",content:"recovered"},endpointSnapshot:{id:endpoint.id,baseUrl:endpoint.baseUrl,model:endpoint.model,protocol:endpoint.protocol}};},async streamChat(endpoint,messages,options){const response=await this.completeChat(endpoint,messages,options);options.onDelta(response.message.content);return response;}};
     const services=createApplicationServices({store:createInMemoryProductStore(),dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password",providerClient:client});const{user}=await services.auth.loginAfterBootstrap("admin-password");const workspace=await services.workspaces.createWorkspace(user.id,{name:"Workspace"});const project=await services.workspaces.createProject(user.id,workspace.id,{name:"Project"});const endpoint=await createCredentialEndpoint(services,user.id,project.id);const thread=await services.chat.createThread(user.id,project.id,endpoint.id);await assert.rejects(()=>services.chat.sendMessage(user.id,project.id,thread.id,"recover me",null));const failed=(await services.chat.listMessages(user.id,project.id,thread.id))[0]!;assert.equal(failed.deliveryStatus,"failed");const edited=await services.chat.editMessage(user.id,project.id,thread.id,failed.id,failed.version,"revised recovery");assert.equal(edited.deliveryStatus,"failed");await assert.rejects(()=>services.chat.branchMessage(user.id,project.id,thread.id,edited.id,edited.version),(error:unknown)=>error instanceof ProductError&&error.statusCode===409);await services.chat.retryMessage(user.id,project.id,thread.id,edited.id,edited.version,undefined,()=>undefined);assert.deepEqual(histories.map((items)=>items.map((item)=>item.content)),[["recover me"],["revised recovery"]]);assert.deepEqual((await services.chat.listMessages(user.id,project.id,thread.id)).map((item)=>[item.content,item.deliveryStatus]),[["revised recovery","completed"],["recovered","completed"]]);
+  });
+
+  it("requires resolving a failed latest message before sending another", async () => {
+    let providerCalls=0;
+    const client:OpenAICompatibleClient={async validateEndpoint(){return{status:"healthy" as const};},async completeChat(endpoint){providerCalls++;throw new ProductError("provider unavailable",502);},async streamChat(endpoint,messages,options){return this.completeChat(endpoint,messages,options);}};
+    const services=createApplicationServices({store:createInMemoryProductStore(),dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password",providerClient:client});
+    const{user}=await services.auth.loginAfterBootstrap("admin-password");
+    const workspace=await services.workspaces.createWorkspace(user.id,{name:"Workspace"});
+    const project=await services.workspaces.createProject(user.id,workspace.id,{name:"Project"});
+    const endpoint=await createCredentialEndpoint(services,user.id,project.id);
+    const thread=await services.chat.createThread(user.id,project.id,endpoint.id);
+    await assert.rejects(()=>services.chat.sendMessage(user.id,project.id,thread.id,"first",null));
+    const failed=(await services.chat.listMessages(user.id,project.id,thread.id))[0]!;
+
+    await assert.rejects(
+      ()=>services.chat.sendMessage(user.id,project.id,thread.id,"skip the failure",failed.id),
+      (error:unknown)=>error instanceof ProductError&&error.statusCode===409&&/Retry, edit, or delete/.test(error.message)
+    );
+    assert.equal(providerCalls,1);
+    assert.equal((await services.chat.listMessages(user.id,project.id,thread.id)).length,1);
   });
 
   it("admits only one provider request for concurrent sends against the same history", async () => {

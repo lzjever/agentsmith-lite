@@ -700,8 +700,8 @@ export class TaskService {
       const message = await this.store.findTaskMessage(messageId);
       if (!message || message.taskId !== task.id) throw new ProductError("Task message not found", 404);
       const deletedAt = strictlyLaterIso(message.updatedAt ?? message.createdAt);
-      const deleted = message.deletedAt ? message : await this.store.deletePendingTaskMessage(messageId, deletedAt);
-      if (!deleted) throw new ProductError("Only a pending message can be deleted", 409);
+      const deleted = message.deletedAt ? message : await this.store.deleteQueuedTaskMessage(messageId, deletedAt);
+      if (!deleted) throw new ProductError("Only a pending or failed message can be deleted", 409);
       await this.policies.recordOperation(task.projectId,userId,"task.message.delete","accepted",task.id,"task",{taskId:task.id,messageId});
       return { messageId, disposition:"accepted_by_active_run", targetTaskId:task.id, duplicate:false, queuedMessage:null, interaction:null, capabilities:await this.taskCapabilities(userId, source) };
     });
@@ -760,7 +760,7 @@ export class TaskService {
 
   async cancelTask(userId: string, taskId: string, idempotencyKey?:string): Promise<AgentTask> {
     const task=await this.requireTaskRecordForUser(userId,taskId,"write");
-    const result=await this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"cancel",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current||current.deletedAt)throw new ProductError("Task not found",404);return publicTask(await this.finalizeTaskLifecycle(task.id,"cancelled",userId));});
+    const result=await this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"cancel",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current||current.deletedAt)throw new ProductError("Task not found",404);if(current.terminalReason&&current.terminalReason!=="cancelled")throw new ProductError("Task has already finished",409);return publicTask(current.terminalReason==="cancelled"?current:await this.finalizeTaskLifecycle(task.id,"cancelled",userId));});
     const persisted=await this.store.findTask(result.id);
     if(persisted?.executionMode==="live"&&!isTerminalTask(task)&&persisted.terminalReason==="cancelled")await this.bestEffortAbortAndRequestCleanup(persisted);
     return persisted ? publicTask(persisted) : result;
@@ -1116,7 +1116,7 @@ export class TaskService {
     const suppressedInteractionIds = new Set(snapshot.suppressedInteractionIds);
     const state = await this.taskInteractionState(userId, current, snapshot);
     return {
-      items: snapshot.items.filter((item)=>!suppressedInteractionIds.has(item.id)),
+      items: await this.presentTaskInteractions(userId,task.projectId,snapshot.items.filter((item)=>!suppressedInteractionIds.has(item.id))),
       queuedMessages: state.queuedMessages,
       nextPageCursor: snapshot.nextPageAnchor ? this.encodeInteractionCursor(current, "history", snapshot.latestChangeSeq, snapshot.nextPageAnchor) : null,
       hasMoreBefore: snapshot.hasMoreBefore,
@@ -1140,8 +1140,10 @@ export class TaskService {
     const suppressedInteractionIds = new Set(snapshot.suppressedInteractionIds);
     const lastSeq = changes.at(-1)?.changeSeq ?? decoded.changeSeq;
     const current = await this.store.findTask(task.id) ?? task;
+    const visibleChanges=changes.filter((change)=>!suppressedInteractionIds.has(change.interaction.id));
+    const presented=await this.presentTaskInteractions(userId,task.projectId,visibleChanges.map((change)=>change.interaction));
     return {
-      changes: changes.filter((change)=>!suppressedInteractionIds.has(change.interaction.id)).map((change) => ({ cursor:this.encodeInteractionCursor(task,"stream",change.changeSeq), item:change.interaction })),
+      changes: visibleChanges.map((change,index) => ({ cursor:this.encodeInteractionCursor(task,"stream",change.changeSeq), item:presented[index]! })),
       streamCursor: this.encodeInteractionCursor(task, "stream", lastSeq),
       done: Boolean(current.deletedAt),
       state: await this.taskInteractionState(userId, current, snapshot)
@@ -2258,6 +2260,7 @@ export class TaskService {
     if (!task) throw new ProductError("Task not found", 404);
     const queued = await this.store.listTaskMessages(message.taskId);
     const interaction = await this.latestMessageInteraction(message);
+    const presentedInteraction=userId&&interaction?(await this.presentTaskInteractions(userId,task.projectId,[interaction]))[0]!:interaction;
     const disposition = messageDisposition(message, interaction);
     return {
       messageId: message.id,
@@ -2265,10 +2268,18 @@ export class TaskService {
       targetTaskId: message.targetTaskId ?? message.taskId,
       duplicate,
       queuedMessage: isQueuedMessage(message) ? queuedMessage(message) : null,
-      interaction: disposition === "queued_for_active_run" ? null : interaction?.kind === "user_message" || interaction?.kind === "execution_boundary" ? interaction : null,
+      interaction: disposition === "queued_for_active_run" ? null : presentedInteraction?.kind === "user_message" || presentedInteraction?.kind === "execution_boundary" ? presentedInteraction : null,
       capabilities: userId ? await this.taskCapabilities(userId, task, undefined, queued) : defaultTaskCapabilities(task),
       ...(disposition === "failed" ? { safeError:safeMessageFailure(message.safeError) } : {})
     };
+  }
+
+  private async presentTaskInteractions(userId:string,projectId:string,items:TaskInteractionItem[]):Promise<TaskInteractionItem[]>{
+    const actorIds=[...new Set(items.flatMap((item)=>item.kind==="user_message"&&item.actorId?[item.actorId]:[]))];
+    if(actorIds.length===0)return items;
+    const members=await this.store.listProjectMemberships(projectId);
+    const labels=new Map(members.map((member)=>[member.userId,member.displayName?.trim()||member.email||"Project member"]));
+    return items.map((item)=>item.kind!=="user_message"||!item.actorId?item:{...item,title:item.actorId===userId?"You":labels.get(item.actorId)??"Project member"});
   }
 
   private async latestMessageInteraction(message: PersistedTaskMessage): Promise<TaskInteractionItem | null> {
@@ -2293,7 +2304,7 @@ export class TaskService {
     return {
       queuedMessages: snapshot.queuedMessages.map((message) => {
         const presented = queuedMessage(message);
-        return capabilities.editQueuedMessage ? presented : { ...presented, editable:false, deletable:false };
+        return { ...presented, editable:capabilities.editQueuedMessage&&presented.editable, deletable:capabilities.sendMessage&&presented.deletable };
       }),
       runState: runtime.runState,
       runtimeReachability: runtime.reachability,
@@ -2578,6 +2589,7 @@ function initialPromptProductSource(task: PersistedAgentTask): ProductTaskIntera
   return {
     sourceKind: "product",
     type: "task_created",
+    actorId: task.createdByUserId ?? null,
     taskId: task.id,
     sourceId: `task:${task.id}:prompt`,
     sourceRevision: productSourceRevision(task.updatedAt, startInteractionRank(task)),
@@ -2635,6 +2647,7 @@ function messageProductSource(message: PersistedTaskMessage): ProductTaskInterac
   return {
     sourceKind: "product",
     type: "message_delivery",
+    actorId: message.actorId ?? null,
     taskId: message.taskId,
     sourceId: `message:${message.id}`,
     sourceRevision: productSourceRevision(updatedAt, { pending:1, dispatching:2, retrying:3, accepted:4, failed:5 }[projectedStatus]),
@@ -2707,7 +2720,8 @@ function queuedMessage(message: PersistedTaskMessage): TaskQueuedMessage {
     content: message.content,
     deliveryStatus,
     editable: status === "pending" && !message.deletedAt,
-    deletable: status === "pending" && !message.deletedAt,
+    deletable: (status === "pending" || status === "failed") && !message.deletedAt,
+    ...(status === "failed" && message.safeError ? { safeError:safeMessageFailure(message.safeError) } : {}),
     updatedAt: message.updatedAt ?? message.createdAt
   };
 }

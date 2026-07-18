@@ -584,9 +584,23 @@ export class InMemoryProductStore implements ProductStore {
   }
 
   async createProjectChatThread(thread: ProjectChatThread): Promise<ProjectChatThread> { this.chatThreads.set(thread.id, clone({ ...thread, title: thread.title ?? null, pinnedAt: thread.pinnedAt ?? null, starredAt: thread.starredAt ?? null, deletedAt: thread.deletedAt ?? null })); return clone(this.chatThreads.get(thread.id)!); }
+  async createProjectChatBranch(thread: ProjectChatThread, messages: ProjectChatMessage[]): Promise<ProjectChatThread> {
+    if (this.chatThreads.has(thread.id)) throw new Error("Chat thread already exists");
+    const messageIds = new Set(this.chatMessages.map((message) => message.id));
+    const sequences = new Set<number>();
+    for (const message of messages) {
+      if (message.threadId !== thread.id || messageIds.has(message.id) || sequences.has(message.sequence)) throw new Error("Chat branch messages are invalid");
+      messageIds.add(message.id);
+      sequences.add(message.sequence);
+    }
+    const created = clone({ ...thread, title: thread.title ?? null, pinnedAt: thread.pinnedAt ?? null, starredAt: thread.starredAt ?? null, deletedAt: thread.deletedAt ?? null });
+    this.chatThreads.set(thread.id, created);
+    this.chatMessages.push(...messages.map(clone));
+    return clone(created);
+  }
   async findProjectChatThread(id: string): Promise<ProjectChatThread | null> { return clone(this.chatThreads.get(id) ?? null); }
-  async listProjectChatThreads(projectId: string): Promise<ProjectChatThread[]> { return this.sortedChatThreads(projectId); }
-  async searchProjectChatThreads(projectId: string, query: string): Promise<ProjectChatThread[]> { const needle = query.trim().toLowerCase(); return this.sortedChatThreads(projectId).filter((thread) => !needle || (thread.title ?? "").toLowerCase().includes(needle)); }
+  async listProjectChatThreads(projectId: string, ownerUserId: string): Promise<ProjectChatThread[]> { return this.sortedChatThreads(projectId, ownerUserId); }
+  async searchProjectChatThreads(projectId: string, ownerUserId: string, query: string): Promise<ProjectChatThread[]> { const needle = query.trim().toLowerCase(); return this.sortedChatThreads(projectId, ownerUserId).filter((thread) => !needle || (thread.title ?? "").toLowerCase().includes(needle)); }
   async updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null> { const thread=this.chatThreads.get(id); if(!thread || thread.deletedAt) return null; const updated={...thread,title:metadata.title ?? null,pinnedAt:metadata.pinnedAt ?? null,starredAt:metadata.starredAt ?? null,updatedAt}; this.chatThreads.set(id,clone(updated)); return clone(updated); }
   async deleteProjectChatThread(id: string, deletedAt: string): Promise<ProjectChatThread|"request_running"|null> { const thread=this.chatThreads.get(id); if(!thread || thread.deletedAt) return null;if(this.chatMessages.some((message)=>message.threadId===id&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return"request_running"; const updated={...thread,deletedAt,updatedAt:deletedAt}; this.chatThreads.set(id,clone(updated)); return clone(updated); }
   async touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null> { const thread = this.chatThreads.get(id); if (!thread) return null; const updated = { ...thread, updatedAt }; this.chatThreads.set(id, clone(updated)); return clone(updated); }
@@ -1048,10 +1062,10 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
     });
   }
-  async deletePendingTaskMessage(id: string, deletedAt: string): Promise<PersistedTaskMessage | null> {
+  async deleteQueuedTaskMessage(id: string, deletedAt: string): Promise<PersistedTaskMessage | null> {
     const index = this.messages.findIndex((value) => value.id === id);
     const current = this.messages[index];
-    if (!current || current.deletedAt || (current.deliveryStatus ?? "pending") !== "pending") return null;
+    if (!current || current.deletedAt || !["pending", "failed"].includes(current.deliveryStatus ?? "pending")) return null;
     const updated = { ...current, deletedAt, updatedAt: deletedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1183,7 +1197,7 @@ export class InMemoryProductStore implements ProductStore {
     }
   }
 
-  private sortedChatThreads(projectId: string): ProjectChatThread[] { return [...this.chatThreads.values()].filter((thread) => thread.projectId === projectId && !thread.deletedAt).sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || (right.starredAt ?? "").localeCompare(left.starredAt ?? "") || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || (right.pinnedAt ?? "").localeCompare(left.pinnedAt ?? "") || right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)).map(clone); }
+  private sortedChatThreads(projectId: string, ownerUserId: string): ProjectChatThread[] { return [...this.chatThreads.values()].filter((thread) => thread.projectId === projectId && thread.ownerUserId === ownerUserId && !thread.deletedAt).sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || (right.starredAt ?? "").localeCompare(left.starredAt ?? "") || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || (right.pinnedAt ?? "").localeCompare(left.pinnedAt ?? "") || right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)).map(clone); }
   private taskSummary(task: PersistedAgentTask): TaskSummary { return { taskId: task.id, artifactCount: this.artifacts.filter((artifact) => artifact.taskId === task.id).length, updatedAt: task.updatedAt }; }
   private initializeTaskInteractionSync(taskId: string): void { this.interactionSync.set(taskId, { sourceCursor: null, historyStatus: "complete", lastSyncedAt: null }); }
 

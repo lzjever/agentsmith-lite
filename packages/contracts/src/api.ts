@@ -280,6 +280,7 @@ export interface ChatMessage {
 export interface ProjectChatThread {
   id: string;
   projectId: string;
+  ownerUserId: string;
   endpointId: string | null;
   title?: string | null;
   pinnedAt?: ISODateString | null;
@@ -430,6 +431,7 @@ export interface TaskInteractionBase {
 
 export interface TaskUserMessageInteraction extends TaskInteractionBase {
   kind: "user_message";
+  actorId?: string | null;
   status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
 }
 
@@ -560,6 +562,7 @@ export interface TaskQueuedMessage {
   deliveryStatus: "pending" | "dispatching" | "terminal_pending" | "failed";
   editable: boolean;
   deletable: boolean;
+  safeError?: string;
   updatedAt: ISODateString;
 }
 

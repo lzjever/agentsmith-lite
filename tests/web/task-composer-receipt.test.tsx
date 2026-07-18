@@ -38,6 +38,13 @@ describe("task composer receipts", () => {
     assert.equal(composer.value, "Please continue");
   });
 
+  it("shows why a failed queued message stopped and lets the user remove it", () => {
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_failed", content:"Please continue", deliveryStatus:"failed", editable:false, deletable:true, safeError:"Botified rejected this message.", updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+
+    assert.ok(screen.getByText("Botified rejected this message."));
+    assert.ok(screen.getByRole("button", { name:"Delete queued message" }));
+  });
+
   it("locks queued message controls while sending a message", async () => {
     let sendStarted = false;
     render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => { sendStarted = true; return new Promise(() => undefined); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);

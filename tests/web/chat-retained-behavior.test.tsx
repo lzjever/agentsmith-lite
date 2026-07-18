@@ -14,7 +14,7 @@ const { ProjectChatPage } = await import("../../src/components/chat/ProjectChatP
 afterEach(() => cleanup());
 
 const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "DeepSeek chat", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "deepseek-chat", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, health: { status: "healthy", checkedAt: "2026-07-11T00:00:00.000Z", errorCategory: null }, hasCredentialRef: true, taskEligible: false, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
-const threads: ProjectChatThread[] = [{ id: "chat_1", projectId: "project_1", endpointId: endpoint.id, title: "Product Q&A", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
+const threads: ProjectChatThread[] = [{ id: "chat_1", projectId: "project_1", ownerUserId: "user_1", endpointId: endpoint.id, title: "Product Q&A", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt }];
 const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
 
 describe("retained chat and overview behavior", () => {
@@ -53,6 +53,7 @@ describe("retained chat and overview behavior", () => {
     fireEvent.click(screen.getByRole("button",{name:"Star conversation"}));fireEvent.click(screen.getByRole("button",{name:"Pin conversation"}));assert.deepEqual(starred,["chat_1"]);assert.deepEqual(pinned,["chat_1"]);
     fireEvent.click(screen.getByRole("button", { name: "Rename conversation" }));
     await screen.findByRole("dialog", { name: "Rename conversation" });
+    assert.equal((screen.getByRole("textbox", { name: "Conversation title" }) as HTMLInputElement).maxLength, 200);
     const saveTitle = screen.getByRole("button", { name: "Save title" }) as HTMLButtonElement;
     assert.equal(saveTitle.disabled, true);
     fireEvent.submit(saveTitle.closest("form")!);

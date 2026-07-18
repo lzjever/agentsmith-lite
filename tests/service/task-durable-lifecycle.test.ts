@@ -31,7 +31,7 @@ describe("durable task lifecycle", () => {
   afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
   it("persists scoped idempotency, canonical replay, hash mismatch, and dry-run non-execution", async () => {
-    const setup = await createSetup(false);
+    const setup = await createSetup(true);
     const input = { endpointId: setup.endpointId, prompt: "do not execute", title: "Dry run" };
     const first = await setup.services.tasks.createTask(setup.userId, setup.projectId, input, "same-key");
     const replay = await setup.services.tasks.createTask(setup.userId, setup.projectId, { title: "Dry run", prompt: "do not execute", endpointId: setup.endpointId }, "same-key");
@@ -140,6 +140,31 @@ describe("durable task lifecycle", () => {
 
     assert.equal(message?.actorId, member.user.id);
     assert.equal(successor?.createdByUserId, member.user.id);
+  });
+
+  it("labels task messages for the member who is viewing them", async () => {
+    const setup=await createSetup(false);
+    const member=await setup.services.auth.loginExternalPrincipal({issuer:"https://idp.test",subject:"task-author",email:"task-author@example.test",emailVerified:true});
+    const timestamp=new Date().toISOString();
+    await setup.store.upsertProjectMembership({projectId:setup.projectId,userId:member.user.id,role:"member",createdAt:timestamp,updatedAt:timestamp});
+    const task=await setup.services.tasks.createTask(member.user.id,setup.projectId,{endpointId:setup.endpointId,prompt:"member prompt"},"member-task-label");
+
+    const memberView=await setup.services.tasks.taskInteractions(member.user.id,task.id);
+    const ownerView=await setup.services.tasks.taskInteractions(setup.userId,task.id);
+    assert.equal(memberView.items.find((item)=>item.kind==="user_message")?.title,"You");
+    assert.equal(ownerView.items.find((item)=>item.kind==="user_message")?.title,member.user.email);
+  });
+
+  it("presents and removes a failed follow-up message", async () => {
+    const setup=await createSetup(false);
+    const task=await setup.services.tasks.createTask(setup.userId,setup.projectId,{endpointId:setup.endpointId,prompt:"finished source"},"failed-follow-up-source");
+    const timestamp=new Date().toISOString();
+    await setup.store.createTaskMessage({id:"message_failed_follow_up",taskId:task.id,actorId:setup.userId,content:"continue",deliveryStatus:"failed",safeError:"Botified rejected this message",createdAt:timestamp,updatedAt:timestamp});
+
+    const snapshot=await setup.services.tasks.taskInteractions(setup.userId,task.id);
+    assert.deepEqual(snapshot.queuedMessages.map((message)=>[message.id,message.deliveryStatus,message.deletable,message.safeError]),[["message_failed_follow_up","failed",true,"Botified rejected this message"]]);
+    await setup.services.tasks.deleteTaskMessage(setup.userId,task.id,"message_failed_follow_up","delete-failed-follow-up");
+    assert.deepEqual((await setup.services.tasks.taskInteractions(setup.userId,task.id)).queuedMessages,[]);
   });
 
   it("rejects an endpoint missing task capabilities before task persistence", async () => {
@@ -1089,6 +1114,19 @@ describe("durable task lifecycle", () => {
     assert.equal(await setup.store.findProject(setup.projectId), null);
     assert.equal(await setup.store.sandboxRuns.get(task.runId), null);
     assert.equal(setup.port.resources.length, 0);
+  });
+
+  it("does not report cancellation after a task has already completed", async () => {
+    const setup = await createSetup(false);
+    const task = await setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "finish first" }, "create-finish-first");
+    const timestamp = new Date().toISOString();
+    await setup.store.finalizeTaskLifecycle({ taskId:task.id, terminalReason:"completed", updatedAt:timestamp, auditEvent:{ id:"audit_finish_first", projectId:setup.projectId, actorId:null, action:"task.completed", status:"accepted", resourceKind:"task", resourceId:task.id, createdAt:timestamp }, successors:[] });
+
+    await assert.rejects(
+      ()=>setup.services.tasks.cancelTask(setup.userId,task.id,"cancel-too-late"),
+      (error:unknown)=>error instanceof ProductError&&error.statusCode===409&&error.message==="Task has already finished"
+    );
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason,task.terminalReason);
   });
 
   async function createSetup(live: boolean) {

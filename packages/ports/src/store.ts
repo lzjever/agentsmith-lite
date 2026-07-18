@@ -454,9 +454,10 @@ export interface ProductStore {
   findEndpoint(id: string): Promise<ModelEndpoint | null>;
 
   createProjectChatThread(thread: ProjectChatThread): Promise<ProjectChatThread>;
+  createProjectChatBranch(thread: ProjectChatThread, messages: ProjectChatMessage[]): Promise<ProjectChatThread>;
   findProjectChatThread(id: string): Promise<ProjectChatThread | null>;
-  listProjectChatThreads(projectId: string): Promise<ProjectChatThread[]>;
-  searchProjectChatThreads(projectId: string, query: string): Promise<ProjectChatThread[]>;
+  listProjectChatThreads(projectId: string, ownerUserId: string): Promise<ProjectChatThread[]>;
+  searchProjectChatThreads(projectId: string, ownerUserId: string, query: string): Promise<ProjectChatThread[]>;
   updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null>;
   deleteProjectChatThread(id: string, deletedAt: string): Promise<DeleteProjectChatThreadResult>;
   touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null>;
@@ -516,7 +517,7 @@ export interface ProductStore {
   listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]>;
   findTaskMessage(id: string): Promise<PersistedTaskMessage | null>;
   updatePendingTaskMessage(id: string, content: string, requestHash: string, updatedAt: string, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
-  deletePendingTaskMessage(id: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedTaskMessage | null>;
+  deleteQueuedTaskMessage(id: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedTaskMessage | null>;
   listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]>;
   claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null>;
   reclaimTaskMessage(input: TaskDeliveryReclaimInput): Promise<PersistedTaskMessage | null>;

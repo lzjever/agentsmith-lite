@@ -128,7 +128,7 @@ describe("task interaction store", () => {
     assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,null);
     assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"pending");
 
-    await store.deletePendingTaskMessage("pending-message",timestamp(4));
+    await store.deleteQueuedTaskMessage("pending-message",timestamp(4));
     await store.persistTaskInteractionMutation({
       taskId:"task_interactions",
       changes:[change("product","terminal-result",1,interaction("result",1,3,"assistant_message"))],

@@ -10,10 +10,10 @@ describe("retained chat, task, and artifact store metadata", () => {
     await store.createProjectChatThread(thread("chat_new", "2026-07-02T00:00:00.000Z"));
     await store.updateProjectChatThreadMetadata("chat_old", { title: "Release notes", pinnedAt: "2026-07-03T00:00:00.000Z" }, "2026-07-03T00:00:00.000Z");
 
-    assert.deepEqual((await store.searchProjectChatThreads("project_1", "release")).map((value) => value.id), ["chat_old"]);
-    assert.deepEqual((await store.listProjectChatThreads("project_1")).map((value) => value.id), ["chat_old", "chat_new"]);
+    assert.deepEqual((await store.searchProjectChatThreads("project_1", "user_1", "release")).map((value) => value.id), ["chat_old"]);
+    assert.deepEqual((await store.listProjectChatThreads("project_1", "user_1")).map((value) => value.id), ["chat_old", "chat_new"]);
     await store.deleteProjectChatThread("chat_old", "2026-07-04T00:00:00.000Z");
-    assert.deepEqual((await store.listProjectChatThreads("project_1")).map((value) => value.id), ["chat_new"]);
+    assert.deepEqual((await store.listProjectChatThreads("project_1", "user_1")).map((value) => value.id), ["chat_new"]);
   });
 
   it("persists queued messages and computes artifact-only task summaries", async () => {
@@ -28,7 +28,7 @@ describe("retained chat, task, and artifact store metadata", () => {
 });
 
 function thread(id: string, timestamp: string) {
-  return { id, projectId: "project_1", endpointId: "endpoint_1", title: null, pinnedAt: null, deletedAt: null, createdAt: timestamp, updatedAt: timestamp };
+  return { id, projectId: "project_1", ownerUserId: "user_1", endpointId: "endpoint_1", title: null, pinnedAt: null, deletedAt: null, createdAt: timestamp, updatedAt: timestamp };
 }
 
 function task(id: string, timestamp: string): PersistedAgentTask {

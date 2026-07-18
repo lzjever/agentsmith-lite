@@ -42,6 +42,7 @@ interface ProductSourceBase {
 
 export interface TaskCreatedInteractionSource extends ProductSourceBase {
   type: "task_created";
+  actorId?: string | null;
   messageId: string;
   content: string;
   status: "pending" | "dispatching" | "retrying" | "accepted" | "failed";
@@ -49,6 +50,7 @@ export interface TaskCreatedInteractionSource extends ProductSourceBase {
 
 export interface MessageAdmittedInteractionSource extends ProductSourceBase {
   type: "message_admitted";
+  actorId?: string | null;
   messageId: string;
   content: string;
   status: "accepted" | "queued" | "rejected";
@@ -56,6 +58,7 @@ export interface MessageAdmittedInteractionSource extends ProductSourceBase {
 
 export interface MessageDeliveryInteractionSource extends ProductSourceBase {
   type: "message_delivery";
+  actorId?: string | null;
   messageId: string;
   content?: string;
   status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
@@ -239,6 +242,7 @@ function projectProduct(
     ...base(source.taskId, old?.id ?? interactionId(source.taskId, `User:${source.messageId}`), source, old),
     kind: "user_message",
     title: "You",
+    actorId: source.actorId ?? old?.actorId ?? null,
     body: body.text,
     contentMode: body.text === null ? "none" : "full",
     status: monotonicUserStatus(old?.status, incomingStatus)
@@ -300,6 +304,7 @@ function projectInput(
     ...eventBase(source, old?.id ?? interactionId(source.taskId, `User:${inputId}`), old),
     kind: "user_message",
     title: "You",
+    actorId: old?.actorId ?? null,
     body: body.text ?? old?.body ?? null,
     contentMode: body.text === null ? old?.contentMode ?? "none" : body.mode,
     status: monotonicUserStatus(old?.status, status)

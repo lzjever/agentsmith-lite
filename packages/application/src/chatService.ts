@@ -16,6 +16,8 @@ export interface ProjectChatSendResult {
   endpointSnapshot: ChatResponse["endpointSnapshot"];
 }
 
+const THREAD_TITLE_MAX_LENGTH = 200;
+
 function requireChatEndpoint(endpoint: ModelEndpoint): void {
   if (!endpoint.capabilities.includes("text")) throw new ProductError("Chat endpoint must support the text capability", 409);
 }
@@ -33,18 +35,18 @@ export class ChatService {
 
   async listThreads(userId: string, projectId: string): Promise<ProjectChatThread[]> {
     await this.workspaces.requireProjectForUser(userId, projectId, "view");
-    return this.store.listProjectChatThreads(projectId);
+    return this.store.listProjectChatThreads(projectId, userId);
   }
 
   async searchThreads(userId: string, projectId: string, query: string): Promise<ProjectChatThread[]> {
     await this.workspaces.requireProjectForUser(userId, projectId, "view");
-    return this.store.searchProjectChatThreads(projectId, query);
+    return this.store.searchProjectChatThreads(projectId, userId, query);
   }
 
   async createThread(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<ProjectChatThread> {
     const normalizedEndpointId=requireNonEmptyString(endpointId,"chat.endpointId");
     await this.workspaces.requireProjectForUser(userId,projectId,"write");
-    const create=async(id:string)=>{requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId,projectId,normalizedEndpointId));const existing=await this.store.findProjectChatThread(id);if(existing&&existing.projectId===projectId)return existing;const timestamp=nowIso();const thread=await this.store.createProjectChatThread({id,projectId,endpointId:normalizedEndpointId,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});await this.policies.recordOperation(projectId,userId,"chat.thread.create","accepted",thread.id);return thread;};
+    const create=async(id:string)=>{requireChatEndpoint(await this.endpointService.requireCredentialEndpointForUser(userId,projectId,normalizedEndpointId));const existing=await this.store.findProjectChatThread(id);if(existing&&existing.projectId===projectId&&existing.ownerUserId===userId)return existing;const timestamp=nowIso();const thread=await this.store.createProjectChatThread({id,projectId,ownerUserId:userId,endpointId:normalizedEndpointId,title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});await this.policies.recordOperation(projectId,userId,"chat.thread.create","accepted",thread.id);return thread;};
     if(!idempotencyKey)return create(newId("chat"));
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-thread.create",key:idempotencyKey,request:{projectId,endpointId:normalizedEndpointId},resourceId:newId("chat"),failureMessage:"Conversation could not be created",run:create});
   }
@@ -93,9 +95,13 @@ export class ChatService {
     const text = requireNonEmptyString(content, "chat.content");
     const endpoint = await this.endpointService.requireCredentialEndpointForUser(userId, projectId, requireThreadEndpointId(thread));
     requireChatEndpoint(endpoint);
-    const credential = await this.credentials.resolve(projectId, endpoint.credentialId);
     await this.recoverPendingResponses(thread.id);
     const history = await this.store.listProjectChatMessages(thread.id);
+    const latest = history.at(-1);
+    if (latest?.role === "user" && (latest.deliveryStatus === "failed" || latest.deliveryStatus === "stopped")) {
+      throw new ProductError("Retry, edit, or delete the failed message before continuing", 409);
+    }
+    const credential = await this.credentials.resolve(projectId, endpoint.credentialId);
     const context = await this.contexts.resolveForAgent(userId, projectId);
     const input = withAgentContext(context, [...history.map(({ role, content: saved }) => ({ role, content: saved })), { role: "user", content: text }]);
     let responseStaged = false;
@@ -123,7 +129,31 @@ export class ChatService {
 
   async editMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,content:string,idempotencyKey?:string):Promise<ProjectChatMessage>{const normalized=requireNonEmptyString(content,"chat.content");await this.workspaces.requireProjectForUser(userId,projectId,"write");const edit=async()=>{await this.requireThreadForUser(userId,projectId,threadId,"write");const messages=await this.store.listProjectChatMessages(threadId);const target=requireMessage(messages,messageId,expectedVersion);if(target.role!=="user")throw new ProductError("Only user messages can be edited",409);if(normalized===target.content)return target;const updated=await this.store.editProjectChatMessageAndTruncate(threadId,messageId,expectedVersion,normalized,nowIso());if(!updated)throw new ProductError("Chat history changed; reload and try again",409);await this.store.touchProjectChatThread(threadId,nowIso());await this.policies.recordOperation(projectId,userId,"chat.message.edit","accepted",messageId);return updated;};if(!idempotencyKey)return edit();return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-message.edit",key:idempotencyKey,request:{threadId,messageId,expectedVersion,content:normalized},resourceId:messageId,failureMessage:"Message could not be edited",run:edit});}
   async deleteMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,idempotencyKey?:string):Promise<{deleted:true}>{await this.workspaces.requireProjectForUser(userId,projectId,"write");const remove=async()=>{await this.requireThreadForUser(userId,projectId,threadId,"write");const messages=await this.store.listProjectChatMessages(threadId);requireMessage(messages,messageId,expectedVersion);if(!await this.store.deleteProjectChatMessageAndFollowing(threadId,messageId,expectedVersion))throw new ProductError("Chat history changed; reload and try again",409);await this.store.touchProjectChatThread(threadId,nowIso());await this.policies.recordOperation(projectId,userId,"chat.message.delete","accepted",messageId);return{deleted:true as const};};if(!idempotencyKey)return remove();return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-message.delete",key:idempotencyKey,request:{threadId,messageId,expectedVersion},resourceId:messageId,failureMessage:"Message could not be deleted",run:remove});}
-  async branchMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,idempotencyKey?:string):Promise<ProjectChatThread>{await this.workspaces.requireProjectForUser(userId,projectId,"write");const branch=async(branchId:string)=>{const existing=await this.store.findProjectChatThread(branchId);if(existing&&existing.projectId===projectId&&!existing.deletedAt&&(await this.store.listProjectChatMessages(branchId)).length>0)return existing;const source=await this.requireThreadForUser(userId,projectId,threadId,"write");const messages=await this.store.listProjectChatMessages(threadId);const target=requireMessage(messages,messageId,expectedVersion);if(target.deliveryStatus!=="completed")throw new ProductError("Only completed history can be branched",409);const timestamp=nowIso();const created=existing&&existing.projectId===projectId&&!existing.deletedAt?existing:await this.store.createProjectChatThread({id:branchId,projectId,endpointId:source.endpointId,title:source.title?`${source.title} branch`:"Branched conversation",pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});try{await this.store.appendProjectChatMessages(messages.filter((message)=>message.sequence<=target.sequence).map((message,index)=>({...message,id:newId("chatmsg"),threadId:created.id,sequence:index+1,version:1,deliveryStatus:"completed",createdAt:timestamp,updatedAt:timestamp})));}catch(error){if(!existing)await this.store.deleteProjectChatThread(created.id,timestamp);throw error;}await this.policies.recordOperation(projectId,userId,"chat.message.branch","accepted",messageId);return created;};if(!idempotencyKey)return branch(newId("chat"));return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-message.branch",key:idempotencyKey,request:{threadId,messageId,expectedVersion},resourceId:newId("chat"),failureMessage:"Conversation could not be branched",run:branch});}
+  async branchMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,idempotencyKey?:string):Promise<ProjectChatThread>{
+    await this.workspaces.requireProjectForUser(userId,projectId,"write");
+    const branch=async(branchId:string)=>{
+      const source=await this.requireThreadForUser(userId,projectId,threadId,"write");
+      const messages=await this.store.listProjectChatMessages(threadId);
+      const target=requireMessage(messages,messageId,expectedVersion);
+      if(target.deliveryStatus!=="completed")throw new ProductError("Only completed history can be branched",409);
+      const copiedMessages=messages.filter((message)=>message.sequence<=target.sequence);
+      const existing=await this.store.findProjectChatThread(branchId);
+      if(existing){
+        const existingMessages=await this.store.listProjectChatMessages(branchId);
+        if(existing.projectId===projectId&&existing.ownerUserId===userId&&!existing.deletedAt&&existingMessages.length===copiedMessages.length)return existing;
+        throw new ProductError("Conversation branch is incomplete; create a new branch",409);
+      }
+      const timestamp=nowIso();
+      const created=await this.store.createProjectChatBranch(
+        {id:branchId,projectId,ownerUserId:userId,endpointId:source.endpointId,title:branchThreadTitle(source.title),pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp},
+        copiedMessages.map((message,index)=>({...message,id:newId("chatmsg"),threadId:branchId,sequence:index+1,version:1,deliveryStatus:"completed",createdAt:timestamp,updatedAt:timestamp}))
+      );
+      await this.policies.recordOperation(projectId,userId,"chat.message.branch","accepted",messageId);
+      return created;
+    };
+    if(!idempotencyKey)return branch(newId("chat"));
+    return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.chat-message.branch",key:idempotencyKey,request:{threadId,messageId,expectedVersion},resourceId:newId("chat"),failureMessage:"Conversation could not be branched",run:branch});
+  }
   async retryMessage(userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(value:string)=>void):Promise<ProjectChatSendResult>{
     const thread=await this.requireThreadForUser(userId,projectId,threadId,"write");await this.recoverPendingResponses(threadId);const history=await this.store.listProjectChatMessages(threadId);const target=requireMessage(history,messageId,expectedVersion);
     if(target.role!=="user"||!(["failed","stopped"] as const).includes(target.deliveryStatus as "failed"|"stopped"))throw new ProductError("Only a failed or stopped user message can be retried",409);if(history.at(-1)?.id!==target.id)throw new ProductError("Only the latest message can be retried",409);
@@ -140,7 +170,7 @@ export class ChatService {
   private async requireThreadForUser(userId: string, projectId: string, threadId: string, permission: "view" | "write"): Promise<ProjectChatThread> {
     await this.workspaces.requireProjectForUser(userId, projectId, permission);
     const thread = await this.store.findProjectChatThread(threadId);
-    if (!thread || thread.projectId !== projectId || thread.deletedAt) throw new NotFoundError("Chat thread not found");
+    if (!thread || thread.projectId !== projectId || thread.ownerUserId !== userId || thread.deletedAt) throw new NotFoundError("Chat thread not found");
     return thread;
   }
 }
@@ -156,6 +186,12 @@ function withAgentContext(context: string, messages: ChatMessage[]): ChatMessage
 function normalizeThreadTitle(value: string | null): string | null {
   if (value === null) return null;
   const title = value.trim();
-  if (title.length > 200) throw new ProductError("chat.title must be at most 200 characters", 400);
+  if (title.length > THREAD_TITLE_MAX_LENGTH) throw new ProductError(`chat.title must be at most ${THREAD_TITLE_MAX_LENGTH} characters`, 400);
   return title || null;
+}
+
+function branchThreadTitle(value: string | null | undefined): string {
+  if (!value) return "Branched conversation";
+  const suffix = " branch";
+  return `${value.slice(0, THREAD_TITLE_MAX_LENGTH - suffix.length)}${suffix}`;
 }
