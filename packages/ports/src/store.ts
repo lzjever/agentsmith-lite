@@ -332,6 +332,8 @@ export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_
 export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner";
 export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
 export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
+export type AppendProjectChatMessageResult = "accepted" | "history_changed" | "request_running";
+export type DeleteProjectChatThreadResult = ProjectChatThread | "request_running" | null;
 
 export interface ProductStore {
   readonly observedExternalModelCalls: number;
@@ -451,11 +453,13 @@ export interface ProductStore {
   listProjectChatThreads(projectId: string): Promise<ProjectChatThread[]>;
   searchProjectChatThreads(projectId: string, query: string): Promise<ProjectChatThread[]>;
   updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null>;
-  deleteProjectChatThread(id: string, deletedAt: string): Promise<ProjectChatThread | null>;
+  deleteProjectChatThread(id: string, deletedAt: string): Promise<DeleteProjectChatThreadResult>;
   touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null>;
+  appendProjectChatMessageIfCurrent(threadId: string, afterMessageId: string | null, message: ProjectChatMessage): Promise<AppendProjectChatMessageResult>;
   appendProjectChatMessages(messages: ProjectChatMessage[]): Promise<void>;
   listProjectChatMessages(threadId: string): Promise<ProjectChatMessage[]>;
   updateProjectChatMessageDelivery(id: string, deliveryStatus: ProjectChatMessage["deliveryStatus"], updatedAt: string): Promise<ProjectChatMessage | null>;
+  claimProjectChatMessageRetry(messageId: string, expectedVersion: number, updatedAt: string): Promise<ProjectChatMessage | null>;
   stageProjectChatResponse(userMessageId: string, assistantMessage: ProjectChatMessage): Promise<boolean>;
   finalizeProjectChatResponse(userMessageId: string): Promise<ProjectChatMessage | null>;
   editProjectChatMessageAndTruncate(threadId: string, messageId: string, expectedVersion: number, content: string, updatedAt: string): Promise<ProjectChatMessage | null>;

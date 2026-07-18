@@ -69,7 +69,9 @@ export class ChatService {
     await this.workspaces.requireProjectForUser(userId, projectId, "write");
     const remove = async () => {
       const thread = await this.requireThreadForUser(userId, projectId, threadId, "write");
-      if (!await this.store.deleteProjectChatThread(thread.id, nowIso())) throw new NotFoundError("Chat thread not found");
+      const deleted=await this.store.deleteProjectChatThread(thread.id,nowIso());
+      if(deleted==="request_running")throw new ProductError("Stop the active response before deleting this conversation",409);
+      if(!deleted)throw new NotFoundError("Chat thread not found");
       await this.policies.recordOperation(projectId, userId, "chat.thread.delete", "accepted", thread.id);
       return { deleted: true as const };
     };
@@ -94,7 +96,6 @@ export class ChatService {
     const credential = await this.credentials.resolve(projectId, endpoint.credentialId);
     await this.recoverPendingResponses(thread.id);
     const history = await this.store.listProjectChatMessages(thread.id);
-    requireCurrentHistory(history, afterMessageId);
     const context = await this.contexts.resolveForAgent(userId, projectId);
     const input = withAgentContext(context, [...history.map(({ role, content: saved }) => ({ role, content: saved })), { role: "user", content: text }]);
     let responseStaged = false;
@@ -102,7 +103,9 @@ export class ChatService {
     try {
       const timestamp = nowIso();
       userMessage = { id: newId("chatmsg"), threadId: thread.id, sequence:(history.at(-1)?.sequence??0)+1,version:1,deliveryStatus:"pending",role: "user", content: text, createdAt: timestamp,updatedAt:timestamp };
-      await this.store.appendProjectChatMessages([userMessage]);
+      const admission=await this.store.appendProjectChatMessageIfCurrent(thread.id,afterMessageId,userMessage);
+      if(admission==="request_running")throw new ProductError("A chat request is already running",409);
+      if(admission==="history_changed")throw new ProductError("Chat history changed; reload and try again",409);
       await this.policies.recordOperation(projectId,userId,"chat.message.send","accepted",userMessage.id);
       const response = await this.client.streamChat({ endpoint, settlementEndpointId: endpoint.id, apiKey: credential.apiKey, actorId: userId, ...(signal ? { signal } : {}), onDelta }, input);
       const assistantMessage: ProjectChatMessage = { id: newId("chatmsg"), threadId: thread.id,sequence:userMessage.sequence+1,version:1,deliveryStatus:"completed",role: "assistant", content: response.message.content, createdAt: timestamp,updatedAt:timestamp };
@@ -126,7 +129,8 @@ export class ChatService {
     if(target.role!=="user"||!(["failed","stopped"] as const).includes(target.deliveryStatus as "failed"|"stopped"))throw new ProductError("Only a failed or stopped user message can be retried",409);if(history.at(-1)?.id!==target.id)throw new ProductError("Only the latest message can be retried",409);
     const endpoint=await this.endpointService.requireCredentialEndpointForUser(userId,projectId,requireThreadEndpointId(thread));requireChatEndpoint(endpoint);const credential=await this.credentials.resolve(projectId,endpoint.credentialId);
     const context=await this.contexts.resolveForAgent(userId,projectId);const input=withAgentContext(context,history.map(({role,content})=>({role,content})));
-    let responseStaged=false;await this.store.updateProjectChatMessageDelivery(target.id,"pending",nowIso());await this.policies.recordOperation(projectId,userId,"chat.message.retry","accepted",target.id);
+    const claimed=await this.store.claimProjectChatMessageRetry(target.id,expectedVersion,nowIso());if(!claimed)throw new ProductError("Chat history changed; reload and try again",409);
+    let responseStaged=false;await this.policies.recordOperation(projectId,userId,"chat.message.retry","accepted",target.id);
     try{const response=await this.client.streamChat({endpoint,settlementEndpointId:endpoint.id,apiKey:credential.apiKey,actorId:userId,...(signal?{signal}:{}),onDelta},input);const timestamp=nowIso();const assistant:ProjectChatMessage={id:newId("chatmsg"),threadId,sequence:target.sequence+1,version:1,deliveryStatus:"completed",role:"assistant",content:response.message.content,createdAt:timestamp,updatedAt:timestamp};if(!await this.store.stageProjectChatResponse(target.id,assistant))throw new Error("Chat response could not be staged");responseStaged=true;const finalized=await this.store.finalizeProjectChatResponse(target.id);if(!finalized)throw new Error("Chat response could not be finalized");await this.store.touchProjectChatThread(threadId,timestamp);return{message:finalized,endpointSnapshot:response.endpointSnapshot};}
     catch(error){if(!responseStaged)await this.store.updateProjectChatMessageDelivery(target.id,isAbortError(error)?"stopped":"failed",nowIso());if(isAbortError(error))await this.policies.recordOperation(projectId,userId,"chat.message.stop","accepted",target.id);throw error;}
   }
@@ -141,7 +145,6 @@ export class ChatService {
   }
 }
 
-function requireCurrentHistory(history:ProjectChatMessage[],afterMessageId:string|null):void{const current=history.at(-1)?.id??null;if(current!==afterMessageId)throw new ProductError("Chat history changed; reload and try again",409);if(history.some((message)=>message.deliveryStatus==="pending"))throw new ProductError("A chat request is already running",409);}
 function requireMessage(messages:ProjectChatMessage[],messageId:string,expectedVersion:number):ProjectChatMessage{const message=messages.find((item)=>item.id===messageId);if(!message)throw new NotFoundError("Chat message not found");if(!Number.isInteger(expectedVersion)||message.version!==expectedVersion)throw new ProductError("Chat history changed; reload and try again",409);return message;}
 function requireThreadEndpointId(thread: ProjectChatThread): string { if (!thread.endpointId) throw new ProductError("Chat thread endpoint has been deleted", 409); return thread.endpointId; }
 function isAbortError(error:unknown):boolean{return error instanceof Error&&error.name==="AbortError";}

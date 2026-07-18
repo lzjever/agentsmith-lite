@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
-import type { ModelEndpoint, Project, ProjectContextEntry, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
+import type { ModelEndpoint, Project, ProjectChatMessage, ProjectContextEntry, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
 import type { PersistedAgentTask, PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -103,6 +103,25 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[{projectId:"proj_pin",pinnedAt:timestamp}]);
     await store.deleteProjectMembership("proj_pin","user_pin_member");
     assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[]);
+  });
+
+  it("atomically admits one chat send and one retry claim per history tail", async () => {
+    const timestamp="2026-07-18T00:00:00.000Z";
+    await store.createUser({id:"user_chat_claim",email:"chat-claim@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+    await store.createWorkspace({id:"ws_chat_claim",name:"Chat claim",ownerUserId:"user_chat_claim",createdAt:timestamp,updatedAt:timestamp});
+    await store.createProject({id:"proj_chat_claim",workspaceId:"ws_chat_claim",name:"Chat claim",ownerUserId:"user_chat_claim",rootPath:"workspaces/ws_chat_claim/projects/proj_chat_claim",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+    await createTestCredential(store,"proj_chat_claim","cred_chat_claim",timestamp);
+    await store.createEndpoint(endpointRecord("endpoint_chat_claim","proj_chat_claim","cred_chat_claim",timestamp));
+    await store.createProjectChatThread({id:"thread_chat_claim",projectId:"proj_chat_claim",endpointId:"endpoint_chat_claim",title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});
+    const message=(id:string):ProjectChatMessage=>({id,threadId:"thread_chat_claim",sequence:1,version:1,deliveryStatus:"pending",role:"user",content:id,createdAt:timestamp,updatedAt:timestamp});
+
+    const admissions=await Promise.all([store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_one")),store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_two"))]);
+    assert.deepEqual(admissions.sort(),["accepted","request_running"]);
+    assert.equal(await store.deleteProjectChatThread("thread_chat_claim",timestamp),"request_running");
+    const saved=(await store.listProjectChatMessages("thread_chat_claim"))[0]!;
+    const failed=(await store.updateProjectChatMessageDelivery(saved.id,"failed",timestamp))!;
+    const claims=await Promise.all([store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp),store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp)]);
+    assert.equal(claims.filter(Boolean).length,1);
   });
 
   it("atomically rejects duplicate context keys during creates and renames", async () => {

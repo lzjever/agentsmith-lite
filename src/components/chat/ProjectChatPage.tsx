@@ -41,7 +41,6 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const [sending, setSending] = useState(false);
   const [threadMutationBusy, setThreadMutationBusy] = useState(false);
   const [threadSheetOpen, setThreadSheetOpen] = useState(false);
-  const messageEnd = useRef<HTMLDivElement>(null);
   const streamAbort = useRef<AbortController | null>(null);
   const endpointLoadVersion = useRef(0);
   const capabilitiesLoadVersion = useRef(0);
@@ -149,7 +148,6 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     void loadThreads();
   }, [loadCapabilities, loadEndpoints, loadThreads]);
   useEffect(() => { void loadMessages(threadId); }, [loadMessages, threadId]);
-  useEffect(() => { messageEnd.current?.scrollIntoView({ block: "end" }); }, [messages, sending]);
 
   const selectedThread = threads.find((thread) => thread.id === threadId);
   const compatibleEndpoints = endpoints.filter(isChatCompatibleEndpoint);
@@ -196,6 +194,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-thread.create", projectId);
       if (!active.current) return false;
+      if (isChatEndpointDrift(reason)) await loadEndpoints();
       return failAction(reason);
     } finally {
       if (active.current) setThreadMutationBusy(false);
@@ -371,11 +370,13 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
 
   async function branchMessage(target: ProjectChatMessage) {
     const identity = `${target.id}:${target.version}`;
+    const sourceThreadId=target.threadId;
     try {
-      const branch = await apiClient.branchChatMessage(projectId, threadId, target.id, target.version, mutationKeys.key("chat-message.branch", identity));
+      const branch = await apiClient.branchChatMessage(projectId, sourceThreadId, target.id, target.version, mutationKeys.key("chat-message.branch", identity));
       mutationKeys.complete("chat-message.branch", identity);
       if (!active.current) return;
       setThreads((current) => orderedThreads([branch, ...current]));
+      if(currentThreadId.current!==sourceThreadId){toast.success("Conversation branched");return;}
       ++messageLoadVersion.current;
       setMessages([]);
       setMessagesError("");
@@ -413,6 +414,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
         await reconcileStoppedMessage(threadId);
         return;
       }
+      if(isChatEndpointDrift(reason))await loadEndpoints();
       failAction(reason);
     } finally {
       streamAbort.current = null;
@@ -482,7 +484,6 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           onBranch={(target) => void branchMessage(target)}
           {...(endpointReady ? { onRetry: (target: ProjectChatMessage) => void retryMessage(target) } : {})}
         />
-        <div ref={messageEnd} />
         {sending ? <Button variant="danger" className="m-3 w-fit" onClick={stop}>Stop</Button> : null}
         <ChatComposer
           key={selectedThread?.id ?? "new-conversation"}
