@@ -205,6 +205,11 @@ export class PostgresProductStore implements ProductStore {
     return result.rowCount === 1;
   }
 
+  async deleteExpiredSessions(now: string): Promise<number> {
+    const result = await this.pool.query("delete from auth_sessions where expires_at <= $1", [now]);
+    return result.rowCount ?? 0;
+  }
+
   async createWorkspace(workspace: Workspace): Promise<Workspace> {
     await transaction(this.pool, async (client) => {
       await client.query(`insert into workspaces (id, name, owner_user_id, created_at, updated_at) values ($1, $2, $3, $4, $5)`, [workspace.id, workspace.name, workspace.ownerUserId, workspace.createdAt, workspace.updatedAt]);

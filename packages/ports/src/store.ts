@@ -357,6 +357,7 @@ export interface ProductStore {
   createSession(session: AuthSession): Promise<AuthSession>;
   findSession(id: string): Promise<AuthSession | null>;
   deleteSession(id: string): Promise<boolean>;
+  deleteExpiredSessions(now: string): Promise<number>;
 
   createWorkspace(workspace: Workspace): Promise<Workspace>;
   listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]>;

@@ -193,6 +193,16 @@ export class InMemoryProductStore implements ProductStore {
     return this.sessions.delete(id);
   }
 
+  async deleteExpiredSessions(now: string): Promise<number> {
+    let deleted = 0;
+    for (const [id, session] of this.sessions) {
+      if (session.expiresAt > now) continue;
+      this.sessions.delete(id);
+      deleted += 1;
+    }
+    return deleted;
+  }
+
   async createWorkspace(workspace: Workspace): Promise<Workspace> {
     this.workspaces.set(workspace.id, clone(workspace));
     this.workspaceMemberships.set(workspaceMembershipKey(workspace.id, workspace.ownerUserId), { workspaceId: workspace.id, userId: workspace.ownerUserId, role: "owner", createdAt: workspace.createdAt, updatedAt: workspace.updatedAt });

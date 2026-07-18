@@ -151,6 +151,34 @@ describe("product services", () => {
     );
   });
 
+  it("removes expired sessions when a new session is created", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/agentsmith-lite",
+      builtinAdminPassword: "admin-password"
+    });
+    const principal = {
+      issuer: "https://keycloak.example.test/realms/agentsmith",
+      subject: "session-cleanup-user",
+      email: "session-cleanup@example.test",
+      emailVerified: true
+    };
+    const first = await services.auth.loginExternalPrincipal(principal);
+    await store.createSession({
+      id: "sess_expired",
+      userId: first.user.id,
+      csrfToken: "csrf_expired",
+      createdAt: "2026-07-01T00:00:00.000Z",
+      expiresAt: "2026-07-01T01:00:00.000Z"
+    });
+
+    await services.auth.loginExternalPrincipal(principal);
+
+    assert.equal(await store.findSession("sess_expired"), null);
+    assert.ok(await store.findSession(first.sessionId));
+  });
+
   it("rejects a bound OIDC email collision without exposing either identity", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });

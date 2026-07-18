@@ -140,6 +140,7 @@ export class AuthService {
   private async createSession(userId: string, oidcIdToken?: string): Promise<AuthSession> {
     const created = new Date();
     const expires = new Date(created.getTime() + 1000 * 60 * 60 * 12);
+    await this.store.deleteExpiredSessions(created.toISOString());
     return this.store.createSession({
       id: `sess_${randomBytes(18).toString("hex")}`,
       userId,
