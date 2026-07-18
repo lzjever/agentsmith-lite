@@ -303,9 +303,9 @@ describe("retained chat and overview behavior", () => {
     apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
     apiClient.chatThreads = async () => [];
     try {
-      render(<ProjectChatPage projectId="project_1" />);
+      render(<ProjectChatPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByText("Add or repair a compatible endpoint before starting a conversation.");
-      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "endpoints");
+      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/endpoints");
       assert.equal(screen.getByRole("button", { name: "Start conversation" }).hasAttribute("disabled"), true);
       assert.equal(screen.queryByText("DeepSeek chat (deepseek-chat)"), null);
     } finally {
@@ -582,14 +582,14 @@ describe("retained chat and overview behavior", () => {
     apiClient.chatMessages = async () => [];
     apiClient.sendChatMessage = async () => { throw new ApiError(409, "Project provider tokens limit reached", "provider_tokens_limit_reached"); };
     try {
-      render(<ProjectChatPage projectId="project_1" />);
+      render(<ProjectChatPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByLabelText("Thread endpoint fixed");
       const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
       await waitFor(() => assert.equal(composer.disabled, false));
       fireEvent.change(composer, { target: { value: "Use the provider" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
       await screen.findByText("Provider quota reached.");
-      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "policy");
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/policy");
     } finally {
       Object.assign(apiClient, original);
     }

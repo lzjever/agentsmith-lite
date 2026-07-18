@@ -404,10 +404,10 @@ describe("project resource pages", () => {
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [endpoint];
     try {
-      render(<AlertsPage projectId={projectId} />);
+      render(<AlertsPage workspaceId="workspace_1" projectId={projectId} />);
       assert.ok(await screen.findByText("Project request limit reached"));
       assert.ok(screen.getByText("Endpoint request limit reached"));
-      assert.equal(screen.getByRole("link", { name: "Primary" }).getAttribute("href"), "endpoints");
+      assert.equal(screen.getByRole("link", { name: "Primary" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/endpoints");
       assert.equal(screen.queryByText(/Endpoint endpoint_1/), null);
     } finally { restoreClient(original); }
   });
@@ -424,12 +424,12 @@ describe("project resource pages", () => {
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [endpoint];
     try {
-      render(<AlertsPage projectId={projectId} />);
+      render(<AlertsPage workspaceId="workspace_1" projectId={projectId} />);
       await screen.findByText("Endpoint failure");
-      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "endpoints");
-      assert.equal(screen.getByRole("link", { name: "View provider failures" }).getAttribute("href"), "audit?action=provider.request&status=rejected");
-      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "tasks?status=failed");
-      assert.equal(screen.getByRole("link", { name: "View sandbox failures" }).getAttribute("href"), "audit?action=sandbox.failed&status=accepted");
+      assert.equal(screen.getByRole("link", { name: "Open endpoints" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/endpoints");
+      assert.equal(screen.getByRole("link", { name: "View provider failures" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/audit?action=provider.request&status=rejected");
+      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks?status=failed");
+      assert.equal(screen.getByRole("link", { name: "View sandbox failures" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/audit?action=sandbox.failed&status=accepted");
       assert.equal(screen.getAllByRole("link", { name: "View alert history" }).length, 4);
     } finally { restoreClient(original); }
   });
@@ -867,11 +867,11 @@ describe("project resource pages", () => {
     apiClient.transitionAlert = async (_projectId, alertId, status) => { transitions.push(`${alertId}:${status}`); return { ...alert, status, resolvedAt: policy.updatedAt, updatedAt: policy.updatedAt }; };
     try {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/alerts?alertId=history_1");
-      render(<AlertsPage projectId={projectId} />);
+      render(<AlertsPage workspaceId="workspace_1" projectId={projectId} />);
       await screen.findByText("Task failure");
       assert.ok(screen.getByText("Linked instance"));
-      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "tasks?status=failed");
-      assert.equal(screen.getByRole("link", { name: "View alert history" }).getAttribute("href"), "audit?resourceKind=alert&resourceId=history_1");
+      assert.equal(screen.getByRole("link", { name: "View failed tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks?status=failed");
+      assert.equal(screen.getByRole("link", { name: "View alert history" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=history_1");
       fireEvent.click(screen.getByRole("button", { name: "Resolve alert" }));
       await waitFor(() => assert.deepEqual(transitions, ["history_1:resolved"]));
       assert.ok(screen.getByText("resolved"));

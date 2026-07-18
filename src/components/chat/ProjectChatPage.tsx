@@ -17,11 +17,12 @@ import { ChatThreadRail } from "./ChatThreadRail";
 type LoadStatus = "loading" | "ready" | "error";
 type MessageStatus = "idle" | LoadStatus;
 
-export function ProjectChatPage({ projectId }: { projectId: string }) {
-  return <ProjectChatProjectPage key={projectId} projectId={projectId} />;
+export function ProjectChatPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
+  return <ProjectChatProjectPage key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
-function ProjectChatProjectPage({ projectId }: { projectId: string }) {
+function ProjectChatProjectPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
+  const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const active = useRef(true);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [endpointsStatus, setEndpointsStatus] = useState<LoadStatus>("loading");
@@ -514,12 +515,12 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       {capabilitiesStatus === "ready" && !canSend ? <Notice>Your project access is read-only.</Notice> : null}
       {endpointsStatus === "loading" ? <Notice>Loading compatible endpoints...</Notice> : null}
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
-      {endpointsStatus === "ready" && selectedThread && endpoint && !endpointReady ? <Notice>This conversation&apos;s endpoint is unavailable. Recheck it before sending. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
+      {endpointsStatus === "ready" && selectedThread && endpoint && !endpointReady ? <Notice>This conversation&apos;s endpoint is unavailable. Recheck it before sending. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/endpoints`}>Open endpoints</Link></Notice> : null}
       {endpointsStatus === "ready" && selectedThread && !endpoint && compatibleEndpoints.length > 0 ? <Notice action="Start new conversation" onAction={beginNewThread}>This conversation&apos;s endpoint was deleted. Its saved messages remain available.</Notice> : null}
-      {endpointsStatus === "ready" && selectedThread && !endpoint && compatibleEndpoints.length === 0 ? <Notice>This conversation&apos;s endpoint was deleted. Its saved messages remain available. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
-      {endpointsStatus === "ready" && !selectedThread && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
+      {endpointsStatus === "ready" && selectedThread && !endpoint && compatibleEndpoints.length === 0 ? <Notice>This conversation&apos;s endpoint was deleted. Its saved messages remain available. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/endpoints`}>Open endpoints</Link></Notice> : null}
+      {endpointsStatus === "ready" && !selectedThread && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/endpoints`}>Open endpoints</Link></Notice> : null}
       {actionError ? isProviderQuotaError(actionError.code)
-        ? <Notice error><strong>Provider quota reached.</strong> Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href="policy">Open resource policy</Link>.</Notice>
+        ? <Notice error><strong>Provider quota reached.</strong> Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/policy`}>Open resource policy</Link>.</Notice>
         : <Notice error>{actionError.message}</Notice> : null}
     </div>
   </PageLayout>;

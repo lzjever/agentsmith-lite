@@ -270,14 +270,14 @@ describe("project files browser", () => {
       throw new ApiError(409, "Project file bytes limit reached", "project_file_bytes_limit_reached");
     };
     try {
-      render(<ProjectFilesPage projectId="project_1" />);
+      render(<ProjectFilesPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByRole("heading", { name: "No files yet" });
       fireEvent.change(document.querySelector('input[type="file"]')!, {
         target: { files: [new File(["a"], "quota-denied.txt")] },
       });
       const alert = await screen.findByRole("alert");
       assert.match(alert.textContent ?? "", /file storage limit reached/i);
-      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "policy");
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/policy");
       assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
       assert.equal(screen.queryByRole("alertdialog", { name: "Replace quota-denied.txt?" }), null);
     } finally { restoreClient(original); }
@@ -614,7 +614,7 @@ function snapshotClient() { return { files: apiClient.files, projectCapabilities
 function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.files = original.files; apiClient.projectCapabilities = original.projectCapabilities; apiClient.uploadFile = original.uploadFile; apiClient.downloadProjectFile = original.downloadProjectFile; apiClient.deleteFile = original.deleteFile; }
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
   if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });

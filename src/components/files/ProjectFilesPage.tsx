@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronRight, Download, FileText, Folder, FolderUp, Image, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import Link from "next/link";
 import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type ProjectCapabilities, type ProjectFile } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -25,11 +26,12 @@ export function invalidateFilePreview(preview: FilePreview | null, path: string)
   return preview?.path === path ? null : preview;
 }
 
-export function ProjectFilesPage({ projectId }: { projectId: string }) {
-  return <ProjectFiles key={projectId} projectId={projectId} />;
+export function ProjectFilesPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
+  return <ProjectFiles key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
-function ProjectFiles({ projectId }: { projectId: string }) {
+function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
+  const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const [path, setPath] = useState(PROJECT_FILES_ROOT);
@@ -247,7 +249,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
         <nav className="flex min-h-12 items-center gap-1 overflow-x-auto border-b border-subtle px-3" aria-label="File path"><ol className="flex min-w-max items-center gap-1 text-sm text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-tertiary" aria-hidden="true" /> : null}<button type="button" className="rounded-sm px-1.5 py-1 hover:bg-surface-low hover:text-foreground" onClick={() => navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav>
         <div className="flex gap-2 border-b border-subtle p-3"><Label className="relative flex-1"><span className="sr-only">Filter files</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary"/><Input value={query} onChange={event=>setQuery(event.target.value)} className="pl-9 pr-8" placeholder="Filter files"/>{query?<Button className="absolute right-1 top-0.5" size="icon" variant="quiet" aria-label="Clear file filter" onClick={()=>setQuery("")}><X size={14}/></Button>:null}</Label></div>
         {message ? <div className="mx-3 mt-3 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{message}</span><Button variant="quiet" size="icon" aria-label="Dismiss error" onClick={() => setMessage("")}><X size={15} /></Button></div> : null}
-        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.code === "project_file_bytes_limit_reached" ? <><strong>File storage limit reached.</strong> Delete files or ask a project administrator to change the limit. <a className="font-medium text-foreground hover:underline" href="policy">Open resource policy</a>.</> : uploadFailure.message}</span><div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path)} disabled={mutationBusy}>Retry upload</Button> : null}<Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={mutationBusy}><RefreshCw size={15} /></Button></div></div> : null}
+        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.code === "project_file_bytes_limit_reached" ? <><strong>File storage limit reached.</strong> Delete files or ask a project administrator to change the limit. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/policy`}>Open resource policy</Link>.</> : uploadFailure.message}</span><div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path)} disabled={mutationBusy}>Retry upload</Button> : null}<Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={mutationBusy}><RefreshCw size={15} /></Button></div></div> : null}
         {display === "loading" ? <FileBrowserLoading /> : null}
         {display === "error" ? <FileBrowserError onRetry={load} /> : null}
         {display === "empty" ? <FileBrowserEmpty nested={path !== PROJECT_FILES_ROOT} /> : null}

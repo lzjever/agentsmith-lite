@@ -53,11 +53,12 @@ const labels: Record<ProjectAlert["type"], string> = {
   sandbox_failure: "Sandbox failure",
 };
 
-export function AlertsPage({ projectId }: { projectId: string }) {
-  return <ProjectAlertsPage key={projectId} projectId={projectId} />;
+export function AlertsPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
+  return <ProjectAlertsPage key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
-function ProjectAlertsPage({ projectId }: { projectId: string }) {
+function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
+  const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
@@ -307,6 +308,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
             <AlertInstances
               alerts={alerts}
               endpoints={endpoints}
+              projectBasePath={projectBasePath}
               canManage={canManage}
               busyId={busyId}
               retry={retry}
@@ -345,6 +347,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
 function AlertInstances({
   alerts,
   endpoints,
+  projectBasePath,
   canManage,
   busyId,
   retry,
@@ -356,6 +359,7 @@ function AlertInstances({
 }: {
   alerts: ProjectAlert[];
   endpoints: Endpoint[];
+  projectBasePath: string;
   canManage: boolean;
   busyId: string | null;
   retry: { alert: ProjectAlert; action: "ack" | "silence"; silencedUntil?: string | null } | null;
@@ -408,7 +412,7 @@ function AlertInstances({
             const silenced =
               !!alert.silencedUntil &&
               Date.parse(alert.silencedUntil) > Date.now();
-            const investigation = alertInvestigation(alert);
+            const investigation = alertInvestigation(alert, projectBasePath);
             const endpoint = alert.endpointId
               ? endpoints.find((item) => item.id === alert.endpointId)
               : undefined;
@@ -454,7 +458,7 @@ function AlertInstances({
                     alert.metricValue !== undefined
                       ? `${alert.metric?.replaceAll("_", " ")}: ${alert.metricValue}${alert.threshold !== null && alert.threshold !== undefined ? ` of ${alert.threshold}` : ""}`
                       : "No metric context recorded"}
-                    {alert.endpointId ? <> · <Link className="hover:text-foreground hover:underline" href="endpoints">{endpoint?.name ?? `Endpoint ${alert.endpointId}`}</Link></> : null}
+                    {alert.endpointId ? <> · <Link className="hover:text-foreground hover:underline" href={`${projectBasePath}/endpoints`}>{endpoint?.name ?? `Endpoint ${alert.endpointId}`}</Link></> : null}
                   </p>
                   <p className="mt-1 text-xs text-tertiary">
                     Opened {formatDate(alert.createdAt)}
@@ -477,7 +481,7 @@ function AlertInstances({
                       {investigation.label}
                     </Link>
                     <Link
-                      href={`audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
+                      href={`${projectBasePath}/audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
                       className="inline-flex items-center gap-1.5 text-xs text-secondary hover:text-foreground"
                     >
                       <ClipboardList size={14} />
@@ -575,13 +579,13 @@ function alertElementId(alertId: string) {
   return `alert-${alertId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
-function alertInvestigation(alert: ProjectAlert): { href: string; label: string } {
-  if (alert.type === "endpoint_failure") return { href: "endpoints", label: "Open endpoints" };
-  if (alert.type === "provider_failure") return { href: "audit?action=provider.request&status=rejected", label: "View provider failures" };
-  if (alert.type === "task_failure") return { href: "tasks?status=failed", label: "View failed tasks" };
-  if (alert.type === "sandbox_failure") return { href: "audit?action=sandbox.failed&status=accepted", label: "View sandbox failures" };
+function alertInvestigation(alert: ProjectAlert, projectBasePath: string): { href: string; label: string } {
+  if (alert.type === "endpoint_failure") return { href: `${projectBasePath}/endpoints`, label: "Open endpoints" };
+  if (alert.type === "provider_failure") return { href: `${projectBasePath}/audit?action=provider.request&status=rejected`, label: "View provider failures" };
+  if (alert.type === "task_failure") return { href: `${projectBasePath}/tasks?status=failed`, label: "View failed tasks" };
+  if (alert.type === "sandbox_failure") return { href: `${projectBasePath}/audit?action=sandbox.failed&status=accepted`, label: "View sandbox failures" };
   return {
-    href: alert.endpointId ? `usage?endpointId=${encodeURIComponent(alert.endpointId)}` : "usage",
+    href: alert.endpointId ? `${projectBasePath}/usage?endpointId=${encodeURIComponent(alert.endpointId)}` : `${projectBasePath}/usage`,
     label: "Investigate usage"
   };
 }
