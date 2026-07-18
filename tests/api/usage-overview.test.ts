@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -32,8 +32,12 @@ test("usage overview returns project limits and server-filtered settled endpoint
     const now = new Date().toISOString();
     await settle(store, "settlement_primary", project.id, first.id, user.id, now, { tokens: 8, cost: 1.25 });
     await settle(store, "settlement_secondary", project.id, second.id, user.id, now, { tokens: 2, cost: 0.25 });
+    const filesRoot = path.join(dataRoot, project.rootPath, "files");
+    await mkdir(filesRoot, { recursive: true });
+    await writeFile(path.join(filesRoot, "unaccounted.txt"), "storage");
 
     const all = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie);
+    assert.equal(all.usage.projectFileBytes, 7);
     assert.equal(all.daily.length, 30);
     assert.deepEqual(all.endpoints.map((endpoint: { endpointName: string; requests: number; tokens: number; cost: number }) => [endpoint.endpointName, endpoint.requests, endpoint.tokens, endpoint.cost]), [["Primary", 1, 8, 1.25], ["Secondary", 1, 2, 0.25], ["Unassigned or deleted endpoints", 2, 0, 0]]);
     assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "activeTasks"), { metric: "activeTasks", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });

@@ -214,10 +214,17 @@ postgresDescribe("postgres product store", () => {
     await store.createUser({ id: "user_quota", email: "quota@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
     await store.createWorkspace({ id: "ws_quota", name: "Quota", ownerUserId: "user_quota", createdAt: timestamp, updatedAt: timestamp });
     await store.createProject({ id: "proj_quota", workspaceId: "ws_quota", name: "Quota", ownerUserId: "user_quota", rootPath: "workspaces/ws_quota/projects/proj_quota", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
+    await createTestCredential(store, "proj_quota", "cred_quota", timestamp);
+    await store.createEndpoint(endpointRecord("endpoint_quota", "proj_quota", "cred_quota", timestamp));
+    await store.createTask({ id: "task_quota", workspaceId: "ws_quota", projectId: "proj_quota", endpointId: "endpoint_quota", prompt: "quota", status: "completed", runId: "run_quota", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
+    await store.appendTaskArtifacts([{ id: "artifact_quota", taskId: "task_quota", fileId: "file_quota", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: timestamp }]);
+    assert.equal(await store.measureProjectArtifactBytes("proj_quota"), 2);
 
     await store.patchProjectResourcePolicy("proj_quota", { projectFileBytesLimit: 0 }, timestamp);
     assert.equal(await adjustFileBytes(store, "proj_quota", 1, timestamp), null);
     assert.equal((await store.findProjectResourceUsage("proj_quota"))?.projectFileBytes, 0);
+    assert.equal((await store.setProjectFileBytes("proj_quota", 9, timestamp))?.projectFileBytes, 9);
+    assert.equal((await store.setProjectFileBytes("proj_quota", 0, timestamp))?.projectFileBytes, 0);
 
     await store.patchProjectResourcePolicy("proj_quota", { projectFileBytesLimit: 1 }, timestamp);
     assert.equal((await adjustFileBytes(store, "proj_quota", 1, timestamp))?.projectFileBytes, 1);

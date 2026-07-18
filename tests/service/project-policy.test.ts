@@ -82,6 +82,23 @@ describe("project resource policy", () => {
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 1);
   });
 
+  it("reconciles file usage to the storage truth without applying the quota as a write gate", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-file-reconcile", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 5 }, "2026-07-12T00:00:00.000Z");
+    const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "running", runId: "run_file_reconcile", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    await store.createTask(task);
+    await store.appendTaskArtifacts([{ id: "artifact_file_reconcile", taskId: task.id, fileId: "file_reconcile", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: project.createdAt }]);
+
+    await services.policies.reconcileFileLibraryBytes(project.id, 8);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 10);
+    await services.policies.reconcileFileLibraryBytes(project.id, 3);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 5);
+  });
+
   it("rejects a duplicate in-memory task id without charging active capacity twice", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-duplicate-task", builtinAdminPassword: "admin-password" });
@@ -327,16 +344,14 @@ describe("project resource policy", () => {
     );
   });
 
-  it("patches nullable limits without replacing concurrent policy fields", async () => {
+  it("patches nullable limits without replacing unrelated policy fields", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-patch", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
 
-    await Promise.all([
-      services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 12 }),
-      services.policies.updatePolicy(user.id, project.id, { providerTokensLimit: null, providerCostLimit: 4 })
-    ]);
+    await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 12 });
+    await services.policies.updatePolicy(user.id, project.id, { providerTokensLimit: null, providerCostLimit: 4 });
 
     const policy = await services.policies.getPolicy(user.id, project.id);
     assert.equal(policy.providerRequestsLimit, 12);

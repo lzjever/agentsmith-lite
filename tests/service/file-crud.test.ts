@@ -305,6 +305,31 @@ describe("file CRUD service", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("reconciles files left behind before admitting the next charged upload", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-reconcile-"));
+    const service = new FileService();
+    let used = 0;
+    const reconciled: number[] = [];
+    try {
+      await service.uploadFile(root, { path: "files/unaccounted.txt", bytes: Buffer.from("four") });
+      await service.uploadFileWithAccounting(root, { path: "files/next.txt", bytes: Buffer.from("ok") }, {
+        async reconcile(bytes) {
+          reconciled.push(bytes);
+          used = bytes;
+        },
+        async record(_path, delta) {
+          if (used + delta > 6) throw new ProductError("Project file bytes limit reached", 409);
+          used += delta;
+        }
+      });
+
+      assert.deepEqual(reconciled, [4]);
+      assert.equal(used, 6);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function productError(error: unknown, statusCode: number, message: RegExp): boolean {

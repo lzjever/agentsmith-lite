@@ -414,6 +414,8 @@ export interface ProductStore {
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;
   findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null>;
   upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage>;
+  measureProjectArtifactBytes(projectId: string): Promise<number>;
+  setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null>;
   adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null>;
   reserveProjectProviderSettlement(input: ReserveProjectProviderSettlementInput): Promise<ProjectProviderSettlement | null>;
   markProjectProviderSettlementDispatched(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null>;

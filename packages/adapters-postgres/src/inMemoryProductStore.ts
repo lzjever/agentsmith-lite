@@ -386,6 +386,16 @@ export class InMemoryProductStore implements ProductStore {
   }
   async findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null> { return clone(this.usage.get(projectId) ?? null); }
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> { this.usage.set(usage.projectId, clone(usage)); return clone(usage); }
+  async measureProjectArtifactBytes(projectId: string): Promise<number> {
+    return this.artifacts.reduce((total, artifact) => total + (this.tasks.get(artifact.taskId)?.projectId === projectId ? artifact.bytes : 0), 0);
+  }
+  async setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null> {
+    const usage = this.usage.get(projectId);
+    if (!usage) return null;
+    const next = { ...usage, projectFileBytes: bytes, updatedAt };
+    this.usage.set(projectId, clone(next));
+    return clone(next);
+  }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
     const policy = this.policies.get(input.projectId);
     const usage = this.usage.get(input.projectId);

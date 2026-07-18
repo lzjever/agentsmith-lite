@@ -431,6 +431,14 @@ export class PostgresProductStore implements ProductStore {
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> {
     const rows = await this.queryRows<ProjectUsageRow>(`insert into project_resource_usage (project_id,active_tasks,provider_requests,provider_tokens,provider_cost,project_file_bytes,updated_at) values ($1,$2,$3,$4,$5,$6,$7) on conflict (project_id) do update set active_tasks=excluded.active_tasks,provider_requests=excluded.provider_requests,provider_tokens=excluded.provider_tokens,provider_cost=excluded.provider_cost,project_file_bytes=excluded.project_file_bytes,updated_at=excluded.updated_at returning *`, usageValues(usage)); return mapUsage(rows[0]!);
   }
+  async measureProjectArtifactBytes(projectId: string): Promise<number> {
+    const rows = await this.queryRows<{ bytes: string | number }>("select coalesce(sum(a.bytes),0) as bytes from agent_task_artifacts a join agent_tasks t on t.id=a.task_id where t.project_id=$1", [projectId]);
+    return Number(rows[0]?.bytes ?? 0);
+  }
+  async setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null> {
+    const rows = await this.queryRows<ProjectUsageRow>("update project_resource_usage set project_file_bytes=$2,updated_at=$3 where project_id=$1 returning *", [projectId, bytes, updatedAt]);
+    return rows[0] ? mapUsage(rows[0]) : null;
+  }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
     const delta = input.delta;
     const limitedDelta = input.limit ? usageDelta(input.limit, delta) : 0;

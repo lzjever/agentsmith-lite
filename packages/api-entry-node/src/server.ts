@@ -615,7 +615,14 @@ async function routeApi(
       if (method === "GET") return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId));
       if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req)));
     }
-    if (segments[4] === "usage" && method === "GET") return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
+    if (segments[4] === "usage" && method === "GET") {
+      const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
+      await services.files.reconcileFileBytes(services.projectAbsoluteRoot(project.rootPath), {
+        reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
+        record: async () => undefined
+      });
+      return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
+    }
     if (segments[4] === "alerts") {
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.policies.alerts(user.id, projectId));
       if (segments[5] && segments[6] === "acknowledge" && method === "POST") return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5],requireIdempotencyKey(req)));
@@ -634,7 +641,10 @@ async function routeApi(
       if (!segments[5] && method === "GET") {
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
-        return sendJson(res, 200, await services.files.listFiles(projectRoot, url.searchParams.get("path") ?? "files"));
+        return sendJson(res, 200, await services.files.listFilesWithAccounting(projectRoot, url.searchParams.get("path") ?? "files", {
+          reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
+          record: async () => undefined
+        }));
       }
       if (!segments[5] && method === "PUT") {
         const idempotencyKey = requireIdempotencyKey(req);
@@ -647,6 +657,7 @@ async function routeApi(
           const saved = await services.files.uploadFileWithAccounting(projectRoot, {
             path: filePath, bytes, overwrite
           }, {
+            reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
             record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
           });
           await services.policies.recordOperation(projectId, user.id, "file.upload", "accepted", saved.path, "file", {
@@ -666,6 +677,7 @@ async function routeApi(
         const filePath = asString(body.path);
         const response = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,async()=>{
           const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
+            reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
             record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
           });
           await services.policies.recordOperation(projectId, user.id, "file.delete", "accepted", filePath, "file", {
