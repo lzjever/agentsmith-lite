@@ -105,7 +105,7 @@ describe("ChatService", () => {
 
     await sendThreadMessage(services, user.id, project.id, endpoint.id, "hello");
 
-    assert.equal(calls[0]?.messages[0]?.role, "user");
+    assert.equal(calls[0]?.messages[0]?.role, "system");
     assert.match(calls[0]?.messages[0]?.content ?? "", /answer\.style[\s\S]*Answer in one sentence/);
     assert.deepEqual(calls[0]?.messages.at(-1), { role: "user", content: "hello" });
     const thread = (await services.chat.listThreads(user.id, project.id))[0]!;
