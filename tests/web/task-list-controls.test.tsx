@@ -98,16 +98,13 @@ describe("task list controls", () => {
     } finally { apiClient.uploadFile = original; }
   });
 
-  it("reuses pending keys for task input uploads and URL notes", async () => {
-    const original = { uploadFile: apiClient.uploadFile, createTaskUrlInput: apiClient.createTaskUrlInput, files: apiClient.files };
+  it("reuses a pending key when a task input upload is retried", async () => {
+    const original = { uploadFile: apiClient.uploadFile, files: apiClient.files };
     const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
     const uploadKeys: Array<string | undefined> = [];
-    const urlKeys: string[] = [];
     let uploadAttempts = 0;
-    let urlAttempts = 0;
     apiClient.files = async () => ({ entries: [] });
     apiClient.uploadFile = async (_projectId, path, _file, options) => { uploadKeys.push(options?.idempotencyKey); if (++uploadAttempts === 1) throw new Error("connection closed"); return { path, bytes: 1, mediaType: "text/plain", updatedAt: "x" }; };
-    apiClient.createTaskUrlInput = (async (_projectId:string,_url:string,key:string)=>{urlKeys.push(key);if(++urlAttempts===1)throw new Error("connection closed");return{path:"files/url-inputs/example.md",bytes:1,mediaType:"text/markdown"};}) as typeof apiClient.createTaskUrlInput;
     try {
       render(<TaskCreateDialog projectId="project_1" canWriteFiles endpoints={[endpoint]} projectFiles={[]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async () => undefined} />);
       const file = new File(["a"], "brief.txt", { type: "text/plain", lastModified: 1 });
@@ -117,12 +114,6 @@ describe("task list controls", () => {
       fireEvent.change(input, { target: { files: [file] } });
       await waitFor(() => assert.equal(uploadAttempts, 2));
       assert.ok(uploadKeys[0]);assert.equal(uploadKeys[1],uploadKeys[0]);
-      fireEvent.change(screen.getByRole("textbox", { name: "Attach URL" }), { target: { value: "https://example.test" } });
-      fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
-      await waitFor(() => assert.equal(urlAttempts, 1));
-      fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
-      await waitFor(() => assert.equal(urlAttempts, 2));
-      assert.ok(urlKeys[0]);assert.equal(urlKeys[1],urlKeys[0]);
     } finally { Object.assign(apiClient, original); }
   });
 

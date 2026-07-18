@@ -316,7 +316,6 @@ export const apiClient = {
     if (!response.ok) throw await apiResponseError(response);
     return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
   },
-  createTaskUrlInput: (projectId:string,url:string,idempotencyKey:string) => jsonIdempotent<{path:string;bytes:number;mediaType:string}>(`/projects/${encodeURIComponent(projectId)}/files/url-note`,"POST",idempotencyKey,{url}),
   deleteFile: (projectId: string, path: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/files`, "DELETE", idempotencyKey, { path }),
   fileDownloadUrl: (projectId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}`,
   async downloadProjectFile(projectId: string, path: string, signal?: AbortSignal): Promise<Blob> {

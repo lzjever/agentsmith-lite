@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
@@ -600,23 +600,6 @@ async function routeApi(
     }
     if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
     if (segments[4] === "files") {
-      if (segments[5] === "url-note" && method === "POST") {
-        const idempotencyKey = requireIdempotencyKey(req);
-        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
-        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
-        const body = await readJson(req);
-        assertOnlyKeys(body,["url"]);
-        const inputUrl = normalizeTaskInputUrl(asString(body.url));
-        const host = inputUrl.hostname.toLowerCase().replace(/[^a-z0-9.-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,80) || "link";
-        const filePath = `files/url-inputs/${host}-${randomUUID()}.md`;
-        const bytes = Buffer.from(`# URL input\n\n${inputUrl.href}\n`,"utf8");
-        const written = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.url-note",idempotencyKey,{projectId,url:inputUrl.href},filePath,async(resourcePath)=>{
-          const saved = await services.files.uploadFileWithAccounting(projectRoot,{path:resourcePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
-          await services.policies.recordOperation(projectId,user.id,"file.upload","accepted",saved.path,"file",{filePath:saved.path,bytes:saved.bytes,mediaType:saved.mediaType});
-          return saved;
-        });
-        return sendJson(res,200,written);
-      }
       if (!segments[5] && method === "GET") {
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
@@ -1022,7 +1005,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/files(?:\/(?:download|url-note))?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/files(?:\/download)?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
@@ -1376,14 +1359,6 @@ function asString(value: unknown): string {
   return value;
 }
 
-function normalizeTaskInputUrl(value:string):URL{
-  const trimmed=value.trim();
-  if(!trimmed||trimmed.length>2048)throw new ProductError("URL must be between 1 and 2048 characters",400);
-  let parsed:URL;try{parsed=new URL(trimmed);}catch{throw new ProductError("Enter a valid URL",400);}
-  if(parsed.protocol!=="http:"&&parsed.protocol!=="https:")throw new ProductError("Only HTTP and HTTPS URLs can be attached",400);
-  if(parsed.username||parsed.password)throw new ProductError("URL credentials are not allowed",400);
-  return parsed;
-}
 function asStringArray(value:unknown,field:string):string[]{if(!Array.isArray(value)||value.some((item)=>typeof item!=="string"))throw new ProductError(`${field} must be an array of strings`);return value;}
 function asPositiveQueryInteger(value:string,field:string):number{const parsed=Number(value);if(!Number.isInteger(parsed)||parsed<1)throw new ProductError(`${field} must be a positive integer`);return parsed;}
 function requireIdempotencyKey(req:IncomingMessage):string{const value=req.headers["idempotency-key"];if(typeof value!=="string"||!value.trim())throw new ProductError("Idempotency-Key header is required",400);if(value.trim().length>200)throw new ProductError("Idempotency-Key must be at most 200 characters",400);return value.trim();}

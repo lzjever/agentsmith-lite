@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, ChevronRight, FileText, Folder, FolderUp, Link as LinkIcon, Upload, X } from "lucide-react";
+import { AlertCircle, ChevronRight, FileText, Folder, FolderUp, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectFile } from "../../lib/api/client";
@@ -39,8 +39,6 @@ export function TaskCreateDialog({
   const [browserEntries, setBrowserEntries] = useState<ProjectFile[]>(projectFiles);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [urlInput, setUrlInput] = useState("");
-  const [addingUrl, setAddingUrl] = useState(false);
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
   const uploadInput = useRef<HTMLInputElement>(null);
@@ -51,7 +49,6 @@ export function TaskCreateDialog({
   useEffect(() => {
     if (!open) {
       mutationKeys.clear("task-input.upload");
-      mutationKeys.clear("task-input.url");
       wasOpen.current = false;
       browserLoadVersion.current += 1;
       setBrowserLoading(false);
@@ -67,7 +64,6 @@ export function TaskCreateDialog({
     setBrowserLoading(false);
     setBrowserPath(PROJECT_FILES_ROOT);
     setBrowserEntries(sortFileEntries(projectFiles));
-    setUrlInput("");
     clearError();
   }, [endpoints, open, projectFiles]);
 
@@ -122,22 +118,6 @@ export function TaskCreateDialog({
     if (file) void upload(file);
   }
 
-  async function addUrl() {
-    if (!projectId || !urlInput.trim()) return;
-    const url = urlInput.trim();
-    setAddingUrl(true);
-    clearError();
-    try {
-      const written = await apiClient.createTaskUrlInput(projectId, url, mutationKeys.key("task-input.url", url));
-      mutationKeys.complete("task-input.url", url);
-      setInputPaths((current) => current.includes(written.path) ? current : [...current, written.path]);
-      setUrlInput("");
-    } catch (reason) {
-      if (reason instanceof ApiError) mutationKeys.complete("task-input.url", url);
-      showError(reason, "The URL could not be attached.");
-    } finally { setAddingUrl(false); }
-  }
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!prompt.trim() || !endpointId || saving) return;
@@ -153,7 +133,7 @@ export function TaskCreateDialog({
   const crumbs = fileBreadcrumbs(browserPath);
   const entries = projectId ? browserEntries : projectFiles;
   const loadingFiles = projectFilesLoading || browserLoading;
-  const busy = saving || uploading || addingUrl;
+  const busy = saving || uploading;
 
   return <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
     <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl overflow-y-auto">
@@ -170,7 +150,6 @@ export function TaskCreateDialog({
               <div className="flex flex-wrap items-center justify-between gap-2"><legend className="text-sm text-secondary">Project inputs <span className="text-tertiary">({inputPaths.length} selected)</span></legend>{projectId && canWriteFiles ? <><Button type="button" variant="quiet" size="sm" disabled={busy} onClick={() => uploadInput.current?.click()}><Upload size={15} />{uploading ? "Uploading..." : "Upload and attach"}</Button><input ref={uploadInput} hidden type="file" onChange={selectUpload} /></> : null}</div>
               {projectId ? <nav className="flex min-h-9 items-center gap-1 overflow-x-auto border border-subtle px-2" aria-label="Task input path"><ol className="flex min-w-max items-center gap-1 text-xs text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index ? <ChevronRight size={13} className="text-tertiary" /> : null}<button type="button" className="px-1 py-1 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav> : null}
               {loadingFiles ? <p className="text-sm text-tertiary">Loading project files...</p> : entries.length || parent ? <div className="max-h-48 divide-y divide-subtle overflow-y-auto border border-subtle">{parent ? <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-secondary hover:bg-surface-low disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void navigate(parent)}><FolderUp className="size-4" />Up one folder</button> : null}{entries.map((file) => <FileChoice key={file.path} file={file} selected={inputPaths.includes(file.path)} disabled={busy} onToggle={() => setInputPaths((current) => current.includes(file.path) ? current.filter((path) => path !== file.path) : [...current, file.path])} onOpen={() => void navigate(file.path)} />)}</div> : <p className="text-sm text-tertiary">No project files available.</p>}
-              {projectId && canWriteFiles ? <div className="flex gap-2"><label className="relative min-w-0 flex-1"><span className="sr-only">Attach URL</span><LinkIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input className="pl-9" type="url" value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="https://example.com/resource" disabled={busy} /></label><Button type="button" variant="outline" disabled={!urlInput.trim() || busy} onClick={() => void addUrl()}>{addingUrl ? "Adding..." : "Add URL"}</Button></div> : null}
               {inputPaths.length ? <div className="flex flex-wrap gap-1.5">{inputPaths.map((path) => <button type="button" key={path} className="inline-flex max-w-full items-center gap-1 border border-border bg-surface-low px-2 py-1 text-xs text-secondary disabled:cursor-not-allowed disabled:opacity-50" title={`Remove ${path}`} disabled={busy} onClick={() => setInputPaths((current) => current.filter((candidate) => candidate !== path))}><span className="truncate">{path.replace(/^files\//, "")}</span><X size={12} /></button>)}</div> : null}
             </fieldset>
             <label className="grid gap-1.5 text-sm text-secondary">Task prompt<Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-36 resize-y" placeholder="Describe the result you need" disabled={busy} /></label>

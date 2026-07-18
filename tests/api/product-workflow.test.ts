@@ -336,7 +336,7 @@ describe("api product workflow", () => {
     if (/\/endpoints\/[^/]+(?:\/health)?$/.test(pathname) && ["POST", "PATCH", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
-    if (/\/projects\/[^/]+\/files(?:\/url-note)?$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
+    if (/\/projects\/[^/]+\/files$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
     if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
