@@ -744,12 +744,14 @@ describe("project resource pages", () => {
       await waitFor(() => assert.equal(queries.at(-1)?.actorId, "user_1"));
       assert.equal(new URL(window.location.href).searchParams.get("actorId"), "user_1");
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
-      assert.ok(await screen.findByRole("option", { name: "chat.message.send" }));
+      assert.ok(await screen.findByRole("option", { name: "Sent chat message" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));
       const row = await screen.findByRole("button", { name: /alert.rule.delete/ });
       fireEvent.click(row);
       await screen.findByRole("heading", { name: "Audit event detail" });
       assert.ok(screen.getByText("Event metadata for this project activity."));
+      assert.ok(screen.getAllByText("Deleted alert rule").length >= 2);
+      assert.ok(screen.getByText("alert.rule.delete"));
       assert.ok(screen.getAllByText("Ada Admin").length > 0);
       assert.ok(screen.getByText(event.createdAt));
       assert.equal(screen.queryByText("do not render"), null);
@@ -765,14 +767,14 @@ describe("project resource pages", () => {
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
       await screen.findByText("No audit events match this query.");
-      await waitFor(() => assert.match(screen.getByRole("combobox", { name: "Result" }).textContent ?? "", /rejected/));
+      await waitFor(() => assert.match(screen.getByRole("combobox", { name: "Result" }).textContent ?? "", /Rejected/));
 
       assert.ok(screen.getByText("From"));
       assert.ok(screen.getByText("To"));
       assert.match(screen.getByLabelText("To timestamp").parentElement?.parentElement?.className ?? "", /xl:grid-cols-4/);
 
       fireEvent.click(screen.getByRole("combobox", { name: "Resource type" }));
-      fireEvent.click(await screen.findByRole("option", { name: "task", exact: true }));
+      fireEvent.click(await screen.findByRole("option", { name: "Task", exact: true }));
       await waitFor(() => {
         const query = new URL(window.location.href).searchParams;
         assert.equal(query.get("resourceKind"), "task");
@@ -781,12 +783,12 @@ describe("project resource pages", () => {
       await screen.findByText("No audit events match this query.");
 
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
-      fireEvent.click(await screen.findByRole("option", { name: "chat.message.send" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Sent chat message" }));
       assert.equal(new URL(window.location.href).searchParams.get("action"), "chat.message.send");
       await screen.findByText("No audit events match this query.");
 
       fireEvent.click(screen.getByRole("combobox", { name: "Result" }));
-      fireEvent.click(await screen.findByRole("option", { name: "accepted" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Accepted" }));
       assert.equal(new URL(window.location.href).searchParams.get("status"), "accepted");
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
   });
@@ -819,7 +821,7 @@ describe("project resource pages", () => {
       const view = render(<AuditPage projectId="project_1" />);
       await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1")));
       fireEvent.click(screen.getByRole("combobox", { name: "Result" }));
-      fireEvent.click(await screen.findByRole("option", { name: "rejected" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Rejected" }));
       fireEvent.change(screen.getByLabelText("From timestamp"), { target: { value: "2026-07-10T12:00" } });
       await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1" && call.query.status === "rejected" && typeof call.query.from === "string")));
 
@@ -845,14 +847,14 @@ describe("project resource pages", () => {
     };
     try {
       render(<AuditPage projectId={projectId} />);
-      await screen.findByText("alert.acknowledge");
+      await screen.findByText("Acknowledged alert");
       fireEvent.click(screen.getByRole("button", { name: "Refresh audit" }));
       await waitFor(() => assert.equal(reads, 2));
       fireEvent.click(screen.getByRole("button", { name: "Refresh audit" }));
-      await screen.findByText("alert.resolve");
+      await screen.findByText("Resolved alert");
       await act(async () => { resolveOlder({ items: [auditEvent("older", "alert.dismiss")], nextCursor: null }); await Promise.resolve(); });
-      assert.ok(screen.getByText("alert.resolve"));
-      assert.equal(screen.queryByText("alert.dismiss"), null);
+      assert.ok(screen.getByText("Resolved alert"));
+      assert.equal(screen.queryByText("Dismissed alert"), null);
     } finally { restoreClient(original); }
   });
 

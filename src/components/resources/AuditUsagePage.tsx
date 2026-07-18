@@ -126,6 +126,26 @@ const actions = ["all", ...PROJECT_AUDIT_ACTIONS] as const;
 const kinds = ["all", ...PROJECT_AUDIT_RESOURCE_KINDS] as const;
 const statuses = ["all", "accepted", "rejected"] as const;
 
+const auditActionLabels: Record<(typeof PROJECT_AUDIT_ACTIONS)[number], string> = {
+  "project.settings.update": "Updated project settings", "project.archive": "Archived project", "project.unarchive": "Restored project", "project.owner.transfer": "Transferred project ownership", "project.delete": "Deleted project",
+  "policy.update": "Updated resource policy",
+  "credential.create": "Created credential", "credential.rotate": "Rotated credential", "credential.delete": "Deleted credential",
+  "endpoint.create": "Created endpoint", "endpoint.update": "Updated endpoint", "endpoint.delete": "Deleted endpoint", "endpoint.health_check": "Checked endpoint health", "endpoint.model_discover": "Discovered endpoint models",
+  "membership.add": "Added project member", "membership.change": "Changed project member", "membership.remove": "Removed project member",
+  "provider.request": "Called model provider",
+  "chat.thread.create": "Created conversation", "chat.thread.update": "Updated conversation", "chat.thread.delete": "Deleted conversation",
+  "chat.message.send": "Sent chat message", "chat.message.retry": "Retried chat message", "chat.message.stop": "Stopped chat message", "chat.message.edit": "Edited chat message", "chat.message.delete": "Deleted chat message", "chat.message.branch": "Branched conversation",
+  "task.create": "Created task", "task.edit": "Edited task", "task.archive": "Archived task", "task.delete": "Deleted task",
+  "task.message.create": "Sent task message", "task.message.edit": "Edited task message", "task.message.delete": "Deleted task message", "task.cancel": "Cancelled task", "task.completed": "Task completed", "task.failed": "Task failed", "task.expired": "Task expired", "task.cleaned": "Cleaned task resources",
+  "artifact.project": "Projected task artifact", "sandbox.failed": "Sandbox failed",
+  "file.upload": "Uploaded file", "file.delete": "Deleted file", "file.quota": "Reached file quota",
+  "alert.resolve": "Resolved alert", "alert.dismiss": "Dismissed alert", "alert.rule.create": "Created alert rule", "alert.rule.update": "Updated alert rule", "alert.rule.delete": "Deleted alert rule", "alert.acknowledge": "Acknowledged alert", "alert.silence": "Silenced alert"
+};
+
+const auditResourceLabels: Record<(typeof PROJECT_AUDIT_RESOURCE_KINDS)[number], string> = {
+  project: "Project", credential: "Credential", endpoint: "Endpoint", member: "Project member", chat_thread: "Conversation", chat_message: "Chat message", task: "Task", artifact: "Task artifact", provider: "Model provider", file: "File", file_quota: "File quota", sandbox: "Sandbox", alert: "Alert"
+};
+
 export function AuditPage({ projectId }: { projectId: string }) {
   return <AuditProjectPage key={projectId} projectId={projectId} />;
 }
@@ -300,6 +320,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               reset();
             }}
             values={actions}
+            formatValue={auditActionLabel}
           />
           <Filter
             label="Result"
@@ -313,6 +334,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               reset();
             }}
             values={statuses}
+            formatValue={auditResultLabel}
           />
           <Filter
             label="Resource type"
@@ -328,6 +350,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               reset();
             }}
             values={kinds}
+            formatValue={auditResourceLabel}
           />
           <div className="grid gap-1">
             <span className="text-xs text-secondary">From</span>
@@ -377,16 +400,16 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
                   {formatDate(event.createdAt)}
                 </span>
                 <span className="truncate text-xs text-secondary" title={actorName(event)}>{actorName(event)}</span>
-                <strong className="text-sm font-medium">{event.action}</strong>
+                <strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong>
                 <Badge
                   variant={
                     event.status === "rejected" ? "destructive" : "secondary"
                   }
                 >
-                  {event.status}
+                  {auditResultLabel(event.status)}
                 </Badge>
                 <span className="break-all text-xs text-secondary">
-                  {event.resourceKind}: {event.resourceId ?? "-"}
+                  {auditResourceLabel(event.resourceKind)}: {event.resourceId ?? "-"}
                 </span>
               </button>
             ))}
@@ -421,17 +444,23 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
 function actorName(event:ProjectAuditEvent):string{return event.actorId===null?"System":event.actorDisplayName||event.actorEmail||event.actorId}
 function auditActors(members:ProjectMember[],events:ProjectAuditEvent[],selected:string):Array<{id:string;label:string}>{const actors=new Map<string,string>();actors.set("system","System");for(const member of members)actors.set(member.userId,member.displayName?`${member.displayName} (${member.email})`:member.email);for(const event of events)if(event.actorId)actors.set(event.actorId,event.actorDisplayName?`${event.actorDisplayName} (${event.actorEmail??event.actorId})`:event.actorEmail??event.actorId);if(selected!=="all"&&!actors.has(selected))actors.set(selected,selected);return [...actors].map(([id,label])=>({id,label}))}
 function linkedResourceLabel(kind:string,resourceId:string):string{if(kind==="alert")return resourceId.startsWith("alert_rule_")?"alert rule":"alert instance";return `${kind==="all"?"linked":kind.replaceAll("_"," ")} resource`}
+function auditActionLabel(value:string):string{return value in auditActionLabels?auditActionLabels[value as keyof typeof auditActionLabels]:humanizeAuditToken(value)}
+function auditResourceLabel(value:string):string{return value in auditResourceLabels?auditResourceLabels[value as keyof typeof auditResourceLabels]:humanizeAuditToken(value)}
+function auditResultLabel(value:string):string{return value==="accepted"?"Accepted":value==="rejected"?"Rejected":humanizeAuditToken(value)}
+function humanizeAuditToken(value:string):string{return value.replace(/[._-]+/g," ").replace(/\s+/g," ").trim().replace(/^./,(character)=>character.toUpperCase())}
 
 function Filter({
   label,
   value,
   onChange,
   values,
+  formatValue = humanizeAuditToken,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   values: readonly string[];
+  formatValue?: (value: string) => string;
 }) {
   return (
     <div className="grid gap-1">
@@ -445,7 +474,7 @@ function Filter({
             <SelectItem value={item} key={item}>
               {item === "all"
                 ? `All ${label.toLowerCase()}s`
-                : item.replaceAll("_", " ")}
+                : formatValue(item)}
             </SelectItem>
           ))}
         </SelectContent>
@@ -472,7 +501,8 @@ function DetailDialog({
             />
             <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
               <DT label="Timestamp" value={event.createdAt} />
-              <DT label="Action" value={event.action} />
+              <DT label="Action" value={auditActionLabel(event.action)} />
+              <DT label="Action ID" value={event.action} />
               <DT
                 label="Actor"
                 value={
@@ -482,11 +512,9 @@ function DetailDialog({
                   "System"
                 }
               />
-              <DT
-                label="Resource"
-                value={`${event.resourceKind}: ${event.resourceId ?? "-"}`}
-              />
-              <DT label="Result" value={event.status} />
+              <DT label="Resource type" value={auditResourceLabel(event.resourceKind)} />
+              <DT label="Resource ID" value={event.resourceId ?? "-"} />
+              <DT label="Result" value={auditResultLabel(event.status)} />
               {Object.entries(event.detail ?? {}).map(([key, value]) => (
                 <DT
                   label={key.replaceAll(/([A-Z])/g, " $1")}
