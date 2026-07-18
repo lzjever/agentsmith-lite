@@ -164,19 +164,74 @@ describe("context manager", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("reloads a changed entry and requires a new confirmation before deleting it", async () => {
+    const original = { contexts: apiClient.contexts, deleteContext: apiClient.deleteContext };
+    const entry = { id: "ctx_changed", workspaceId: "workspace_1", projectId: null, ownerUserId: null, scope: "workspace_shared" as const, contextKey: "project.rules", content: "before", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    let loads = 0;
+    const versions: number[] = [];
+    apiClient.contexts = async () => {
+      const latest = loads++ > 0;
+      return { items: [{ ...entry, content: latest ? "changed remotely" : "before", version: latest ? 2 : 1 }], canWrite: true };
+    };
+    apiClient.deleteContext = async (input) => {
+      versions.push(input.expectedVersion);
+      if (versions.length === 1) throw new ApiError(409, "Context changed elsewhere. Reload and try again.", "context_version_conflict");
+      return { deleted: true };
+    };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete entry" }));
+
+      await screen.findByText("Context changed elsewhere. Latest version loaded; review before deleting.");
+      assert.equal(screen.queryByRole("alertdialog", { name: "Delete context entry" }), null);
+      assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "changed remotely");
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete entry" }));
+      await waitFor(() => assert.deepEqual(versions, [1, 2]));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("sends rename versions and offers recovery for a stale write", async () => {
     const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
     let loads = 0;
-    apiClient.contexts = async (input) => { loads++; return { items: [{ id: "ctx_1", workspaceId: input.workspaceId, projectId: null, ownerUserId: "user_1", scope: input.scope, contextKey: "draft", content: "one", contentType: "text", version: 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }], canWrite: true } satisfies ContextList; };
-    apiClient.saveContext = async () => { throw new ApiError(409, "Context changed elsewhere. Reload and try again."); };
+    apiClient.contexts = async (input) => {
+      loads++;
+      return { items: [
+        { id: "ctx_other", workspaceId: input.workspaceId, projectId: null, ownerUserId: "user_1", scope: input.scope, contextKey: "other", content: "leave me", contentType: "text", version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" },
+        { id: "ctx_1", workspaceId: input.workspaceId, projectId: null, ownerUserId: "user_1", scope: input.scope, contextKey: "draft", content: loads > 1 ? "remote latest" : "one", contentType: "text", version: loads > 1 ? 3 : 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }
+      ], canWrite: true } satisfies ContextList;
+    };
+    apiClient.saveContext = async () => { throw new ApiError(409, "Context changed elsewhere. Reload and try again.", "context_version_conflict"); };
     try {
       render(<ContextManager workspaceId="workspace_1" />);
-      fireEvent.change(await screen.findByRole("textbox", { name: "Content" }), { target: { value: "two" } });
+      fireEvent.click(await screen.findByRole("button", { name: /draft/i }));
+      const content = screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement;
+      fireEvent.change(content, { target: { value: "two" } });
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
       await screen.findByRole("alert");
       fireEvent.click(screen.getByRole("button", { name: "Reload latest" }));
       await waitFor(() => assert.ok(loads >= 2));
+      await waitFor(() => assert.equal((screen.getByRole("textbox", { name: "Content" }) as HTMLTextAreaElement).value, "remote latest"));
+      assert.equal((screen.getByRole("textbox", { name: "Key" }) as HTMLInputElement).value, "draft");
     } finally { apiClient.contexts = original.contexts; apiClient.saveContext = original.saveContext; }
+  });
+
+  it("keeps a duplicate-key rename editable without offering stale-version recovery", async () => {
+    const original = { contexts: apiClient.contexts, saveContext: apiClient.saveContext };
+    const entry = { id: "ctx_1", workspaceId: "workspace_1", projectId: null, ownerUserId: "user_1", scope: "workspace_personal" as const, contextKey: "draft", content: "one", contentType: "text" as const, version: 1, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
+    apiClient.contexts = async () => ({ items: [entry], canWrite: true });
+    apiClient.saveContext = async () => { throw new ApiError(409, "A context entry already uses that key", "context_key_conflict"); };
+    try {
+      render(<ContextManager workspaceId="workspace_1" />);
+      const key = await screen.findByRole("textbox", { name: "Key" }) as HTMLInputElement;
+      fireEvent.change(key, { target: { value: "existing" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await screen.findByText("A context entry already uses that key");
+      assert.equal(key.value, "existing");
+      assert.equal(screen.queryByRole("button", { name: "Reload latest" }), null);
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("fails closed when the project is archived during a context write", async () => {

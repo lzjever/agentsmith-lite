@@ -63,12 +63,12 @@ export class ContextService {
       const entries = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
       const existing = entries.find((entry) => entry.contextKey === previousContextKey);
       const updateRequested = input.previousContextKey !== undefined || input.expectedVersion !== undefined;
-      if (!existing && updateRequested) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
-      if (existing && !updateRequested) throw new ProductError("A context entry already uses that key", 409);
-      if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw new ProductError("A context entry already uses that key", 409);
+      if (!existing && updateRequested) throw contextVersionConflict();
+      if (existing && !updateRequested) throw contextKeyConflict();
+      if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw contextKeyConflict();
       if (existing) {
         if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
-        if (existing.version !== input.expectedVersion) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+        if (existing.version !== input.expectedVersion) throw contextVersionConflict();
         if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing, contentType);
       }
       const entry: ProjectContextEntry = {
@@ -78,11 +78,15 @@ export class ContextService {
       };
       if (!existing) {
         const created = await this.store.createProjectContextEntry(entry);
-        if (!created) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+        if (!created) throw contextKeyConflict();
         return toView(created, contentType);
       }
       const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
-      if (!updated) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      if (!updated) {
+        const latest = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
+        if (latest.some((candidate) => candidate.contextKey === contextKey && candidate.id !== existing.id)) throw contextKeyConflict();
+        throw contextVersionConflict();
+      }
       return toView(updated, contentType);
     };
     if (!idempotencyKey) return save(newId("ctx"));
@@ -98,7 +102,7 @@ export class ContextService {
       const entry = entries.find((candidate) => candidate.contextKey === contextKey);
       if (!entry) throw new NotFoundError("Context entry not found");
       if (!Number.isInteger(target.expectedVersion) || target.expectedVersion < 1) throw new ProductError("expectedVersion is required to delete context", 400);
-      if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) throw contextVersionConflict();
       return { deleted: true as const };
     };
     if (!idempotencyKey) return remove();
@@ -227,4 +231,12 @@ function inferredContentType(content: string): ContextContentType {
   } catch {
     return "text";
   }
+}
+
+function contextKeyConflict(): ProductError {
+  return new ProductError("A context entry already uses that key", 409, "context_key_conflict");
+}
+
+function contextVersionConflict(): ProductError {
+  return new ProductError("Context changed elsewhere. Reload and try again.", 409, "context_version_conflict");
 }

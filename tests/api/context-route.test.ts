@@ -36,11 +36,16 @@ describe("context API", () => {
     assert.equal(renamed.contextKey, "project.renamed");
     const stale = await request("PUT", "/api/v1/context", { ...input, previousContextKey: "project.renamed", expectedVersion: saved.version, contextKey: "project.renamed" });
     assert.equal(stale.response.status, 409);
+    assert.equal(stale.body.code, "context_version_conflict");
+    const duplicate = await request("PUT", "/api/v1/context", { ...input, contextKey: "project.renamed" });
+    assert.equal(duplicate.response.status, 409);
+    assert.equal(duplicate.body.code, "context_key_conflict");
     const malformed = await request("PUT", "/api/v1/context", { ...input, contextKey: "bad", content: "{" });
     assert.equal(malformed.response.status, 400);
     const updated = await requestJson("PUT", "/api/v1/context", { ...input, previousContextKey: "project.renamed", expectedVersion: renamed.version, contextKey: "project.renamed", content: "{\"tone\":\"detailed\"}" });
     const staleDelete = await request("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "project.renamed", expectedVersion: renamed.version });
     assert.equal(staleDelete.response.status, 409);
+    assert.equal(staleDelete.body.code, "context_version_conflict");
     const deleted = await requestJson("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "project.renamed", expectedVersion: updated.version });
     assert.deepEqual(deleted, { deleted: true });
   });

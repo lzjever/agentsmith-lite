@@ -51,11 +51,11 @@ describe("context service", () => {
     const renamed = await services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "draft", expectedVersion: created.version, contextKey: "notes", content: "two", contentType: "text" });
     assert.equal(renamed.contextKey, "notes");
     assert.equal(renamed.version, 2);
-    await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: 1, contextKey: "notes", content: "stale", contentType: "text" }), status(409));
-    await assert.rejects(() => services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: 1 }), status(409));
+    await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: 1, contextKey: "notes", content: "stale", contentType: "text" }), code(409, "context_version_conflict"));
+    await assert.rejects(() => services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: 1 }), code(409, "context_version_conflict"));
     assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items[0]?.version, 2);
     await services.contexts.delete(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", contextKey: "notes", expectedVersion: renamed.version });
-    await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: renamed.version, contextKey: "notes", content: "must not recreate", contentType: "text" }), status(409));
+    await assert.rejects(() => services.contexts.upsert(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal", previousContextKey: "notes", expectedVersion: renamed.version, contextKey: "notes", content: "must not recreate", contentType: "text" }), code(409, "context_version_conflict"));
     assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items.length, 0);
   });
 
@@ -76,7 +76,7 @@ describe("context service", () => {
     assert.equal((await services.contexts.list(owner.user.id, target)).items.filter((entry) => entry.contextKey === "same").length, 1);
     await assert.rejects(
       () => services.contexts.upsert(owner.user.id, { ...target, contextKey: "same", content: "later", contentType: "text" }),
-      message(409, "A context entry already uses that key")
+      code(409, "context_key_conflict", "A context entry already uses that key")
     );
 
     const left = await services.contexts.upsert(owner.user.id, { ...target, contextKey: "left", content: "left", contentType: "text" });
@@ -188,4 +188,10 @@ describe("context service", () => {
 function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }
 function message(expectedStatus: number, expectedMessage: string) {
   return (error: unknown) => error instanceof ProductError && error.statusCode === expectedStatus && error.message === expectedMessage;
+}
+function code(expectedStatus: number, expectedCode: string, expectedMessage?: string) {
+  return (error: unknown) => error instanceof ProductError
+    && error.statusCode === expectedStatus
+    && error.code === expectedCode
+    && (expectedMessage === undefined || error.message === expectedMessage);
 }
