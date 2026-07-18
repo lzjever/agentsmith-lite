@@ -134,6 +134,18 @@ describe("personal and resource UI", () => {
     } finally { Object.assign(apiClient,original); }
   });
 
+  it("removes a notification that disappeared before it was dismissed", async () => {
+    const original = { notifications: apiClient.notifications, dismissNotification: apiClient.dismissNotification };
+    apiClient.notifications = async () => [notification];
+    apiClient.dismissNotification = async () => { throw new ApiError(404, "Notification not found"); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
+      fireEvent.click(await screen.findByRole("button", { name: "Dismiss notification" }));
+      await screen.findByRole("heading", { name: "No notifications" });
+      assert.equal(screen.queryByText("Task finished"), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("does not navigate after a pending notification read leaves the page", async () => {
     const original = { notifications: apiClient.notifications, markNotificationRead: apiClient.markNotificationRead };
     const pushed: string[] = [];

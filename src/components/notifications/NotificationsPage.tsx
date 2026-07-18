@@ -89,8 +89,16 @@ export function NotificationsPage() {
       loadRequest.current += 1;
       setItems((current) => current.filter((item) => item.id !== id));
       setState("ready");
-    } catch {
-      if (mounted.current) setMutationError({ id, action: "dismiss", message: "Notification could not be dismissed." });
+    } catch (reason) {
+      if (!mounted.current) return;
+      if (isMissingNotification(reason)) {
+        loadRequest.current += 1;
+        setItems((current) => current.filter((item) => item.id !== id));
+        setState("ready");
+        notifyNotificationsChanged("page");
+        return;
+      }
+      setMutationError({ id, action: "dismiss", message: "Notification could not be dismissed." });
     } finally {
       if (mounted.current) setBusy(id, false);
     }
