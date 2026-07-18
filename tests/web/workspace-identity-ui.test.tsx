@@ -61,6 +61,25 @@ describe("workspace identity UX", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("submits a workspace member from the add form", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, addWorkspaceMember: apiClient.addWorkspaceMember };
+    const member: WorkspaceMember = { ...owner, userId: "member_form", role: "member", displayName: "Form Member", email: "form@example.test" };
+    let additions = 0;
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => [owner];
+    apiClient.addWorkspaceMember = async () => { additions += 1; return member; };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Email" }), { target: { value: member.email } });
+      fireEvent.submit(screen.getByRole("textbox", { name: "Email" }).closest("form")!);
+
+      await waitFor(() => assert.equal(additions, 1));
+      assert.ok(await screen.findByText("Form Member"));
+      assert.equal(screen.queryByRole("dialog", { name: "Add workspace member" }), null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("waits for the workspace directory before allowing creation", async () => {
     const original = apiClient.workspaces;
     let finishLoad!: (value: Workspace[]) => void;
