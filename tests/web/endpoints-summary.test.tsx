@@ -289,10 +289,10 @@ describe("endpoint dependencies", () => {
     apiClient.credentials = async () => [];
     apiClient.projectCapabilities = async () => manager;
     try {
-      render(<EndpointsPage projectId="project_1" />);
+      render(<EndpointsPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByRole("heading", { name: "Create a credential first" });
       const link = screen.getByRole("link", { name: "Project credentials" });
-      assert.equal(link.getAttribute("href"), "credentials");
+      assert.equal(link.getAttribute("href"), "/workspaces/workspace_1/projects/project_1/credentials");
       assert.equal(screen.queryByRole("button", { name: "Create endpoint" }), null);
       assert.equal(screen.queryByRole("dialog", { name: "Create endpoint" }), null);
     } finally {
