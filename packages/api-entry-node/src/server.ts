@@ -503,7 +503,7 @@ async function routeApi(
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "settings") {
     const workspaceId = segments[3];
     if (method === "GET") return sendJson(res, 200, await services.settings.workspace(user.id, workspaceId));
-    if (method === "PATCH") {const body=await readJson(req);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.settings.update",requireIdempotencyKey(req),body,workspaceId,()=>services.settings.updateWorkspace(user.id,workspaceId,body)));}
+    if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.settings.update",requireIdempotencyKey(req),body,workspaceId,()=>services.settings.updateWorkspace(user.id,workspaceId,{...body,expectedName:body.expectedName})));}
     if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.archive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.archiveWorkspace(user.id,workspaceId)));
     if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.unarchive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.unarchiveWorkspace(user.id,workspaceId)));
   }
@@ -525,7 +525,7 @@ async function routeApi(
     }
     if (segments[4] === "settings") {
       if (method === "GET") return sendJson(res, 200, await services.settings.project(user.id, projectId));
-      if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,body);await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
+      if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,{...body,expectedName:body.expectedName});await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
       if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.archive",requireIdempotencyKey(req),"project.archive",()=>services.settings.archiveProject(user.id,projectId)));
       if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId)));
     }

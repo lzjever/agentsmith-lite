@@ -404,8 +404,10 @@ postgresDescribe("postgres product store", () => {
     await store.createWorkspace({ id: "ws_profile", name: "Old", ownerUserId: "user_profile", createdAt: timestamp, updatedAt: timestamp });
     await store.createProject({ id: "proj_profile", workspaceId: "ws_profile", name: "Old", ownerUserId: "user_profile", rootPath: "workspaces/ws_profile/projects/proj_profile", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
     const updatedAt = "2026-07-04T00:01:00.000Z";
-    assert.equal((await store.updateWorkspaceName("ws_profile", "New", updatedAt))?.createdAt, timestamp);
-    assert.equal((await store.updateProjectName("proj_profile", "New", updatedAt))?.createdAt, timestamp);
+    assert.equal((await store.updateWorkspaceName("ws_profile", "New", updatedAt, "Old"))?.createdAt, timestamp);
+    assert.equal((await store.updateProjectName("proj_profile", "New", updatedAt, "Old"))?.createdAt, timestamp);
+    assert.equal(await store.updateWorkspaceName("ws_profile", "Stale", "2026-07-04T00:01:01.000Z", "Old"), null);
+    assert.equal(await store.updateProjectName("proj_profile", "Stale", "2026-07-04T00:01:01.000Z", "Old"), null);
     const profile = { userId: "user_profile", displayName: "Profile", timezone: "UTC", bio: null, jobTitle: null, company: null, greetingPreference: null, interests: [], updatedAt };
     assert.equal((await store.upsertUserProfilePreferences(profile, null))?.displayName, "Profile");
     assert.equal(await store.upsertUserProfilePreferences({ ...profile, displayName: "Duplicate" }, null), null);

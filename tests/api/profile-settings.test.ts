@@ -27,13 +27,19 @@ describe("profile and settings API", () => {
     const currentIdentity = await json("GET", "/api/v1/me");
     assert.equal(currentIdentity.user.displayName, "Admin");
 
-    const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace" }, "workspace-settings");
+    const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace", expectedName: "Old workspace" }, "workspace-settings");
     assert.equal(workspace.workspace.name, "New workspace");
-    const replayedWorkspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace" }, "workspace-settings");
+    const replayedWorkspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace", expectedName: "Old workspace" }, "workspace-settings");
     assert.deepEqual(replayedWorkspace, workspace);
-    const mismatch = await call("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "Different workspace" }, "workspace-settings");
+    const mismatch = await call("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "Different workspace", expectedName: "Old workspace" }, "workspace-settings");
     assert.equal(mismatch.response.status, 409);
     assert.deepEqual(mismatch.body, { error: "Idempotency-Key was already used with a different request" });
+    const staleWorkspace = await call("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "Stale workspace", expectedName: "Old workspace" }, "workspace-settings-stale");
+    assert.equal(staleWorkspace.response.status, 409);
+    const projectSettings = await json("PATCH", `/api/v1/projects/${projectId}/settings`, { name: "New project", expectedName: "Old project" }, "project-settings");
+    assert.equal(projectSettings.project.name, "New project");
+    const staleProject = await call("PATCH", `/api/v1/projects/${projectId}/settings`, { name: "Stale project", expectedName: "Old project" }, "project-settings-stale");
+    assert.equal(staleProject.response.status, 409);
 
     const missingKey = await call("POST", `/api/v1/projects/${projectId}/settings/archive`);
     assert.equal(missingKey.response.status, 400);

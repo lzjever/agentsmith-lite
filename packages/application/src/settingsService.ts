@@ -15,10 +15,11 @@ export class SettingsService {
     const member = await this.store.findWorkspaceMembership(workspaceId, userId);
     return { workspace, capabilities: { canManageSettings: workspace.lifecycleStatus !== "archived" && workspace.lifecycleStatus !== "deleting" && (member?.role === "owner" || member?.role === "admin") } };
   }
-  async updateWorkspace(userId: string, workspaceId: string, input: { name?: unknown }) {
+  async updateWorkspace(userId: string, workspaceId: string, input: { name?: unknown; expectedName: unknown }) {
     const workspace = await this.requireWorkspaceAdmin(userId, workspaceId);
-    const updated = await this.store.updateWorkspaceName(workspace.id, input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name", PRODUCT_NAME_MAX_LENGTH), nowIso());
-    if (!updated) throw new NotFoundError("Workspace not found");
+    const expectedName = requireNonEmptyString(input.expectedName, "workspace.expectedName", PRODUCT_NAME_MAX_LENGTH);
+    const updated = await this.store.updateWorkspaceName(workspace.id, input.name === undefined ? workspace.name : requireNonEmptyString(input.name, "workspace.name", PRODUCT_NAME_MAX_LENGTH), nextTimestamp(workspace.updatedAt), expectedName);
+    if (!updated) throw await this.workspaceUpdateError(workspace.id, expectedName);
     return { workspace: updated, capabilities: { canManageSettings: true } };
   }
   async project(userId: string, projectId: string) {
@@ -29,10 +30,11 @@ export class SettingsService {
     ]);
     return { project, workspaceLifecycleStatus, capabilities };
   }
-  async updateProject(userId: string, projectId: string, input: { name?: unknown }) {
+  async updateProject(userId: string, projectId: string, input: { name?: unknown; expectedName: unknown }) {
     const project = await this.authorization.requireProject(userId, projectId, "admin");
-    const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name", PRODUCT_NAME_MAX_LENGTH), nowIso());
-    if (!updated) throw new NotFoundError("Project not found");
+    const expectedName = requireNonEmptyString(input.expectedName, "project.expectedName", PRODUCT_NAME_MAX_LENGTH);
+    const updated = await this.store.updateProjectName(project.id, input.name === undefined ? project.name : requireNonEmptyString(input.name, "project.name", PRODUCT_NAME_MAX_LENGTH), nextTimestamp(project.updatedAt), expectedName);
+    if (!updated) throw await this.projectUpdateError(project.id, expectedName);
     const [capabilities, workspaceLifecycleStatus] = await Promise.all([
       this.projectCapabilities(userId, projectId),
       this.projectWorkspaceLifecycleStatus(project.workspaceId)
@@ -90,6 +92,10 @@ export class SettingsService {
     return { canManageSettings: (await this.authorization.projectCapabilities(userId, projectId)).canManagePolicy };
   }
   private async projectWorkspaceLifecycleStatus(workspaceId:string){const workspace=await this.store.findWorkspace(workspaceId);if(!workspace)throw new NotFoundError("Workspace not found");return workspace.lifecycleStatus??"active"}
+  private async workspaceUpdateError(workspaceId:string,expectedName:string){const current=await this.store.findWorkspace(workspaceId);if(!current)return new NotFoundError("Workspace not found");const status=current.lifecycleStatus??"active";if(current.name!==expectedName||status==="active")return new ProductError("Workspace changed elsewhere. Reload and try again.",409);return new ProductError(`Workspace is ${status}`,409)}
+  private async projectUpdateError(projectId:string,expectedName:string){const current=await this.store.findProject(projectId);if(!current)return new NotFoundError("Project not found");const status=current.lifecycleStatus??"active";if(current.name!==expectedName||status==="active")return new ProductError("Project changed elsewhere. Reload and try again.",409);return new ProductError(`Project is ${status}`,409)}
 }
+
+function nextTimestamp(previous:string){return new Date(Math.max(Date.now(),Date.parse(previous)+1)).toISOString()}
 
 type ProjectLifecycleAuditAction = Extract<ProjectAuditAction, "project.archive" | "project.unarchive">;

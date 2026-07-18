@@ -73,8 +73,8 @@ describe("product services", () => {
 
     await assert.rejects(() => services.workspaces.createWorkspace(owner.user.id, { name: oversized }), /workspace\.name must be 160 characters or less/);
     await assert.rejects(() => services.workspaces.createProject(owner.user.id, workspace.id, { name: oversized }), /project\.name must be 160 characters or less/);
-    await assert.rejects(() => services.settings.updateWorkspace(owner.user.id, workspace.id, { name: oversized }), /workspace\.name must be 160 characters or less/);
-    await assert.rejects(() => services.settings.updateProject(owner.user.id, project.id, { name: oversized }), /project\.name must be 160 characters or less/);
+    await assert.rejects(() => services.settings.updateWorkspace(owner.user.id, workspace.id, { name: oversized, expectedName: workspace.name }), /workspace\.name must be 160 characters or less/);
+    await assert.rejects(() => services.settings.updateProject(owner.user.id, project.id, { name: oversized, expectedName: project.name }), /project\.name must be 160 characters or less/);
   });
 
   it("revokes built-in admin sessions on logout", async () => {

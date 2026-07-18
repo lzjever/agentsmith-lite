@@ -64,7 +64,7 @@ describe("profile and settings pages", () => {
       assert.equal(saveProject.disabled, false);
       fireEvent.click(saveProject);
       await waitFor(() => assert.equal(updates.length, 2));
-      assert.deepEqual(updates[1], { name: "Updated project" });
+      assert.deepEqual(updates[1], { name: "Updated project", expectedName: "Project" });
       assert.equal(screen.queryByRole("spinbutton", { name: "Task concurrency" }), null);
     } finally {
       window.removeEventListener("agentsmith:identity-changed", identityChanged);
@@ -93,7 +93,7 @@ describe("profile and settings pages", () => {
       fireEvent.change(name, { target: { value: "Updated workspace" } });
       assert.equal(save.disabled, false);
       fireEvent.click(save);
-      await waitFor(() => assert.deepEqual(updates, [{ name: "Updated workspace" }]));
+      await waitFor(() => assert.deepEqual(updates, [{ name: "Updated workspace", expectedName: "Workspace" }]));
       assert.equal(save.disabled, true);
     } finally { Object.assign(apiClient, original); }
   });
@@ -103,7 +103,7 @@ describe("profile and settings pages", () => {
     const keys: string[] = [];
     apiClient.projectSettings = async () => settings;
     apiClient.currentIdentity = async () => ({ user: profile.user });
-    apiClient.updateProjectSettings = (async (_projectId: string, input: { name?: string }, key: string) => {
+    apiClient.updateProjectSettings = (async (_projectId: string, input: { name?: string; expectedName: string }, key: string) => {
       keys.push(key);
       if (keys.length === 1) throw new Error("connection closed");
       return { ...settings, project: { ...settings.project, name: input.name ?? settings.project.name } };
@@ -118,6 +118,23 @@ describe("profile and settings pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Save project" }));
       await waitFor(() => assert.equal(keys.length, 2));
       assert.notEqual(keys[1], keys[0]);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("loads the latest project settings after a stale rename is rejected", async () => {
+    const original = { projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
+    const latest = { ...settings, project: { ...settings.project, name: "Newer project", updatedAt: "2026-07-11T00:01:00.000Z" } };
+    let reads = 0;
+    apiClient.projectSettings = async () => { reads += 1; return reads === 1 ? settings : latest; };
+    apiClient.currentIdentity = async () => ({ user: profile.user });
+    apiClient.updateProjectSettings = async () => { throw new ApiError(409, "Project changed elsewhere. Reload and try again."); };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
+      const name = await screen.findByRole("textbox", { name: "Project name" }) as HTMLInputElement;
+      fireEvent.change(name, { target: { value: "My stale rename" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save project" }));
+      await waitFor(() => assert.equal(name.value, "Newer project"));
+      assert.equal(reads, 2);
     } finally { Object.assign(apiClient, original); }
   });
 

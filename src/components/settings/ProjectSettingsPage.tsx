@@ -83,7 +83,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     event.preventDefault();
     if (!settingsDirty || mutationBusy) return;
     setSaving(true);
-    const input = { name: projectName };
+    const input = { name: projectName, expectedName: data!.project.name };
     try {
       const saved = await apiClient.updateProjectSettings(projectId, input, mutationKeys.requestKey("project-settings", projectId, input));
       mutationKeys.complete("project-settings", projectId);
@@ -95,8 +95,9 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("project-settings", projectId);
       if (!mounted.current) return;
-      toast.error(settingsErrorMessage(reason, "Project settings could not be saved."));
-      if (isReadOnlyMutationError(reason)) await load();
+      const changed = reason instanceof ApiError && reason.status === 409 && reason.message === "Project changed elsewhere. Reload and try again.";
+      toast.error(changed ? "Project changed elsewhere. Latest settings loaded." : settingsErrorMessage(reason, "Project settings could not be saved."));
+      if (changed || isReadOnlyMutationError(reason)) await load();
     } finally {
       if (mounted.current) setSaving(false);
     }
