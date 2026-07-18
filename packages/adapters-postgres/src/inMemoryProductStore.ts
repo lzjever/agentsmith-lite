@@ -541,6 +541,10 @@ export class InMemoryProductStore implements ProductStore {
 
   async createTaskAtomically(input: AtomicTaskCreateInput): Promise<PersistedAgentTask | null> {
     if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
+    if (input.task.sourceTaskId) {
+      const source = this.tasks.get(input.task.sourceTaskId);
+      if (!source || source.deletedAt || source.projectId !== input.task.projectId) return null;
+    }
     const task = normalizeStoredTask(input.task, input.reserveActive);
     if (input.reserveActive && !this.reserveActiveTask(task.projectId, task.updatedAt)) return null;
     this.tasks.set(task.id, clone(task));
@@ -1035,7 +1039,7 @@ export class InMemoryProductStore implements ProductStore {
   async createTerminalTaskMessage(input: CreateTerminalTaskMessageInput): Promise<PersistedTaskMessage | null> {
     return this.atomicTaskMessageMutation([input.successor], async () => {
     const source = this.tasks.get(input.message.taskId);
-    if (!source || !source.terminalReason || this.messages.some((value) => value.id === input.message.id)) return null;
+    if (!source || source.deletedAt || !source.terminalReason || this.messages.some((value) => value.id === input.message.id)) return null;
     const successor = await this.createTaskAtomically(input.successor);
     if (!successor) return null;
     const message = normalizeStoredMessage({ ...input.message, targetTaskId: successor.id, deliveryStatus: "successor_created" });
@@ -1050,7 +1054,7 @@ export class InMemoryProductStore implements ProductStore {
     const index = this.messages.findIndex((value) => value.id === input.messageId);
     const current = this.messages[index];
     const source = current ? this.tasks.get(current.taskId) : undefined;
-    if (!current || !source?.terminalReason || !["dispatching","terminal_pending"].includes(current.deliveryStatus ?? "") || current.claimToken !== input.expectedClaimToken || current.receipt?.accepted) return null;
+    if (!current || source?.deletedAt || !source?.terminalReason || !["dispatching","terminal_pending"].includes(current.deliveryStatus ?? "") || current.claimToken !== input.expectedClaimToken || current.receipt?.accepted) return null;
     const successor = await this.createTaskAtomically(input.successor);
     if (!successor) return null;
     const updated: PersistedTaskMessage = { ...current, targetTaskId: successor.id, deliveryStatus: "successor_created", leaseExpiresAt: null, nextRetryAt: null, safeError: null, updatedAt: input.updatedAt };

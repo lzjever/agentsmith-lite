@@ -318,6 +318,10 @@ export class TaskService {
       try {
         persisted = await this.store.createTaskAtomically(create);
         if (!persisted) {
+          if (sourceTaskId) {
+            const source = await this.store.findTask(sourceTaskId);
+            if (!source || source.deletedAt || source.projectId !== projectId) throw new ProductError("Source task not found",404);
+          }
           await this.policies.recordTaskReservationRejected(projectId, userId, id);
           throw activeTasksLimitError();
         }

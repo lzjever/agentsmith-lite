@@ -186,6 +186,9 @@ postgresDescribe("postgres durable task store", () => {
     assert.deepEqual(await store.listTaskInteractionChanges("task_delete_data",0,10), []);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state","task_delete_data"), null);
     assert.equal((await store.findTask("task_delete_successor"))?.sourceTaskId, null);
+    const lateSuccessor = liveCreate("task_delete_late_successor", "run_delete_late_successor");
+    lateSuccessor.task.sourceTaskId = "task_delete_data";
+    assert.equal(await store.createTaskAtomically(lateSuccessor), null);
   });
 
   function liveCreate(taskId: string, runId: string): AtomicTaskCreateInput {

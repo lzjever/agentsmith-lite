@@ -216,6 +216,27 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.services.tasks.getTaskDetail(setup.userId, successor.id)).task.sourceTaskId, null);
   });
 
+  it("does not create a successor when its source is deleted concurrently", async () => {
+    const setup = await createSetup(false);
+    const source = await setup.services.tasks.createTask(setup.userId, setup.projectId, {
+      endpointId: setup.endpointId,
+      prompt: "source deleted during duplicate"
+    }, "create-concurrent-delete-source");
+    const createTaskAtomically = setup.store.createTaskAtomically.bind(setup.store);
+    setup.store.createTaskAtomically = async (input) => {
+      if (input.task.sourceTaskId === source.id) {
+        await setup.store.deleteTaskData(source.id, new Date().toISOString());
+      }
+      return createTaskAtomically(input);
+    };
+
+    await assert.rejects(
+      () => setup.services.tasks.duplicateTask(setup.userId, source.id, "duplicate-concurrently-deleted-source"),
+      /Source task not found/
+    );
+    assert.deepEqual((await setup.store.listTasksForProject(setup.projectId)).filter((task) => !task.deletedAt), []);
+  });
+
   it("snapshots effective context into the Botified task workspace", async () => {
     const setup = await createSetup(true);
     await setup.services.contexts.upsert(setup.userId, { workspaceId: setup.workspaceId, projectId: setup.projectId, scope: "project_personal", contextKey: "task.style", content: "Use terse task updates.", contentType: "text" });
