@@ -578,6 +578,31 @@ describe("project files browser", () => {
       assert.doesNotMatch(target.className, /ring-2/);
     } finally { restoreClient(original); }
   });
+
+  it("keeps a dropped file from navigating away when files are read-only", async () => {
+    const original = snapshotClient();
+    let uploads = 0;
+    apiClient.files = async () => ({ entries: [file] });
+    apiClient.projectCapabilities = async () => readOnly;
+    apiClient.uploadFile = async () => { uploads += 1; throw new Error("unexpected upload"); };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByText("brief.txt");
+      const target = document.querySelector<HTMLElement>("[aria-label='Project files']");
+      assert.ok(target);
+      const transfer = { files: [new File(["hello"], "drop.txt")] };
+      const dragOver = new window.Event("dragover", { bubbles: true, cancelable: true });
+      Object.defineProperty(dragOver, "dataTransfer", { value: transfer });
+      fireEvent(target, dragOver);
+      const drop = new window.Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", { value: transfer });
+      fireEvent(target, drop);
+
+      assert.equal(dragOver.defaultPrevented, true);
+      assert.equal(drop.defaultPrevented, true);
+      assert.equal(uploads, 0);
+    } finally { restoreClient(original); }
+  });
 });
 
 function DeleteDialogHarness() {
