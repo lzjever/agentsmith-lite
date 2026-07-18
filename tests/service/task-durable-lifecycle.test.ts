@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -9,6 +9,7 @@ import type { TaskAssistantPreviewUpdate } from "../../packages/application/src/
 import { projectTaskInteraction } from "../../packages/application/src/taskInteractionProjector.js";
 import type { BotifiedTimelineEvent } from "../../packages/botified-runtime/src/projection.js";
 import type { AgentTask, KubernetesResource, ProjectAuditEvent } from "../../packages/contracts/src/api.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 import type {
   BotifiedAbortResult,
   BotifiedDeliveryMessageInput,
@@ -177,6 +178,33 @@ describe("durable task lifecycle", () => {
     assert.match(terminal.baseUrl,/^http:\/\//);
     setup.services.tasks.closeTaskTerminal(task.id);
     await assert.rejects(() => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "escape", inputPaths: ["../outside"] }, "create-invalid-input"), /must stay under files/);
+  });
+
+  it("removes unpersisted task data when an input snapshot cannot be created", async () => {
+    const setup = await createSetup(true);
+    await assert.rejects(
+      () => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "missing input", inputPaths: ["files/missing.txt"] }, "create-missing-input"),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 404
+    );
+
+    assert.deepEqual(await readdir(path.join(setup.dataRoot, setup.projectRootPath, "tasks")), []);
+    assert.deepEqual(await setup.store.listTasksForProject(setup.projectId), []);
+  });
+
+  it("removes a completed input snapshot when task persistence is rejected", async () => {
+    const setup = await createSetup(true);
+    const source = path.join(setup.dataRoot, setup.projectRootPath, "files", "input.txt");
+    await mkdir(path.dirname(source), { recursive: true });
+    await writeFile(source, "input");
+    setup.store.createTaskAtomically = async () => null;
+
+    await assert.rejects(
+      () => setup.services.tasks.createTask(setup.userId, setup.projectId, { endpointId: setup.endpointId, prompt: "rejected after snapshot", inputPaths: ["files/input.txt"] }, "create-rejected-after-snapshot"),
+      (error: unknown) => error instanceof ProductError && error.code === "active_tasks_limit_reached"
+    );
+
+    assert.deepEqual(await readdir(path.join(setup.dataRoot, setup.projectRootPath, "tasks")), []);
+    assert.deepEqual(await setup.store.listTasksForProject(setup.projectId), []);
   });
 
   it("copies retained source inputs when retrying or duplicating a task", async () => {

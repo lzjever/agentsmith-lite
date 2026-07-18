@@ -313,7 +313,13 @@ export class TaskService {
       requireTaskEndpointCapabilities(endpoint);
       if (this.config.liveSandbox) await this.requireNamespaceSandboxCapacity();
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
-      const create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext, createdByUserId:userId });
+      let create: AtomicTaskCreateInput;
+      try {
+        create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext, createdByUserId:userId });
+      } catch (error) {
+        await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,id);
+        throw error;
+      }
       let persisted: PersistedAgentTask | null = null;
       try {
         persisted = await this.store.createTaskAtomically(create);
@@ -326,7 +332,7 @@ export class TaskService {
           throw activeTasksLimitError();
         }
       } catch (error) {
-        if (create.task.executionMode === "live") await this.bestEffortRemoveTaskInputs(project.rootPath, id);
+        if (create.task.executionMode === "live") await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,id);
         throw error;
       }
       await this.persistInitialPromptInteraction(persisted);
@@ -961,7 +967,7 @@ export class TaskService {
     return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"", createdByUserId:message.actorId??source.createdByUserId??null });
   }
 
-  private async cleanupUnusedTaskCreate(create:AtomicTaskCreateInput):Promise<void>{if(create.task.executionMode!=="live")return;const project=await this.store.findProject(create.task.projectId);if(project)await this.bestEffortRemoveTaskInputs(project.rootPath,create.task.id);}
+  private async cleanupUnusedTaskCreate(create:AtomicTaskCreateInput):Promise<void>{if(create.task.executionMode!=="live")return;const project=await this.store.findProject(create.task.projectId);if(project)await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,create.task.id);}
 
   private async finalizeTaskLifecycle(taskId:string,reason:TaskTerminalReason,actorId:string|null):Promise<PersistedAgentTask>{
     for(let attempt=0;attempt<3;attempt+=1){
@@ -2016,18 +2022,18 @@ export class TaskService {
     });
   }
 
-  private async removeTaskInputs(projectRootPath: string, taskId: string): Promise<void> {
+  private async removeUnpersistedTaskData(projectRootPath: string, taskId: string): Promise<void> {
     const dataRoot = path.resolve(this.config.dataRoot);
-    const snapshotRoot = path.resolve(dataRoot, projectRootPath, "tasks", taskId, "inputs");
-    assertPathInside(dataRoot, snapshotRoot, "Task input snapshot is outside the data root");
-    await rm(snapshotRoot, { recursive: true, force: true });
+    const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", taskId);
+    assertPathInside(dataRoot, taskRoot, "Task data directory is outside the data root");
+    await rm(taskRoot, { recursive: true, force: true });
   }
 
-  private async bestEffortRemoveTaskInputs(projectRootPath: string, taskId: string): Promise<void> {
+  private async bestEffortRemoveUnpersistedTaskData(projectRootPath: string, taskId: string): Promise<void> {
     try {
-      await this.removeTaskInputs(projectRootPath, taskId);
+      await this.removeUnpersistedTaskData(projectRootPath,taskId);
     } catch {
-      // The original create failure remains authoritative; a later reaper can remove the task runtime tree.
+      // The original create failure remains authoritative.
     }
   }
 
