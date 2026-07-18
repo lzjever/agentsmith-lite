@@ -84,6 +84,7 @@ describe("deletion lifecycle", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-delete-workspace-"));
     const store = createLocalInMemoryProductStore();
     const workspace = await store.createWorkspace(ws("ws_1"));
+    await store.upsertWorkspaceMembership({workspaceId:workspace.id,userId:"member",role:"member",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"});
     await store.createProject(project("proj_1", workspace.id));
     await store.createProject(project("proj_2", workspace.id));
     await store.createProjectContextEntry({ id: "context_1", workspaceId: workspace.id, projectId: null, ownerUserId: null, scope: "workspace_shared", contextKey: "note", content: "x", version:1,createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
@@ -94,6 +95,8 @@ describe("deletion lifecycle", () => {
 
     assert.deepEqual(stopped.sort(), ["proj_1", "proj_2"]);
     assert.equal(await store.findWorkspace(workspace.id), null);
+    assert.equal(await store.findWorkspaceMembership(workspace.id,"owner"),null);
+    assert.equal(await store.findWorkspaceMembership(workspace.id,"member"),null);
     assert.deepEqual(await store.listProjectContextEntries(workspace.id, null, "workspace_shared", null), []);
   });
 
