@@ -41,12 +41,15 @@ describe("project files browser", () => {
     window.history.replaceState(null, "", "/files");
     try {
       render(<ProjectFilesPage projectId="project_1" />);
+      const historyLength = window.history.length;
       fireEvent.click(await screen.findByRole("button", { name: "reports" }));
       await screen.findByRole("heading", { name: "This folder is empty" });
       assert.equal(window.location.search, "?path=files%2Freports");
+      assert.equal(window.history.length, historyLength + 1);
 
-      window.history.replaceState(null, "", "/files");
-      await act(async () => window.dispatchEvent(new window.PopStateEvent("popstate")));
+      const wentBack = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+      window.history.back();
+      await act(async () => wentBack);
       await screen.findByRole("button", { name: "reports" });
       assert.equal(paths.at(-1), "files");
     } finally { restoreClient(original); }

@@ -93,7 +93,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       setPreview(null);
       setMobileDetailsOpen(false);
       setPath(restored);
-      replaceFileBrowserPath(restored);
+      writeFileBrowserPath(restored, true);
       setPathReady(true);
     }
     restorePath();
@@ -111,7 +111,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
     setSelected(undefined);
     setPreview(null);
     setMobileDetailsOpen(false);
-    replaceFileBrowserPath(normalized);
+    writeFileBrowserPath(normalized, false);
     setPath(normalized);
   }
 
@@ -303,11 +303,13 @@ function isMissingFile(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.message === "File not found";
 }
 
-function replaceFileBrowserPath(path: string) {
+function writeFileBrowserPath(path: string, replace: boolean) {
   const params = new URLSearchParams(window.location.search);
   if (path === PROJECT_FILES_ROOT) params.delete("path");
   else params.set("path", path);
-  window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
+  const url = `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`;
+  if (replace) window.history.replaceState(window.history.state, "", url);
+  else window.history.pushState(window.history.state, "", url);
 }
 
 export function formatBytes(bytes: number): string {
