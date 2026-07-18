@@ -701,7 +701,7 @@ describe("project resource pages", () => {
 
   it("filters audit events, opens a safe detail view, and never renders unsupported sensitive event fields", async () => {
     const original = snapshotClient();
-    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.resolve", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_1", createdAt: policy.createdAt, payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
+    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.resolve", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_1", createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
     const queries: Array<Record<string, string | number | undefined>> = [];
     apiClient.audit = async (_projectId, query = {}) => { queries.push(query); return { items: [event], nextCursor: null }; };
     try {
@@ -721,6 +721,7 @@ describe("project resource pages", () => {
       await screen.findByRole("heading", { name: "Audit event detail" });
       assert.ok(screen.getByText("Event metadata for this project activity."));
       assert.ok(screen.getAllByText("Ada Admin").length > 0);
+      assert.ok(screen.getByText(event.createdAt));
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }

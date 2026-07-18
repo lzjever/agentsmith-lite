@@ -465,6 +465,30 @@ describe("project files browser", () => {
     try{render(<ProjectFilesPage projectId="project_1"/>);await screen.findByText("brief.txt");const filter=screen.getByRole("textbox",{name:"Filter files"});assert.match(filter.className,/border-border-input/);fireEvent.change(filter,{target:{value:"image"}});assert.equal(screen.queryByText("brief.txt"),null);assert.ok(screen.getByText("image.png"));fireEvent.click(screen.getByRole("button",{name:"Clear file filter"}));fireEvent.click(screen.getByRole("button",{name:"brief.txt"}));fireEvent.click(screen.getAllByRole("button",{name:"Preview"})[0]!);await screen.findByText("preview");fireEvent.click(screen.getByRole("button",{name:"Close preview"}));}finally{restoreClient(original);globalThis.fetch=originalFetch;}
   });
 
+  it("keeps a failed preview recoverable in the file workspace", async () => {
+    const original = snapshotClient();
+    let downloads = 0;
+    apiClient.files = async () => ({ entries: [{ ...file, mediaType:"text/plain" }] });
+    apiClient.projectCapabilities = async () => writable;
+    apiClient.downloadProjectFile = async () => {
+      downloads += 1;
+      if (downloads === 1) throw new ApiError(503, "File preview is temporarily unavailable");
+      return new Blob(["recovered preview"], { type:"text/plain" });
+    };
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name:"Preview" })[0]!);
+
+      assert.match((await screen.findByRole("alert")).textContent ?? "", /temporarily unavailable/i);
+      fireEvent.click(screen.getByRole("button", { name:"Try preview again" }));
+
+      assert.ok(await screen.findByText("recovered preview"));
+      assert.equal(screen.queryByRole("alert"), null);
+      assert.equal(downloads, 2);
+    } finally { restoreClient(original); }
+  });
+
   it("removes a file that disappeared before preview", async () => {
     const original = snapshotClient();
     apiClient.files = async () => ({ entries: [{ ...file, mediaType:"text/plain" }] });

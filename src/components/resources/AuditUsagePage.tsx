@@ -441,7 +441,7 @@ function DetailDialog({
               description="Event metadata for this project activity."
             />
             <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
-              <DT label="Timestamp" value={formatDate(event.createdAt)} />
+              <DT label="Timestamp" value={event.createdAt} />
               <DT label="Action" value={event.action} />
               <DT
                 label="Actor"
