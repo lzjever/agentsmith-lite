@@ -299,7 +299,7 @@ function ProjectAlertsPage({ projectId }: { projectId: string }) {
         <Tabs defaultValue="instances">
           <TabsList aria-label="Alerts view">
             <TabsTrigger value="instances">
-              Instances {activeCount ? `(${activeCount})` : ""}
+              Instances ({activeCount} active)
             </TabsTrigger>
             <TabsTrigger value="rules">Rules</TabsTrigger>
           </TabsList>

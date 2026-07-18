@@ -590,7 +590,7 @@ describe("project resource pages", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Add rule" }));
       fireEvent.change(screen.getByRole("spinbutton", { name: "Threshold" }), { target: { value: "0" } });
       fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
-      await screen.findByRole("tab", { name: "Instances (1)" });
+      await screen.findByRole("tab", { name: "Instances (1 active)" });
       assert.equal(alertReads, 2);
     } finally { restoreClient(original); }
   });
