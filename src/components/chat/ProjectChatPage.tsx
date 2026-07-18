@@ -37,7 +37,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const [messages, setMessages] = useState<ProjectChatMessage[]>([]);
   const [messagesStatus, setMessagesStatus] = useState<MessageStatus>("idle");
   const [messagesError, setMessagesError] = useState("");
-  const [actionError, setActionError] = useState("");
+  const [actionError, setActionError] = useState<{ message: string; code?: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [threadMutationBusy, setThreadMutationBusy] = useState(false);
   const [threadSheetOpen, setThreadSheetOpen] = useState(false);
@@ -178,13 +178,13 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     setMessages([]);
     setMessagesError("");
     setMessagesStatus("idle");
-    setActionError("");
+    setActionError(null);
   }
 
   async function startThread(): Promise<boolean> {
     if (!draftEndpointId || !canSend || sending || threadMutationBusy || endpointsStatus !== "ready") return false;
     setThreadMutationBusy(true);
-    setActionError("");
+    setActionError(null);
     try {
       const created = await apiClient.createChatThread(projectId, draftEndpointId, mutationKeys.requestKey("chat-thread.create", projectId, { endpointId: draftEndpointId }));
       mutationKeys.complete("chat-thread.create", projectId);
@@ -214,7 +214,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     setMessagesStatus("loading");
     setThreadId(id);
     setEndpointId(selected.endpointId ?? "");
-    setActionError("");
+    setActionError(null);
   }
 
   async function updateThread(id: string, input: { title?: string | null; pinned?: boolean; starred?: boolean }): Promise<boolean> {
@@ -226,7 +226,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       mutationKeys.complete("chat-thread.update", identity);
       if (!active.current) return false;
       setThreads((current) => orderedThreads(current.map((thread) => thread.id === id ? saved : thread)));
-      setActionError("");
+      setActionError(null);
       return true;
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-thread.update", identity);
@@ -250,7 +250,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       if (!active.current) return;
       const remaining = threads.filter((thread) => thread.id !== id);
       setThreads(remaining);
-      setActionError("");
+      setActionError(null);
       if (threadId !== id) return;
       const next = orderedThreads(remaining)[0];
       if (!next) {
@@ -294,7 +294,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
     };
     setMessages((current) => [...current, optimistic]);
     setSending(true);
-    setActionError("");
+    setActionError(null);
     try {
       const controller = new AbortController();
       streamAbort.current = controller;
@@ -383,7 +383,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       draftingNewThread.current = false;
       setThreadId(branch.id);
       setEndpointId(branch.endpointId ?? "");
-      setActionError("");
+      setActionError(null);
       toast.success("Conversation branched");
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("chat-message.branch", identity);
@@ -395,7 +395,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   async function retryMessage(target: ProjectChatMessage) {
     if (sending || !historyReady) return;
     setSending(true);
-    setActionError("");
+    setActionError(null);
     const controller = new AbortController();
     streamAbort.current = controller;
     try {
@@ -422,7 +422,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       setCapabilities((current) => current ? { ...current, canSendChat: false } : current);
       setCapabilitiesStatus("ready");
     }
-    setActionError(detail);
+    setActionError({ message: detail, ...(reason instanceof ApiError && reason.code ? { code: reason.code } : {}) });
     toast.error(detail);
     return false;
   }
@@ -510,7 +510,9 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
       {endpointsStatus === "error" ? <Notice error action="Retry endpoints" onAction={() => void loadEndpoints()}>Endpoint configuration could not be loaded. Existing conversation history remains available. {endpointsError}</Notice> : null}
       {endpointsStatus === "ready" && selectedThread && endpoint && !endpointReady ? <Notice>This conversation&apos;s endpoint is unavailable. Recheck it before sending. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
       {endpointsStatus === "ready" && compatibleEndpoints.length === 0 ? <Notice>Add or repair a compatible endpoint before starting a conversation. <Link className="font-medium text-foreground hover:underline" href="endpoints">Open endpoints</Link></Notice> : null}
-      {actionError ? <Notice error>{actionError}</Notice> : null}
+      {actionError ? isProviderQuotaError(actionError.code)
+        ? <Notice error><strong>Provider quota reached.</strong> Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href="policy">Open resource policy</Link>.</Notice>
+        : <Notice error>{actionError.message}</Notice> : null}
     </div>
   </PageLayout>;
 }
@@ -521,6 +523,7 @@ function Notice({ children, error = false, action, onAction }: { children: React
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : "The chat request could not be completed."; }
 function isAbort(error: unknown): boolean { return error instanceof DOMException ? error.name === "AbortError" : error instanceof Error && error.name === "AbortError"; }
+function isProviderQuotaError(code: string | undefined): boolean { return code === "provider_requests_limit_reached" || code === "provider_tokens_limit_reached" || code === "provider_cost_limit_reached"; }
 function isChatEndpointDrift(error: unknown): boolean {
   return error instanceof ApiError && (
     error.status === 404 && (error.message === "Endpoint not found" || error.message === "Credential not found")

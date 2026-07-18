@@ -263,7 +263,9 @@ describe("project resource policy", () => {
 
     await assert.rejects(
       () => services.policies.reserveProvider(project.id, user.id, endpoint.id),
-      /endpoint rolling provider tokens limit reached/i
+      (error: unknown) => error instanceof ProductError
+        && /endpoint rolling provider tokens limit reached/i.test(error.message)
+        && error.code === "provider_tokens_limit_reached"
     );
     assert.deepEqual(
       (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.status === "active").map((alert) => [alert.type, alert.endpointId]),

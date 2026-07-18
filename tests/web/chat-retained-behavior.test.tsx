@@ -546,6 +546,27 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("guides provider quota rejections to the resource policy", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [];
+    apiClient.sendChatMessage = async () => { throw new ApiError(409, "Project provider tokens limit reached", "provider_tokens_limit_reached"); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByLabelText("Thread endpoint fixed");
+      const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      await waitFor(() => assert.equal(composer.disabled, false));
+      fireEvent.change(composer, { target: { value: "Use the provider" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await screen.findByText("Provider quota reached.");
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "policy");
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("refreshes stale endpoint eligibility after a send is rejected", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     const unavailable = { ...endpoint, health: { status: "unavailable" as const, checkedAt: endpoint.updatedAt, errorCategory: "auth" as const } };

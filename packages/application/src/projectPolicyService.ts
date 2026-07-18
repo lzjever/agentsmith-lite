@@ -160,7 +160,7 @@ export class ProjectPolicyService {
     await this.auditEvent(projectId, actorId, "provider.request", "rejected", endpointId);
     const reason = projectLimits[0] ?? endpointLimits[0] ?? "provider_requests_limit";
     const scope = projectLimits.length ? "Project" : endpointLimits.length ? "Endpoint rolling" : "Project";
-    throw new ProductError(`${scope} ${reason.replaceAll("_", " ")} reached`, 409);
+    throw new ProductError(`${scope} ${reason.replaceAll("_", " ")} reached`, 409, `${reason}_reached`);
   }
   async markProviderDispatched(id: string): Promise<void> { if (!await this.store.markProjectProviderSettlementDispatched(id, nowIso())) throw new ProductError("Provider settlement not found", 409); }
   async markProviderDelivered(id: string): Promise<void> { if (!await this.store.markProjectProviderSettlementDelivered(id, nowIso())) throw new ProductError("Provider settlement not found", 409); }
