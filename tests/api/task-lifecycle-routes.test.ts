@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ describe("task lifecycle API routes", () => {
   let dataRoot = "";
   let cookie = "";
   let csrf = "";
+  let userId = "";
   let projectId = "";
   let endpointId = "";
 
@@ -30,7 +32,9 @@ describe("task lifecycle API routes", () => {
     await fetch(api.baseUrl + "/api/v1/auth/bootstrap", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "admin-password" }) });
     const login = await fetch(api.baseUrl + "/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "admin@agentsmith-lite.local", password: "admin-password" }) });
     cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
-    csrf = (await login.json() as { csrfToken: string }).csrfToken;
+    const identity = await login.json() as { csrfToken: string; user: { id: string } };
+    csrf = identity.csrfToken;
+    userId = identity.user.id;
     const workspace = await json("POST", "/api/v1/workspaces", { name: "Workspace" });
     const project = await json("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Project" }); projectId = project.id;
     const credential = await json("POST", `/api/v1/projects/${projectId}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "sk-test" });
@@ -104,6 +108,14 @@ describe("task lifecycle API routes", () => {
     assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"file:///etc/passwd"},"invalid-url-note-1")).status,400);
     assert.equal((await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://user:secret@example.test/"},"invalid-url-note-2")).status,400);
     const events=await store.listProjectAuditEvents(projectId);assert.equal(events.filter(event=>event.action==="file.upload"&&event.resourceId===note.path&&event.status==="accepted").length,1);
+
+    const recoveredUrl="https://docs.example.test/recovered";
+    const recoveredRequest={projectId,url:recoveredUrl};
+    const recoveredPath="files/url-inputs/recovered-request.md";
+    await store.beginTaskIdempotency({actorId:userId,projectId,operation:"project.file.url-note",key:"recovered-url-note-key",requestHash:createHash("sha256").update(JSON.stringify(recoveredRequest)).digest("base64url"),resourceId:recoveredPath,claimToken:"expired-url-note-claim",now:"2026-01-01T00:00:00.000Z",leaseExpiresAt:"2026-01-01T00:00:01.000Z"});
+    const recovered=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:recoveredUrl},"recovered-url-note-key");
+    assert.equal(recovered.path,recoveredPath);
+    assert.equal(await (await request("GET",`/api/v1/projects/${projectId}/files/download?path=${encodeURIComponent(recoveredPath)}`)).text(),`# URL input\n\n${recoveredUrl}\n`);
   });
 
   it("requires an idempotency key and replays a file upload",async()=>{

@@ -610,8 +610,8 @@ async function routeApi(
         const host = inputUrl.hostname.toLowerCase().replace(/[^a-z0-9.-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,80) || "link";
         const filePath = `files/url-inputs/${host}-${randomUUID()}.md`;
         const bytes = Buffer.from(`# URL input\n\n${inputUrl.href}\n`,"utf8");
-        const written = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.url-note",idempotencyKey,{projectId,url:inputUrl.href},filePath,async()=>{
-          const saved = await services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
+        const written = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.url-note",idempotencyKey,{projectId,url:inputUrl.href},filePath,async(resourcePath)=>{
+          const saved = await services.files.uploadFileWithAccounting(projectRoot,{path:resourcePath,bytes},{record:(path,delta)=>services.policies.recordFileBytes(projectId,user.id,path,delta)});
           await services.policies.recordOperation(projectId,user.id,"file.upload","accepted",saved.path,"file",{filePath:saved.path,bytes:saved.bytes,mediaType:saved.mediaType});
           return saved;
         });

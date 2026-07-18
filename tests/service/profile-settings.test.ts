@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -133,6 +134,36 @@ describe("profile and settings services", () => {
     );
     finish();
     await running;
+  });
+
+  it("reuses the original resource identity when reclaiming an expired mutation", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "reclaim-owner", email: "reclaim-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    const request = { name: "Recovered" };
+    await store.beginTaskIdempotency({
+      actorId: owner.user.id,
+      projectId: project.id,
+      operation: "project.settings.update",
+      key: "expired-resource-key",
+      requestHash: createHash("sha256").update(JSON.stringify(request)).digest("base64url"),
+      resourceId: "original-resource",
+      claimToken: "expired-claim",
+      now: "2026-01-01T00:00:00.000Z",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z"
+    });
+    let observedResourceId: string | undefined;
+    const action = async (resourceId: string) => {
+      observedResourceId = resourceId;
+      return { resourceId };
+    };
+
+    const result = await services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "expired-resource-key", request, "new-resource", action);
+
+    assert.equal(observedResourceId, "original-resource");
+    assert.deepEqual(result, { resourceId: "original-resource" });
   });
 
   it("reauthorizes settings before replaying a completed response", async () => {

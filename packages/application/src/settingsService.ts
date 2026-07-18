@@ -43,9 +43,9 @@ export class SettingsService {
   async unarchiveWorkspace(userId:string,workspaceId:string){const workspace=await this.requireWorkspaceOwner(userId,workspaceId);return this.requireWorkspaceState(await this.store.setWorkspaceLifecycleStatus(workspace.id,"active",nowIso()))}
   async archiveProject(userId:string,projectId:string){const project=await this.authorization.requireProject(userId,projectId,"admin");return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"archived",nowIso()))}
   async unarchiveProject(userId:string,projectId:string){const project=await this.requireProjectOwner(userId,projectId);await this.authorization.requireProjectWorkspaceActive(project);return this.requireProjectState(await this.store.setProjectLifecycleStatus(project.id,"active",nowIso()))}
-  async runIdempotentMutation<T>(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>,key:string,request:unknown,resourceId:string,run:()=>Promise<T>):Promise<T>{
+  async runIdempotentMutation<T>(actorId:string,scopeId:string,operation:Extract<TaskIdempotencyOperation,`${"workspace"|"project"}.${string}`>,key:string,request:unknown,resourceId:string,run:(resourceId:string)=>Promise<T>):Promise<T>{
     await this.authorizeIdempotentOperation(actorId,scopeId,operation);
-    return runIdempotentMutation({ store:this.store, actorId, scopeId, operation, key, request, resourceId, failureMessage:"Settings operation failed", run:() => run() });
+    return runIdempotentMutation({ store:this.store, actorId, scopeId, operation, key, request, resourceId, failureMessage:"Settings operation failed", run });
   }
   async runIdempotentProjectLifecycleMutation<T>(actorId:string,projectId:string,operation:Extract<TaskIdempotencyOperation,`project.${"archive"|"unarchive"}`>,key:string,action:ProjectLifecycleAuditAction,run:()=>Promise<T>):Promise<T>{
     return this.runIdempotentMutation(actorId,projectId,operation,key,{projectId},projectId,async()=>{
