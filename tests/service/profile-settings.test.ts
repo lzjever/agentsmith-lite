@@ -177,7 +177,8 @@ describe("profile and settings services", () => {
     const update = () => services.settings.runIdempotentMutation(admin.user.id, project.id, "project.settings.update", "admin-settings-key", { name: "Renamed" }, project.id, () => services.settings.updateProject(admin.user.id, project.id, { name: "Renamed" }));
 
     await update();
-    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member");
+    const adminMembership = (await services.memberships.listMembers(owner.user.id, project.id)).find((member) => member.userId === admin.user.id)!;
+    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member", adminMembership.updatedAt);
     await assert.rejects(update, (error: unknown) => error instanceof ProductError && error.statusCode === 403);
   });
 
@@ -196,7 +197,8 @@ describe("profile and settings services", () => {
 
     const first = await transfer();
     assert.deepEqual(await transfer(), first);
-    await services.memberships.changeMember(successor.user.id, project.id, owner.user.id, "member");
+    const formerOwnerMembership = (await services.memberships.listMembers(successor.user.id, project.id)).find((member) => member.userId === owner.user.id)!;
+    await services.memberships.changeMember(successor.user.id, project.id, owner.user.id, "member", formerOwnerMembership.updatedAt);
     await assert.rejects(transfer, (error: unknown) => error instanceof ProductError && error.statusCode === 403);
   });
 });

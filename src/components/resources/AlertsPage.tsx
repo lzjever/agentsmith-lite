@@ -365,7 +365,7 @@ function AlertInstances({
   onResolve: (alert: ProjectAlert) => void;
   onDismiss: (alert: ProjectAlert) => void;
 }) {
-  const [status, setStatus] = useState("all");
+  const [status, setStatus] = useState("active");
   const visible = alerts.filter(
     (alert) => status === "all" || alert.status === status,
   );

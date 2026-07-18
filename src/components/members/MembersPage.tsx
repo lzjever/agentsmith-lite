@@ -185,7 +185,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     setRoleError(undefined);
     try {
       const requestIdentity = `${member.userId}:${nextRole}`;
-      const updated = await apiClient.changeMember(projectId, member.userId, nextRole, mutationKeys.key("project-member.change", requestIdentity));
+      const updated = await apiClient.changeMember(projectId, member.userId, nextRole, member.updatedAt, mutationKeys.key("project-member.change", requestIdentity));
       mutationKeys.complete("project-member.change", requestIdentity);
       if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === updated.userId ? updated : item));
@@ -216,7 +216,7 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
     const member = removing;
     setBusyUserId(member.userId);
     try {
-      await apiClient.removeMember(projectId, member.userId, mutationKeys.key("project-member.remove", member.userId));
+      await apiClient.removeMember(projectId, member.userId, member.updatedAt, mutationKeys.key("project-member.remove", member.userId));
       mutationKeys.complete("project-member.remove", member.userId);
       if (!mounted.current) return;
       setMembers((items) => removeMemberById(items, member.userId));

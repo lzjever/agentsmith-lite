@@ -551,12 +551,13 @@ async function routeApi(
           projectId,
           asUserId(body.userId),
           asProjectMembershipRole(body.role),
+          asString(body.expectedUpdatedAt),
           requireIdempotencyKey(req)
         ));
       }
       if (method === "DELETE") {
         const body = await readJson(req);
-        await services.memberships.removeMember(user.id, projectId, asUserId(body.userId), requireIdempotencyKey(req));
+        await services.memberships.removeMember(user.id, projectId, asUserId(body.userId), asString(body.expectedUpdatedAt), requireIdempotencyKey(req));
         return sendJson(res, 200, { deleted: true });
       }
     }

@@ -40,12 +40,12 @@ describe("project membership authorization", () => {
     await assert.rejects(() => services.memberships.addMember(owner.user.id, project.id, member.user.id, "viewer"), status(409));
     assert.equal((await store.findProjectMembership(project.id, member.user.id))?.role, "member");
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: "viewer@example.test" }, "viewer");
-    await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
-    const changedMember = await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer");
+    const addedViewer = await services.memberships.addMember(owner.user.id, project.id, viewer.user.id, "viewer");
+    const changedMember = await services.memberships.changeMember(owner.user.id, project.id, member.user.id, "viewer", addedMember.updatedAt);
     assert.deepEqual([changedMember.displayName, changedMember.email, changedMember.role], ["Member display", member.user.email, "viewer"]);
     await store.createUserNotification({ id: "notice_removed_project_viewer", userId: viewer.user.id, type: "project_alert", title: "Project alert", body: "No longer visible", projectId: project.id, resourceKind: "alert", resourceId: "alert_removed_viewer", linkPath: `/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-11T00:00:00.000Z" });
     await store.createUserNotification({ id: "notice_retained_project_owner", userId: owner.user.id, type: "project_alert", title: "Owner alert", body: "Still visible", projectId: project.id, resourceKind: "alert", resourceId: "alert_owner", linkPath: `/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-11T00:00:00.000Z" });
-    await services.memberships.removeMember(owner.user.id, project.id, viewer.user.id);
+    await services.memberships.removeMember(owner.user.id, project.id, viewer.user.id, addedViewer.updatedAt);
     assert.deepEqual(await store.listUserNotifications(viewer.user.id), []);
     assert.deepEqual((await store.listUserNotifications(owner.user.id)).map((item) => item.id), ["notice_retained_project_owner"]);
     await store.createUserNotification({ id: "notice_late_after_project_removal", userId: viewer.user.id, type: "project_alert", title: "Late project alert", body: "Must stay hidden", projectId: project.id, resourceKind: "alert", resourceId: "alert_late_viewer", linkPath: `/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-11T00:00:01.000Z" });
@@ -77,12 +77,13 @@ describe("project membership authorization", () => {
       () => services.authorization.requireProject(viewer.user.id, project.id, "write"),
       (error: unknown) => error instanceof ProductError && error.statusCode === 403
     );
+    const currentOwnerMembership = (await store.findProjectMembership(project.id, owner.user.id))!;
     await assert.rejects(
-      () => services.memberships.changeMember(owner.user.id, project.id, owner.user.id, "admin"),
+      () => services.memberships.changeMember(owner.user.id, project.id, owner.user.id, "admin", currentOwnerMembership.updatedAt),
       (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
     await assert.rejects(
-      () => services.memberships.removeMember(owner.user.id, project.id, owner.user.id),
+      () => services.memberships.removeMember(owner.user.id, project.id, owner.user.id, currentOwnerMembership.updatedAt),
       (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
     assert.deepEqual((await store.listProjectAuditEvents(project.id)).slice(-2).map((event) => [event.action, event.resourceId, event.status]), [
@@ -91,8 +92,9 @@ describe("project membership authorization", () => {
     ]);
 
     await services.memberships.transferOwner(owner.user.id, project.id, member.user.id);
-    assert.equal(await store.updateManagedProjectMembershipRole(project.id, member.user.id, "viewer", new Date().toISOString()), "owner");
-    assert.equal(await store.deleteManagedProjectMembership(project.id, member.user.id), "owner");
+    const ownerMembership = (await store.findProjectMembership(project.id, member.user.id))!;
+    assert.equal(await store.updateManagedProjectMembershipRole(project.id, member.user.id, "viewer", new Date().toISOString(), ownerMembership.updatedAt), "owner");
+    assert.equal(await store.deleteManagedProjectMembership(project.id, member.user.id, ownerMembership.updatedAt), "owner");
     assert.equal((await store.findProjectMembership(project.id, member.user.id))?.role, "owner");
   });
 
@@ -159,17 +161,17 @@ describe("project membership authorization", () => {
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
     const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
-    const add = services.memberships.addMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"member",key:string)=>Promise<{userId:string}>;
+    const add = services.memberships.addMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"member",key:string)=>Promise<{userId:string;updatedAt:string}>;
     const first = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
     const replayed = await add(owner.user.id, project.id, member.user.id, "member", "project-member-key");
     assert.equal(replayed.userId, first.userId);
-    const change = services.memberships.changeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"admin",key:string)=>Promise<{role:string}>;
-    const changed = await change(owner.user.id, project.id, member.user.id, "admin", "project-member-change-key");
-    const replayedChange = await change(owner.user.id, project.id, member.user.id, "admin", "project-member-change-key");
+    const change = services.memberships.changeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,role:"admin",expected:string,key:string)=>Promise<{role:string;updatedAt:string}>;
+    const changed = await change(owner.user.id, project.id, member.user.id, "admin", first.updatedAt, "project-member-change-key");
+    const replayedChange = await change(owner.user.id, project.id, member.user.id, "admin", first.updatedAt, "project-member-change-key");
     assert.deepEqual(replayedChange, changed);
-    const remove = services.memberships.removeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,key:string)=>Promise<void>;
-    await remove(owner.user.id, project.id, member.user.id, "project-member-remove-key");
-    await remove(owner.user.id, project.id, member.user.id, "project-member-remove-key");
+    const remove = services.memberships.removeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,expected:string,key:string)=>Promise<void>;
+    await remove(owner.user.id, project.id, member.user.id, changed.updatedAt, "project-member-remove-key");
+    await remove(owner.user.id, project.id, member.user.id, changed.updatedAt, "project-member-remove-key");
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.status === "accepted").length, 1);
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.change" && event.status === "accepted").length, 1);
     assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.remove" && event.status === "accepted").length, 1);
@@ -187,7 +189,8 @@ describe("project membership authorization", () => {
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
     await services.memberships.addMember(owner.user.id, project.id, admin.user.id, "admin");
     await services.memberships.addMember(admin.user.id, project.id, member.user.id, "member", "admin-member-add-key");
-    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member");
+    const adminMembership = (await store.findProjectMembership(project.id, admin.user.id))!;
+    await services.memberships.changeMember(owner.user.id, project.id, admin.user.id, "member", adminMembership.updatedAt);
 
     await assert.rejects(
       () => services.memberships.addMember(admin.user.id, project.id, member.user.id, "member", "admin-member-add-key"),

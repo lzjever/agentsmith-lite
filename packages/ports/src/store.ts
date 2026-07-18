@@ -329,8 +329,8 @@ export class EndpointNameConflictError extends Error {
 export class CredentialVersionConflictError extends Error {
   constructor() { super("Credential version changed"); }
 }
-export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner";
-export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner";
+export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner" | "conflict";
+export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner" | "conflict";
 export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
 export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner";
 export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
@@ -407,8 +407,8 @@ export interface ProductStore {
   createProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<CreateProjectMembershipResult>;
   updateProjectMembership(membership: ProjectMembership): Promise<ProjectMembership | null>;
   deleteProjectMembership(projectId: string, userId: string): Promise<boolean>;
-  updateManagedProjectMembershipRole(projectId: string, userId: string, role: ManagedProjectMembershipRole, updatedAt: string): Promise<ManagedProjectMembershipUpdateResult>;
-  deleteManagedProjectMembership(projectId: string, userId: string): Promise<ManagedProjectMembershipDeleteResult>;
+  updateManagedProjectMembershipRole(projectId: string, userId: string, role: ManagedProjectMembershipRole, updatedAt: string, expectedUpdatedAt: string): Promise<ManagedProjectMembershipUpdateResult>;
+  deleteManagedProjectMembership(projectId: string, userId: string, expectedUpdatedAt: string): Promise<ManagedProjectMembershipDeleteResult>;
   createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy>;
   findProjectResourcePolicy(projectId: string): Promise<ProjectResourcePolicy | null>;
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;

@@ -57,9 +57,13 @@ postgresDescribe("postgres product store", () => {
     await store.upsertWorkspaceMembership({workspaceId:"ws_membership",userId:"user_membership_target",role:"member",createdAt:timestamp,updatedAt:timestamp});
     assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");
     await store.upsertProjectMembershipForWorkspaceMember({...membership,projectId:"proj_membership_two",role:"viewer"});
+    const changedAt=new Date(Date.parse(timestamp)+1).toISOString();
+    assert.equal((await store.updateManagedProjectMembershipRole("proj_membership_one","user_membership_target","viewer",changedAt,timestamp) as {role:string}).role,"viewer");
+    assert.equal(await store.updateManagedProjectMembershipRole("proj_membership_one","user_membership_target","member",new Date(Date.parse(changedAt)+1).toISOString(),timestamp),"conflict");
+    assert.equal(await store.deleteManagedProjectMembership("proj_membership_one","user_membership_target",timestamp),"conflict");
     await store.createUserNotification({id:"notification_project_membership_target",userId:"user_membership_target",type:"project_alert",title:"Target",body:null,projectId:"proj_membership_one",resourceKind:"alert",resourceId:"alert_project_target",linkPath:"/target",readAt:null,createdAt:timestamp});
     await store.createUserNotification({id:"notification_project_membership_owner",userId:"user_membership_owner",type:"project_alert",title:"Owner",body:null,projectId:"proj_membership_one",resourceKind:"alert",resourceId:"alert_project_owner",linkPath:"/owner",readAt:null,createdAt:timestamp});
-    assert.equal(await store.deleteManagedProjectMembership("proj_membership_one","user_membership_target"),"deleted");
+    assert.equal(await store.deleteManagedProjectMembership("proj_membership_one","user_membership_target",changedAt),"deleted");
     assert.deepEqual(await store.listUserNotifications("user_membership_target"),[]);
     assert.deepEqual((await store.listUserNotifications("user_membership_owner")).map((item)=>item.id),["notification_project_membership_owner"]);
     assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");

@@ -139,9 +139,21 @@ describe("v1 project membership API", () => {
 
     const updated = await requestJson("PATCH", `/api/v1/projects/${projectId}/members`, {
       userId: "user_member",
-      role: "member"
+      role: "member",
+      expectedUpdatedAt: created.updatedAt
     });
     assert.equal(updated.role, "member");
+    const staleUpdate = await request("PATCH", `/api/v1/projects/${projectId}/members`, {
+      userId: "user_member",
+      role: "admin",
+      expectedUpdatedAt: created.updatedAt
+    });
+    assert.equal(staleUpdate.response.status, 409);
+    const staleDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, {
+      userId: "user_member",
+      expectedUpdatedAt: created.updatedAt
+    });
+    assert.equal(staleDelete.response.status, 409);
     const memberUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Fmember.txt`, {
       method: "PUT",
       headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream", "idempotency-key": "member-upload" },
@@ -151,7 +163,8 @@ describe("v1 project membership API", () => {
 
     const missing = await request("PATCH", `/api/v1/projects/${projectId}/members`, {
       userId: "user_oidc_member",
-      role: "viewer"
+      role: "viewer",
+      expectedUpdatedAt: "2026-07-18T00:00:00.000Z"
     });
     assert.equal(missing.response.status, 404);
 
@@ -179,13 +192,15 @@ describe("v1 project membership API", () => {
     assert.equal("passwordHash" in displayed, false);
 
     const deleted = await requestJson("DELETE", `/api/v1/projects/${projectId}/members`, {
-      userId: "user_oidc_member"
+      userId: "user_oidc_member",
+      expectedUpdatedAt: oidcMember.updatedAt
     });
     assert.deepEqual(deleted, { deleted: true });
 
-    const ownerUpdate = await request("PATCH", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId, role: "admin" });
+    const ownerMembership = members.find((member: { userId: string }) => member.userId === ownerUserId);
+    const ownerUpdate = await request("PATCH", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId, role: "admin", expectedUpdatedAt: ownerMembership.updatedAt });
     assert.equal(ownerUpdate.response.status, 409);
-    const ownerDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId });
+    const ownerDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId, expectedUpdatedAt: ownerMembership.updatedAt });
     assert.equal(ownerDelete.response.status, 409);
     const workspaceOwnerDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: ownerUserId });
     assert.equal(workspaceOwnerDelete.response.status, 409);

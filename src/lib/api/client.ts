@@ -254,9 +254,9 @@ export const apiClient = {
   members: (projectId: string) => request<ProjectMember[]>(`/projects/${encodeURIComponent(projectId)}/members`),
   addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
     jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", idempotencyKey, { userId, role }),
-  changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
-    jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", idempotencyKey, { userId, role }),
-  removeMember: (projectId: string, userId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", idempotencyKey, { userId }),
+  changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, expectedUpdatedAt: string, idempotencyKey: string) =>
+    jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", idempotencyKey, { userId, role, expectedUpdatedAt }),
+  removeMember: (projectId: string, userId: string, expectedUpdatedAt: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", idempotencyKey, { userId, expectedUpdatedAt }),
   transferProjectOwner:(projectId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/projects/${encodeURIComponent(projectId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
   credentials: (projectId: string) => request<ProjectCredential[]>(`/projects/${encodeURIComponent(projectId)}/credentials`),
   createCredential: (projectId: string, input: { name: string; baseUrl: string; secret: string }, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials`, "POST", idempotencyKey, input),
