@@ -74,7 +74,7 @@ export function EndpointDialog({
     );
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
-      <DialogContent>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <form onSubmit={onSubmit}>
           <DialogHeader
             title={editing ? "Edit endpoint" : "Create endpoint"}
