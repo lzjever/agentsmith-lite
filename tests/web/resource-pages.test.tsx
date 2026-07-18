@@ -709,10 +709,11 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     apiClient.audit = async () => ({ items: [], nextCursor: null });
     try {
-      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
+      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?action=provider.request&status=rejected&resourceKind=alert&resourceId=alert_1");
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
       await screen.findByText("No audit events match this query.");
+      await waitFor(() => assert.match(screen.getByRole("combobox", { name: "Result" }).textContent ?? "", /rejected/));
 
       assert.ok(screen.getByText("From"));
       assert.ok(screen.getByText("To"));
@@ -730,6 +731,10 @@ describe("project resource pages", () => {
       fireEvent.click(await screen.findByRole("option", { name: "chat.message.send" }));
       assert.equal(new URL(window.location.href).searchParams.get("action"), "chat.message.send");
       await screen.findByText("No audit events match this query.");
+
+      fireEvent.click(screen.getByRole("combobox", { name: "Result" }));
+      fireEvent.click(await screen.findByRole("option", { name: "accepted" }));
+      assert.equal(new URL(window.location.href).searchParams.get("status"), "accepted");
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
   });
 
@@ -765,6 +770,7 @@ describe("project resource pages", () => {
       fireEvent.change(screen.getByLabelText("From timestamp"), { target: { value: "2026-07-10T12:00" } });
       await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_1" && call.query.status === "rejected" && typeof call.query.from === "string")));
 
+      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_2/audit");
       view.rerender(<AuditPage projectId="project_2" />);
       await waitFor(() => assert.ok(calls.some((call) => call.projectId === "project_2")));
       const projectTwo = calls.find((call) => call.projectId === "project_2")!;

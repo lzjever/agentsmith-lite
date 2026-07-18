@@ -123,6 +123,7 @@ export function UsagePage({ projectId }: { projectId: string }) {
 
 const actions = ["all", ...PROJECT_AUDIT_ACTIONS] as const;
 const kinds = ["all", ...PROJECT_AUDIT_RESOURCE_KINDS] as const;
+const statuses = ["all", "accepted", "rejected"] as const;
 
 export function AuditPage({ projectId }: { projectId: string }) {
   return <AuditProjectPage key={projectId} projectId={projectId} />;
@@ -179,6 +180,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     const query = browserQuery();
     const requestedAction = query.get("action");
     const requestedKind = query.get("resourceKind");
+    const requestedStatus = query.get("status");
     setAction(
       requestedAction &&
         PROJECT_AUDIT_ACTIONS.includes(
@@ -195,6 +197,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         ? requestedKind
         : "all",
     );
+    setStatus(requestedStatus === "accepted" || requestedStatus === "rejected" ? requestedStatus : "all");
     setResourceId(query.get("resourceId") ?? "");
     setCursors([undefined]);
     setQueryProjectId(projectId);
@@ -277,10 +280,14 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             label="Result"
             value={status}
             onChange={(value) => {
+              const query = browserQuery();
+              if (value === "all") query.delete("status");
+              else query.set("status", value);
+              replaceBrowserQuery(query);
               setStatus(value);
               reset();
             }}
-            values={["all", "accepted", "rejected"]}
+            values={statuses}
           />
           <Filter
             label="Resource type"
