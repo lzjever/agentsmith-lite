@@ -258,7 +258,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         {resourceId ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-2">
             <p className="text-sm text-secondary">
-              Showing events for {kind === "alert" ? "alert instance" : `${kind === "all" ? "linked" : kind.replaceAll("_", " ")} resource`} <strong>{resourceId}</strong>.
+              Showing events for {linkedResourceLabel(kind, resourceId)} <strong>{resourceId}</strong>.
             </p>
             <Button
               variant="quiet"
@@ -266,7 +266,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               onClick={clearResource}
             >
               <X size={14} />
-              Clear instance
+              Clear resource filter
             </Button>
           </div>
         ) : null}
@@ -420,6 +420,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
 
 function actorName(event:ProjectAuditEvent):string{return event.actorId===null?"System":event.actorDisplayName||event.actorEmail||event.actorId}
 function auditActors(members:ProjectMember[],events:ProjectAuditEvent[],selected:string):Array<{id:string;label:string}>{const actors=new Map<string,string>();actors.set("system","System");for(const member of members)actors.set(member.userId,member.displayName?`${member.displayName} (${member.email})`:member.email);for(const event of events)if(event.actorId)actors.set(event.actorId,event.actorDisplayName?`${event.actorDisplayName} (${event.actorEmail??event.actorId})`:event.actorEmail??event.actorId);if(selected!=="all"&&!actors.has(selected))actors.set(selected,selected);return [...actors].map(([id,label])=>({id,label}))}
+function linkedResourceLabel(kind:string,resourceId:string):string{if(kind==="alert")return resourceId.startsWith("alert_rule_")?"alert rule":"alert instance";return `${kind==="all"?"linked":kind.replaceAll("_"," ")} resource`}
 
 function Filter({
   label,

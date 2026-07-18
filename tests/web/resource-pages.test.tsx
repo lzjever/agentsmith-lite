@@ -724,17 +724,17 @@ describe("project resource pages", () => {
 
   it("filters audit events, opens a safe detail view, and never renders unsupported sensitive event fields", async () => {
     const original = snapshotClient();
-    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.resolve", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_1", createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
+    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.rule.delete", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_rule_1", createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
     const queries: Array<Record<string, string | number | undefined>> = [];
     apiClient.audit = async (_projectId, query = {}) => { queries.push(query); return { items: [event], nextCursor: null }; };
     apiClient.members = async () => [{ projectId, userId: "user_1", role: "owner", displayName: "Ada Admin", email: "ada@example.test", createdAt: policy.createdAt, updatedAt: policy.updatedAt }];
     try {
-      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
+      window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_rule_1");
       render(<AuditPage projectId={projectId} />);
-      await screen.findByText(/Showing events for alert instance/);
+      await screen.findByText(/Showing events for alert rule/);
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
-      assert.equal(queries.at(-1)?.resourceId, "alert_1");
-      fireEvent.click(screen.getByRole("button", { name: "Clear instance" }));
+      assert.equal(queries.at(-1)?.resourceId, "alert_rule_1");
+      fireEvent.click(screen.getByRole("button", { name: "Clear resource filter" }));
       await waitFor(() => assert.equal(queries.at(-1)?.resourceId, undefined));
       assert.equal(new URL(window.location.href).searchParams.has("resourceId"), false);
       assert.ok(screen.getByText("Ada Admin", { selector: "span" }));
@@ -745,7 +745,7 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
       assert.ok(await screen.findByRole("option", { name: "chat.message.send" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));
-      const row = await screen.findByRole("button", { name: /alert.resolve/ });
+      const row = await screen.findByRole("button", { name: /alert.rule.delete/ });
       fireEvent.click(row);
       await screen.findByRole("heading", { name: "Audit event detail" });
       assert.ok(screen.getByText("Event metadata for this project activity."));
