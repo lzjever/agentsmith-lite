@@ -4,7 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import React from "react";
 import { ApiError, apiClient, type Endpoint, type EndpointInput, type ProjectCapabilities } from "../../src/lib/api/client.js";
 installDom(); const {act,cleanup,fireEvent,render,screen,waitFor,within}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
-const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"x",updatedAt:"x"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
+const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"2026-07-12T00:00:00.000Z",updatedAt:"2026-07-12T00:00:00.000Z"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canCancelTasks:false,canSendChat:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText("1 endpoint configured");assert.equal(screen.queryByText(/configured · 1 configured/),null);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);assert.ok(screen.getAllByText("Provider").length>0);assert.ok(screen.getAllByText("fingerprint").length>0);assert.ok(screen.getAllByText(/Last checked/).length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 
 describe("endpoint credential binding", () => {
@@ -20,6 +20,26 @@ describe("endpoint credential binding", () => {
   });
 });
 describe("endpoint dependencies", () => {
+  it("loads the latest endpoint after a stale edit is rejected", async () => {
+    const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,updateEndpoint:apiClient.updateEndpoint};
+    const latest={...endpoint,model:"newer-model",updatedAt:"2026-07-12T00:01:00.000Z"};
+    let reads=0;
+    apiClient.endpoints=async()=>{reads+=1;return reads===1?[endpoint]:[latest];};
+    apiClient.credentials=async()=>[credential];
+    apiClient.projectCapabilities=async()=>manager;
+    apiClient.updateEndpoint=async()=>{throw new ApiError(409,"Endpoint changed elsewhere. Reload and try again.");};
+    try{
+      render(<EndpointsPage projectId="project_1"/>);
+      fireEvent.click((await screen.findAllByRole("button",{name:"Edit DeepSeek"}))[0]!);
+      fireEvent.change(screen.getByLabelText("Model"),{target:{value:"my-stale-change"}});
+      fireEvent.click(screen.getByRole("button",{name:"Save"}));
+
+      await screen.findByText("Endpoint changed elsewhere. Latest configuration loaded; review and apply your change again.");
+      assert.equal((screen.getByLabelText("Model") as HTMLInputElement).value,"newer-model");
+      assert.equal(reads,2);
+    }finally{Object.assign(apiClient,original);}
+  });
+
   it("blocks a duplicate endpoint name while allowing an endpoint to keep its own name", async () => {
     const original = { endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities,createEndpoint:apiClient.createEndpoint };
     let creates = 0;
@@ -402,7 +422,8 @@ describe("endpoint management", () => it("edits and discovers models with the cr
       model: "model-b",
       credentialId: "credential_1",
       capabilities: ["text"],
-      requestTimeoutSecs: 30
+      requestTimeoutSecs: 30,
+      expectedUpdatedAt: endpoint.updatedAt
     }));
     await screen.findAllByRole("button", { name: "Check health for DeepSeek" });
     fireEvent.click(screen.getAllByRole("button", { name: "Check health for DeepSeek" })[0]!);

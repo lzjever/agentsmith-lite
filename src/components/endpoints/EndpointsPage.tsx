@@ -189,6 +189,29 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     loadDependencies();
     return true;
   }
+  async function refreshStaleEndpoint(reason: unknown, endpointId: string) {
+    if (!(reason instanceof ApiError && reason.status === 409 && reason.message === "Endpoint changed elsewhere. Reload and try again.")) return false;
+    try {
+      const listed = await apiClient.endpoints(projectId);
+      if (currentProjectId.current !== projectId) return true;
+      setEndpoints(listed);
+      const latest = listed.find((endpoint) => endpoint.id === endpointId);
+      if (!latest) {
+        setDialogOpen(false);
+        setActionProjectId(undefined);
+        setEditing(undefined);
+        toast.error("Endpoint was removed elsewhere.");
+        return true;
+      }
+      invalidateDiscovery();
+      setEditing(latest);
+      setInput(endpointInputForEdit(latest));
+      setFormError("Endpoint changed elsewhere. Latest configuration loaded; review and apply your change again.");
+    } catch {
+      setFormError("Endpoint changed elsewhere, and the latest configuration could not be loaded. Close this dialog and refresh endpoints.");
+    }
+    return true;
+  }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canConfigure || mutationBusy || actionProjectId !== projectId || input.capabilities.length === 0 || nameConflict || (editing !== undefined && !endpointInputChanged(input, editing))) return;
@@ -197,7 +220,10 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setSaving(true);
     setFormError("");
     try {
-      const saved = editing ? await apiClient.updateEndpoint(projectId, editing.id, input, mutationKeys.requestKey("endpoint.update", editing.id, input)) : await apiClient.createEndpoint(projectId, input, mutationKeys.requestKey("endpoint.create", projectId, input));
+      const updateInput = editing ? { ...input, expectedUpdatedAt: editing.updatedAt } : undefined;
+      const saved = editing && updateInput
+        ? await apiClient.updateEndpoint(projectId, editing.id, updateInput, mutationKeys.requestKey("endpoint.update", editing.id, updateInput))
+        : await apiClient.createEndpoint(projectId, input, mutationKeys.requestKey("endpoint.create", projectId, input));
       mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));
@@ -211,6 +237,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
         toast.error("Endpoint was removed elsewhere.");
         return;
       }
+      if (editing && await refreshStaleEndpoint(reason, editing.id)) return;
       refreshMissingCredential(reason);
       setFormError(denied(reason));
     } finally {

@@ -81,12 +81,22 @@ describe("api product workflow", () => {
       baseUrl: "https://models.example.com/v1",
       model: "updated-compatible",
       capabilities: ["text", "tool_calls"],
-      requestTimeoutSecs: 45
+      requestTimeoutSecs: 45,
+      expectedUpdatedAt: endpoint.updatedAt
     }, cookie, csrf);
     assert.equal(updatedEndpoint.name, "Updated endpoint");
     assert.equal(updatedEndpoint.model, "updated-compatible");
     assert.equal(updatedEndpoint.credentialId, credential.id);
     assert.equal(updatedEndpoint.hasCredentialRef, true);
+    await assertApiError(await request("PATCH", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, {
+      name:"Stale endpoint",
+      protocol:"openai_chat_completions",
+      baseUrl:endpoint.baseUrl,
+      model:endpoint.model,
+      capabilities:endpoint.capabilities,
+      requestTimeoutSecs:endpoint.requestTimeoutSecs,
+      expectedUpdatedAt:endpoint.updatedAt
+    },cookie,csrf),409,"Endpoint changed elsewhere. Reload and try again.");
     const disposableEndpoint = await postJson(`/api/v1/projects/${project.id}/endpoints`, {
       name: "Disposable endpoint",
       protocol: "openai_chat_completions",
@@ -104,7 +114,8 @@ describe("api product workflow", () => {
       model: disposableEndpoint.model,
       credentialId: replacementCredential.id,
       capabilities: disposableEndpoint.capabilities,
-      requestTimeoutSecs: disposableEndpoint.requestTimeoutSecs
+      requestTimeoutSecs: disposableEndpoint.requestTimeoutSecs,
+      expectedUpdatedAt: disposableEndpoint.updatedAt
     }, cookie, csrf);
     assert.equal(reboundEndpoint.credentialId, replacementCredential.id);
     assertNoApiKeySecretRef(reboundEndpoint);

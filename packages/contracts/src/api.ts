@@ -681,6 +681,7 @@ export interface CreateEndpointInput {
 
 export interface UpdateEndpointInput extends Omit<CreateEndpointInput, "credentialId"> {
   credentialId?: string;
+  expectedUpdatedAt: ISODateString;
 }
 
 export interface DiscoverEndpointModelsInput {

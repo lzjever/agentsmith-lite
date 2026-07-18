@@ -520,7 +520,7 @@ postgresDescribe("postgres product store", () => {
     const primary = (await services.endpoints.listEndpoints(user.id, project.id))[0]!;
     const secondary = await services.endpoints.createEndpoint(user.id, project.id, input("Secondary"));
     await assert.rejects(
-      () => services.endpoints.updateEndpoint(user.id, project.id, secondary.id, { ...input(primary.name.toUpperCase()), credentialId: credential.id }),
+      () => services.endpoints.updateEndpoint(user.id, project.id, secondary.id, { ...input(primary.name.toUpperCase()), credentialId: credential.id, expectedUpdatedAt:secondary.updatedAt }),
       /endpoint already uses that name/i
     );
   });

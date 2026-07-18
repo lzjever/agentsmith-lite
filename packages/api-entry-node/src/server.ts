@@ -1691,7 +1691,8 @@ function asEndpointUpdateInput(body: Record<string, unknown>): UpdateEndpointInp
   const { credentialId: _credentialId, ...withoutCredential } = input;
   return {
     ...withoutCredential,
-    ...(body.credentialId === undefined ? {} : { credentialId: input.credentialId })
+    ...(body.credentialId === undefined ? {} : { credentialId: input.credentialId }),
+    expectedUpdatedAt: asString(body.expectedUpdatedAt)
   };
 }
 

@@ -48,6 +48,8 @@ export class EndpointService {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
     const update = async (): Promise<ModelEndpoint> => {
       const existing = await this.requireEndpointForProject(projectId, endpointId);
+      const expectedUpdatedAt = expectedEndpointTimestamp(input.expectedUpdatedAt);
+      if (existing.updatedAt !== expectedUpdatedAt) throw endpointChangedElsewhere();
       const endpoint: ModelEndpoint = {
         ...existing,
         name: requireNonEmptyString(input.name, "endpoint.name", PRODUCT_NAME_MAX_LENGTH),
@@ -68,7 +70,7 @@ export class EndpointService {
         const stored = await this.store.updateEndpoint(validated.endpoint, existing.updatedAt, validated.credentialVersion);
         if (!stored) {
           const current = await this.store.findEndpoint(endpointId);
-          if (current?.projectId === projectId) throw new ProductError("Endpoint changed by another request. Refresh and try again.", 409);
+          if (current?.projectId === projectId) throw endpointChangedElsewhere();
           throw new NotFoundError("Endpoint not found");
         }
         updated = stored;
@@ -233,6 +235,11 @@ class EndpointValidationError extends ProductError {
 function endpointValidationHealth(error:unknown):EndpointHealth|undefined{return error instanceof EndpointValidationError?error.health:undefined}
 function endpointNameConflict(): ProductError { return new ProductError("An endpoint already uses that name", 409); }
 function credentialChangedDuringValidation(): ProductError { return new ProductError("Credential changed during endpoint validation. Retry the request.", 409); }
+function endpointChangedElsewhere(): ProductError { return new ProductError("Endpoint changed elsewhere. Reload and try again.", 409); }
+function expectedEndpointTimestamp(value: string): string {
+  if (!Number.isFinite(Date.parse(value))) throw new ProductError("endpoint.expectedUpdatedAt must be an ISO timestamp");
+  return new Date(value).toISOString();
+}
 
 function nextEndpointUpdatedAt(previous: string): string {
   const previousTime = Date.parse(previous);

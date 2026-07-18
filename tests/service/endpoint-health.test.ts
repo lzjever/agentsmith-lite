@@ -90,7 +90,7 @@ test("endpoint names stay unique within a project across concurrent creates and 
   const first = (await services.endpoints.listEndpoints(user.id, project.id))[0]!;
   const second = await services.endpoints.createEndpoint(user.id, project.id, input("Secondary"));
   await assert.rejects(
-    () => services.endpoints.updateEndpoint(user.id, project.id, second.id, { ...input(first.name.toUpperCase()), credentialId: credential.id }),
+    () => services.endpoints.updateEndpoint(user.id, project.id, second.id, { ...input(first.name.toUpperCase()), credentialId: credential.id, expectedUpdatedAt:second.updatedAt }),
     /endpoint already uses that name/i
   );
   assert.equal((await services.endpoints.requireEndpointForProject(project.id, second.id)).name, "Secondary");
@@ -185,11 +185,31 @@ test("endpoint recheck does not overwrite configuration changed while the provid
 
   const rechecking = services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
   await started;
-  await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs });
+  await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs, expectedUpdatedAt:endpoint.updatedAt });
   finishRecheck({ status: "healthy" });
 
   assert.equal((await rechecking).name, "After");
   assert.equal((await services.endpoints.listEndpoints(user.id, project.id))[0]?.name, "After");
+});
+
+test("a stale endpoint form is rejected before provider validation", async () => {
+  let validationCalls=0;
+  const store=createInMemoryProductStore();
+  const services=createApplicationServices({store,dataRoot:"/tmp/agentsmith-endpoint-stale-form",builtinAdminPassword:"admin-password",providerClient:{completeChat:async()=>{throw new Error("not used");},validateEndpoint:async()=>{validationCalls+=1;return{status:"healthy" as const};}}});
+  const{user}=await services.auth.loginAfterBootstrap("admin-password");
+  const workspace=await services.workspaces.createWorkspace(user.id,{name:"W"});
+  const project=await services.workspaces.createProject(user.id,workspace.id,{name:"P"});
+  const credential=await services.credentials.create(user.id,project.id,{name:"Provider",baseUrl:"https://models.example.test/v1",secret:"secret"});
+  const endpoint=await services.endpoints.createEndpoint(user.id,project.id,{name:"Before",protocol:"openai_chat_completions",baseUrl:credential.baseUrl,model:"model",credentialId:credential.id,capabilities:["text"],requestTimeoutSecs:30});
+  const concurrent={...endpoint,name:"Concurrent",updatedAt:new Date(Date.parse(endpoint.updatedAt)+1).toISOString()};
+  await store.updateEndpoint(concurrent,endpoint.updatedAt);
+
+  await assert.rejects(
+    ()=>services.endpoints.updateEndpoint(user.id,project.id,endpoint.id,{name:"Stale",protocol:endpoint.protocol,baseUrl:endpoint.baseUrl,model:endpoint.model,credentialId:credential.id,capabilities:endpoint.capabilities,requestTimeoutSecs:endpoint.requestTimeoutSecs,expectedUpdatedAt:endpoint.updatedAt}),
+    /Endpoint changed elsewhere/
+  );
+  assert.equal(validationCalls,1);
+  assert.equal((await store.findEndpoint(endpoint.id))?.name,"Concurrent");
 });
 
 test("a slower endpoint update cannot overwrite a newer validated configuration", async () => {
@@ -215,7 +235,7 @@ test("a slower endpoint update cannot overwrite a newer validated configuration"
   const project = await services.workspaces.createProject(user.id, workspace.id, { name:"P" });
   const credential = await services.credentials.create(user.id, project.id, { name:"Provider", baseUrl:"https://models.example.test/v1", secret:"secret" });
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name:"Before", protocol:"openai_chat_completions", baseUrl:credential.baseUrl, model:"model", credentialId:credential.id, capabilities:["text"], requestTimeoutSecs:30 });
-  const input = (name:string) => ({ name, protocol:endpoint.protocol, baseUrl:endpoint.baseUrl, model:endpoint.model, credentialId:credential.id, capabilities:endpoint.capabilities, requestTimeoutSecs:endpoint.requestTimeoutSecs });
+  const input = (name:string) => ({ name, protocol:endpoint.protocol, baseUrl:endpoint.baseUrl, model:endpoint.model, credentialId:credential.id, capabilities:endpoint.capabilities, requestTimeoutSecs:endpoint.requestTimeoutSecs, expectedUpdatedAt:endpoint.updatedAt });
 
   const slow = services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input("Slow"));
   await started;
@@ -223,7 +243,7 @@ test("a slower endpoint update cannot overwrite a newer validated configuration"
   finishSlow();
 
   assert.equal(fast.name, "Fast");
-  await assert.rejects(slow, /changed by another request/);
+  await assert.rejects(slow, /changed elsewhere/);
   assert.equal((await services.endpoints.requireEndpointForProject(project.id, endpoint.id)).name, "Fast");
 });
 
@@ -243,7 +263,7 @@ test("endpoint updates and health rechecks replay without repeating provider wor
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Before", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
-  const input = { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs };
+  const input = { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs, expectedUpdatedAt:endpoint.updatedAt };
 
   const updated = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input, "endpoint-update-key");
   const replayedUpdate = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, input, "endpoint-update-key");

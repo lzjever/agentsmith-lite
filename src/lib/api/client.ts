@@ -264,7 +264,7 @@ export const apiClient = {
   deleteCredential: (projectId: string, credentialId: string, expectedVersion: number, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", idempotencyKey, { expectedVersion }),
   endpoints: (projectId: string) => request<Endpoint[]>(`/projects/${encodeURIComponent(projectId)}/endpoints`),
   createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
-  updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput, idempotencyKey: string) =>
+  updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput & { expectedUpdatedAt: string }, idempotencyKey: string) =>
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   discoverEndpointModels: (projectId: string, input: Pick<EndpointInput, "baseUrl" | "credentialId" | "requestTimeoutSecs"> & { endpointId?: string }, idempotencyKey: string) =>
     jsonIdempotent<EndpointModelDiscovery>(`/projects/${encodeURIComponent(projectId)}/endpoints/models`, "POST", idempotencyKey, input),
