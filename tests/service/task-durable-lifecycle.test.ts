@@ -405,6 +405,50 @@ describe("durable task lifecycle", () => {
     assert.equal((await setup.store.findTask(task.id))?.terminalReason, null);
   });
 
+  it("terminalizes active interactions when their task is cancelled", async () => {
+    const setup = await createSetup(true);
+    const task = await startTask(setup, "cancel-running-command");
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [
+        timelineEvent(1, "command_execution.started", {
+          tool_call_id: "call-cancelled",
+          command: "sleep 30",
+          output_tail: "",
+          exit_code: null,
+          status: "in_progress"
+        }, { id:"cmd_call-cancelled", type:"command_execution", status:"running" }),
+        timelineEvent(2, "background_task.started", {
+          task_id: "work-cancelled",
+          tool_call_id: "call-background",
+          state: "running",
+          work_summary: "Wait in background"
+        }, { id:"task_work-cancelled", type:"background_task", status:"running" }),
+        timelineEvent(3, "task_ask.requested", {
+          task_id: "work-question",
+          ask_id: "ask-cancelled",
+          question: "Continue?"
+        }, { id:"ask_ask-cancelled", type:"task_ask", status:"waiting" })
+      ],
+      nextCursor: "evt_test_3",
+      historyBoundary: "start"
+    });
+    await setup.services.tasks.syncActiveTasksOnce();
+    const active = (await setup.services.tasks.taskInteractions(setup.userId, task.id)).items;
+    assert.equal(active.find((item) => item.kind === "tool")?.executionStatus, "running");
+    assert.equal(active.find((item) => item.kind === "background_task")?.executionStatus, "running");
+    assert.equal(active.find((item) => item.kind === "task_question")?.status, "waiting");
+
+    await setup.services.tasks.cancelTask(setup.userId, task.id, "cancel-running-command");
+
+    const terminal = (await setup.services.tasks.taskInteractions(setup.userId, task.id)).items;
+    const tool = terminal.find((item) => item.kind === "tool");
+    assert.equal(tool?.kind, "tool");
+    assert.equal(tool?.executionStatus, "cancelled");
+    assert.equal(terminal.find((item) => item.kind === "background_task")?.executionStatus, "cancelled");
+    assert.equal(terminal.find((item) => item.kind === "task_question")?.status, "expired");
+  });
+
   it("serializes runtime ticks and interaction reads for the same task", async () => {
     const setup = await createSetup(true);
     const task = await startTask(setup, "concurrent-timeline-sync");
@@ -430,15 +474,25 @@ describe("durable task lifecycle", () => {
     const task = await startTask(setup, "provider-cycle-failure");
     setup.botified.timelineReads.push({
       status: "ok",
-      events: [timelineEvent(1, "cycle.failed", {
+      events: [timelineEvent(1, "command_execution.started", {
+        tool_call_id: "call-provider-failure",
+        command: "long-running-command",
+        status: "in_progress"
+      }, { id:"cmd_call-provider-failure", type:"command_execution", status:"running" })],
+      nextCursor: "evt_test_1",
+      historyBoundary: "start"
+    });
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.timelineReads.push({
+      status: "ok",
+      events: [timelineEvent(2, "cycle.failed", {
         cycle_id: "cycle-1",
         input_ids: ["message-1"],
         queue_length: 0,
         error: { code: "provider_error", message: "provider request failed", retryable: false },
         retryable: false
       }, { id:"cycle-1", type:"cycle", status:"failed" })],
-      nextCursor: "evt_test_1",
-      historyBoundary: "start"
+      nextCursor: "evt_test_2"
     });
 
     await setup.services.tasks.syncActiveTasksOnce();
@@ -447,6 +501,7 @@ describe("durable task lifecycle", () => {
     const interactions = await setup.services.tasks.taskInteractions(setup.userId, task.id);
     assert.equal(failed?.status, "failed");
     assert.equal(failed?.terminalReason, "failed");
+    assert.equal(interactions.items.find((item) => item.kind === "tool")?.executionStatus, "failed");
     assert.equal(interactions.items.some((item) => item.kind === "system_error"), true);
   });
 

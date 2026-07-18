@@ -232,6 +232,7 @@ const KNOWN_INTERACTION_EVENT_TYPES = new Set([
   "command_execution.started",
   "command_execution.completed",
   "command_execution.failed",
+  "command_execution.cancelled",
   "background_task.started",
   "background_task.completed",
   "background_task.failed",

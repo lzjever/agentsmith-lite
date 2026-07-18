@@ -148,6 +148,7 @@ function projectBotified(
     case "command_execution.started":
     case "command_execution.completed":
     case "command_execution.failed":
+    case "command_execution.cancelled":
       return projectTool(source, previous, redaction);
     case "background_task.started":
     case "background_task.completed":
@@ -351,7 +352,9 @@ function projectTool(
   const old = previous?.interaction.kind === "tool" ? previous.interaction : null;
   const incomingStatus: TaskToolInteraction["executionStatus"] = source.event.type === "command_execution.started"
     ? "running"
-    : source.event.type === "command_execution.completed" ? "completed" : "failed";
+    : source.event.type === "command_execution.completed"
+      ? "completed"
+      : source.event.type === "command_execution.cancelled" ? "cancelled" : "failed";
   const executionStatus = monotonicExecution(old?.executionStatus, incomingStatus, TOOL_TERMINAL);
   const summary = optionalRedacted(stringField(data, "command") ?? stringField(data, "arguments_summary"), redaction);
   const output = source.event.type === "command_execution.failed"

@@ -139,6 +139,7 @@ export interface TaskInteractionTerminalLifecycleMutation {
   auditEvent: ProjectAuditEvent;
   successors: TaskLifecycleSuccessor[];
   terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
+  terminalInteractionChanges?: TaskInteractionChangeInput[];
 }
 
 export type TaskInteractionLifecycleMutation =
@@ -605,6 +606,7 @@ export interface FinalizeTaskLifecycleInput {
   auditEvent: ProjectAuditEvent;
   successors: TaskLifecycleSuccessor[];
   terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
+  terminalInteractionChanges?: TaskInteractionChangeInput[];
 }
 
 export interface FinalizeTaskLifecycleResult {

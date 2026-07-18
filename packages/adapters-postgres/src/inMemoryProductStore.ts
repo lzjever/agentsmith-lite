@@ -827,6 +827,7 @@ export class InMemoryProductStore implements ProductStore {
         this.appendInteractionChanges(current.id, pendingChange ? [pendingChange.interactionChange] : []);
       }
     }
+    this.appendInteractionChanges(current.id, input.terminalInteractionChanges ?? []);
     if (!this.auditEvents.some((event) => event.id === input.auditEvent.id)) this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
     return { task: clone(terminal), applied: true, successorTaskIds, missingPendingMessageIds: [] };
     });

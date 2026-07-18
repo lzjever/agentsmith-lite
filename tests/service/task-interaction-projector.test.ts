@@ -635,6 +635,24 @@ describe("task interaction projection", () => {
     assert.equal(field(tool, "detailsOmitted"), true);
     assert.equal(tool.interaction?.contentMode, "preview");
   });
+
+  it("keeps cancelled command execution distinct from failure", () => {
+    const cancelled = projectBotified(canonicalEvent(
+      1,
+      "command_execution.cancelled",
+      {
+        tool_call_id: "call-cancelled",
+        command: "sleep 120",
+        output_tail: "tool execution aborted",
+        exit_code: null,
+        status: "cancelled"
+      },
+      "command_execution"
+    ));
+
+    assert.equal(field(cancelled, "executionStatus"), "cancelled");
+    assert.equal(field(cancelled, "command"), "sleep 120");
+  });
 });
 
 describe("interaction text redaction", () => {
@@ -737,6 +755,7 @@ describe("interaction text redaction", () => {
     assert.doesNotMatch(JSON.stringify(failed.interaction), /task-secret/);
     assert.doesNotMatch(JSON.stringify(completed.interaction), /task-secret/);
   });
+
 });
 
 function canonicalEvent(

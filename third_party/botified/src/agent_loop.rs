@@ -3942,18 +3942,24 @@ fn emit_tool_completed(
     if !detached_ack {
         if let Some(command) = bash_command(tool_call) {
             let exit_code = bash_exit_code(result);
-            let status = if !result.is_error && exit_code == Some(0) {
-                "completed"
-            } else {
-                "failed"
-            };
             data["command"] = json!(command);
             data["aggregated_output"] = json!(bash_aggregated_output(result));
             data["exit_code"] = json!(exit_code);
-            data["status"] = json!(status);
+            data["status"] = json!(bash_command_execution_status(result, exit_code));
         }
     }
     emit(event_log, config, "tool.completed", data);
+}
+
+fn bash_command_execution_status(result: &ToolResult, exit_code: Option<i32>) -> &'static str {
+    let result_kind = result.details.get("kind").and_then(Value::as_str);
+    if matches!(result_kind, Some("tool_cancelled" | "tool_aborted")) {
+        "cancelled"
+    } else if !result.is_error && exit_code == Some(0) {
+        "completed"
+    } else {
+        "failed"
+    }
 }
 
 fn bash_command(tool_call: &ToolCall) -> Option<&str> {
@@ -3985,6 +3991,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::tools::ToolSpec;
+
+    #[test]
+    fn cancelled_bash_result_has_cancelled_command_status() {
+        let result = ToolResult::error(
+            "call-cancelled",
+            "bash",
+            "tool execution aborted",
+            json!({ "kind": "tool_aborted" }),
+        );
+
+        assert_eq!(bash_command_execution_status(&result, None), "cancelled");
+    }
 
     #[test]
     fn detached_ack_proves_running_identity_without_promising_completion() {

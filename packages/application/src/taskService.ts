@@ -990,8 +990,9 @@ export class TaskService {
         const projection=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"terminal_pending",updatedAt:timestamp}));
         if(projection)terminalPendingChanges.push({messageId:message.id,interactionChange:projection.change});
       }
+      const terminalInteractionChanges=await this.prepareTerminalInteractionChanges(task,reason,timestamp);
       let result:FinalizeTaskLifecycleResult|null;
-      try{result=await this.store.finalizeTaskLifecycle({taskId,terminalReason:reason,updatedAt:timestamp,auditEvent:{id:newId("audit"),projectId:task.projectId,actorId,action:auditAction,status:"accepted",resourceKind:"task",resourceId:task.id,detail:{endpointId:task.endpointId},createdAt:timestamp},successors:successorInputs,terminalPendingChanges});}
+      try{result=await this.store.finalizeTaskLifecycle({taskId,terminalReason:reason,updatedAt:timestamp,auditEvent:{id:newId("audit"),projectId:task.projectId,actorId,action:auditAction,status:"accepted",resourceKind:"task",resourceId:task.id,detail:{endpointId:task.endpointId},createdAt:timestamp},successors:successorInputs,terminalPendingChanges,terminalInteractionChanges});}
       catch(error){for(const create of successors)await this.cleanupUnusedTaskCreate(create);throw error;}
       if(!result)throw new ProductError("Task not found",404);
       if(result.missingPendingMessageIds.length){for(const create of successors)await this.cleanupUnusedTaskCreate(create);continue;}
@@ -1001,6 +1002,20 @@ export class TaskService {
       return result.task;
     }
     throw new ProductError("Task message state changed during finalization",409);
+  }
+
+  private async prepareTerminalInteractionChanges(task:PersistedAgentTask,reason:TaskTerminalReason,updatedAt:string):Promise<TaskInteractionChangeInput[]>{
+    if(!["failed","cancelled","expired"].includes(reason))return[];
+    const snapshot=await this.store.readTaskInteractionSnapshot(task.id,null,INTERACTION_LOOKUP_LIMIT);
+    if(!snapshot)return[];
+    const changes:TaskInteractionChangeInput[]=[];
+    for(const interaction of snapshot.items){
+      const terminal=terminalizeInteraction(interaction,reason,updatedAt);
+      if(!terminal)continue;
+      const latest=await this.store.findLatestTaskInteractionChange(task.id,interaction.id);
+      changes.push({sourceKind:"product",sourceId:`task-terminal:${interaction.id}`,sourceRevision:1,interaction:terminal,...(latest?.correlation?{correlation:latest.correlation}:{})});
+    }
+    return changes;
   }
 
   private async bestEffortAbortAndRequestCleanup(task:PersistedAgentTask):Promise<void>{
@@ -1427,7 +1442,8 @@ export class TaskService {
         updatedAt:syncedAt,
         auditEvent:{ id:newId("audit"), projectId:task.projectId, actorId:null, action:taskAuditActionForReason(terminalReasonForStatus(projectedStatus)), status:"accepted", resourceKind:"task", resourceId:task.id, detail:{endpointId:task.endpointId}, createdAt:syncedAt },
         successors:successorInputs,
-        terminalPendingChanges
+        terminalPendingChanges,
+        terminalInteractionChanges:await this.prepareTerminalInteractionChanges(task,terminalReasonForStatus(projectedStatus),syncedAt)
       };
     }
     try {
@@ -2973,6 +2989,26 @@ function isBotifiedSessionQuiescent(state: BotifiedRuntimeStateResult, timelineC
     if (["input", "task_ask", "subagent"].includes(String(item.type))) return true;
     return item.type === "background_task" && ["running", "cancelling"].includes(String(item.status));
   });
+}
+
+function terminalizeInteraction(interaction:TaskInteractionItem,reason:TaskTerminalReason,updatedAt:string):TaskInteractionItem|null{
+  const update={revision:interaction.revision+1,updatedAt};
+  switch(interaction.kind){
+    case "assistant_message":
+      return interaction.status==="generating"?{...interaction,...update,status:reason==="failed"?"failed":"aborted"}:null;
+    case "tool":
+      return interaction.executionStatus==="pending"||interaction.executionStatus==="running"
+        ?{...interaction,...update,executionStatus:reason==="failed"?"failed":"cancelled",canStop:false}
+        :null;
+    case "background_task":
+      return interaction.executionStatus==="queued"||interaction.executionStatus==="running"
+        ?{...interaction,...update,executionStatus:reason==="failed"?"failed":reason==="expired"?"timed_out":"cancelled",canStop:false}
+        :null;
+    case "task_question":
+      return interaction.status==="waiting"?{...interaction,...update,status:reason==="failed"?"rejected":"expired"}:null;
+    default:
+      return null;
+  }
 }
 
 function isTerminalTaskStatus(status: AgentTaskStatus): status is Extract<AgentTaskStatus, "completed" | "failed" | "expired" | "cancelled" | "cleaned"> {

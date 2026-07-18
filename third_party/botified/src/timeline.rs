@@ -698,14 +698,15 @@ fn command_execution_completed_event(event: &ServiceEvent) -> Option<ProjectedEv
         .and_then(|value| i32::try_from(value).ok());
     let status = match event.data.get("status").and_then(Value::as_str) {
         Some("completed") => "completed",
+        Some("cancelled") => "cancelled",
         Some("failed") => "failed",
         _ if exit_code == Some(0) => "completed",
         _ => "failed",
     };
-    let event_suffix = if status == "completed" {
-        "completed"
-    } else {
-        "failed"
+    let event_suffix = match status {
+        "completed" => "completed",
+        "cancelled" => "cancelled",
+        _ => "failed",
     };
 
     Some(ProjectedEvent {
@@ -1345,4 +1346,34 @@ fn sha256(input: &[u8]) -> [u8; 32] {
         digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     digest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_cancelled_bash_as_cancelled_command_execution() {
+        let event = ServiceEvent::new(
+            1,
+            "tool.completed",
+            Some("session-1"),
+            Some("turn-1"),
+            json!({
+                "tool_call_id": "call-cancelled",
+                "tool_name": "bash",
+                "command": "sleep 120",
+                "aggregated_output": "tool execution aborted",
+                "exit_code": Value::Null,
+                "status": "cancelled"
+            }),
+        );
+
+        let projected = project_timeline_event(&event, "testprocess")
+            .expect("cancelled command should project");
+
+        assert_eq!(projected.event_type, "command_execution.cancelled");
+        assert_eq!(projected.item.expect("command item").status, "cancelled");
+        assert_eq!(projected.data["status"], json!("cancelled"));
+    }
 }
