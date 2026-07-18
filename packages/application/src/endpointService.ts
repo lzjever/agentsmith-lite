@@ -2,7 +2,7 @@ import { sanitizeProjectAuditDetail, type CreateEndpointInput, type DiscoverEndp
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
-import { normalizeOpenAICompatibleBaseUrl, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
+import { normalizeOpenAICompatibleBaseUrl, normalizeOpenAICompatibleModelIds, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
 import { CredentialVersionConflictError, EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
@@ -100,31 +100,35 @@ export class EndpointService {
     await runIdempotentMutation({ store:this.store, actorId:userId, scopeId:projectId, operation:"project.endpoint.delete", key:idempotencyKey, request:{projectId,endpointId}, resourceId:endpointId, failureMessage:"Endpoint could not be deleted", run:remove });
   }
 
-  async discoverModels(userId: string, projectId: string, input: DiscoverEndpointModelsInput): Promise<EndpointModelDiscovery> {
+  async discoverModels(userId: string, projectId: string, input: DiscoverEndpointModelsInput, idempotencyKey?: string): Promise<EndpointModelDiscovery> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
-    let checked: EndpointModelDiscovery;
-    let settlementEndpointId: string|null = null;
-    try {
-      settlementEndpointId = input.endpointId === undefined
-        ? null
-        : (await this.requireEndpointForProject(projectId, requireNonEmptyString(input.endpointId, "endpoint.id"))).id;
-      const probe = this.discoveryProbe(projectId, input);
-      validateOpenAICompatibleEndpoint(probe);
-      await this.requireCredentialBinding(projectId, probe.credentialId, probe.baseUrl);
-      const credential = await this.credentials.resolve(projectId, probe.credentialId);
-      const result = await this.provider.discoverModels(
-        { endpoint: probe, settlementEndpointId, apiKey: credential.apiKey, actorId: userId },
-        { baseUrl: probe.baseUrl, credentialId: probe.credentialId, requestTimeoutSecs: probe.requestTimeoutSecs }
-      );
-      checked = { ...result, health: this.checkedHealth(result.health) };
-    } catch (error) {
-      await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"rejected");
-      throw error;
-    }
-    const detail={modelCount:checked.models.length,...(healthAuditDetail(checked.health)??{})};
-    if(checked.health.status==="unavailable")await this.endpointFailure(projectId,userId,"endpoint.model_discover",settlementEndpointId,detail);
-    else await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"accepted",detail);
-    return checked;
+    const discover = async (): Promise<EndpointModelDiscovery> => {
+      let checked: EndpointModelDiscovery;
+      let settlementEndpointId: string|null = null;
+      try {
+        settlementEndpointId = input.endpointId === undefined
+          ? null
+          : (await this.requireEndpointForProject(projectId, requireNonEmptyString(input.endpointId, "endpoint.id"))).id;
+        const probe = this.discoveryProbe(projectId, input);
+        validateOpenAICompatibleEndpoint(probe);
+        await this.requireCredentialBinding(projectId, probe.credentialId, probe.baseUrl);
+        const credential = await this.credentials.resolve(projectId, probe.credentialId);
+        const result = await this.provider.discoverModels(
+          { endpoint: probe, settlementEndpointId, apiKey: credential.apiKey, actorId: userId },
+          { baseUrl: probe.baseUrl, credentialId: probe.credentialId, requestTimeoutSecs: probe.requestTimeoutSecs }
+        );
+        checked = { ...result, models: normalizeOpenAICompatibleModelIds(result.models), health: this.checkedHealth(result.health) };
+      } catch (error) {
+        await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"rejected");
+        throw error;
+      }
+      const detail={modelCount:checked.models.length,...(healthAuditDetail(checked.health)??{})};
+      if(checked.health.status==="unavailable")await this.endpointFailure(projectId,userId,"endpoint.model_discover",settlementEndpointId,detail);
+      else await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"accepted",detail);
+      return checked;
+    };
+    if (!idempotencyKey) return discover();
+    return runIdempotentMutation({ store:this.store, actorId:userId, scopeId:projectId, operation:"project.endpoint.models", key:idempotencyKey, request:{projectId,...input}, resourceId:input.endpointId ?? projectId, failureMessage:"Endpoint model discovery could not be completed", run:discover });
   }
 
   async recheckEndpoint(userId: string, projectId: string, endpointId: string, idempotencyKey?: string): Promise<ModelEndpoint> {

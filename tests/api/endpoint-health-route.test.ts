@@ -26,9 +26,11 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
     const credential = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-return-this" }, cookie, csrfToken);
+    const discoveryWithoutKey = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints/models`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken }, body: JSON.stringify({ baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }) });
+    assert.equal(discoveryWithoutKey.status, 400);
 
     const discovery = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/models`, { baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }, cookie, csrfToken);
-    assert.deepEqual(discovery.models, ["model-b", "model-a"]);
+    assert.deepEqual(discovery.models, ["model-a", "model-b"]);
     assert.equal(discovery.health.status, "healthy");
     assert.doesNotMatch(JSON.stringify(discovery), /never-return-this|credentialId/);
 
@@ -44,7 +46,7 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.equal(duplicate.status, 409);
     assert.match(await duplicate.text(), /An endpoint already uses that name/);
     const persistedDiscovery = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/models`, { endpointId: endpoint.id, baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }, cookie, csrfToken);
-    assert.deepEqual(persistedDiscovery.models, ["model-b", "model-a"]);
+    assert.deepEqual(persistedDiscovery.models, ["model-a", "model-b"]);
 
     available = false;
     const missingHealthKey = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken } });
@@ -78,7 +80,7 @@ async function post(base: string, pathname: string, body: unknown): Promise<Resp
 }
 
 async function json(base: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> {
-  const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/endpoints\/[^/]+\/health$/.test(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const response = await fetch(base + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/endpoints\/(models|[^/]+\/health)$/.test(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   if (response.status !== 200) assert.fail(await response.text());
   return response.json();
 }

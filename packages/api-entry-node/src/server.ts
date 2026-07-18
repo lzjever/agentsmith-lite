@@ -567,7 +567,7 @@ async function routeApi(
     }
     if (segments[4] === "endpoints") {
       if (segments[5] === "models" && method === "POST") {
-        return sendJson(res, 200, await services.endpoints.discoverModels(user.id, projectId, asEndpointModelDiscoveryInput(await readJson(req))));
+        return sendJson(res, 200, await services.endpoints.discoverModels(user.id, projectId, asEndpointModelDiscoveryInput(await readJson(req)), requireIdempotencyKey(req)));
       }
       if (segments[5] && segments[6] === "health" && method === "POST") {
         return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req))));

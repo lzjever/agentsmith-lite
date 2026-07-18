@@ -49,6 +49,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     projectRevision.current += 1;
     mutationKeys.clear("endpoint.create");
     mutationKeys.clear("endpoint.update");
+    mutationKeys.clear("endpoint.models");
     mutationKeys.clear("endpoint.recheck");
     mutationKeys.clear("endpoint.delete");
   }
@@ -223,7 +224,10 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
     setDiscovering(true);
     setFormError("");
     try {
-      const result = await apiClient.discoverEndpointModels(projectId, { baseUrl: input.baseUrl, credentialId: input.credentialId, requestTimeoutSecs: input.requestTimeoutSecs, ...(editing ? { endpointId: editing.id } : {}) });
+      const request = { baseUrl: input.baseUrl, credentialId: input.credentialId, requestTimeoutSecs: input.requestTimeoutSecs, ...(editing ? { endpointId: editing.id } : {}) };
+      const requestSlot = editing?.id ?? projectId;
+      const result = await apiClient.discoverEndpointModels(projectId, request, mutationKeys.requestKey("endpoint.models", requestSlot, request));
+      mutationKeys.complete("endpoint.models", requestSlot);
       if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
       if (result.health.status !== "healthy") {
         setModels([]);
@@ -235,6 +239,7 @@ export function EndpointsPage({ projectId }: { projectId: string }) {
       else if (!input.model) setInput((current) => ({ ...current, model: result.models[0]! }));
     } catch (reason) {
       if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
+      if (reason instanceof ApiError) mutationKeys.complete("endpoint.models", editing?.id ?? projectId);
       setModels([]);
       refreshMissingCredential(reason);
       setFormError(denied(reason));

@@ -415,7 +415,8 @@ describe("endpoint management", () => it("edits and discovers models with the cr
     apiClient.recheckEndpoint = original.recheckEndpoint;
   }
 }));
-describe("endpoint model discovery", () => it("ignores models discovered for connection details that have since changed", async () => {
+describe("endpoint model discovery", () => {
+it("ignores models discovered for connection details that have since changed", async () => {
   const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels };
   let resolveDiscovery!: (value: Awaited<ReturnType<typeof apiClient.discoverEndpointModels>>) => void;
   const otherCredential = { ...credential, id: "credential_2", name: "Other provider", baseUrl: "https://other.example.test/v1" };
@@ -436,6 +437,35 @@ describe("endpoint model discovery", () => it("ignores models discovered for con
   } finally {
     Object.assign(apiClient, original);
   }
-}));
+});
+
+it("reuses a model discovery key after an unknown network result", async () => {
+  const original = { endpoints: apiClient.endpoints, credentials: apiClient.credentials, projectCapabilities: apiClient.projectCapabilities, discoverEndpointModels: apiClient.discoverEndpointModels };
+  const keys: string[] = [];
+  let attempts = 0;
+  apiClient.endpoints = async () => [endpoint];
+  apiClient.credentials = async () => [credential];
+  apiClient.projectCapabilities = async () => manager;
+  apiClient.discoverEndpointModels = async (_projectId, _input, key) => {
+    keys.push(key);
+    if (++attempts === 1) throw new Error("connection closed");
+    return { models: ["model-a"], health: { status: "healthy", checkedAt: "2026-07-12T00:00:00.000Z", errorCategory: null } };
+  };
+  try {
+    render(<EndpointsPage projectId="project_1" />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Edit DeepSeek" }))[0]!);
+    await screen.findByRole("dialog", { name: "Edit endpoint" });
+    fireEvent.click(screen.getByRole("button", { name: "Discover models" }));
+    await waitFor(() => assert.equal(attempts, 1));
+    fireEvent.click(screen.getByRole("button", { name: "Discover models" }));
+    await waitFor(() => assert.equal(attempts, 2));
+    assert.ok(keys[0]);
+    assert.equal(keys[1], keys[0]);
+    await screen.findByRole("combobox", { name: "Discovered models" });
+  } finally {
+    Object.assign(apiClient, original);
+  }
+});
+});
 const credential={id:"credential_1",projectId:"project_1",name:"Provider",type:"api_key" as const,baseUrl:"https://api.example.test/v1",fingerprint:"fingerprint",version:1,createdAt:"x",lastRotatedAt:null,updatedAt:"x"}; const manager={...viewer,canManageEndpoints:true};
 function installDom(){const dom=new JSDOM("<!doctype html><html><body></body></html>",{url:"http://localhost"});Object.assign(globalThis,{window:dom.window,self:dom.window,document:dom.window.document,Element:dom.window.Element,HTMLElement:dom.window.HTMLElement,HTMLInputElement:dom.window.HTMLInputElement,HTMLFormElement:dom.window.HTMLFormElement,Node:dom.window.Node,NodeFilter:dom.window.NodeFilter,DocumentFragment:dom.window.DocumentFragment,Event:dom.window.Event,CustomEvent:dom.window.CustomEvent,MutationObserver:dom.window.MutationObserver,getComputedStyle:dom.window.getComputedStyle,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,"navigator",{configurable:true,value:dom.window.navigator});Object.assign(dom.window,{PointerEvent:dom.window.MouseEvent});Object.assign(dom.window.HTMLElement.prototype,{scrollIntoView(){}});if(!("ResizeObserver" in globalThis))Object.assign(globalThis,{ResizeObserver:class{observe(){}unobserve(){}disconnect(){}}});}

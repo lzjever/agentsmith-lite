@@ -115,6 +115,7 @@ test("endpoint save rejects a sanitized validation failure without persisting an
 
 test("endpoint model discovery and recheck persist only safe health transitions", async () => {
   let outcome: "healthy" | "unavailable" = "healthy";
+  let discoveryCalls = 0;
   const store = createInMemoryProductStore();
   const services = createApplicationServices({
     store, dataRoot: "/tmp/agentsmith-endpoint-recheck",
@@ -122,20 +123,25 @@ test("endpoint model discovery and recheck persist only safe health transitions"
     providerClient: {
       completeChat: async () => { throw new Error("not used"); },
       validateEndpoint: async () => outcome === "healthy" ? { status: "healthy" } : { status: "unavailable", errorCategory: "auth" },
-      discoverModels: async () => ({ models: ["z-model", "a-model", "a-model"], health: { status: "healthy", checkedAt: null, errorCategory: null } })
+      discoverModels: async () => { discoveryCalls += 1; return { models: ["z-model", "a-model", "a-model"], health: { status: "healthy", checkedAt: null, errorCategory: null } }; }
     }
   });
   const { user } = await services.auth.loginAfterBootstrap("admin-password");
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
-  const discovered = await services.endpoints.discoverModels(user.id, project.id, { baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 });
-  assert.deepEqual(discovered.models, ["z-model", "a-model", "a-model"]);
+  const discoveryInput = { baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 };
+  const discovered = await services.endpoints.discoverModels(user.id, project.id, discoveryInput, "model-discovery-key");
+  const replayedDiscovery = await services.endpoints.discoverModels(user.id, project.id, discoveryInput, "model-discovery-key");
+  assert.deepEqual(discovered.models, ["a-model", "z-model"]);
+  assert.deepEqual(replayedDiscovery, discovered);
+  assert.equal(discoveryCalls, 1);
   assert.equal(discovered.health.status, "healthy");
   assert.ok(discovered.health.checkedAt);
 
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "a-model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
   await services.endpoints.discoverModels(user.id, project.id, { endpointId: endpoint.id, baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 });
+  assert.equal(discoveryCalls, 2);
   outcome = "unavailable";
   const unavailable = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id);
   assert.deepEqual(unavailable.health?.status, "unavailable");

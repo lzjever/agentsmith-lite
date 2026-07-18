@@ -209,9 +209,12 @@ function providerErrorCategory(error: unknown): EndpointHealthErrorCategory {
 
 function modelIds(body: unknown): string[] {
   if (!body || typeof body !== "object" || !Array.isArray((body as { data?: unknown }).data)) return [];
+  return normalizeOpenAICompatibleModelIds((body as { data: unknown[] }).data.map((item) => item && typeof item === "object" ? (item as { id?: unknown }).id : undefined));
+}
+
+export function normalizeOpenAICompatibleModelIds(values: readonly unknown[]): string[] {
   const ids = new Set<string>();
-  for (const item of (body as { data: unknown[] }).data) {
-    const id = item && typeof item === "object" ? (item as { id?: unknown }).id : undefined;
+  for (const id of values) {
     if (typeof id === "string" && id.trim() && id.length <= 256) ids.add(id.trim());
     if (ids.size === 200) break;
   }

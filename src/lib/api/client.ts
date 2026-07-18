@@ -266,8 +266,8 @@ export const apiClient = {
   createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput, idempotencyKey: string) =>
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
-  discoverEndpointModels: (projectId: string, input: Pick<EndpointInput, "baseUrl" | "credentialId" | "requestTimeoutSecs"> & { endpointId?: string }) =>
-    json<EndpointModelDiscovery>(`/projects/${encodeURIComponent(projectId)}/endpoints/models`, "POST", input),
+  discoverEndpointModels: (projectId: string, input: Pick<EndpointInput, "baseUrl" | "credentialId" | "requestTimeoutSecs"> & { endpointId?: string }, idempotencyKey: string) =>
+    jsonIdempotent<EndpointModelDiscovery>(`/projects/${encodeURIComponent(projectId)}/endpoints/models`, "POST", idempotencyKey, input),
   recheckEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}/health`, "POST", idempotencyKey),
   deleteEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
