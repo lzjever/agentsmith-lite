@@ -4,7 +4,7 @@ import { ArrowLeft, Save, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
-import { apiClient, type Profile, type ProfileGreetingPreference } from "../../lib/api/client";
+import { apiClient, notifyIdentityChanged, type Profile, type ProfileGreetingPreference } from "../../lib/api/client";
 import { workspaceReturnPath } from "../../lib/navigation/return-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -60,6 +60,7 @@ export function ProfilePage() {
       setProfile(saved);
       setDraft(profileDraft(saved));
       setGreeting(profileGreeting(saved));
+      notifyIdentityChanged();
       toast.success("Profile saved.");
     } catch {
       if (mounted.current) toast.error("Profile could not be saved.");

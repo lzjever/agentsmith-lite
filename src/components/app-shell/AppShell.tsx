@@ -4,7 +4,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
+import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
 import { PageLoading } from "../ui/loading";
@@ -34,9 +34,9 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const routedProjectId = Array.isArray(routeParams.project) ? routeParams.project[0] : routeParams.project;
 
-  async function loadIdentity() {
+  async function loadIdentity(preservePage = false) {
     const request = ++identityRequest.current;
-    setStatus("loading");
+    if (!preservePage) setStatus("loading");
     try {
       const identity = await apiClient.currentIdentity();
       if (!mounted.current || request !== identityRequest.current) return;
@@ -44,7 +44,8 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
       setStatus("ready");
     } catch (error) {
       if (!mounted.current || request !== identityRequest.current) return;
-      setStatus(error instanceof ApiError && error.status === 401 ? "login" : "error");
+      if (error instanceof ApiError && error.status === 401) setStatus("login");
+      else if (!preservePage) setStatus("error");
     }
   }
 
@@ -71,12 +72,15 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
       setStatus("login");
     };
     const refreshDirectory = () => { void loadDirectory(true); };
+    const refreshIdentity = () => { void loadIdentity(true); };
     window.addEventListener(SESSION_EXPIRED_EVENT, expireSession);
     window.addEventListener(DIRECTORY_CHANGED_EVENT, refreshDirectory);
+    window.addEventListener(IDENTITY_CHANGED_EVENT, refreshIdentity);
     return () => {
       mounted.current = false;
       window.removeEventListener(SESSION_EXPIRED_EVENT, expireSession);
       window.removeEventListener(DIRECTORY_CHANGED_EVENT, refreshDirectory);
+      window.removeEventListener(IDENTITY_CHANGED_EVENT, refreshIdentity);
     };
   }, []);
   useEffect(() => {

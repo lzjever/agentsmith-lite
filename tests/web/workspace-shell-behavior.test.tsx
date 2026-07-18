@@ -225,6 +225,26 @@ describe("workspace and shell interactions", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("refreshes the shell identity after a profile change without unmounting the page", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    let reads = 0;
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test", displayName: ++reads === 1 ? "Old Owner" : "Updated Name" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<DraftHarness />, "/workspaces/ws_1/projects/proj_1/settings", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      const draft = await view.findByRole("textbox", { name: "Unsaved draft" }) as HTMLInputElement;
+      fireEvent.change(draft, { target: { value: "Keep this work" } });
+      assert.match(view.getByRole("button", { name: "Open account menu" }).textContent ?? "", /OO/);
+
+      act(() => window.dispatchEvent(new Event("agentsmith:identity-changed")));
+
+      await waitFor(() => assert.equal(reads, 2));
+      assert.match(view.getByRole("button", { name: "Open account menu" }).textContent ?? "", /UN/);
+      assert.equal(draft.value, "Keep this work");
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("keeps the active page mounted during a directory refresh", async () => {
     const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
     let finishRefresh!: (value: Workspace[]) => void;

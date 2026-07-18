@@ -21,6 +21,9 @@ describe("profile and settings pages", () => {
   it("renders immutable identity and only sends changed profile/project mutations", async () => {
     const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile, projectSettings: apiClient.projectSettings, updateProjectSettings: apiClient.updateProjectSettings, currentIdentity: apiClient.currentIdentity };
     const updates: unknown[] = [];
+    let identityChanges = 0;
+    const identityChanged = () => { identityChanges += 1; };
+    window.addEventListener("agentsmith:identity-changed", identityChanged);
     apiClient.profile = async () => profile;
     apiClient.updateProfile = async (input) => { updates.push(input); return profile; };
     apiClient.projectSettings = async () => settings;
@@ -48,6 +51,7 @@ describe("profile and settings pages", () => {
       assert.equal(saveProfile.disabled, false);
       fireEvent.click(saveProfile);
       await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal(identityChanges, 1);
       view.unmount();
       render(<AppRouterContext.Provider value={router()}><ProjectSettingsPage workspaceId="workspace_1" projectId="project_1" /></AppRouterContext.Provider>);
       await screen.findByRole("link", { name: "Manage members" });
@@ -62,6 +66,7 @@ describe("profile and settings pages", () => {
       assert.deepEqual(updates[1], { name: "Updated project" });
       assert.equal(screen.queryByRole("spinbutton", { name: "Task concurrency" }), null);
     } finally {
+      window.removeEventListener("agentsmith:identity-changed", identityChanged);
       apiClient.profile = original.profile;
       apiClient.updateProfile = original.updateProfile;
       apiClient.projectSettings = original.projectSettings;

@@ -32,12 +32,17 @@ export class IdempotencyPendingError extends Error {
 
 export const SESSION_EXPIRED_EVENT = "agentsmith:session-expired";
 export const DIRECTORY_CHANGED_EVENT = "agentsmith:directory-changed";
+export const IDENTITY_CHANGED_EVENT = "agentsmith:identity-changed";
 export const NOTIFICATIONS_CHANGED_EVENT = "agentsmith:notifications-changed";
 
 export type NotificationChangeSource = "bell" | "page";
 
 export function notifyDirectoryChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(DIRECTORY_CHANGED_EVENT));
+}
+
+export function notifyIdentityChanged(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(IDENTITY_CHANGED_EVENT));
 }
 
 export function notifyNotificationsChanged(source: NotificationChangeSource): void {
