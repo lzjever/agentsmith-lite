@@ -126,59 +126,61 @@ export class FileService {
   }
 
   async listFiles(projectRoot: string, input = "files"): Promise<ProjectFileListResponse> {
-    const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
-    await this.ensureFilesRoot(projectRoot);
+    return withProjectFileLock(projectRoot, async () => {
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
+      await this.ensureFilesRoot(projectRoot);
 
-    let directoryStat;
-    try {
-      directoryStat = await lstat(absolutePath);
-    } catch (error) {
-      if (isNotFound(error)) {
-        return { entries: [] };
+      let directoryStat;
+      try {
+        directoryStat = await lstat(absolutePath);
+      } catch (error) {
+        if (isNotFound(error)) {
+          return { entries: [] };
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    if (directoryStat.isSymbolicLink()) {
-      throw new ProductError("Cannot list symlink paths");
-    }
-    if (!directoryStat.isDirectory()) {
-      throw new ProductError("Path is not a directory");
-    }
+      if (directoryStat.isSymbolicLink()) {
+        throw new ProductError("Cannot list symlink paths");
+      }
+      if (!directoryStat.isDirectory()) {
+        throw new ProductError("Path is not a directory");
+      }
 
-    const entries = await readdir(absolutePath, { withFileTypes: true });
-    const resolvedEntries: ProjectFileEntry[] = [];
-    for (const entry of entries) {
-      const entryPath = path.posix.join(normalizedPath, entry.name);
-      const entryStat = await lstat(path.join(absolutePath, entry.name));
-      if (entryStat.isSymbolicLink()) {
-        continue;
+      const entries = await readdir(absolutePath, { withFileTypes: true });
+      const resolvedEntries: ProjectFileEntry[] = [];
+      for (const entry of entries) {
+        const entryPath = path.posix.join(normalizedPath, entry.name);
+        const entryStat = await lstat(path.join(absolutePath, entry.name));
+        if (entryStat.isSymbolicLink()) {
+          continue;
+        }
+        if (entryStat.isDirectory()) {
+          resolvedEntries.push({
+            name: entry.name,
+            path: entryPath,
+            type: "directory",
+            updatedAt: entryStat.mtime.toISOString()
+          });
+          continue;
+        }
+        if (entryStat.isFile()) {
+          resolvedEntries.push({
+            name: entry.name,
+            path: entryPath,
+            type: "file",
+            size: entryStat.size,
+            mediaType: projectFileMediaTypeFromName(entryPath),
+            updatedAt: entryStat.mtime.toISOString()
+          });
+        }
       }
-      if (entryStat.isDirectory()) {
-        resolvedEntries.push({
-          name: entry.name,
-          path: entryPath,
-          type: "directory",
-          updatedAt: entryStat.mtime.toISOString()
-        });
-        continue;
-      }
-      if (entryStat.isFile()) {
-        resolvedEntries.push({
-          name: entry.name,
-          path: entryPath,
-          type: "file",
-          size: entryStat.size,
-          mediaType: projectFileMediaTypeFromName(entryPath),
-          updatedAt: entryStat.mtime.toISOString()
-        });
-      }
-    }
 
-    return {
-      entries: resolvedEntries
-        .sort((left, right) => left.path.localeCompare(right.path))
-    };
+      return {
+        entries: resolvedEntries
+          .sort((left, right) => left.path.localeCompare(right.path))
+      };
+    });
   }
 
   async downloadFile(projectRoot: string, input: string): Promise<ProjectFileDownloadResponse> {

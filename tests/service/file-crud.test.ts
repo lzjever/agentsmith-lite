@@ -238,6 +238,46 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("does not list an upload before its byte accounting commits", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-list-consistency-"));
+    const service = new FileService();
+    let releaseAccounting!: () => void;
+    const accountingBlocked = new Promise<void>((resolve) => {
+      releaseAccounting = resolve;
+    });
+    let accountingStarted!: () => void;
+    const accountingEntered = new Promise<void>((resolve) => {
+      accountingStarted = resolve;
+    });
+    try {
+      const upload = service.uploadFileWithAccounting(root, { path: "files/rejected.txt", bytes: Buffer.from("temporary") }, {
+        record: async () => {
+          accountingStarted();
+          await accountingBlocked;
+          throw new ProductError("Project file bytes limit reached", 409);
+        }
+      }).then(
+        () => null,
+        (error: unknown) => error
+      );
+      await accountingEntered;
+
+      let listCompleted = false;
+      const listed = service.listFiles(root).finally(() => {
+        listCompleted = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(listCompleted, false);
+
+      releaseAccounting();
+      assert.match(String(await upload), /Project file bytes limit reached/);
+      assert.deepEqual((await listed).entries, []);
+    } finally {
+      releaseAccounting();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("serializes concurrent charged uploads so rejected quota writes leave no file behind", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-concurrent-accounting-"));
     const service = new FileService();
