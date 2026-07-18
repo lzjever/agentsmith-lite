@@ -178,7 +178,6 @@ export class ProjectPolicyService {
   async markProviderUnknown(id: string): Promise<void> { await this.store.markProjectProviderSettlementUnknown(id, nowIso()); }
   async failProvider(id: string): Promise<void> { await this.store.failProjectProviderSettlement(id, nowIso()); }
   async expireProviderReservations(): Promise<void> { await this.store.expireProjectProviderSettlements(nowIso()); await this.store.pruneProjectProviderSettlements(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString(), 100); }
-  async authorizeFileBytes(projectId: string, actorId: string | null, _resourceId: string, delta: number): Promise<void> { if (delta > 0) await this.check(projectId, actorId, "file.quota", null, { projectFileBytes: delta }, "project_file_bytes_limit"); }
   async recordFileBytes(projectId: string, actorId: string | null, resourceId: string, delta: number): Promise<void> {
     const adjusted = await this.store.adjustProjectResourceUsage({
       projectId,
@@ -234,12 +233,6 @@ export class ProjectPolicyService {
       limits.push(providerMetricLimit(window.metric));
     }
     return limits;
-  }
-  private async check(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string | null, delta: Partial<ProjectResourceUsage>, limit: Limit) {
-    const [policy, usage] = await Promise.all([this.requirePolicy(projectId), this.usage(projectId)]);
-    const key = limit === "active_tasks_limit" ? "activeTasks" : limit === "provider_requests_limit" ? "providerRequests" : limit === "provider_tokens_limit" ? "providerTokens" : limit === "provider_cost_limit" ? "providerCost" : "projectFileBytes";
-    const policyKey = `${key}Limit` as keyof ProjectResourcePolicy; const maximum = policy[policyKey]; const proposed = usage[key] + (delta[key] ?? 0);
-    if (typeof maximum === "number" && proposed > maximum) { await this.openAlert(projectId, limit); await this.auditEvent(projectId, actorId, action, "rejected", resourceId); throw new ProductError(`Project ${limit.replaceAll("_", " ")} reached`, 409, `${limit}_reached`); }
   }
   private async change(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string, delta: Partial<ProjectResourceUsage>, limit: Limit | undefined) {
     const adjusted = await this.store.adjustProjectResourceUsage({
