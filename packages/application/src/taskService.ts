@@ -1,6 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, chown, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -83,7 +82,7 @@ import {
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { FilePathValidationService } from "./filePathValidationService.js";
-import { detectProjectFileMediaType, withProjectFileLock } from "./fileService.js";
+import { detectProjectFileMediaType, readRegularFileWithoutFollowingSymlink, withProjectFileLock } from "./fileService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import type { ProjectPermission } from "./authorizationService.js";
 import type { ContextService } from "./contextService.js";
@@ -600,7 +599,7 @@ export class TaskService {
     const filePath = path.resolve(snapshotRoot, ...entry.path.split("/"));
     assertPathInside(snapshotRoot, filePath, "Task input path is outside the snapshot");
     try {
-      const bytes = await readRegularFileWithoutFollowingSymlink(filePath);
+      const bytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task input source");
       const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
       if (bytes.byteLength !== entry.size || digest !== entry.digest) {
         throw new ProductError("Task input snapshot no longer matches its manifest", 409);
@@ -1690,7 +1689,7 @@ export class TaskService {
       newlyWritten = true;
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
-      const existingBytes = await readFile(filePath);
+      const existingBytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task artifact");
       if (existingBytes.byteLength !== actualBytes || createHash("sha256").update(existingBytes).digest("hex") !== actualSha256) {
         throw new ProductError("Stored task artifact file does not match the published artifact", 409);
       }
@@ -1749,7 +1748,7 @@ export class TaskService {
         await rm(filePath, { force: true });
         continue;
       }
-      const bytes = await readRegularFileWithoutFollowingSymlink(filePath);
+      const bytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task input source");
       if (bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) throw new ProductError("Task artifact exceeds the maximum file size", 409);
       const artifact: PersistedTaskArtifact = {
         id: stableSandboxArtifactId(task.id, fileId),
@@ -2001,7 +2000,7 @@ export class TaskService {
     assertPathInside(dataRoot, manifestPath, "Task input manifest is outside the data root");
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(manifestPath, "utf8"));
+      parsed = JSON.parse((await readRegularFileWithoutFollowingSymlink(manifestPath,"Task input manifest")).toString("utf8"));
     } catch (error) {
       if (isNotFound(error)) {
         if (required) throw new ProductError("Source task input snapshot is unavailable", 409);
@@ -2436,7 +2435,7 @@ async function copyProjectInputTree(
     throw new ProductError("Task input source must contain regular files and directories");
   }
 
-  const bytes = await readRegularFileWithoutFollowingSymlink(source);
+  const bytes = await readRegularFileWithoutFollowingSymlink(source,"Task input source");
   await mkdir(path.dirname(destination), { recursive: true });
   await writeFile(destination, bytes);
   manifest.push({
@@ -2781,26 +2780,6 @@ function isTerminalTask(task: PersistedAgentTask): boolean {
   return Boolean(task.terminalReason) || ["completed","failed","expired","cancelled","cleaned"].includes(task.status);
 }
 
-async function readRegularFileWithoutFollowingSymlink(source: string, label = "Task input source"): Promise<Buffer> {
-  let handle;
-  try {
-    handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    if (isSymlinkOpenError(error)) {
-      throw new ProductError(`${label} uses a symlink`);
-    }
-    throw error;
-  }
-  try {
-    if (!(await handle.stat()).isFile()) {
-      throw new ProductError(`${label} must be a regular file`);
-    }
-    return handle.readFile();
-  } finally {
-    await handle.close();
-  }
-}
-
 function stableSandboxArtifactId(taskId: string, fileId: string): string {
   return `art_${createHash("sha256").update(taskId).update("\0").update(fileId).digest("base64url").slice(0, 24)}`;
 }
@@ -3126,10 +3105,6 @@ function assertPathInside(root: string, candidate: string, message: string): voi
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function isSymlinkOpenError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ELOOP";
 }
 
 function isAlreadyExists(error: unknown): boolean {

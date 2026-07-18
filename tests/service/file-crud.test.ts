@@ -3,7 +3,7 @@ import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { FileService } from "../../packages/application/src/fileService.js";
+import { FileService, readRegularFileWithoutFollowingSymlink } from "../../packages/application/src/fileService.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 
@@ -158,10 +158,15 @@ describe("file CRUD service", () => {
       await writeFile(path.join(root, "files", "safe", "ok.txt"), "ok");
       await writeFile(path.join(outside, "secret.txt"), "nope");
       await symlink(outside, path.join(root, "files", "escape"));
+      await symlink(path.join(outside,"secret.txt"),path.join(root,"files","secret-link.txt"));
 
       const service = new FileService();
       const listed = await service.listFiles(root, "files");
       assert.deepEqual(listed.entries.map((entry) => entry.path), ["files/safe"]);
+      await assert.rejects(
+        () => readRegularFileWithoutFollowingSymlink(path.join(root,"files","secret-link.txt"),"Project file"),
+        /Project file uses a symlink/
+      );
 
       await assert.rejects(
         () => service.downloadFile(root, "files/escape/secret.txt"),

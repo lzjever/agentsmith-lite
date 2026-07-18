@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   DeleteProjectFileResponse,
@@ -193,7 +194,7 @@ export class FileService {
       if (!entryStat.isFile()) {
         throw new ProductError("Path is not a regular file");
       }
-      const bytes = await readFile(absolutePath);
+      const bytes = await readRegularFileWithoutFollowingSymlink(absolutePath,"Project file");
       return {
         path: normalizedPath,
         filename: path.posix.basename(normalizedPath),
@@ -251,7 +252,7 @@ export class FileService {
       if (!entryStat.isFile()) {
         throw new ProductError("Path is not a regular file");
       }
-      const previous = await readFile(absolutePath);
+      const previous = await readRegularFileWithoutFollowingSymlink(absolutePath,"Project file");
       const mediaType = detectProjectFileMediaType(previous, normalizedPath);
       try {
         await rm(absolutePath);
@@ -352,11 +353,31 @@ async function readOptionalRegularFile(absolutePath: string): Promise<Buffer | n
   try {
     const entry = await lstat(absolutePath);
     if (!entry.isFile()) throw new ProductError("Path is not a regular file");
-    return readFile(absolutePath);
+    return readRegularFileWithoutFollowingSymlink(absolutePath,"Project file");
   } catch (error) {
     if (isNotFound(error)) return null;
     throw error;
   }
+}
+
+export async function readRegularFileWithoutFollowingSymlink(source:string,label="Project file"):Promise<Buffer>{
+  let handle;
+  try{
+    handle=await open(source,constants.O_RDONLY|constants.O_NOFOLLOW);
+  }catch(error){
+    if(isSymlinkOpenError(error))throw new ProductError(`${label} uses a symlink`);
+    throw error;
+  }
+  try{
+    if(!(await handle.stat()).isFile())throw new ProductError(`${label} must be a regular file`);
+    return handle.readFile();
+  }finally{
+    await handle.close();
+  }
+}
+
+function isSymlinkOpenError(error:unknown):boolean{
+  return typeof error==="object"&&error!==null&&"code" in error&&error.code==="ELOOP";
 }
 
 async function regularFileExists(absolutePath: string): Promise<boolean> {
