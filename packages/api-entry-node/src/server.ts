@@ -370,7 +370,16 @@ async function routeApi(
   }
 
   if (method === "GET" && url.pathname === "/api/v1/me") {
-    return sendJson(res, 200, { user, csrfToken: sessionPrincipal.csrfToken });
+    const profile = await services.profile.getProfile(user.id);
+    return sendJson(res, 200, {
+      user: {
+        ...user,
+        ...(profile.preferences.displayName
+          ? { displayName: profile.preferences.displayName }
+          : {}),
+      },
+      csrfToken: sessionPrincipal.csrfToken,
+    });
   }
   if (url.pathname === "/api/v1/me/profile") {
     if (method === "GET") return sendJson(res, 200, await services.profile.getProfile(user.id));

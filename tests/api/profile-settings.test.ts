@@ -18,6 +18,8 @@ describe("profile and settings API", () => {
     assert.equal("oidcSubject" in profile.user, false);
     const updatedProfile = await json("PATCH", "/api/v1/me/profile", { displayName: "Admin", timezone: "UTC" });
     assert.equal(updatedProfile.preferences.displayName, "Admin");
+    const currentIdentity = await json("GET", "/api/v1/me");
+    assert.equal(currentIdentity.user.displayName, "Admin");
 
     const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace" }, "workspace-settings");
     assert.equal(workspace.workspace.name, "New workspace");
