@@ -12,7 +12,9 @@ export interface User {
 }
 export type PublicUser = Omit<User, "oidcIssuer" | "oidcSubject">;
 export type ProfileUser = PublicUser;
-export interface UserProfilePreferences { userId: string; displayName: string | null; timezone: string | null; bio: string | null; jobTitle: string | null; company: string | null; greetingPreference: string | null; interests: string[]; updatedAt: ISODateString; }
+export const PROFILE_GREETING_PREFERENCES = ["formal", "casual", "friendly", "professional"] as const;
+export type ProfileGreetingPreference = typeof PROFILE_GREETING_PREFERENCES[number];
+export interface UserProfilePreferences { userId: string; displayName: string | null; timezone: string | null; bio: string | null; jobTitle: string | null; company: string | null; greetingPreference: ProfileGreetingPreference | null; interests: string[]; updatedAt: ISODateString; }
 export interface ProfileResponse { user: ProfileUser; preferences: UserProfilePreferences; }
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: ISODateString; lastRotatedAt: ISODateString | null; updatedAt: ISODateString; }
 export interface StoredProjectCredential extends ProjectCredential { keyId: string; nonce: Uint8Array; ciphertext: Uint8Array; authTag: Uint8Array; }

@@ -37,6 +37,11 @@ describe("profile and settings services", () => {
       () => services.profile.updateProfile(user.user.id, { interests: ["x".repeat(61)] }),
       (error: unknown) => error instanceof ProductError && error.statusCode === 400
     );
+    assert.equal((await services.profile.updateProfile(user.user.id, { greetingPreference: "professional" })).preferences.greetingPreference, "professional");
+    await assert.rejects(
+      () => services.profile.updateProfile(user.user.id, { greetingPreference: "concise" }),
+      (error: unknown) => error instanceof ProductError && error.statusCode === 400 && error.message === "profile.greetingPreference is invalid"
+    );
   });
 
   it("keeps archived workspace projects readable but rejects every project write capability", async () => {

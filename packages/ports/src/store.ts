@@ -379,7 +379,7 @@ export interface ProductStore {
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
   deleteProjectDependenciesAndProject(id: string): Promise<boolean>;
-  createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry>;
+  createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry | null>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
   listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;

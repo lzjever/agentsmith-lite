@@ -154,6 +154,27 @@ describe("profile and settings pages", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("preserves an unset greeting preference and offers the original product choices", async () => {
+    const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile };
+    const updates: Parameters<typeof apiClient.updateProfile>[0][] = [];
+    const unset = { ...profile, preferences: { ...profile.preferences, greetingPreference: null } };
+    apiClient.profile = async () => unset;
+    apiClient.updateProfile = async (input) => { updates.push(input); return { ...unset, preferences: { ...unset.preferences, displayName: input.displayName ?? null, greetingPreference: input.greetingPreference ?? null } }; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
+      const greeting = await screen.findByRole("combobox", { name: "Greeting style" });
+      assert.equal(greeting.textContent, "Not set");
+      fireEvent.click(greeting);
+      for (const label of ["Formal", "Casual", "Friendly", "Professional"]) assert.ok(screen.getByRole("option", { name: label }));
+      assert.equal(screen.queryByRole("option", { name: "Concise" }), null);
+      fireEvent.click(screen.getByRole("option", { name: "Not set" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Display name" }), { target: { value: "Updated owner" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+      await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal(updates[0]?.greetingPreference, null);
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows archived project read-only state and keeps ownership transfer owner-scoped", async () => {
     const original={projectSettings:apiClient.projectSettings,currentIdentity:apiClient.currentIdentity,members:apiClient.members,unarchiveProject:apiClient.unarchiveProject};
     apiClient.projectSettings=async()=>({...settings,project:{...settings.project,ownerUserId:"user_1",lifecycleStatus:"archived"}});

@@ -59,6 +59,40 @@ describe("context service", () => {
     assert.equal((await services.contexts.list(owner.user.id, { workspaceId: workspace.id, scope: "workspace_personal" })).items.length, 0);
   });
 
+  it("keeps context keys unique when creates and renames race", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "race-owner", email: "race-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const target = { workspaceId: workspace.id, scope: "workspace_personal" as const };
+
+    const creates = await Promise.allSettled([
+      services.contexts.upsert(owner.user.id, { ...target, contextKey: "same", content: "one", contentType: "text" }),
+      services.contexts.upsert(owner.user.id, { ...target, contextKey: "same", content: "two", contentType: "text" })
+    ]);
+
+    assert.equal(creates.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(creates.filter((result) => result.status === "rejected" && result.reason instanceof ProductError && result.reason.statusCode === 409).length, 1);
+    assert.equal((await services.contexts.list(owner.user.id, target)).items.filter((entry) => entry.contextKey === "same").length, 1);
+    await assert.rejects(
+      () => services.contexts.upsert(owner.user.id, { ...target, contextKey: "same", content: "later", contentType: "text" }),
+      message(409, "A context entry already uses that key")
+    );
+
+    const left = await services.contexts.upsert(owner.user.id, { ...target, contextKey: "left", content: "left", contentType: "text" });
+    const right = await services.contexts.upsert(owner.user.id, { ...target, contextKey: "right", content: "right", contentType: "text" });
+    const renames = await Promise.allSettled([
+      services.contexts.upsert(owner.user.id, { ...target, previousContextKey: left.contextKey, expectedVersion: left.version, contextKey: "merged", content: left.content, contentType: left.contentType }),
+      services.contexts.upsert(owner.user.id, { ...target, previousContextKey: right.contextKey, expectedVersion: right.version, contextKey: "merged", content: right.content, contentType: right.contentType })
+    ]);
+
+    assert.equal(renames.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(renames.filter((result) => result.status === "rejected" && result.reason instanceof ProductError && result.reason.statusCode === 409).length, 1);
+    const entries = (await services.contexts.list(owner.user.id, target)).items;
+    assert.equal(entries.filter((entry) => entry.contextKey === "merged").length, 1);
+    assert.equal(entries.length, 3);
+  });
+
   it("does not create a new version for a normalized no-op update", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });

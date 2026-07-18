@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
-import type { ModelEndpoint, Project, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
+import type { ModelEndpoint, Project, ProjectContextEntry, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
 import type { PersistedAgentTask, PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -85,6 +85,31 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[{projectId:"proj_pin",pinnedAt:timestamp}]);
     await store.deleteProjectMembership("proj_pin","user_pin_member");
     assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[]);
+  });
+
+  it("atomically rejects duplicate context keys during creates and renames", async () => {
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    await store.createUser({ id:"user_context_race",email:"context-race@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"ws_context_race",name:"Context race",ownerUserId:"user_context_race",createdAt:timestamp,updatedAt:timestamp });
+    const entry = (id: string, contextKey: string): ProjectContextEntry => ({ id,workspaceId:"ws_context_race",projectId:null,ownerUserId:"user_context_race",scope:"workspace_personal",contextKey,content:id,contentType:"text",version:1,createdAt:timestamp,updatedAt:timestamp });
+
+    const creates = await Promise.all([
+      store.createProjectContextEntry(entry("ctx_same_one", "same")),
+      store.createProjectContextEntry(entry("ctx_same_two", "same"))
+    ]);
+    assert.equal(creates.filter(Boolean).length, 1);
+
+    const left = (await store.createProjectContextEntry(entry("ctx_left", "left")))!;
+    const right = (await store.createProjectContextEntry(entry("ctx_right", "right")))!;
+    const renames = await Promise.all([
+      store.updateProjectContextEntry({ ...left,contextKey:"merged",version:2,updatedAt:timestamp }, left.version),
+      store.updateProjectContextEntry({ ...right,contextKey:"merged",version:2,updatedAt:timestamp }, right.version)
+    ]);
+    assert.equal(renames.filter(Boolean).length, 1);
+    const stored = await store.listProjectContextEntries("ws_context_race", null, "workspace_personal", "user_context_race");
+    assert.equal(stored.filter((item) => item.contextKey === "same").length, 1);
+    assert.equal(stored.filter((item) => item.contextKey === "merged").length, 1);
+    assert.equal(stored.length, 3);
   });
 
   it("removes project-scoped audit events with a physically deleted project", async () => {

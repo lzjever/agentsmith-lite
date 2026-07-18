@@ -1,9 +1,10 @@
 "use client";
 
-import type { ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
+import type { ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
+export type { ProfileGreetingPreference };
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string, public readonly code?: string) {
@@ -221,7 +222,7 @@ export const apiClient = {
   markAllNotificationsRead: () => json<UserNotification[]>("/notifications/read", "PATCH"),
   dismissNotification: (notificationId: string) => json<{ dismissed: true }>(`/notifications/${encodeURIComponent(notificationId)}`, "DELETE"),
   profile: () => request<Profile>("/me/profile"),
-  updateProfile: (input: { displayName?: string | null; timezone?: string | null; bio?: string | null; jobTitle?: string | null; company?: string | null; greetingPreference?: string | null; interests?: string[] }) => json<Profile>("/me/profile", "PATCH", input),
+  updateProfile: (input: { displayName?: string | null; timezone?: string | null; bio?: string | null; jobTitle?: string | null; company?: string | null; greetingPreference?: ProfileGreetingPreference | null; interests?: string[] }) => json<Profile>("/me/profile", "PATCH", input),
   workspaces: () => request<Workspace[]>("/workspaces"),
   createWorkspace: (name: string, idempotencyKey: string) => jsonIdempotent<Workspace>("/workspaces", "POST", idempotencyKey, { name }),
   deleteWorkspace: (workspaceId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}`, "DELETE", idempotencyKey),

@@ -64,6 +64,7 @@ export class ContextService {
       const existing = entries.find((entry) => entry.contextKey === previousContextKey);
       const updateRequested = input.previousContextKey !== undefined || input.expectedVersion !== undefined;
       if (!existing && updateRequested) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+      if (existing && !updateRequested) throw new ProductError("A context entry already uses that key", 409);
       if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw new ProductError("A context entry already uses that key", 409);
       if (existing) {
         if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
@@ -75,7 +76,11 @@ export class ContextService {
         contextKey, content, contentType, version: existing ? existing.version + 1 : 1,
         createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp
       };
-      if (!existing) return toView(await this.store.createProjectContextEntry(entry), contentType);
+      if (!existing) {
+        const created = await this.store.createProjectContextEntry(entry);
+        if (!created) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
+        return toView(created, contentType);
+      }
       const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
       if (!updated) throw new ProductError("Context changed elsewhere. Reload and try again.", 409);
       return toView(updated, contentType);
