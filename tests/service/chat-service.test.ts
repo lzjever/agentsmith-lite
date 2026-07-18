@@ -119,6 +119,24 @@ describe("ChatService", () => {
     assert.deepEqual((await services.chat.listMessages(user.id, project.id, (await services.chat.listThreads(user.id, project.id))[0]!.id)).map((message) => [message.role, message.content]), [["user", "hello"], ["assistant", "fake response"]]);
   });
 
+  it("names an untitled conversation from its first accepted user message without replacing a manual title", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient([]) });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const endpoint = await createCredentialEndpoint(services, user.id, project.id);
+    const generated = await services.chat.createThread(user.id, project.id, endpoint.id);
+    const manual = await services.chat.createThread(user.id, project.id, endpoint.id);
+    await services.chat.updateThreadMetadata(user.id, project.id, manual.id, { title: "Release planning" });
+
+    await services.chat.sendMessage(user.id, project.id, generated.id, "  Summarize the migration risks and propose a careful rollout sequence  ");
+    await services.chat.sendMessage(user.id, project.id, manual.id, "This message must not replace the title");
+
+    const threads = await services.chat.listThreads(user.id, project.id);
+    assert.equal(threads.find((thread) => thread.id === generated.id)?.title, "Summarize the migration risks and propos");
+    assert.equal(threads.find((thread) => thread.id === manual.id)?.title, "Release planning");
+  });
+
   it("adds effective context to provider input without storing it in conversation history", async () => {
     const calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password", providerClient: fakeClient(calls) });

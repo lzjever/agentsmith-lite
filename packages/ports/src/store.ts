@@ -461,7 +461,7 @@ export interface ProductStore {
   updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null>;
   deleteProjectChatThread(id: string, deletedAt: string): Promise<DeleteProjectChatThreadResult>;
   touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null>;
-  appendProjectChatMessageIfCurrent(threadId: string, afterMessageId: string | null, message: ProjectChatMessage): Promise<AppendProjectChatMessageResult>;
+  appendProjectChatMessageIfCurrent(threadId: string, afterMessageId: string | null, message: ProjectChatMessage, untitledThreadTitle?: string): Promise<AppendProjectChatMessageResult>;
   appendProjectChatMessages(messages: ProjectChatMessage[]): Promise<void>;
   listProjectChatMessages(threadId: string): Promise<ProjectChatMessage[]>;
   updateProjectChatMessageDelivery(id: string, deliveryStatus: ProjectChatMessage["deliveryStatus"], updatedAt: string): Promise<ProjectChatMessage | null>;

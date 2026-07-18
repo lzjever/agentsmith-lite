@@ -119,10 +119,11 @@ postgresDescribe("postgres product store", () => {
     await store.createProjectChatThread({id:"thread_chat_claim",projectId:"proj_chat_claim",ownerUserId:"user_chat_claim",endpointId:"endpoint_chat_claim",title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});
     const message=(id:string):ProjectChatMessage=>({id,threadId:"thread_chat_claim",sequence:1,version:1,deliveryStatus:"pending",role:"user",content:id,createdAt:timestamp,updatedAt:timestamp});
 
-    const admissions=await Promise.all([store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_one")),store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_two"))]);
+    const admissions=await Promise.all([store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_one"),"First request"),store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_two"),"Second request")]);
     assert.deepEqual(admissions.sort(),["accepted","request_running"]);
     assert.equal(await store.deleteProjectChatThread("thread_chat_claim",timestamp),"request_running");
     const saved=(await store.listProjectChatMessages("thread_chat_claim"))[0]!;
+    assert.equal((await store.findProjectChatThread("thread_chat_claim"))?.title,saved.id==="chatmsg_claim_one"?"First request":"Second request");
     const failed=(await store.updateProjectChatMessageDelivery(saved.id,"failed",timestamp))!;
     const claims=await Promise.all([store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp),store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp)]);
     assert.equal(claims.filter(Boolean).length,1);

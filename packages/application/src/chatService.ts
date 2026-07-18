@@ -109,7 +109,7 @@ export class ChatService {
     try {
       const timestamp = nowIso();
       userMessage = { id: newId("chatmsg"), threadId: thread.id, sequence:(history.at(-1)?.sequence??0)+1,version:1,deliveryStatus:"pending",role: "user", content: text, createdAt: timestamp,updatedAt:timestamp };
-      const admission=await this.store.appendProjectChatMessageIfCurrent(thread.id,afterMessageId,userMessage);
+      const admission=await this.store.appendProjectChatMessageIfCurrent(thread.id,afterMessageId,userMessage,text.slice(0,40));
       if(admission==="request_running")throw new ProductError("A chat request is already running",409);
       if(admission==="history_changed")throw new ProductError("Chat history changed; reload and try again",409);
       await this.policies.recordOperation(projectId,userId,"chat.message.send","accepted",userMessage.id);
