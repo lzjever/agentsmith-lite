@@ -100,10 +100,9 @@ describe("alert rule evaluation", () => {
     };
 
     await services.alertRules.remove(owner.id, project.id, rule.id);
-    assert.equal(
-      (await services.policies.alerts(owner.id, project.id)).find((alert) => alert.id === replacement.id)?.status,
-      "resolved",
-    );
+    const retained = (await services.policies.alerts(owner.id, project.id)).find((alert) => alert.id === replacement.id);
+    assert.equal(retained?.status, "resolved");
+    assert.equal(retained?.ruleId, null);
   });
 
   it("rejects endpoint scope for project-only gauges", async () => {

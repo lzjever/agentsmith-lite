@@ -37,7 +37,8 @@ describe("endpoint deletion", () => {
     await store.markProjectProviderSettlementDelivered("settlement_endpoint_history", timestamp);
     await store.settleProjectProviderSettlement("settlement_endpoint_history", { tokens: 7, cost: 0.01 }, timestamp);
     await store.upsertActiveProjectAlert({ id: "alert_endpoint_history_generic", projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: null, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
-    await store.upsertActiveProjectAlert({ id: "alert_endpoint_history_scoped", projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: endpoint.id, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
+    const scopedRule = await store.createProjectAlertRule({ id: "rule_endpoint_history_scoped", projectId, name: "Endpoint failure", alertType: "endpoint_failure", metric: "failure_count", condition: "greater_than_or_equal", threshold: 1, windowSeconds: 3600, scope: { kind: "endpoint", endpointId: endpoint.id }, enabled: true, createdAt: timestamp, updatedAt: timestamp });
+    await store.upsertActiveProjectAlert({ id: "alert_endpoint_history_scoped", projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", ruleId: scopedRule.id, endpointId: endpoint.id, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
 
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
 
@@ -45,11 +46,12 @@ describe("endpoint deletion", () => {
     assert.equal((await services.chat.listThreads(userId, projectId)).find((item) => item.id === thread.id)?.endpointId, null);
     assert.deepEqual((await services.chat.listMessages(userId, projectId, thread.id)).map((message) => message.content), ["Retain this message"]);
     assert.equal((await store.listSettledProjectProviderSettlements(projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_history")?.endpointId, null);
+    assert.equal((await store.listProjectAlertRules(projectId)).some((rule) => rule.id === scopedRule.id), false);
     const alerts = await store.listProjectAlerts(projectId);
     assert.equal(alerts.find((alert) => alert.id === "alert_endpoint_history_generic")?.status, "active");
     assert.deepEqual(
-      alerts.filter((alert) => alert.id === "alert_endpoint_history_scoped").map((alert) => [alert.status, alert.endpointId, Boolean(alert.resolvedAt)]),
-      [["resolved", null, true]]
+      alerts.filter((alert) => alert.id === "alert_endpoint_history_scoped").map((alert) => [alert.status, alert.ruleId, alert.endpointId, Boolean(alert.resolvedAt)]),
+      [["resolved", null, null, true]]
     );
     await assert.rejects(
       () => services.chat.sendMessage(userId, projectId, thread.id, "Cannot continue"),

@@ -461,7 +461,16 @@ export class InMemoryProductStore implements ProductStore {
   async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { return []; }
   async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); const credential=this.credentials.get(credentialId); if(!endpoint||endpoint.credentialId||!credential||credential.projectId!==endpoint.projectId) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
   async createProjectContextEntry(v:ProjectContextEntry){if(this.contextKeyExists(v))return null;this.contexts.set(v.id,clone(v));return clone(v)} async updateProjectContextEntry(v:ProjectContextEntry,expectedVersion:number){const current=this.contexts.get(v.id);if(!current||current.version!==expectedVersion||this.contextKeyExists(v,v.id))return null;this.contexts.set(v.id,clone(v));return clone(v)} async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null){return [...this.contexts.values()].filter(v=>v.workspaceId===workspaceId&&v.projectId===projectId&&v.scope===scope&&v.ownerUserId===ownerUserId).map(clone)} async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId"|"version">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId||current.version!==v.version)return false;return this.contexts.delete(v.id)}
-  async createProjectAlertRule(v:ProjectAlertRule){this.alertRules.set(v.id,clone(v));return clone(v)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId)return null;this.alertRules.set(v.id,clone(v));return clone(v)} async deleteProjectAlertRule(projectId:string,id:string){const current=this.alertRules.get(id);if(!current||current.projectId!==projectId)return false;return this.alertRules.delete(id)}
+  async createProjectAlertRule(v:ProjectAlertRule){this.alertRules.set(v.id,clone(v));return clone(v)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId)return null;this.alertRules.set(v.id,clone(v));return clone(v)}
+  async deleteProjectAlertRule(projectId:string,id:string){
+    const current=this.alertRules.get(id);
+    if(!current||current.projectId!==projectId)return false;
+    this.alertRules.delete(id);
+    for(const [alertId,alert] of this.alerts){
+      if(alert.ruleId===id)this.alerts.set(alertId,clone({...alert,ruleId:null}));
+    }
+    return true;
+  }
 
   async createEndpoint(endpoint: ModelEndpoint): Promise<ModelEndpoint> {
     this.requireEndpointCredentialProject(endpoint);
@@ -516,7 +525,7 @@ export class InMemoryProductStore implements ProductStore {
       }
     }
     for (const [ruleId, rule] of this.alertRules) {
-      if (rule.scope?.kind === "endpoint" && rule.scope.endpointId === id) this.alertRules.delete(ruleId);
+      if (rule.scope?.kind === "endpoint" && rule.scope.endpointId === id) await this.deleteProjectAlertRule(rule.projectId, ruleId);
     }
     const resolvedAt = new Date().toISOString();
     for (const [alertId, alert] of this.alerts) {
