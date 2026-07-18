@@ -139,6 +139,7 @@ describe("endpoint dependencies", () => {
 
       await waitFor(()=>assert.equal((screen.getAllByRole("button",{name:"Delete DeepSeek"})[0] as HTMLButtonElement).disabled,false));
       fireEvent.click(screen.getAllByRole("button",{name:"Delete DeepSeek"})[0]!);
+      assert.match((await screen.findByRole("alertdialog",{name:"Delete endpoint"})).textContent??"",/rolling limits and endpoint alert rules.*chat history/i);
       fireEvent.click(await screen.findByRole("button",{name:"Delete endpoint"}));
       await waitFor(()=>assert.equal(deleteAttempts,1));
       fireEvent.click(screen.getByRole("button",{name:"Delete endpoint"}));
