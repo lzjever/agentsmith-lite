@@ -682,6 +682,7 @@ describe("project resource pages", () => {
       await screen.findByText("2.0 KiB");
       for (const label of ["Active tasks", "Provider requests", "Provider tokens", "Provider cost", "Project file storage"]) assert.ok(screen.getByText(label));
       assert.ok(screen.getByText(/Your settled provider requests/));
+      assert.ok(screen.getByText("Provider totals include conservative reservations when final delivery usage is unknown."));
       assert.equal((screen.getByLabelText("2026-07-01: 0 requests") as HTMLElement).style.height, "0%");
       assert.equal((screen.getByLabelText("2026-07-30: 4 requests") as HTMLElement).style.height, "100%");
       assert.ok(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
