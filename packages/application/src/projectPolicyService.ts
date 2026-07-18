@@ -8,7 +8,7 @@ import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, reco
 
 type Limit = ProjectAlertType;
 const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: nowIso() });
-const providerReservationBudget = { tokens: 4096, cost: 1 } as const;
+export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
 
 export class ProjectPolicyService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
@@ -139,7 +139,7 @@ export class ProjectPolicyService {
     },endpointId?{endpointId}:{});
   }
   async releaseTask(projectId: string, taskId: string): Promise<void> { await this.change(projectId, null, "task.cleaned", taskId, { activeTasks: -1 }, undefined); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); await recoverProjectAlerts(this.store,projectId,"active_tasks_limit"); }
-  async reserveProvider(projectId: string, actorId: string | null, endpointId: string | null, taskId: string | null = null, reservation: Readonly<{ tokens: number; cost: number }> = providerReservationBudget): Promise<string> {
+  async reserveProvider(projectId: string, actorId: string | null, endpointId: string | null, taskId: string | null = null, reservation: Readonly<{ tokens: number; cost: number }> = DEFAULT_PROVIDER_RESERVATION): Promise<string> {
     const reservedAt = nowIso();
     const policy = await this.requirePolicy(projectId);
     const reserved = await this.store.reserveProjectProviderSettlement({ id: newId("providersettle"), projectId, taskId, endpointId,actorId,reservedTokens:reservation.tokens,reservedCost:reservation.cost, reservedAt, expiresAt: new Date(Date.parse(reservedAt) + 5 * 60_000).toISOString() });
@@ -202,8 +202,8 @@ export class ProjectPolicyService {
     const limits: Array<{ before: number | null; after: number | null; current: number; next: number; type: Limit }> = [
       { before: previous.activeTasksLimit, after: updated.activeTasksLimit, current: usage.activeTasks, next: 1, type: "active_tasks_limit" },
       { before: previous.providerRequestsLimit, after: updated.providerRequestsLimit, current: usage.providerRequests, next: 1, type: "provider_requests_limit" },
-      { before: previous.providerTokensLimit, after: updated.providerTokensLimit, current: usage.providerTokens, next: providerReservationBudget.tokens, type: "provider_tokens_limit" },
-      { before: previous.providerCostLimit, after: updated.providerCostLimit, current: usage.providerCost, next: providerReservationBudget.cost, type: "provider_cost_limit" },
+      { before: previous.providerTokensLimit, after: updated.providerTokensLimit, current: usage.providerTokens, next: DEFAULT_PROVIDER_RESERVATION.tokens, type: "provider_tokens_limit" },
+      { before: previous.providerCostLimit, after: updated.providerCostLimit, current: usage.providerCost, next: DEFAULT_PROVIDER_RESERVATION.cost, type: "provider_cost_limit" },
       { before: previous.projectFileBytesLimit, after: updated.projectFileBytesLimit, current: usage.projectFileBytes, next: 1, type: "project_file_bytes_limit" },
     ];
     for (const limit of limits) {

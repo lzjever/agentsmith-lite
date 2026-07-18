@@ -212,6 +212,33 @@ describe("project resource policy", () => {
     assert.deepEqual({ requests: usage.providerRequests, tokens: usage.providerTokens, cost: usage.providerCost }, { requests: 1, tokens: 4096, cost: 1 });
   });
 
+  it("reserves a sandbox completion's declared token budget before provider dispatch", async () => {
+    let calls = 0;
+    const services = createApplicationServices({
+      store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-provider-declared-budget", builtinAdminPassword: "admin-password",
+      providerClient: {
+        async completeChat() { throw new Error("not used"); },
+        async rawChatCompletion() { calls += 1; return new Response(JSON.stringify({ choices: [] })); }
+      }
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+    await services.policies.updatePolicy(user.id, project.id, { providerTokensLimit: 5_000 });
+
+    await assert.rejects(
+      () => services.providerBroker.forwardChatCompletion(
+        { endpoint, settlementEndpointId: null, apiKey: "secret", actorId: user.id },
+        { model: endpoint.model, messages: [{ role: "user", content: "hello" }], max_completion_tokens: 6_000 },
+        {},
+        async () => ({ value: undefined })
+      ),
+      (error: unknown) => error instanceof ProductError && error.code === "provider_tokens_limit_reached"
+    );
+    assert.equal(calls, 0);
+  });
+
   it("returns and settles a successful provider response that arrives after reservation expiry", async () => {
     const store = createInMemoryProductStore();
     let releaseResponse!: () => void;

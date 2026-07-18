@@ -1,7 +1,7 @@
 import type { ChatMessage, ChatResponse, DiscoverEndpointModelsInput, EndpointHealthErrorCategory, EndpointModelDiscovery, ModelEndpoint, ProviderUsage } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import type { OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
-import { ProjectPolicyService } from "./projectPolicyService.js";
+import { DEFAULT_PROVIDER_RESERVATION, ProjectPolicyService } from "./projectPolicyService.js";
 
 interface ProviderCallContext {
   endpoint: ModelEndpoint;
@@ -58,10 +58,11 @@ export class OpenAIProviderBroker {
     consume: (response: Response) => Promise<{ value: T; usage?: ProviderUsage }>
   ): Promise<T> {
     if (!this.client.rawChatCompletion) throw new ProductError("OpenAI-compatible provider transport is unavailable", 503);
+    const reservation = chatCompletionReservation(body);
     return this.settledCall(context, async () => {
       const response = await this.client.rawChatCompletion!(context.endpoint, { apiKey: context.apiKey, body, headers });
       return consume(response);
-    }, (result) => result.usage).then((result) => result.value);
+    }, (result) => result.usage, reservation).then((result) => result.value);
   }
 
   private async settledCall<T>(context: ProviderCallContext, call: () => Promise<T>, usage: (result: T) => ProviderUsage | undefined = () => undefined, reservation?: { tokens: number; cost: number }): Promise<T> {
@@ -94,6 +95,19 @@ export class OpenAIProviderBroker {
     }
     return result;
   }
+}
+
+function chatCompletionReservation(body: Record<string, unknown>): { tokens: number; cost: number } {
+  let tokens: number = DEFAULT_PROVIDER_RESERVATION.tokens;
+  for (const field of ["max_tokens", "max_completion_tokens"] as const) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || (value as number) < 0) {
+      throw new ProductError(`${field} must be a non-negative integer`);
+    }
+    tokens = Math.max(tokens, value as number);
+  }
+  return { tokens, cost: DEFAULT_PROVIDER_RESERVATION.cost };
 }
 
 function isAbortError(error: unknown): boolean {
