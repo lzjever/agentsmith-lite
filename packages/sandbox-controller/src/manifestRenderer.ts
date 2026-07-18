@@ -93,7 +93,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       },
       type: "Opaque",
       stringData: {
-        [serviceKeySecretKey]: "<redacted-generated-per-task>"
+        [serviceKeySecretKey]: "<redacted-generated-per-task>",
+        "AGENTS.md": "<generated-by-api>"
       }
     },
     {
@@ -204,6 +205,12 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 mountPath: "/etc/botified",
                 readOnly: true
               },
+              {
+                name: "botified-instructions",
+                mountPath: "/workspace/task/home/AGENTS.md",
+                subPath: "AGENTS.md",
+                readOnly: true
+              },
               ...(modelCaMount ? [modelCaMount] : [])
             ]
           },
@@ -274,6 +281,13 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "botified-config",
             configMap: {
               name: configName
+            }
+          },
+          {
+            name: "botified-instructions",
+            secret: {
+              secretName: serviceKeySecretName,
+              items: [{ key: "AGENTS.md", path: "AGENTS.md" }]
             }
           },
           ...(modelCaVolume ? [modelCaVolume] : [])

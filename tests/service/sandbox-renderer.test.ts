@@ -125,12 +125,14 @@ describe("sandbox manifest renderer", () => {
     const taskHomeMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
     const botifiedMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/botified");
     const artifactMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/artifacts");
+    const instructionsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home/AGENTS.md");
     assert.ok(container);
     assert.ok(executor);
     assert.ok(projectMount);
     assert.ok(taskHomeMount);
     assert.ok(botifiedMount);
     assert.ok(artifactMount);
+    assert.deepEqual(instructionsMount, { name: "botified-instructions", mountPath: "/workspace/task/home/AGENTS.md", subPath: "AGENTS.md", readOnly: true });
     assert.equal(container.workingDir, "/workspace/task/home");
     assert.deepEqual(container.env, [
       {
@@ -181,6 +183,7 @@ describe("sandbox manifest renderer", () => {
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/home" && mount.readOnly !== true), true);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/artifacts" && mount.subPath === "workspaces/w1/projects/p1/tasks/t1/artifacts" && mount.readOnly !== true), true);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/botified"), false);
+    assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-instructions" || mount.mountPath === "/workspace/task/home/AGENTS.md"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
     assert.ok(service, "Service should be rendered");
     assert.deepEqual(service.spec.selector, pod?.metadata.labels);
@@ -222,7 +225,8 @@ describe("sandbox manifest renderer", () => {
       "NetworkPolicy egress should stay limited to DNS and API broker TCP/3000"
     );
     assert.deepEqual(secret?.stringData, {
-      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>"
+      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
+      "AGENTS.md": "<generated-by-api>"
     });
 
     const serialized = JSON.stringify(rendered.resources);

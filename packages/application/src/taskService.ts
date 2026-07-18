@@ -206,6 +206,7 @@ const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
 const BOTIFIED_ARTIFACT_PATH = "/workspace/task/artifacts";
+const TASK_WORKSPACE_GUIDANCE = `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`;
 const ACTIVE_TASKS_LIMIT_MESSAGE = "Project active tasks limit reached";
 const ACTIVE_TASKS_LIMIT_CODE = "active_tasks_limit_reached";
 const MAX_TASK_ARTIFACT_FILES = 128;
@@ -1887,7 +1888,8 @@ export class TaskService {
     });
     const materialized = materializeLiveCreateActions(actions, {
       serviceKey: input.serviceKey,
-      botifiedConfig: serializeBotifiedConfig(config)
+      botifiedConfig: serializeBotifiedConfig(config),
+      agentInstructions: taskAgentInstructions(input.task)
     });
     await applySandboxReconcileActionsToKubernetes(live.port, materialized);
     const podAction = materialized.find((action) => action.type === "create_resource" && action.kind === "Pod");
@@ -1908,8 +1910,7 @@ export class TaskService {
     for (const directory of runnerWritableDirectories) {
       await prepareRunnerWritableDirectory(directory);
     }
-    const taskGuidance = `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`;
-    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), task.agentContext ? `${taskGuidance}\n${task.agentContext}` : taskGuidance, { mode: 0o664 });
+    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), TASK_WORKSPACE_GUIDANCE, { mode: 0o664 });
   }
 
   private async snapshotProjectInputs(projectRootPath: string, taskId: string, inputPaths: string[]): Promise<void> {
@@ -2851,7 +2852,7 @@ function requireBotifiedServiceKey(serviceKey: string | undefined): asserts serv
 
 function materializeLiveCreateActions(
   actions: SandboxReconcileAction[],
-  input: { serviceKey: string; botifiedConfig: string }
+  input: { serviceKey: string; botifiedConfig: string; agentInstructions: string }
 ): SandboxReconcileAction[] {
   return actions.map((action) => {
     if (action.type !== "create_resource") {
@@ -2860,7 +2861,8 @@ function materializeLiveCreateActions(
     const resource = structuredClone(action.resource);
     if (action.kind === "Secret") {
       resource.stringData = {
-        BOTIFIED_SERVICE_KEY: input.serviceKey
+        BOTIFIED_SERVICE_KEY: input.serviceKey,
+        "AGENTS.md": input.agentInstructions
       };
     }
     if (action.kind === "ConfigMap") {
@@ -2874,6 +2876,10 @@ function materializeLiveCreateActions(
       resource
     };
   });
+}
+
+function taskAgentInstructions(task: PersistedAgentTask): string {
+  return task.agentContext ? `${TASK_WORKSPACE_GUIDANCE}\n${task.agentContext}` : TASK_WORKSPACE_GUIDANCE;
 }
 
 function constantTimeEqual(value: string, expected: string): boolean {

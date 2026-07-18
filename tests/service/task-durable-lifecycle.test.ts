@@ -273,7 +273,10 @@ describe("durable task lifecycle", () => {
 
     await setup.services.tasks.syncActiveTasksOnce();
 
-    const instructions = await readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "home", "AGENTS.md"), "utf8");
+    const shellInstructions = await readFile(path.join(setup.dataRoot, setup.projectRootPath, "tasks", task.id, "home", "AGENTS.md"), "utf8");
+    const taskSecret = setup.port.resources.find((resource) => resource.kind === "Secret" && resource.metadata.labels["agentsmith-lite/task-id"] === task.id) as (KubernetesResource & { stringData?: Record<string, string> }) | undefined;
+    const instructions = taskSecret?.stringData?.["AGENTS.md"] ?? "";
+    assert.doesNotMatch(shellInstructions, /task\.style|Use terse task updates/);
     assert.match(instructions, /task\.style[\s\S]*Use terse task updates/);
     assert.doesNotMatch(instructions, /later edit/);
   });
