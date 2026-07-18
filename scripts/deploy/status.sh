@@ -52,4 +52,4 @@ fi
 if [ -n "${KUBE_CONTEXT:-}" ]; then
   kubectl_args+=(--context "$KUBE_CONTEXT")
 fi
-kubectl "${kubectl_args[@]}" -n "$namespace" get deploy,svc,ingress,job -l agentsmith-lite/managed-by=agentsmith-lite
+kubectl "${kubectl_args[@]}" -n "$namespace" get deploy,pod,svc,ingress,job -l agentsmith-lite/managed-by=agentsmith-lite

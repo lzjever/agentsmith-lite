@@ -47,7 +47,7 @@ if [ -n "${KUBE_CONTEXT:-}" ]; then
   kubectl_args+=(--context "$KUBE_CONTEXT")
 fi
 
-command=(kubectl "${kubectl_args[@]}" -n "$namespace" delete deploy,svc,ingress,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
+command=(kubectl "${kubectl_args[@]}" -n "$namespace" delete deploy,pod,svc,ingress,job,cm,secret,sa,role,rolebinding,networkpolicy,resourcequota,limitrange -l agentsmith-lite/managed-by=agentsmith-lite)
 if [ "$dry_run" = true ]; then
   printf '%q ' "${command[@]}"
   echo
