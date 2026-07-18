@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { after, afterEach, describe, it } from "node:test";
 import React from "react";
-import { apiClient, type Endpoint, type ProjectFile, type Task } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectFile, type Task } from "../../src/lib/api/client.js";
 
 const dom = installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -84,6 +84,18 @@ describe("task list controls", () => {
 
     assert.equal(screen.getAllByRole("button", { name: "Upload and attach" }).length, 1);
     assert.equal((document.querySelector('input[type="file"]') as HTMLInputElement).hidden, true);
+  });
+
+  it("guides task input quota failures to the resource policy", async () => {
+    const original = apiClient.uploadFile;
+    const endpoint: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: "x", updatedAt: "x" };
+    apiClient.uploadFile = async () => { throw new ApiError(409, "Project file bytes limit reached", "project_file_bytes_limit_reached"); };
+    try {
+      render(<TaskCreateDialog projectId="project_1" policyHref="/projects/project_1/policy" canWriteFiles endpoints={[endpoint]} projectFiles={[]} projectFilesLoading={false} open saving={false} onClose={() => undefined} onCreate={async () => undefined} />);
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "brief.txt")] } });
+      await screen.findByText("File storage limit reached.");
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "/projects/project_1/policy");
+    } finally { apiClient.uploadFile = original; }
   });
 
   it("reuses pending keys for task input uploads and URL notes", async () => {
