@@ -191,7 +191,7 @@ export class ProjectPolicyService {
       await this.requirePolicy(projectId);
       await this.openAlert(projectId, "project_file_bytes_limit");
       await this.auditEvent(projectId, actorId, "file.quota", "rejected", null, "file_quota");
-      throw new ProductError("Project file bytes limit reached", 409);
+      throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
     }
     throw new ProductError("Project policy usage not found", 409);
   }
@@ -239,7 +239,7 @@ export class ProjectPolicyService {
     const [policy, usage] = await Promise.all([this.requirePolicy(projectId), this.usage(projectId)]);
     const key = limit === "active_tasks_limit" ? "activeTasks" : limit === "provider_requests_limit" ? "providerRequests" : limit === "provider_tokens_limit" ? "providerTokens" : limit === "provider_cost_limit" ? "providerCost" : "projectFileBytes";
     const policyKey = `${key}Limit` as keyof ProjectResourcePolicy; const maximum = policy[policyKey]; const proposed = usage[key] + (delta[key] ?? 0);
-    if (typeof maximum === "number" && proposed > maximum) { await this.openAlert(projectId, limit); await this.auditEvent(projectId, actorId, action, "rejected", resourceId); throw new ProductError(`Project ${limit.replaceAll("_", " ")} reached`, 409); }
+    if (typeof maximum === "number" && proposed > maximum) { await this.openAlert(projectId, limit); await this.auditEvent(projectId, actorId, action, "rejected", resourceId); throw new ProductError(`Project ${limit.replaceAll("_", " ")} reached`, 409, `${limit}_reached`); }
   }
   private async change(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string, delta: Partial<ProjectResourceUsage>, limit: Limit | undefined) {
     const adjusted = await this.store.adjustProjectResourceUsage({
@@ -253,7 +253,7 @@ export class ProjectPolicyService {
         await this.requirePolicy(projectId);
         await this.openAlert(projectId, limit);
         await this.auditEvent(projectId, actorId, action, "rejected", resourceId);
-        throw new ProductError(`Project ${limit.replaceAll("_", " ")} reached`, 409);
+        throw new ProductError(`Project ${limit.replaceAll("_", " ")} reached`, 409, `${limit}_reached`);
       }
       throw new ProductError("Project policy usage not found", 409);
     }

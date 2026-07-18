@@ -1438,7 +1438,7 @@ export class TaskService {
       for (const successor of terminalSuccessors) await this.cleanupUnusedTaskCreate(successor);
       if (error instanceof Error && /file bytes limit/i.test(error.message)) {
         await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
-        throw new ProductError("Project file bytes limit reached", 409);
+        throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
       }
       throw error;
     }
@@ -1773,7 +1773,7 @@ export class TaskService {
         await rm(filePath, { force: true });
         await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
         await this.policies.recordOperation(task.projectId, null, "file.quota", "rejected", artifact.id, "file_quota");
-        throw new ProductError("Project file bytes limit reached", 409);
+        throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
       }
       await rm(filePath, { force: true });
       existingFileIds.add(fileId);

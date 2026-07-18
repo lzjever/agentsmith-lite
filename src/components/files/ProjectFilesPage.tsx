@@ -41,7 +41,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
   const [selected, setSelected] = useState<ProjectFile>();
   const [deleteTarget, setDeleteTarget] = useState<ProjectFile>();
   const [uploading, setUploading] = useState(false);
-  const [uploadFailure, setUploadFailure] = useState<{ file: File; path: string; message: string }>();
+  const [uploadFailure, setUploadFailure] = useState<{ file: File; path: string; message: string; code?: string }>();
   const [replaceTarget, setReplaceTarget] = useState<{ file: File; path: string }>();
   const [deleting, setDeleting] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
@@ -187,7 +187,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
       } else if (overwrite) {
         throw new Error(errorMessage(error, "File could not be replaced."));
       } else {
-        setUploadFailure({ file, path: uploadPath, message: errorMessage(error, "File could not be uploaded.") });
+        setUploadFailure({ file, path: uploadPath, message: errorMessage(error, "File could not be uploaded."), ...(error instanceof ApiError && error.code ? { code: error.code } : {}) });
       }
     } finally {
       if (mounted.current) setUploading(false);
@@ -242,7 +242,7 @@ function ProjectFiles({ projectId }: { projectId: string }) {
         <nav className="flex min-h-12 items-center gap-1 overflow-x-auto border-b border-subtle px-3" aria-label="File path"><ol className="flex min-w-max items-center gap-1 text-sm text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-tertiary" aria-hidden="true" /> : null}<button type="button" className="rounded-sm px-1.5 py-1 hover:bg-surface-low hover:text-foreground" onClick={() => navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav>
         <div className="flex gap-2 border-b border-subtle p-3"><Label className="relative flex-1"><span className="sr-only">Filter files</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary"/><Input value={query} onChange={event=>setQuery(event.target.value)} className="pl-9 pr-8" placeholder="Filter files"/>{query?<Button className="absolute right-1 top-0.5" size="icon" variant="quiet" aria-label="Clear file filter" onClick={()=>setQuery("")}><X size={14}/></Button>:null}</Label></div>
         {message ? <div className="mx-3 mt-3 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{message}</span><Button variant="quiet" size="icon" aria-label="Dismiss error" onClick={() => setMessage("")}><X size={15} /></Button></div> : null}
-        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.message}</span><div className="flex shrink-0 gap-1"><Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path)} disabled={mutationBusy}>Retry upload</Button><Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={mutationBusy}><RefreshCw size={15} /></Button></div></div> : null}
+        {uploadFailure ? <div className="mx-3 mt-3 flex items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.code === "project_file_bytes_limit_reached" ? <><strong>File storage limit reached.</strong> Delete files or ask a project administrator to change the limit. <a className="font-medium text-foreground hover:underline" href="policy">Open resource policy</a>.</> : uploadFailure.message}</span><div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button variant="quiet" size="sm" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path)} disabled={mutationBusy}>Retry upload</Button> : null}<Button variant="quiet" size="icon" title="Refresh files" aria-label="Refresh files" onClick={() => void load()} disabled={mutationBusy}><RefreshCw size={15} /></Button></div></div> : null}
         {display === "loading" ? <FileBrowserLoading /> : null}
         {display === "error" ? <FileBrowserError onRetry={load} /> : null}
         {display === "empty" ? <FileBrowserEmpty nested={path !== PROJECT_FILES_ROOT} /> : null}

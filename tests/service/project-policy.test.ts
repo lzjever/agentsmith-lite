@@ -67,6 +67,10 @@ describe("project resource policy", () => {
     const adjust = (delta: number) => store.adjustProjectResourceUsage({ projectId: project.id, delta: { activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: delta }, limit: "project_file_bytes_limit", updatedAt: timestamp });
 
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 0 }, timestamp);
+    await assert.rejects(
+      () => services.policies.recordFileBytes(project.id, user.id, "files/blocked.txt", 1),
+      (error: unknown) => error instanceof ProductError && error.code === "project_file_bytes_limit_reached"
+    );
     assert.equal(await adjust(1), null);
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 0);
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 1 }, timestamp);

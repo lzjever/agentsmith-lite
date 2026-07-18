@@ -264,7 +264,7 @@ describe("project files browser", () => {
     apiClient.projectCapabilities = async () => writable;
     apiClient.files = async () => ({ entries: [] });
     apiClient.uploadFile = async () => {
-      throw new ApiError(409, "Project file bytes limit reached");
+      throw new ApiError(409, "Project file bytes limit reached", "project_file_bytes_limit_reached");
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
@@ -273,8 +273,9 @@ describe("project files browser", () => {
         target: { files: [new File(["a"], "quota-denied.txt")] },
       });
       const alert = await screen.findByRole("alert");
-      assert.match(alert.textContent ?? "", /project file bytes limit reached/i);
-      assert.ok(screen.getByRole("button", { name: "Retry upload" }));
+      assert.match(alert.textContent ?? "", /file storage limit reached/i);
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "policy");
+      assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
       assert.equal(screen.queryByRole("alertdialog", { name: "Replace quota-denied.txt?" }), null);
     } finally { restoreClient(original); }
   });
