@@ -73,6 +73,26 @@ describe("task lifecycle API routes", () => {
     }
   });
 
+  it("returns a stable code when the active task limit rejects creation", async () => {
+    const createTaskAtomically = store.createTaskAtomically.bind(store);
+    store.createTaskAtomically = async () => null;
+    try {
+      const rejected = await request("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "over quota" }, "quota-task-create");
+      assert.equal(rejected.status, 409);
+      assert.deepEqual(await rejected.json(), {
+        error: "Project active tasks limit reached",
+        code: "active_tasks_limit_reached"
+      });
+      const replayed = await request("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "over quota" }, "quota-task-create");
+      assert.deepEqual(await replayed.json(), {
+        error: "Project active tasks limit reached",
+        code: "active_tasks_limit_reached"
+      });
+    } finally {
+      store.createTaskAtomically = createTaskAtomically;
+    }
+  });
+
   it("stores HTTP URL inputs in the fixed project files tree",async()=>{
     const missing=await request("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"});assert.equal(missing.status,400);
     const note=await json("POST",`/api/v1/projects/${projectId}/files/url-note`,{url:"https://docs.example.test/guide?q=task"},"url-note-key");

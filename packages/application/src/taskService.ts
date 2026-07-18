@@ -207,6 +207,8 @@ const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
 const BOTIFIED_ARTIFACT_PATH = "/workspace/task/artifacts";
+const ACTIVE_TASKS_LIMIT_MESSAGE = "Project active tasks limit reached";
+const ACTIVE_TASKS_LIMIT_CODE = "active_tasks_limit_reached";
 const MAX_TASK_ARTIFACT_FILES = 128;
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
@@ -217,6 +219,10 @@ const MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS = 3;
 const IDEMPOTENCY_LEASE_MS = 30_000;
 const INTERACTION_HISTORY_PAGE_LIMIT = 100;
 const INTERACTION_SYNC_PAGE_LIMIT = 200;
+
+function activeTasksLimitError(): ProductError {
+  return new ProductError(ACTIVE_TASKS_LIMIT_MESSAGE, 409, ACTIVE_TASKS_LIMIT_CODE);
+}
 const INTERACTION_LOOKUP_LIMIT = 1_000;
 
 interface TaskInputManifestEntry {
@@ -313,7 +319,7 @@ export class TaskService {
         persisted = await this.store.createTaskAtomically(create);
         if (!persisted) {
           await this.policies.recordTaskReservationRejected(projectId, userId, id);
-          throw new ProductError("Project active tasks limit reached", 409);
+          throw activeTasksLimitError();
         }
       } catch (error) {
         if (create.task.executionMode === "live") await this.bestEffortRemoveTaskInputs(project.rootPath, id);
@@ -430,7 +436,7 @@ export class TaskService {
     if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
     if(begun.kind==="in_progress")throw new ProductError("Idempotent task operation is still in progress",409);
     if(begun.kind==="replay"){
-      if(begun.responseStatus>=400){const record=isUnknownRecord(begun.responseBody)?begun.responseBody:{};throw new ProductError(typeof record.error==="string"?record.error:"Task operation failed",begun.responseStatus);}
+      if(begun.responseStatus>=400){const record=isUnknownRecord(begun.responseBody)?begun.responseBody:{};throw new ProductError(typeof record.error==="string"?record.error:"Task operation failed",begun.responseStatus,typeof record.code==="string"?record.code:undefined);}
       if(String(scope.operation)==="message"){
         const message=await this.store.findTaskMessage(begun.resourceId);
         if(message)return await this.messageReceipt(scope.actorId,message,true) as unknown as T;
@@ -444,7 +450,7 @@ export class TaskService {
       if(!await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt:nowIso()}))throw new ProductError("Idempotent task operation lost its claim",409);
       return response;
     }catch(error){
-      if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message},updatedAt:nowIso()});
+      if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});
       throw error;
     }
   }
@@ -922,7 +928,7 @@ export class TaskService {
     catch(error){await this.cleanupUnusedTaskCreate(successor);throw error;}
     if (!created) {
       await this.cleanupUnusedTaskCreate(successor);
-      throw new ProductError("Project active tasks limit reached", 409);
+      throw activeTasksLimitError();
     }
     return created;
   }
@@ -965,7 +971,7 @@ export class TaskService {
       for(let index=0;index<pending.length;index+=1){
         const message=pending[index]!;const create=successors[index]!;
         const success=await this.prepareProductInteractionChange(messageProductSource({...message,targetTaskId:create.task.id,deliveryStatus:"successor_created",updatedAt:timestamp}));
-        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:"Project active tasks limit reached",updatedAt:timestamp}));
+        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:ACTIVE_TASKS_LIMIT_MESSAGE,updatedAt:timestamp}));
         const successorPrompt=await this.prepareProductInteractionChange(initialPromptProductSource(create.task),create.task);
         successorInputs.push({messageId:message.id,create,...(success?{messageSuccessInteractionChange:success.change}:{}),...(failure?{messageFailureInteractionChange:failure.change}:{}),...(successorPrompt?{successorInteractionChange:successorPrompt.change}:{})});
       }
@@ -1396,7 +1402,7 @@ export class TaskService {
       for (let index = 0; index < pending.length; index += 1) {
         const message=pending[index]!;const create=terminalSuccessors[index]!;
         const success=await this.prepareProductInteractionChange(messageProductSource({...message,targetTaskId:create.task.id,deliveryStatus:"successor_created",updatedAt:syncedAt}));
-        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:"Project active tasks limit reached",updatedAt:syncedAt}));
+        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:ACTIVE_TASKS_LIMIT_MESSAGE,updatedAt:syncedAt}));
         const successorPrompt=await this.prepareProductInteractionChange(initialPromptProductSource(create.task),create.task);
         successorInputs.push({messageId:message.id,create,...(success?{messageSuccessInteractionChange:success.change}:{}),...(failure?{messageFailureInteractionChange:failure.change}:{}),...(successorPrompt?{successorInteractionChange:successorPrompt.change}:{})});
       }

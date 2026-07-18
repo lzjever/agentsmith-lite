@@ -6,7 +6,7 @@ export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js"
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(public readonly status: number, message: string, public readonly code?: string) {
     super(message);
   }
 }
@@ -190,7 +190,7 @@ async function apiResponseError(response: Response): Promise<Error> {
       const code = (body as { code?: unknown }).code;
       const error = (body as { error?: unknown }).error;
       if (code === "idempotency_in_progress" && typeof error === "string") return new IdempotencyPendingError(error);
-      if (typeof error === "string") return new ApiError(response.status, error);
+      if (typeof error === "string") return new ApiError(response.status, error, typeof code === "string" ? code : undefined);
       if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
         return new ApiError(response.status, (error as { message: string }).message);
       }

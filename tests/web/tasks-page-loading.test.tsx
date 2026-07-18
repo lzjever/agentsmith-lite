@@ -110,7 +110,7 @@ describe("tasks page loading", () => {
     apiClient.files = async () => ({ entries: [] });
     apiClient.createTask = async (_projectId, _input, key) => {
       keys.push(key);
-      if (keys.length === 1) throw new ApiError(409, "Project active tasks limit reached");
+      if (keys.length === 1) throw new ApiError(409, "Project active tasks limit reached", "active_tasks_limit_reached");
       return task;
     };
     try {
@@ -119,6 +119,8 @@ describe("tasks page loading", () => {
       fireEvent.change(screen.getByRole("textbox", { name: "Task prompt" }), { target: { value: "Run after capacity is released" } });
       fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
       await waitFor(() => assert.equal(keys.length, 1));
+      assert.match(screen.getByRole("alert").textContent ?? "", /Wait for or cancel an active task/);
+      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/policy");
 
       fireEvent.submit(screen.getByRole("form", { name: "Create task" }));
       await waitFor(() => assert.deepEqual(navigations, ["/workspaces/workspace_1/projects/project_1/tasks/task_1"]));

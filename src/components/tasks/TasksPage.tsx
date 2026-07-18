@@ -174,12 +174,12 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
           throw new Error(detail);
         }
         setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
+        setError(detail);
+        toast.error(detail);
       } else if (isTaskEndpointDrift(reason)) {
         await loadEndpoints();
       }
-      setError(detail);
-      toast.error(detail);
-      throw new Error(detail);
+      throw reason instanceof Error ? reason : new Error(detail);
     } finally { if (active.current) setCreating(false); }
   }
 
@@ -200,7 +200,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {state === "loading" ? <PageState>Loading tasks...</PageState> : null}
     {state === "error" ? <PageState><Button onClick={() => void load()}>Try again</Button></PageState> : null}
     {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && endpointGuidance ? <p className="mt-4 text-sm text-secondary">{endpointGuidance} <Link className="font-medium text-foreground hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}>Open endpoints</Link></p> : null}</> : null}
-    <TaskCreateDialog projectId={projectId} canWriteFiles={capabilities?.canWriteFiles === true} endpoints={compatibleEndpoints} projectFiles={projectFiles} projectFilesLoading={projectFilesLoading} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    <TaskCreateDialog projectId={projectId} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} canWriteFiles={capabilities?.canWriteFiles === true} endpoints={compatibleEndpoints} projectFiles={projectFiles} projectFilesLoading={projectFilesLoading} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 
