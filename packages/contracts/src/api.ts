@@ -145,7 +145,7 @@ export interface ProjectUsageDay {
 }
 
 export interface ProjectUsageEndpoint {
-  endpointId: string;
+  endpointId: string | null;
   endpointName: string;
   requests: number;
   tokens: number;

@@ -38,6 +38,14 @@ describe("project usage overview", () => {
     assert.deepEqual(selected.daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), { requests: 0, tokens: 0, cost: 0 });
     assert.equal("currentUser" in selected,false);
     await assert.rejects(() => services.policies.getUsageOverview(user.id, project.id, "missing"), /Endpoint not found/);
+
+    await settle(store, "settlement_deleted", project.id, "endpoint_2", user.id, now, { tokens: 2, cost: 0.25 });
+    assert.equal(await store.deleteEndpoint("endpoint_2"), "deleted");
+    const afterDelete = await services.policies.getUsageOverview(user.id, project.id);
+    assert.deepEqual(
+      afterDelete.endpoints.map((value) => [value.endpointId, value.endpointName, value.requests, value.tokens, value.cost]),
+      [["endpoint_1", "Primary", 2, 10, 2], [null, "Unassigned or deleted endpoints", 1, 2, 0.25]],
+    );
   });
 
   it("allows project viewers to read the overview and rejects non-members", async () => {

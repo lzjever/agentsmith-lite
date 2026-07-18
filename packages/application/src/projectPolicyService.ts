@@ -32,9 +32,14 @@ export class ProjectPolicyService {
       if (!day) continue;
       day.requests += 1; day.tokens += settlement.usage?.tokens ?? 0; day.cost += settlement.usage?.cost ?? 0;
     }
-    const endpointUsage = new Map<string, ProjectUsageEndpoint>(endpoints.map((endpoint) => [endpoint.id, { endpointId: endpoint.id, endpointName: endpoint.name, requests: 0, tokens: 0, cost: 0, limits: [] }]));
+    const endpointUsage = new Map<string, ProjectUsageEndpoint & { endpointId: string }>(endpoints.map((endpoint) => [endpoint.id, { endpointId: endpoint.id, endpointName: endpoint.name, requests: 0, tokens: 0, cost: 0, limits: [] }]));
+    let unassignedEndpointUsage: ProjectUsageEndpoint | undefined;
     for (const settlement of allSettlements) {
-      if (settlement.endpointId === null) continue;
+      if (settlement.endpointId === null) {
+        unassignedEndpointUsage ??= { endpointId: null, endpointName: "Unassigned or deleted endpoints", requests: 0, tokens: 0, cost: 0 };
+        unassignedEndpointUsage.requests += 1; unassignedEndpointUsage.tokens += settlement.usage?.tokens ?? 0; unassignedEndpointUsage.cost += settlement.usage?.cost ?? 0;
+        continue;
+      }
       const endpoint = endpointUsage.get(settlement.endpointId);
       if (!endpoint) continue;
       endpoint.requests += 1; endpoint.tokens += settlement.usage?.tokens ?? 0; endpoint.cost += settlement.usage?.cost ?? 0;
@@ -42,7 +47,7 @@ export class ProjectPolicyService {
     const measuredAt=Date.now();
     for(const endpoint of endpointUsage.values()){const windows=(policy.endpointWindows??[]).filter(item=>item.endpointId===endpoint.endpointId);endpoint.limits=[];for(const window of windows){const cutoff=new Date(measuredAt-window.windowSeconds*1000).toISOString();const measured=await this.store.measureProjectProviderWindow({projectId,endpointId:endpoint.endpointId,actorId:userId,metric:window.metric,since:cutoff});const resetAt=measured.oldestReservedAt?new Date(Date.parse(measured.oldestReservedAt)+window.windowSeconds*1000).toISOString():null;endpoint.limits.push({metric:window.metric,current:measured.current,limit:window.limit,remaining:Math.max(0,window.limit-measured.current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt}})}}
     const trendTotals = daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 });
-    return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values()], selectedEndpointId: endpointId ?? null };
+    return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values(), ...(unassignedEndpointUsage ? [unassignedEndpointUsage] : [])], selectedEndpointId: endpointId ?? null };
   }
   async alerts(userId: string, projectId: string) {
     await this.authorization.requireProject(userId, projectId);
