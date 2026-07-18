@@ -275,12 +275,12 @@ describe("app manifest rendering", () => {
 
   it("renders separate API and web health probes under the public base path", () => {
     assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com/app"), {
-      readiness: "/app/api/v1/health",
+      readiness: "/app/api/v1/ready",
       liveness: "/app/api/v1/health",
       startup: "/app/api/v1/health"
     });
     assert.deepEqual(apiHealthProbePaths("https://agentsmith.example.com"), {
-      readiness: "/api/v1/health",
+      readiness: "/api/v1/ready",
       liveness: "/api/v1/health",
       startup: "/api/v1/health"
     });
@@ -296,7 +296,7 @@ describe("app manifest rendering", () => {
 
     assert.equal(apiIngressPath(publicBaseUrl), "/app/api/v1");
     assert.deepEqual(apiHealthProbePaths(publicBaseUrl), {
-      readiness: "/app/api/v1/health",
+      readiness: "/app/api/v1/ready",
       liveness: "/app/api/v1/health",
       startup: "/app/api/v1/health"
     });

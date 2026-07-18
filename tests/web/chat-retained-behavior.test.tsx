@@ -546,6 +546,33 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("refreshes stale endpoint eligibility after a send is rejected", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
+    const unavailable = { ...endpoint, health: { status: "unavailable" as const, checkedAt: endpoint.updatedAt, errorCategory: "auth" as const } };
+    let endpointReads = 0;
+    let rejected = false;
+    apiClient.endpoints = async () => { endpointReads += 1; return rejected ? [unavailable] : [endpoint]; };
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => [];
+    apiClient.sendChatMessage = async () => { rejected = true; throw new ApiError(409, "Endpoint is unavailable. Recheck it before use."); };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByLabelText("Thread endpoint fixed");
+      const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+      await waitFor(() => assert.equal(composer.disabled, false));
+      const readsBeforeSend = endpointReads;
+      fireEvent.change(composer, { target: { value: "Use the current endpoint" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await screen.findAllByText("Endpoint is unavailable. Recheck it before use.");
+      await waitFor(() => assert.equal(endpointReads, readsBeforeSend + 1));
+      assert.equal(composer.disabled, true);
+      assert.ok(screen.getByRole("link", { name: "Open endpoints" }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps the persisted user message after stopping an active stream", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, sendChatMessage: apiClient.sendChatMessage };
     let aborted = false;

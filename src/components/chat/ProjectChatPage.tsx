@@ -156,6 +156,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   const draftEndpointId = compatibleEndpoints.some((item) => item.id === endpointId) ? endpointId : (compatibleEndpoints[0]?.id ?? "");
   const selectedEndpointId = selectedThread ? selectedThread.endpointId : draftEndpointId;
   const endpoint = endpoints.find((item) => item.id === selectedEndpointId);
+  const endpointReady = endpoint ? isChatCompatibleEndpoint(endpoint) : false;
   const canSend = capabilitiesStatus === "ready" && capabilities?.canSendChat === true;
   const historyReady = messagesStatus === "ready" && loadedThreadId.current === threadId;
 
@@ -277,7 +278,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
   }
 
   async function send(content: string): Promise<boolean> {
-    if (!threadId || !canSend || sending || !endpoint || !historyReady) return false;
+    if (!threadId || !canSend || sending || !endpointReady || !historyReady) return false;
     const afterMessageId = latestConfirmedMessageId(messages);
     const timestamp = new Date().toISOString();
     const optimistic: ProjectChatMessage = {
@@ -312,6 +313,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
         await reconcileStoppedMessage(threadId);
         return true;
       }
+      if (isChatEndpointDrift(reason)) await loadEndpoints();
       return failAction(reason);
     } finally {
       streamAbort.current = null;
@@ -473,7 +475,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           onEdit={editMessage}
           onDelete={deleteMessage}
           onBranch={(target) => void branchMessage(target)}
-          onRetry={(target) => void retryMessage(target)}
+          {...(endpointReady ? { onRetry: (target: ProjectChatMessage) => void retryMessage(target) } : {})}
         />
         <div ref={messageEnd} />
         {sending ? <Button variant="danger" className="m-3 w-fit" onClick={stop}>Stop</Button> : null}
@@ -487,7 +489,7 @@ function ProjectChatProjectPage({ projectId }: { projectId: string }) {
           onEndpointChange={setEndpointId}
           onStartThread={startThread}
           onSend={send}
-          disabled={!canSend || !selectedThread || !endpoint || sending || !historyReady}
+          disabled={!canSend || !selectedThread || !endpointReady || sending || !historyReady}
         />
       </section>
     </div>
@@ -518,6 +520,15 @@ function Notice({ children, error = false, action, onAction }: { children: React
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : "The chat request could not be completed."; }
 function isAbort(error: unknown): boolean { return error instanceof DOMException ? error.name === "AbortError" : error instanceof Error && error.name === "AbortError"; }
+function isChatEndpointDrift(error: unknown): boolean {
+  return error instanceof ApiError && (
+    error.status === 404 && (error.message === "Endpoint not found" || error.message === "Credential not found")
+    || error.status === 409 && (
+      error.message === "Endpoint is unavailable. Recheck it before use."
+      || error.message === "Chat thread endpoint has been deleted"
+    )
+  );
+}
 function wait(milliseconds: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
 function orderedThreads(threads: ProjectChatThread[]): ProjectChatThread[] { return [...threads].sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || right.updatedAt.localeCompare(left.updatedAt)); }
 function latestConfirmedMessageId(messages: ProjectChatMessage[]): string | null { return messages.filter((item) => !item.id.startsWith("pending-") && !item.id.startsWith("stream-")).reduce<ProjectChatMessage | undefined>((latest, item) => !latest || item.sequence > latest.sequence ? item : latest, undefined)?.id ?? null; }

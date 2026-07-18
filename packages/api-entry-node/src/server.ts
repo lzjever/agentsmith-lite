@@ -291,6 +291,11 @@ async function routeApi(
     return sendJson(res, 200, { status: "ok", version: "0.1.0" });
   }
 
+  if (method === "GET" && url.pathname === "/api/v1/ready") {
+    await services.auth.hasAnyUser();
+    return sendJson(res, 200, { status: "ready" });
+  }
+
   if (method === "GET" && url.pathname === "/api/v1/bootstrap") {
     return sendJson(res, 200, { authMode: auth.authMode, hasAdmin: await services.auth.hasAnyUser() });
   }

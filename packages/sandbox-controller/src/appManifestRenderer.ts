@@ -25,6 +25,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   const parsedPublicBaseUrl = parsePublicBaseUrl(publicBaseUrl);
   const publicBasePath = normalizedPublicBasePath(parsedPublicBaseUrl.pathname);
   const apiHealthPath = publicPathFor(publicBasePath, "/api/v1/health");
+  const apiReadyPath = publicPathFor(publicBasePath, "/api/v1/ready");
   const webHealthPath = publicPathFor(publicBasePath, "/health");
   const appDataRoot = resolveAppDataRoot(input.env);
   const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
@@ -146,7 +147,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 name: "api",
                 image: appImage,
                 ports: [{ containerPort: APP_KUBERNETES_CONTAINER_PORT }],
-                readinessProbe: apiHealthProbe(apiHealthPath),
+                readinessProbe: apiHealthProbe(apiReadyPath),
                 livenessProbe: apiHealthProbe(apiHealthPath),
                 startupProbe: apiHealthProbe(apiHealthPath),
                 resources: {
