@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { DeletionService } from "../../packages/application/src/deletionService.js";
 import type { Project, Workspace } from "../../packages/contracts/src/api.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 
 describe("deletion lifecycle", () => {
   it("marks first, removes only its checked root, and leaves other projects intact", async () => {
@@ -43,6 +44,26 @@ describe("deletion lifecycle", () => {
     fail = false;
     await deletion.deleteProject("owner", target.id);
     assert.equal(await store.findProject(target.id), null);
+  });
+
+  it("does not start deletion after ownership changes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-owner-race-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_owner_race"));
+    const target = await store.createProject(project("proj_owner_race", workspace.id));
+    const beginProjectDeletion = store.beginProjectDeletion.bind(store);
+    store.beginProjectDeletion = async (id, updatedAt, expectedOwnerUserId) => {
+      await store.upsertProjectMembership({ projectId: id, userId: "successor", role: "member", createdAt: updatedAt, updatedAt });
+      await store.transferProjectOwner(id, "owner", "successor", updatedAt);
+      return beginProjectDeletion(id, updatedAt, expectedOwnerUserId);
+    };
+    let stopped = false;
+    const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { stopped = true; } } as never, root);
+
+    await assert.rejects(() => deletion.deleteProject("owner", target.id), (error: unknown) => error instanceof ProductError && error.statusCode === 403);
+    assert.equal((await store.findProject(target.id))?.lifecycleStatus, "active");
+    assert.equal((await store.findProject(target.id))?.ownerUserId, "successor");
+    assert.equal(stopped, false);
   });
 
   it("deletes a workspace by running each project lifecycle before its own context", async () => {

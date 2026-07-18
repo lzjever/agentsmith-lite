@@ -12,8 +12,8 @@ export class DeletionService {
 
   async deleteProject(userId: string, projectId: string): Promise<{ deleted: true }> {
     const project = await this.requireProjectOwner(userId, projectId);
-    const deleting = await this.store.beginProjectDeletion(project.id, nowIso());
-    if (!deleting) throw new NotFoundError("Project not found");
+    const deleting = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
+    if (!deleting) throw await this.projectDeletionConflict(userId, project.id);
     await this.finishProject(deleting);
     return { deleted: true };
   }
@@ -22,8 +22,8 @@ export class DeletionService {
     const workspace = await this.store.findWorkspace(workspaceId);
     if (!workspace) throw new NotFoundError("Workspace not found");
     if ((await this.store.findWorkspaceMembership(workspaceId, userId))?.role !== "owner") throw new ForbiddenError("Workspace access denied");
-    const deleting = await this.store.beginWorkspaceDeletion(workspace.id, nowIso());
-    if (!deleting) throw new NotFoundError("Workspace not found");
+    const deleting = await this.store.beginWorkspaceDeletion(workspace.id, nowIso(), userId);
+    if (!deleting) throw await this.workspaceDeletionConflict(userId, workspace.id);
     for (const project of await this.store.listProjectsForWorkspace(workspace.id)) {
       const marked = await this.store.beginProjectDeletion(project.id, nowIso());
       if (marked) await this.finishProject(marked);
@@ -47,6 +47,20 @@ export class DeletionService {
     if (!project) throw new NotFoundError("Project not found");
     if (project.ownerUserId !== userId) throw new ForbiddenError("Project access denied");
     return project;
+  }
+
+  private async projectDeletionConflict(userId: string, projectId: string): Promise<ProductError> {
+    const current = await this.store.findProject(projectId);
+    return current && current.ownerUserId !== userId
+      ? new ForbiddenError("Project access denied")
+      : new NotFoundError("Project not found");
+  }
+
+  private async workspaceDeletionConflict(userId: string, workspaceId: string): Promise<ProductError> {
+    const current = await this.store.findWorkspace(workspaceId);
+    return current && current.ownerUserId !== userId
+      ? new ForbiddenError("Workspace access denied")
+      : new NotFoundError("Workspace not found");
   }
 
   private projectRoot(project: Project): string {

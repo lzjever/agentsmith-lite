@@ -361,7 +361,7 @@ export interface ProductStore {
   listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]>;
   findWorkspace(id: string): Promise<Workspace | null>;
   updateWorkspaceName(workspaceId: string, name: string, updatedAt: string): Promise<Workspace | null>;
-  beginWorkspaceDeletion(id: string, updatedAt: string): Promise<Workspace | null>;
+  beginWorkspaceDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<Workspace | null>;
   setWorkspaceLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Workspace | null>;
   transferWorkspaceOwner(workspaceId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Workspace | null>;
   deleteWorkspaceAfterProjects(id: string): Promise<boolean>;
@@ -379,7 +379,7 @@ export interface ProductStore {
   setProjectPin(userId: string, projectId: string, pinnedAt: string | null): Promise<boolean>;
   findProject(id: string): Promise<Project | null>;
   updateProjectName(projectId: string, name: string, updatedAt: string): Promise<Project | null>;
-  beginProjectDeletion(id: string, updatedAt: string): Promise<Project | null>;
+  beginProjectDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<Project | null>;
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
   deleteProjectDependenciesAndProject(id: string): Promise<boolean>;
