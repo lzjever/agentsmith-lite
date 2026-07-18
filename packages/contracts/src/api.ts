@@ -211,7 +211,7 @@ export interface ProjectAuditEventView extends ProjectAuditEvent {
   actorDisplayName: string | null;
   actorEmail: string | null;
 }
-export interface ProjectAuditQuery { cursor?: string; limit?: number; action?: ProjectAuditAction; status?: "accepted" | "rejected"; resourceKind?: ProjectAuditResourceKind; resourceId?: string; from?: ISODateString; to?: ISODateString; }
+export interface ProjectAuditQuery { cursor?: string; limit?: number; actorId?: string | null; action?: ProjectAuditAction; status?: "accepted" | "rejected"; resourceKind?: ProjectAuditResourceKind; resourceId?: string; from?: ISODateString; to?: ISODateString; }
 export interface ProjectAuditPage { items: ProjectAuditEventView[]; nextCursor: string | null; }
 
 export interface UpdateProjectResourcePolicyInput {
@@ -222,6 +222,7 @@ export interface UpdateProjectResourcePolicyInput {
   projectFileBytesLimit?: number | null;
   endpointWindows?: EndpointPolicyWindow[];
 }
+export interface UpdateProjectResourcePolicyRequest extends UpdateProjectResourcePolicyInput { expectedUpdatedAt: ISODateString; }
 
 export interface WorkspaceListProjection extends Workspace {
   owner: MembershipIdentity;

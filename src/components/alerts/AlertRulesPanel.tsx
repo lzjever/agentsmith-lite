@@ -99,8 +99,9 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     setSaving(true);
     setFormError("");
     try {
+      const update = editing ? { ...value, expectedUpdatedAt: editing.updatedAt } : null;
       const saved = editing
-        ? await apiClient.updateAlertRule(projectId, editing.id, value, mutationKeys.requestKey("alert-rule.update", `${editing.id}:form`, value))
+        ? await apiClient.updateAlertRule(projectId, editing.id, update!, mutationKeys.requestKey("alert-rule.update", `${editing.id}:form`, update))
         : await apiClient.createAlertRule(projectId, value, mutationKeys.requestKey("alert-rule.create", projectId, value));
       if (editing) mutationKeys.complete("alert-rule.update", `${editing.id}:form`);
       else mutationKeys.complete("alert-rule.create", projectId);
@@ -113,6 +114,12 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "alert-rule.update" : "alert-rule.create", editing ? `${editing.id}:form` : projectId);
+      if (editing && isRuleConflict(reason)) {
+        setDialogOpen(false);
+        await load();
+        if (mounted.current) toast.error("Alert rule changed elsewhere. Latest rules loaded.");
+        return;
+      }
       if (editing && forgetMissingRule(reason, editing.id)) return;
       const message = editing ? "Alert rule could not be updated." : "Alert rule could not be created.";
       if (!isReadOnlyMutationError(reason)) setFormError(message);
@@ -127,7 +134,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     setBusyRuleId(rule.id);
     try {
       const identity = `${rule.id}:toggle:${!rule.enabled}`;
-      const saved = await apiClient.updateAlertRule(projectId, rule.id, { enabled: !rule.enabled }, mutationKeys.key("alert-rule.update", identity));
+      const saved = await apiClient.updateAlertRule(projectId, rule.id, { enabled: !rule.enabled, expectedUpdatedAt: rule.updatedAt }, mutationKeys.key("alert-rule.update", identity));
       mutationKeys.complete("alert-rule.update", identity);
       if (!mounted.current) return;
       setRules((current) => current.map((item) => item.id === rule.id ? saved : item));
@@ -137,6 +144,11 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("alert-rule.update", `${rule.id}:toggle:${!rule.enabled}`);
+      if (isRuleConflict(reason)) {
+        await load();
+        if (mounted.current) toast.error("Alert rule changed elsewhere. Latest rules loaded.");
+        return;
+      }
       if (forgetMissingRule(reason, rule.id)) return;
       mutationFailed(reason, "Alert rule could not be updated.");
     } finally {
@@ -199,3 +211,4 @@ function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule
 function alertRuleFormValue(rule: ProjectAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
 function alertRuleChanged(value: AlertRuleFormValue, rule: ProjectAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }
 function isMissingRule(error:unknown):boolean{return error instanceof ApiError&&error.status===404&&error.message==="Alert rule not found";}
+function isRuleConflict(error:unknown):boolean{return error instanceof ApiError&&error.status===409&&error.message==="Alert rule changed elsewhere. Reload and try again.";}

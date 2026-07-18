@@ -20,8 +20,10 @@ describe("PATCH project policy", () => {
       const workspace = await requestJson(api.baseUrl, "POST", "/api/v1/workspaces", { name: "Policy" }, cookie, csrf);
       const project = await requestJson(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Patch" }, cookie, csrf);
       await requestJson(api.baseUrl, "PATCH", "/api/v1/me/profile", { displayName: "Policy Owner" }, cookie, csrf);
+      const currentPolicy = await (await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { headers: { cookie } })).json() as { updatedAt: string };
 
       const policy = await requestJson(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/policy`, {
+        expectedUpdatedAt: currentPolicy.updatedAt,
         providerRequestsLimit: null,
         providerCostLimit: 3.5
       }, cookie, csrf);
@@ -30,7 +32,7 @@ describe("PATCH project policy", () => {
       assert.equal(policy.providerRequestsLimit, null);
       assert.equal(policy.providerCostLimit, 3.5);
       assert.equal(policy.providerTokensLimit, null);
-      const invalidActiveLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ activeTasksLimit: null }) });
+      const invalidActiveLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, activeTasksLimit: null }) });
       assert.equal(invalidActiveLimit.status, 400);
       const auditResponse = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit`, { headers: { cookie } });
       assert.equal(auditResponse.status, 200);

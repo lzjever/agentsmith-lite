@@ -10,6 +10,7 @@ import {
   ApiError,
   apiClient,
   type ProjectAuditEvent,
+  type ProjectMember,
   type ProjectUsageOverview,
 } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
@@ -137,6 +138,8 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
   const [action, setAction] = useState("all");
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("all");
+  const [actorId, setActorId] = useState("all");
+  const [members, setMembers] = useState<ProjectMember[]>([]);
   const [resourceId, setResourceId] = useState("");
   const [queryProjectId, setQueryProjectId] = useState("");
   const [from, setFrom] = useState("");
@@ -158,6 +161,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
       const page = await apiClient.audit(projectId, {
         limit: 20,
         cursor,
+        actorId: actorId === "all" ? undefined : actorId,
         action: action === "all" ? undefined : action,
         status: status === "all" ? undefined : status,
         resourceKind: kind === "all" ? undefined : kind,
@@ -173,7 +177,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
       if (!active.current || revision !== requestRevision.current) return;
       setState("error");
     }
-  }, [projectId, cursor, action, status, kind, resourceId, from, to]);
+  }, [projectId, cursor, actorId, action, status, kind, resourceId, from, to]);
 
   useEffect(() => {
     requestRevision.current += 1;
@@ -181,6 +185,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     const requestedAction = query.get("action");
     const requestedKind = query.get("resourceKind");
     const requestedStatus = query.get("status");
+    const requestedActor = query.get("actorId");
     setAction(
       requestedAction &&
         PROJECT_AUDIT_ACTIONS.includes(
@@ -198,7 +203,10 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         : "all",
     );
     setStatus(requestedStatus === "accepted" || requestedStatus === "rejected" ? requestedStatus : "all");
+    setActorId(requestedActor || "all");
     setResourceId(query.get("resourceId") ?? "");
+    setMembers([]);
+    void apiClient.members(projectId).then((listed) => { if (active.current) setMembers(listed); }).catch(() => undefined);
     setCursors([undefined]);
     setQueryProjectId(projectId);
   }, [projectId]);
@@ -262,7 +270,24 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             </Button>
           </div>
         ) : null}
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-1">
+            <span className="text-xs text-secondary">Actor</span>
+            <Select value={actorId} onValueChange={(value) => {
+              const query = browserQuery();
+              if (value === "all") query.delete("actorId");
+              else query.set("actorId", value);
+              replaceBrowserQuery(query);
+              setActorId(value);
+              reset();
+            }}>
+              <SelectTrigger aria-label="Actor"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All actors</SelectItem>
+                {auditActors(members, items, actorId).map((actor) => <SelectItem value={actor.id} key={actor.id}>{actor.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
           <Filter
             label="Action"
             value={action}
@@ -344,13 +369,14 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
           <div className="divide-y divide-border border-y border-border">
             {items.map((event) => (
               <button
-                className="grid w-full gap-2 py-3 text-left sm:grid-cols-[11rem_1fr_7rem_1fr]"
+                className="grid w-full gap-2 py-3 text-left sm:grid-cols-[10rem_10rem_1fr_7rem_1fr]"
                 onClick={() => setSelected(event)}
                 key={event.id}
               >
                 <span className="text-xs text-secondary">
                   {formatDate(event.createdAt)}
                 </span>
+                <span className="truncate text-xs text-secondary" title={actorName(event)}>{actorName(event)}</span>
                 <strong className="text-sm font-medium">{event.action}</strong>
                 <Badge
                   variant={
@@ -391,6 +417,9 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     </PageLayout>
   );
 }
+
+function actorName(event:ProjectAuditEvent):string{return event.actorId===null?"System":event.actorDisplayName||event.actorEmail||event.actorId}
+function auditActors(members:ProjectMember[],events:ProjectAuditEvent[],selected:string):Array<{id:string;label:string}>{const actors=new Map<string,string>();actors.set("system","System");for(const member of members)actors.set(member.userId,member.displayName?`${member.displayName} (${member.email})`:member.email);for(const event of events)if(event.actorId)actors.set(event.actorId,event.actorDisplayName?`${event.actorDisplayName} (${event.actorEmail??event.actorId})`:event.actorEmail??event.actorId);if(selected!=="all"&&!actors.has(selected))actors.set(selected,selected);return [...actors].map(([id,label])=>({id,label}))}
 
 function Filter({
   label,

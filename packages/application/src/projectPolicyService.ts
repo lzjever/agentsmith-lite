@@ -1,4 +1,4 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -100,7 +100,7 @@ export class ProjectPolicyService {
       return { ...event,detail:safeAuditDetail(event.detail), actorDisplayName: actor?.displayName ?? null, actorEmail: actor?.email ?? null };
     });return query===undefined?items:{nextCursor:events.nextCursor,items};
   }
-  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput, idempotencyKey?: string): Promise<ProjectResourcePolicy> {
+  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput & Partial<Pick<UpdateProjectResourcePolicyRequest,"expectedUpdatedAt">>, idempotencyKey?: string): Promise<ProjectResourcePolicy> {
     try {
       await this.authorization.requireProject(userId, projectId, "admin");
     } catch (error) {
@@ -111,11 +111,17 @@ export class ProjectPolicyService {
       let result: ProjectResourcePolicy;
       let previous!: ProjectResourcePolicy;
       try {
-        const updated = validatePolicyInput(input);
+        const { expectedUpdatedAt, ...policyInput } = input;
+        const updated = validatePolicyInput(policyInput);
         previous = await this.requirePolicy(projectId);
+        const expected = expectedPolicyTimestamp(expectedUpdatedAt, previous.updatedAt);
         if(updated.endpointWindows){const endpoints=await this.store.listEndpointsForProject(projectId);const endpointIds=new Set(endpoints.map(endpoint=>endpoint.id));if(updated.endpointWindows.some(window=>!endpointIds.has(window.endpointId)))throw new ProductError("Endpoint policy window endpoint not found",404)}
         if (Object.keys(updated).length === 0) throw new ProductError("Project policy update requires at least one limit");
-        const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nowIso()); if (!patched) throw new ProductError("Project policy not found", 404);
+        const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nextTimestamp(previous.updatedAt), expected);
+        if (!patched) {
+          if (await this.store.findProjectResourcePolicy(projectId)) throw new ProductError("Project policy changed elsewhere. Reload and try again.", 409);
+          throw new ProductError("Project policy not found", 404);
+        }
         result = patched;
       } catch (error) {
         await this.auditEvent(projectId, userId, "policy.update", "rejected", projectId);
@@ -313,4 +319,6 @@ function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdatePro
   }
   return input;
 }
+function expectedPolicyTimestamp(value:string|undefined,current:string):string{if(value===undefined)return current;if(!Number.isFinite(Date.parse(value)))throw new ProductError("expectedUpdatedAt must be an ISO timestamp");return new Date(value).toISOString()}
+function nextTimestamp(previous:string):string{const now=Date.now();const prior=Date.parse(previous);return new Date(Number.isFinite(prior)&&now<=prior?prior+1:now).toISOString()}
 function safeAuditDetail(detail:import("../../contracts/src/api.js").ProjectAuditSafeDetail|undefined){return sanitizeProjectAuditDetail(detail)}

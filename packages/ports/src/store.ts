@@ -397,7 +397,7 @@ export interface ProductStore {
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
   createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule>;
   listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;
-  updateProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule | null>;
+  updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
   listProjectsForUser(userId: string): Promise<Project[]>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
@@ -411,7 +411,7 @@ export interface ProductStore {
   deleteManagedProjectMembership(projectId: string, userId: string): Promise<ManagedProjectMembershipDeleteResult>;
   createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy>;
   findProjectResourcePolicy(projectId: string): Promise<ProjectResourcePolicy | null>;
-  patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string): Promise<ProjectResourcePolicy | null>;
+  patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;
   findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null>;
   upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage>;
   adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null>;

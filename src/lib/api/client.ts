@@ -159,6 +159,7 @@ export interface ProjectPolicyInput {
   projectFileBytesLimit?: number | null;
   endpointWindows?:Array<{endpointId:string;metric:"providerRequests"|"providerTokens"|"providerCost";limit:number;windowSeconds:number}>;
 }
+export type ProjectPolicyUpdate = ProjectPolicyInput & { expectedUpdatedAt: string };
 
 const apiBasePath = process.env.NEXT_PUBLIC_API_BASE_PATH || "/api/v1";
 let csrfToken: string | undefined;
@@ -293,7 +294,7 @@ export const apiClient = {
   saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }, idempotencyKey: string) => jsonIdempotent<ContextEntry>("/context", "PUT", idempotencyKey, input),
   deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>("/context", "DELETE", idempotencyKey, input),
   policy: (projectId: string) => request<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`),
-  updatePolicy: (projectId: string, input: ProjectPolicyInput, idempotencyKey: string) =>
+  updatePolicy: (projectId: string, input: ProjectPolicyUpdate, idempotencyKey: string) =>
     jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
   usage: (projectId: string, endpointId?: string) => request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${endpointId ? `?endpointId=${encodeURIComponent(endpointId)}` : ""}`),
   alerts: (projectId: string) => request<ProjectAlert[]>(`/projects/${encodeURIComponent(projectId)}/alerts`),
@@ -302,7 +303,7 @@ export const apiClient = {
   silenceAlert:(projectId:string,alertId:string,silencedUntil:string|null,idempotencyKey:string)=>jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}/silence`,"POST",idempotencyKey,{silencedUntil}),
   alertRules: (projectId: string) => request<ProjectAlertRule[]>(`/projects/${encodeURIComponent(projectId)}/alert-rules`),
   createAlertRule: (projectId: string, input: { name?:string;alertType:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules`, "POST", idempotencyKey, input),
-  updateAlertRule: (projectId: string, ruleId: string, input: { name?:string;alertType?:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "PATCH", idempotencyKey, input),
+  updateAlertRule: (projectId: string, ruleId: string, input: { name?:string;alertType?:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean;expectedUpdatedAt:string }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "PATCH", idempotencyKey, input),
   deleteAlertRule: (projectId: string, ruleId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "DELETE", idempotencyKey),
   testAlertRule:(projectId:string,ruleId:string)=>json<{matched:boolean;metric:string;value:number;threshold:number;evaluatedAt:string}>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}/test`,"POST",{}),
   async audit(projectId: string, query:Record<string,string|number|undefined>={}): Promise<{items:ProjectAuditEvent[];nextCursor:string|null}> {

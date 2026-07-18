@@ -169,13 +169,14 @@ postgresDescribe("postgres product store", () => {
     await store.createUser({ id:"user_audit_resource",email:"audit-resource@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
     await store.createWorkspace({ id:"ws_audit_resource",name:"Audit resource",ownerUserId:"user_audit_resource",createdAt:timestamp,updatedAt:timestamp });
     await store.createProject({ id:"proj_audit_resource",workspaceId:"ws_audit_resource",name:"Audit resource",ownerUserId:"user_audit_resource",rootPath:"workspaces/ws_audit_resource/projects/proj_audit_resource",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
-    await store.appendProjectAuditEvent({id:"audit_resource_target",projectId:"proj_audit_resource",actorId:null,action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:"alert_target",createdAt:timestamp});
+    await store.appendProjectAuditEvent({id:"audit_resource_target",projectId:"proj_audit_resource",actorId:"user_audit_resource",action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:"alert_target",createdAt:timestamp});
     await store.appendProjectAuditEvent({id:"audit_resource_other",projectId:"proj_audit_resource",actorId:null,action:"alert.resolve",status:"accepted",resourceKind:"alert",resourceId:"alert_other",createdAt:"2026-07-15T00:00:01.000Z"});
 
-    const page = await store.queryProjectAuditEvents("proj_audit_resource", { limit:1,resourceKind:"alert",resourceId:"alert_target" });
+    const page = await store.queryProjectAuditEvents("proj_audit_resource", { limit:1,actorId:"user_audit_resource",resourceKind:"alert",resourceId:"alert_target" });
 
     assert.deepEqual(page.items.map((event) => event.id), ["audit_resource_target"]);
     assert.equal(page.nextCursor, null);
+    assert.deepEqual((await store.queryProjectAuditEvents("proj_audit_resource", { limit:10,actorId:null })).items.map((event)=>event.id),["audit_resource_other"]);
   });
 
   it("initializes a new task interaction snapshot with complete history", async () => {
@@ -597,11 +598,15 @@ postgresDescribe("postgres product store", () => {
     await store.createWorkspace({ id: "ws_patch", name: "Patch", ownerUserId: "user_patch", createdAt: timestamp, updatedAt: timestamp });
     await store.createProject({ id: "proj_patch", workspaceId: "ws_patch", name: "Patch", ownerUserId: "user_patch", rootPath: "workspaces/ws_patch/projects/proj_patch", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
 
-    const updated = await store.patchProjectResourcePolicy("proj_patch", { providerRequestsLimit: null, providerCostLimit: 3.5 }, "2026-07-04T00:01:00.000Z");
+    const updated = await store.patchProjectResourcePolicy("proj_patch", { providerRequestsLimit: null, providerCostLimit: 3.5 }, "2026-07-04T00:01:00.000Z", timestamp);
 
     assert.equal(updated?.providerRequestsLimit, null);
     assert.equal(updated?.providerCostLimit, 3.5);
     assert.equal(updated?.activeTasksLimit, 1);
+    assert.equal(await store.patchProjectResourcePolicy("proj_patch", { providerCostLimit: 7 }, "2026-07-04T00:02:00.000Z", timestamp),null);
+    const rule=await store.createProjectAlertRule({id:"rule_patch",projectId:"proj_patch",alertType:"task_failure",metric:"failure_count",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:true,createdAt:timestamp,updatedAt:timestamp});
+    assert.ok(await store.updateProjectAlertRule({...rule,threshold:2,updatedAt:"2026-07-04T00:01:00.000Z"},timestamp));
+    assert.equal(await store.updateProjectAlertRule({...rule,threshold:3,updatedAt:"2026-07-04T00:02:00.000Z"},timestamp),null);
   });
 
   it("persists product records with idempotent task event and artifact appends", async () => {

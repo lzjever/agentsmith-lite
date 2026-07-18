@@ -27,13 +27,13 @@ const limits = [
   { key: "activeTasksLimit", label: "Active tasks", step: "1", required: true },
   { key: "providerRequestsLimit", label: "Provider requests", step: "1", required: false },
   { key: "providerTokensLimit", label: "Provider tokens", step: "1", required: false },
-  { key: "providerCostLimit", label: "Provider cost", step: "any", required: false },
-  { key: "projectFileBytesLimit", label: "Project file storage", step: "1", required: false },
+  { key: "providerCostLimit", label: "Provider cost (USD)", step: "any", required: false },
+  { key: "projectFileBytesLimit", label: "Project file storage (MiB)", step: "any", required: false },
 ] as const;
 const endpointMetrics = [
   { value: "providerRequests", label: "Requests", step: "1" },
   { value: "providerTokens", label: "Tokens", step: "1" },
-  { value: "providerCost", label: "Cost", step: "any" },
+  { value: "providerCost", label: "Cost (USD)", step: "any" },
 ] as const;
 const endpointWindowOptions = [
   { value: 3600, label: "1 hour" },
@@ -112,7 +112,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!policy || !draft || draft.activeTasksLimit === null || !dirty) return;
-    const input = policyPatch(draft, policyDraft(policy));
+    const input = { ...policyPatch(draft, policyDraft(policy)), expectedUpdatedAt: policy.updatedAt };
     loadRequest.current += 1;
     setSaving(true);
     setError("");
@@ -126,6 +126,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     } catch (cause) {
       if (!active.current) return;
       if (cause instanceof ApiError) mutationKeys.complete("project.policy.update", projectId);
+      if (cause instanceof ApiError && cause.status === 409 && cause.message === "Project policy changed elsewhere. Reload and try again.") {
+        await load();
+        if (active.current) toast.error("Resource policy changed elsewhere. Latest values loaded.");
+        return;
+      }
       if (cause instanceof ApiError && cause.status === 403) {
         setPolicy(undefined);
         setDraft(undefined);
@@ -220,21 +225,21 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                       step={limit.step}
                       required={limit.required}
                       disabled={saving}
-                      value={draft[limit.key] ?? ""}
+                      value={policyInputValue(limit.key, draft[limit.key])}
                       placeholder={limit.required ? "Required" : "Unlimited"}
                       onChange={(event) =>
                         setDraft((current) =>
                           current
                             ? {
                                 ...current,
-                                [limit.key]: numberOrNull(event.target.value),
+                                [limit.key]: policyInputNumber(limit.key, event.target.value),
                               }
                             : current,
                         )
                       }
                     />
                   ) : (
-                    <strong>{policy[limit.key] ?? (limit.required ? "Not configured" : "Unlimited")}</strong>
+                    <strong>{policyLimitValue(limit.key, policy[limit.key], limit.required)}</strong>
                   )}
                 </label>
               ))}
@@ -419,6 +424,12 @@ function sameEndpointWindows(left: EndpointWindow[], right: EndpointWindow[]): b
 function numberOrNull(value: string): number | null {
   return value.trim() === "" ? null : Number(value);
 }
+
+const MEBIBYTE = 1024 * 1024;
+function policyInputValue(key:(typeof limits)[number]["key"],value:number|null):number|string{return value===null?"":key==="projectFileBytesLimit"?value/MEBIBYTE:value}
+function policyInputNumber(key:(typeof limits)[number]["key"],value:string):number|null{const parsed=numberOrNull(value);return parsed===null?null:key==="projectFileBytesLimit"?Math.round(parsed*MEBIBYTE):parsed}
+function policyLimitValue(key:(typeof limits)[number]["key"],value:number|null,required:boolean):string|number{if(value===null)return required?"Not configured":"Unlimited";if(key==="projectFileBytesLimit")return formatBytes(value);if(key==="providerCostLimit")return `$${value.toLocaleString(undefined,{maximumFractionDigits:6})}`;return value}
+function formatBytes(value:number):string{if(value<1024)return `${value} B`;if(value<1024*1024)return `${(value/1024).toLocaleString(undefined,{maximumFractionDigits:2})} KiB`;return `${(value/MEBIBYTE).toLocaleString(undefined,{maximumFractionDigits:2})} MiB`}
 
 function updateEndpointLimit(
   draft: PolicyDraft,

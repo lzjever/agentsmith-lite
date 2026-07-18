@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectAlert, type ProjectAuditEvent, type ProjectCapabilities, type ProjectPolicyInput, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageOverview } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectAlert, type ProjectAuditEvent, type ProjectCapabilities, type ProjectPolicyInput, type ProjectPolicyUpdate, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageOverview } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -25,7 +25,7 @@ afterEach(() => {
 describe("project resource pages", () => {
   it("only saves a changed resource policy and becomes clean after success", async () => {
     const original = snapshotClient();
-    const updates: ProjectPolicyInput[] = [];
+    const updates: ProjectPolicyUpdate[] = [];
     apiClient.policy = async () => policy;
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [];
@@ -41,7 +41,30 @@ describe("project resource pages", () => {
       assert.equal(save.disabled, false);
       fireEvent.click(save);
       await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal(updates[0]?.expectedUpdatedAt, policy.updatedAt);
       await waitFor(() => assert.equal(save.disabled, true));
+    } finally { restoreClient(original); }
+  });
+
+  it("edits file storage in MiB while preserving bytes in the API", async () => {
+    const original = snapshotClient();
+    const updates: ProjectPolicyInput[] = [];
+    apiClient.policy = async () => ({ ...policy, projectFileBytesLimit: 10 * 1024 * 1024 });
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.endpoints = async () => [];
+    apiClient.updatePolicy = async (_projectId, input) => {
+      updates.push(input);
+      return { ...policy, ...input, projectFileBytesLimit: input.projectFileBytesLimit ?? null };
+    };
+    try {
+      render(<ResourcePolicyPage projectId={projectId} />);
+      const storage = await screen.findByRole("spinbutton", { name: "Project file storage (MiB)" }) as HTMLInputElement;
+      assert.equal(storage.value, "10");
+      fireEvent.change(storage, { target: { value: "12" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+      await waitFor(() => assert.equal(updates.length, 1));
+      assert.equal(updates[0]?.projectFileBytesLimit, 12 * 1024 * 1024);
+      assert.ok(screen.getByText("Provider cost (USD)"));
     } finally { restoreClient(original); }
   });
 
@@ -225,7 +248,7 @@ describe("project resource pages", () => {
       fireEvent.change(activeTasks, { target: { value: "5" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 1));
-      assert.deepEqual(updates[0], { activeTasksLimit: 5 });
+      assert.deepEqual(updates[0], { activeTasksLimit: 5, expectedUpdatedAt: policy.updatedAt });
     } finally { restoreClient(original); }
   });
 
@@ -336,7 +359,7 @@ describe("project resource pages", () => {
       fireEvent.change(screen.getByRole("spinbutton", { name: "Primary Requests limit" }), { target: { value: "10" } });
       fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
       await waitFor(() => assert.equal(updates.length, 2));
-      assert.deepEqual(updates[1], { endpointWindows: [{ ...refreshed.endpointWindows[0]!, limit: 10 }] });
+      assert.deepEqual(updates[1], { endpointWindows: [{ ...refreshed.endpointWindows[0]!, limit: 10 }], expectedUpdatedAt: refreshed.updatedAt });
     } finally { restoreClient(original); }
   });
 
@@ -704,6 +727,7 @@ describe("project resource pages", () => {
     const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.resolve", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_1", createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
     const queries: Array<Record<string, string | number | undefined>> = [];
     apiClient.audit = async (_projectId, query = {}) => { queries.push(query); return { items: [event], nextCursor: null }; };
+    apiClient.members = async () => [{ projectId, userId: "user_1", role: "owner", displayName: "Ada Admin", email: "ada@example.test", createdAt: policy.createdAt, updatedAt: policy.updatedAt }];
     try {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
       render(<AuditPage projectId={projectId} />);
@@ -713,6 +737,11 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Clear instance" }));
       await waitFor(() => assert.equal(queries.at(-1)?.resourceId, undefined));
       assert.equal(new URL(window.location.href).searchParams.has("resourceId"), false);
+      assert.ok(screen.getByText("Ada Admin", { selector: "span" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Actor" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Ada Admin (ada@example.test)" }));
+      await waitFor(() => assert.equal(queries.at(-1)?.actorId, "user_1"));
+      assert.equal(new URL(window.location.href).searchParams.get("actorId"), "user_1");
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
       assert.ok(await screen.findByRole("option", { name: "chat.message.send" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));

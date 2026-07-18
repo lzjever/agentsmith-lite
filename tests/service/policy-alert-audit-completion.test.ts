@@ -174,6 +174,21 @@ describe("policy alert audit completion", () => {
       ["audit_0"],
     );
     assert.equal(second.nextCursor, null);
+
+    await store.appendProjectAuditEvent({
+      id: "audit_system",
+      projectId: project.id,
+      actorId: null,
+      action: "task.cleaned",
+      status: "accepted",
+      resourceKind: "task",
+      resourceId: "task_system",
+      createdAt: "2026-07-12T00:00:03.000Z",
+    });
+    const byActor = await services.policies.audit(user.id, project.id, { actorId: user.id, limit: 10 });
+    assert.deepEqual(byActor.items.map((event) => event.id), ["audit_2", "audit_1", "audit_0"]);
+    const system = await services.policies.audit(user.id, project.id, { actorId: null, limit: 10 });
+    assert.deepEqual(system.items.map((event) => event.id), ["audit_system"]);
   });
 
   it("classifies chat thread and message audit resources", async () => {
