@@ -18,6 +18,7 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   const { user } = await services.auth.loginAfterBootstrap("admin-password");
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  await assert.rejects(() => services.credentials.create(user.id, project.id, { name: "x".repeat(161), baseUrl: "https://models.example.test/v1", secret: "secret" }), /credential\.name must be 160 characters or less/);
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" }, "credential-create-key");
   const replayedCredential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "first-secret" }, "credential-create-key");
 

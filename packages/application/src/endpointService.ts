@@ -1,7 +1,7 @@
 import { sanitizeProjectAuditDetail, type CreateEndpointInput, type DiscoverEndpointModelsInput, type EndpointHealth, type EndpointModelDiscovery, type ModelEndpoint, type ProjectAuditAction, type UpdateEndpointInput } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import { requireNonEmptyString } from "../../domain/src/validation.js";
+import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl, normalizeOpenAICompatibleModelIds, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
 import { CredentialVersionConflictError, EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
@@ -24,7 +24,7 @@ export class EndpointService {
     const endpoint: ModelEndpoint = {
       id: newId("endp"),
       projectId,
-      name: requireNonEmptyString(input.name, "endpoint.name"),
+      name: requireNonEmptyString(input.name, "endpoint.name", PRODUCT_NAME_MAX_LENGTH),
       protocol: input.protocol,
       baseUrl: requireNonEmptyString(input.baseUrl, "endpoint.baseUrl"),
       model: requireNonEmptyString(input.model, "endpoint.model"),
@@ -50,7 +50,7 @@ export class EndpointService {
       const existing = await this.requireEndpointForProject(projectId, endpointId);
       const endpoint: ModelEndpoint = {
         ...existing,
-        name: requireNonEmptyString(input.name, "endpoint.name"),
+        name: requireNonEmptyString(input.name, "endpoint.name", PRODUCT_NAME_MAX_LENGTH),
         protocol: input.protocol,
         baseUrl: requireNonEmptyString(input.baseUrl, "endpoint.baseUrl"),
         model: requireNonEmptyString(input.model, "endpoint.model"),

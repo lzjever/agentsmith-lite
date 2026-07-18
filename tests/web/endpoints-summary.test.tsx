@@ -29,7 +29,9 @@ describe("endpoint dependencies", () => {
       render(<EndpointsPage projectId="project_1" />);
       fireEvent.click((await screen.findAllByRole("button",{name:"Create endpoint"}))[0]!);
       let dialog=await screen.findByRole("dialog",{name:"Create endpoint"});
-      fireEvent.change(within(dialog).getByLabelText("Name"),{target:{value:" deepseek "}});
+      const name=within(dialog).getByLabelText("Name") as HTMLInputElement;
+      assert.equal(name.maxLength,160);
+      fireEvent.change(name,{target:{value:" deepseek "}});
       assert.ok(within(dialog).getByText("An endpoint already uses this name."));
       assert.equal((within(dialog).getByRole("button",{name:"Save"}) as HTMLButtonElement).disabled,true);
       fireEvent.submit(within(dialog).getByRole("button",{name:"Save"}).closest("form")!);

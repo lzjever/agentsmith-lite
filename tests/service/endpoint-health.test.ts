@@ -15,6 +15,7 @@ test("endpoint save validates with the bound write-only credential and exposes o
   const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
   const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
+  await assert.rejects(() => services.endpoints.createEndpoint(user.id, project.id, { name: "x".repeat(161), protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 }), /endpoint\.name must be 160 characters or less/);
 
   const endpointInput = { name: "Provider", protocol: "openai_chat_completions" as const, baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text" as const], requestTimeoutSecs: 30 };
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, endpointInput, "endpoint-create-key");

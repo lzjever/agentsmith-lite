@@ -102,6 +102,7 @@ export function EndpointDialog({
               Name
               <Input
                 required
+                maxLength={160}
                 disabled={saving}
                 value={input.name}
                 onChange={(event) => set("name", event.target.value)}
