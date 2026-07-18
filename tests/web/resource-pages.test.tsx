@@ -768,6 +768,7 @@ describe("project resource pages", () => {
 
       assert.ok(screen.getByText("From"));
       assert.ok(screen.getByText("To"));
+      assert.match(screen.getByLabelText("To timestamp").parentElement?.parentElement?.className ?? "", /xl:grid-cols-4/);
 
       fireEvent.click(screen.getByRole("combobox", { name: "Resource type" }));
       fireEvent.click(await screen.findByRole("option", { name: "task", exact: true }));

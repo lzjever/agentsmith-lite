@@ -270,7 +270,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             </Button>
           </div>
         ) : null}
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Actor</span>
             <Select value={actorId} onValueChange={(value) => {
