@@ -11,6 +11,20 @@ const { ContextManager } = await import("../../src/components/context/ContextMan
 afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 describe("context manager", () => {
+  it("describes only the context scopes available from the current route", async () => {
+    const original = apiClient.contexts;
+    apiClient.contexts = async () => ({ items: [], canWrite: true });
+    try {
+      const view = render(<ContextManager workspaceId="workspace_1" />);
+      await screen.findByText("Saved instructions and reference data for this workspace.");
+      assert.equal(screen.queryByText(/workspace and project/), null);
+
+      view.unmount();
+      render(<ContextManager workspaceId="workspace_1" projectId="project_1" />);
+      await screen.findByText("Saved instructions and reference data for this workspace and project.");
+    } finally { apiClient.contexts = original; }
+  });
+
   it("opens a valid personal scope deep link and ignores unknown scopes", async () => {
     const original = { contexts: apiClient.contexts };
     const calls: string[] = [];
