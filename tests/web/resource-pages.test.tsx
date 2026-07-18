@@ -589,6 +589,8 @@ describe("project resource pages", () => {
       await screen.findByText("2.0 KiB");
       for (const label of ["Active tasks", "Provider requests", "Provider tokens", "Provider cost", "Project file storage"]) assert.ok(screen.getByText(label));
       assert.ok(screen.getByText(/Your settled provider requests/));
+      assert.equal((screen.getByLabelText("2026-07-01: 0 requests") as HTMLElement).style.height, "0%");
+      assert.equal((screen.getByLabelText("2026-07-30: 4 requests") as HTMLElement).style.height, "100%");
       assert.ok(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
       assert.equal(screen.queryByRole("combobox", { name: "Usage endpoint" }), null);
       fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
@@ -636,7 +638,6 @@ describe("project resource pages", () => {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
-      await screen.findByText("No audit events match this query.");
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
       assert.equal(queries.at(-1)?.resourceId, "alert_1");
       fireEvent.click(screen.getByRole("button", { name: "Clear instance" }));
@@ -662,6 +663,7 @@ describe("project resource pages", () => {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_1");
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert instance/);
+      await screen.findByText("No audit events match this query.");
 
       assert.ok(screen.getByText("From"));
       assert.ok(screen.getByText("To"));
