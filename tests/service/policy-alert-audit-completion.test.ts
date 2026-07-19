@@ -4,6 +4,49 @@ import { createLocalInMemoryProductStore } from "../../packages/adapters-postgre
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 
 describe("policy alert audit completion", () => {
+  it("pages alert history by status while preserving active counts and direct lookup", async () => {
+    const store = createLocalInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/tmp/asl-alert-pagination",
+      builtinAdminPassword: "admin-password",
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
+    const alert = (id: string, second: number) => ({
+      id,
+      projectId: project.id,
+      type: "task_failure" as const,
+      ruleId: `rule_${id}`,
+      status: "active" as const,
+      deliveryStatus: "delivered" as const,
+      createdAt: `2026-07-18T00:00:0${second}.000Z`,
+      updatedAt: `2026-07-18T00:00:0${second}.000Z`,
+      resolvedAt: null,
+      dismissedAt: null,
+    });
+    for (let second = 1; second <= 4; second += 1) {
+      await store.upsertActiveProjectAlert(alert(`alert_${second}`, second));
+    }
+    await store.transitionProjectAlert(project.id, "alert_2", "resolved", "2026-07-18T00:01:00.000Z");
+    await store.transitionProjectAlert(project.id, "alert_3", "dismissed", "2026-07-18T00:01:01.000Z");
+
+    const first = await store.queryProjectAlerts(project.id, { limit: 2 });
+    assert.deepEqual(first.items.map((item) => item.id), ["alert_4", "alert_3"]);
+    assert.ok(first.nextCursor);
+    const second = await store.queryProjectAlerts(project.id, { limit: 2, cursor: first.nextCursor! });
+    assert.deepEqual(second.items.map((item) => item.id), ["alert_2", "alert_1"]);
+    assert.equal(second.nextCursor, null);
+    const resolved = await store.queryProjectAlerts(project.id, { limit: 10, status: "resolved" });
+    assert.deepEqual(resolved.items.map((item) => item.id), ["alert_2"]);
+    await services.alertRules.create(user.id, project.id, { alertType: "task_failure", threshold: 0 });
+    const active = await services.policies.alerts(user.id, project.id, { limit: 10, status: "active" });
+    assert.equal(active.activeCount, 1);
+    assert.equal(active.items.length, 1);
+    assert.equal((await services.policies.alert(user.id, project.id, "alert_1")).id, "alert_1");
+  });
+
   it("evaluates scoped thresholds and authorizes acknowledgement and silence", async () => {
     const store = createLocalInMemoryProductStore();
     const services = createApplicationServices({

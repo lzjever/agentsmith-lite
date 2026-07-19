@@ -207,6 +207,18 @@ export interface ProjectAlert {
   dismissedAt: ISODateString | null;
 }
 
+export interface ProjectAlertQuery {
+  status?: ProjectAlertStatus;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ProjectAlertPage {
+  items: ProjectAlert[];
+  nextCursor: string | null;
+  activeCount: number;
+}
+
 export interface ProjectAuditEvent {
   id: string;
   projectId: string;

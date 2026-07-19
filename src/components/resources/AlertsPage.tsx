@@ -47,13 +47,28 @@ export function AlertsPage({ workspaceId, projectId }: { workspaceId?: string; p
   return <ProjectAlertsPage key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
+function mergeLinkedAlert(items: ProjectAlert[], linked: ProjectAlert | null) {
+  return linked && !items.some((alert) => alert.id === linked.id)
+    ? [...items, linked]
+    : items;
+}
+
 function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
   const routeSearchParams = useSearchParams();
+  const requestedAlertId =
+    routeSearchParams?.get("alertId") ??
+    (typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("alertId"));
   const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [alerts, setAlerts] = useState<ProjectAlert[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [activeCount, setActiveCount] = useState(0);
+  const [alertStatus, setAlertStatus] = useState<"all" | ProjectAlert["status"]>("all");
+  const [loadingMore, setLoadingMore] = useState(false);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -79,11 +94,18 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     setError("");
     setCapabilities(undefined);
     setCapabilitiesError("");
-    const [alertsResult, capabilitiesResult, endpointsResult] = await Promise.allSettled([
-      apiClient.alerts(projectId),
-      apiClient.projectCapabilities(projectId),
-      apiClient.endpoints(projectId),
-    ]);
+    const [alertsResult, capabilitiesResult, endpointsResult, linkedResult] =
+      await Promise.allSettled([
+        apiClient.alerts(projectId, {
+          limit: 20,
+          ...(alertStatus === "all" ? {} : { status: alertStatus }),
+        }),
+        apiClient.projectCapabilities(projectId),
+        apiClient.endpoints(projectId),
+        requestedAlertId && alertStatus === "all"
+          ? apiClient.alert(projectId, requestedAlertId)
+          : Promise.resolve(null),
+      ]);
     if (!mounted.current || request !== loadRequest.current) return;
     if (alertsResult.status === "rejected") {
       setError(
@@ -92,7 +114,10 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       setState("error");
       return;
     }
-    setAlerts(alertsResult.value);
+    const linked = linkedResult.status === "fulfilled" ? linkedResult.value : null;
+    setAlerts(mergeLinkedAlert(alertsResult.value.items, linked));
+    setNextCursor(alertsResult.value.nextCursor);
+    setActiveCount(alertsResult.value.activeCount);
     if (capabilitiesResult.status === "fulfilled") {
       setCapabilities(capabilitiesResult.value);
     } else {
@@ -100,28 +125,57 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     }
     setEndpoints(endpointsResult.status === "fulfilled" ? endpointsResult.value : []);
     setState("ready");
-  }, [projectId]);
+  }, [alertStatus, projectId, requestedAlertId]);
   const refreshInstances = useCallback(async () => {
     const request = ++loadRequest.current;
     try {
-      const loaded = await apiClient.alerts(projectId);
+      const [loaded, linked] = await Promise.all([
+        apiClient.alerts(projectId, {
+          limit: 20,
+          ...(alertStatus === "all" ? {} : { status: alertStatus }),
+        }),
+        requestedAlertId && alertStatus === "all"
+          ? apiClient.alert(projectId, requestedAlertId).catch(() => null)
+          : Promise.resolve(null),
+      ]);
       if (!mounted.current || request !== loadRequest.current) return false;
-      setAlerts(loaded);
+      setAlerts(mergeLinkedAlert(loaded.items, linked));
+      setNextCursor(loaded.nextCursor);
+      setActiveCount(loaded.activeCount);
       return true;
     } catch (cause) {
       if (!mounted.current || request !== loadRequest.current) return false;
       setError(cause instanceof Error ? cause.message : "Alert instances could not be refreshed.");
       return false;
     }
-  }, [projectId]);
+  }, [alertStatus, projectId, requestedAlertId]);
+  async function loadMoreInstances() {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    const request = ++loadRequest.current;
+    try {
+      const page = await apiClient.alerts(projectId, {
+        limit: 20,
+        cursor: nextCursor,
+        ...(alertStatus === "all" ? {} : { status: alertStatus }),
+      });
+      if (!mounted.current || request !== loadRequest.current) return;
+      setAlerts((current) => {
+        const seen = new Set(current.map((alert) => alert.id));
+        return [...current, ...page.items.filter((alert) => !seen.has(alert.id))];
+      });
+      setNextCursor(page.nextCursor);
+      setActiveCount(page.activeCount);
+    } catch (cause) {
+      if (mounted.current && request === loadRequest.current)
+        setError(cause instanceof Error ? cause.message : "More alerts could not be loaded.");
+    } finally {
+      if (mounted.current) setLoadingMore(false);
+    }
+  }
   useEffect(() => {
     void load();
   }, [load]);
-  const requestedAlertId =
-    routeSearchParams?.get("alertId") ??
-    (typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("alertId"));
   const selectedAlertId =
     state === "ready" &&
     requestedAlertId &&
@@ -208,8 +262,15 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     }
   }
   function replace(saved: ProjectAlert) {
+    const previous = alerts.find((item) => item.id === saved.id);
+    if (previous?.status === "active" && saved.status !== "active")
+      setActiveCount((count) => Math.max(0, count - 1));
+    if (previous?.status !== "active" && saved.status === "active")
+      setActiveCount((count) => count + 1);
     setAlerts((current) =>
-      current.map((item) => (item.id === saved.id ? saved : item)),
+      alertStatus !== "all" && saved.status !== alertStatus
+        ? current.filter((item) => item.id !== saved.id)
+        : current.map((item) => (item.id === saved.id ? saved : item)),
     );
   }
   async function recoverChangedInstance(cause: unknown) {
@@ -255,7 +316,6 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     toast.error("Alert could not be updated.");
     return accessDenied;
   }
-  const activeCount = alerts.filter((alert) => alert.status === "active").length;
   return (
     <PageLayout
       header={
@@ -303,12 +363,17 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           <TabsContent value="instances">
             <AlertInstances
               alerts={alerts}
+              status={alertStatus}
+              nextCursor={nextCursor}
+              loadingMore={loadingMore}
               endpoints={endpoints}
               projectBasePath={projectBasePath}
               canManage={canManage}
               busyId={busyId}
               retry={retry}
               selectedAlertId={selectedAlertId}
+              onStatusChange={setAlertStatus}
+              onLoadMore={() => void loadMoreInstances()}
               onAck={(alert) => void instance(alert, "ack")}
               onSilence={(alert, silencedUntil) => void instance(alert, "silence", silencedUntil)}
               onResolve={(alert) =>
@@ -342,33 +407,39 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
 
 function AlertInstances({
   alerts,
+  status,
+  nextCursor,
+  loadingMore,
   endpoints,
   projectBasePath,
   canManage,
   busyId,
   retry,
   selectedAlertId,
+  onStatusChange,
+  onLoadMore,
   onAck,
   onSilence,
   onResolve,
   onDismiss,
 }: {
   alerts: ProjectAlert[];
+  status: "all" | ProjectAlert["status"];
+  nextCursor: string | null;
+  loadingMore: boolean;
   endpoints: Endpoint[];
   projectBasePath: string;
   canManage: boolean;
   busyId: string | null;
   retry: { alert: ProjectAlert; action: "ack" | "silence"; silencedUntil?: string | null } | null;
   selectedAlertId: string | null;
+  onStatusChange: (status: "all" | ProjectAlert["status"]) => void;
+  onLoadMore: () => void;
   onAck: (alert: ProjectAlert) => void;
   onSilence: (alert: ProjectAlert, silencedUntil?: string | null) => void;
   onResolve: (alert: ProjectAlert) => void;
   onDismiss: (alert: ProjectAlert) => void;
 }) {
-  const [status, setStatus] = useState("all");
-  const visible = alerts.filter(
-    (alert) => status === "all" || alert.status === status,
-  );
   useEffect(() => {
     if (!selectedAlertId) return;
     const frame = requestAnimationFrame(() => {
@@ -378,18 +449,14 @@ function AlertInstances({
     });
     return () => cancelAnimationFrame(frame);
   }, [alerts, selectedAlertId]);
-  if (!alerts.length)
-    return (
-      <PageState state="empty">
-        <div>
-          <Bell className="mx-auto size-8 text-tertiary" />
-          <h2 className="mt-3 type-title">No alert instances</h2>
-        </div>
-      </PageState>
-    );
   return (
     <section className="mt-4 space-y-3">
-      <Select value={status} onValueChange={setStatus}>
+      <Select
+        value={status}
+        onValueChange={(value) =>
+          onStatusChange(value as "all" | ProjectAlert["status"])
+        }
+      >
         <SelectTrigger className="w-48" aria-label="Alert status">
           <SelectValue />
         </SelectTrigger>
@@ -400,11 +467,21 @@ function AlertInstances({
           <SelectItem value="dismissed">Dismissed</SelectItem>
         </SelectContent>
       </Select>
-      {visible.length === 0 ? (
-        <PageState state="empty">No instances match this filter.</PageState>
+      {alerts.length === 0 ? (
+        <PageState state="empty">
+          {status === "all" ? (
+            <div>
+              <Bell className="mx-auto size-8 text-tertiary" />
+              <h2 className="mt-3 type-title">No alert instances</h2>
+            </div>
+          ) : (
+            "No instances match this filter."
+          )}
+        </PageState>
       ) : (
-        <ul className="divide-y divide-border border-y border-border">
-          {visible.map((alert) => {
+        <>
+          <ul className="divide-y divide-border border-y border-border">
+            {alerts.map((alert) => {
             const silenced =
               !!alert.silencedUntil &&
               Date.parse(alert.silencedUntil) > Date.now();
@@ -552,8 +629,20 @@ function AlertInstances({
                 ) : null}
               </li>
             );
-          })}
-        </ul>
+            })}
+          </ul>
+          {nextCursor ? (
+            <div className="flex justify-center pt-2">
+              <Button
+                variant="outline"
+                disabled={loadingMore}
+                onClick={onLoadMore}
+              >
+                {loadingMore ? "Loading..." : "Load more"}
+              </Button>
+            </div>
+          ) : null}
+        </>
       )}
     </section>
   );

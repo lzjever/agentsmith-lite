@@ -49,11 +49,29 @@ export class ProjectPolicyService {
     const trendTotals = daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 });
     return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values(), ...(unassignedEndpointUsage ? [unassignedEndpointUsage] : [])], selectedEndpointId: endpointId ?? null };
   }
-  async alerts(userId: string, projectId: string) {
+  async alerts(userId:string,projectId:string):Promise<ProjectAlert[]>;
+  async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery):Promise<import("../../contracts/src/api.js").ProjectAlertPage>;
+  async alerts(userId: string, projectId: string, query?: import("../../contracts/src/api.js").ProjectAlertQuery): Promise<ProjectAlert[] | import("../../contracts/src/api.js").ProjectAlertPage> {
     await this.authorization.requireProject(userId, projectId);
     const activeTypes = new Set((await this.store.listActiveProjectAlerts(projectId)).map((alert) => alert.type));
     for (const type of activeTypes) await recoverProjectAlerts(this.store, projectId, type, undefined, true);
-    return this.store.listProjectAlerts(projectId);
+    if (!query) return this.store.listProjectAlerts(projectId);
+    const [page, active] = await Promise.all([
+      this.store.queryProjectAlerts(projectId, query),
+      this.store.listActiveProjectAlerts(projectId),
+    ]);
+    return { ...page, activeCount: active.length };
+  }
+  async alert(userId:string,projectId:string,alertId:string):Promise<ProjectAlert>{
+    await this.authorization.requireProject(userId,projectId);
+    let alert=await this.store.findProjectAlert(projectId,alertId);
+    if(!alert)throw new ProductError("Project alert not found",404);
+    if(alert.status==="active"){
+      await recoverProjectAlerts(this.store,projectId,alert.type,undefined,true);
+      alert=await this.store.findProjectAlert(projectId,alertId);
+      if(!alert)throw new ProductError("Project alert not found",404);
+    }
+    return alert;
   }
   async transitionAlert(userId: string, projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey?: string) {
     const action: ProjectAuditAction = status === "resolved" ? "alert.resolve" : "alert.dismiss";

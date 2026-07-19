@@ -41,7 +41,13 @@ describe("project alert history API", () => {
       await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/members`, { userId: "alert_viewer", role: "viewer" }, ownerCookie, ownerCsrf);
       const visible = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: `asl_session=${viewerSession}` } });
       assert.equal(visible.status, 200);
-      assert.deepEqual((await visible.json() as Array<{ id: string; deliveryStatus: string }>).map((item) => [item.id, item.deliveryStatus]), [[alert.id, "delivered"]]);
+      const visiblePage = await visible.json() as { items: Array<{ id: string; deliveryStatus: string }>; nextCursor: string | null; activeCount: number };
+      assert.deepEqual(visiblePage.items.map((item) => [item.id, item.deliveryStatus]), [[alert.id, "delivered"]]);
+      assert.equal(visiblePage.nextCursor, null);
+      assert.equal(visiblePage.activeCount, 1);
+      const linked = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts/${alert.id}`, { headers: { cookie: `asl_session=${viewerSession}` } });
+      assert.equal(linked.status, 200);
+      assert.equal((await linked.json() as { id: string }).id, alert.id);
       const viewerTransition = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts/${alert.id}`, { method: "PATCH", headers: { cookie: `asl_session=${viewerSession}`, "x-csrf-token": "alert-viewer-csrf", "content-type": "application/json", "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ status: "resolved" }) });
       assert.equal(viewerTransition.status, 403, await viewerTransition.text());
       const resolved = await json(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/alerts/${alert.id}`, { status: "resolved" }, ownerCookie, ownerCsrf);
@@ -54,7 +60,7 @@ describe("project alert history API", () => {
       assert.equal(audit.status, 200);
       const auditPage=await audit.json() as {items:Array<{action:string;status:string;resourceKind:string;resourceId:string}>;nextCursor:string|null};assert.deepEqual(auditPage.items.filter(event=>event.status==="accepted"&&["alert.dismiss","alert.resolve"].includes(event.action)).map(event=>[event.action,event.resourceId]).sort((left,right)=>left[0]!.localeCompare(right[0]!)),[["alert.dismiss",dismissable.id],["alert.resolve",alert.id]]);assert.equal(auditPage.nextCursor,null);
       const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: ownerCookie } });
-      assert.equal((await history.json() as Array<{ status: string }>)[0]?.status, "resolved");
+      assert.equal((await history.json() as { items: Array<{ status: string }> }).items[0]?.status, "resolved");
     } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
   });
 });

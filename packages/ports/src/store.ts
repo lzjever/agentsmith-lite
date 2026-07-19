@@ -431,6 +431,8 @@ export interface ProductStore {
   upsertActiveProjectAlert(alert: ProjectAlert): Promise<ProjectAlert>;
   listActiveProjectAlerts(projectId: string): Promise<ProjectAlert[]>;
   listProjectAlerts(projectId: string): Promise<ProjectAlert[]>;
+  queryProjectAlerts(projectId: string, query: import("../../contracts/src/api.js").ProjectAlertQuery): Promise<{ items: ProjectAlert[]; nextCursor: string | null }>;
+  findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null>;
   transitionProjectAlert(projectId: string, id: string, status: Extract<ProjectAlert["status"], "resolved" | "dismissed">, updatedAt: string): Promise<ProjectAlert | null>;
   updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string):Promise<ProjectAlert|null>;
   updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null>;
