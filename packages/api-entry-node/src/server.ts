@@ -499,11 +499,11 @@ async function routeApi(
   }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "members") {
     const workspaceId = segments[3];
-    if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
-    if (!segments[5] && method === "GET") return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId));
-    if (!segments[5] && method === "POST") { const body = await readJson(req); return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asWorkspaceMemberIdentity(body), asWorkspaceMembershipRole(body.role), requireIdempotencyKey(req))); }
-    if (method === "PATCH") { const body = await readJson(req);assertOnlyKeys(body,["userId","role","expectedUpdatedAt"]);return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role), asString(body.expectedUpdatedAt), requireIdempotencyKey(req))); }
-    if (method === "DELETE") { const body = await readJson(req);assertOnlyKeys(body,["userId","expectedUpdatedAt"]);await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId), asString(body.expectedUpdatedAt), requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
+    if (segments[5] === "transfer-owner" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["userId"]);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
+    if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId)); }
+    if (!segments[5] && method === "POST") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["email","issuer","subject","role"]);return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asWorkspaceMemberIdentity(body), asWorkspaceMembershipRole(body.role), requireIdempotencyKey(req))); }
+    if (!segments[5] && method === "PATCH") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["userId","role","expectedUpdatedAt"]);return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role), asString(body.expectedUpdatedAt), requireIdempotencyKey(req))); }
+    if (!segments[5] && method === "DELETE") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["userId","expectedUpdatedAt"]);await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId), asString(body.expectedUpdatedAt), requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
   }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "settings") {
     const workspaceId = segments[3];
@@ -535,12 +535,15 @@ async function routeApi(
       if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId)));
     }
     if (segments[4] === "members") {
-      if (segments[5] === "transfer-owner" && method === "POST") { const body=await readJson(req);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.owner.transfer",requireIdempotencyKey(req),{projectId,userId:target},projectId,async()=>{await services.memberships.transferOwner(user.id,projectId,target);await services.settings.auditProjectLifecycle(projectId,user.id,"project.owner.transfer");return{transferred:true as const}})); }
-      if (method === "GET") {
+      if (segments[5] === "transfer-owner" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["userId"]);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.owner.transfer",requireIdempotencyKey(req),{projectId,userId:target},projectId,async()=>{await services.memberships.transferOwner(user.id,projectId,target);await services.settings.auditProjectLifecycle(projectId,user.id,"project.owner.transfer");return{transferred:true as const}})); }
+      if (!segments[5] && method === "GET") {
+        assertOnlySearchParams(url,[]);
         return sendJson(res, 200, await services.memberships.listMembers(user.id, projectId));
       }
-      if (method === "POST") {
+      if (!segments[5] && method === "POST") {
+        assertOnlySearchParams(url,[]);
         const body = await readJson(req);
+        assertOnlyKeys(body,["userId","role"]);
         return sendJson(res, 200, await services.memberships.addMember(
           user.id,
           projectId,
@@ -549,8 +552,10 @@ async function routeApi(
           requireIdempotencyKey(req)
         ));
       }
-      if (method === "PATCH") {
+      if (!segments[5] && method === "PATCH") {
+        assertOnlySearchParams(url,[]);
         const body = await readJson(req);
+        assertOnlyKeys(body,["userId","role","expectedUpdatedAt"]);
         return sendJson(res, 200, await services.memberships.changeMember(
           user.id,
           projectId,
@@ -560,8 +565,10 @@ async function routeApi(
           requireIdempotencyKey(req)
         ));
       }
-      if (method === "DELETE") {
+      if (!segments[5] && method === "DELETE") {
+        assertOnlySearchParams(url,[]);
         const body = await readJson(req);
+        assertOnlyKeys(body,["userId","expectedUpdatedAt"]);
         await services.memberships.removeMember(user.id, projectId, asUserId(body.userId), asString(body.expectedUpdatedAt), requireIdempotencyKey(req));
         return sendJson(res, 200, { deleted: true });
       }
@@ -621,8 +628,8 @@ async function routeApi(
       }
     }
     if (segments[4] === "policy") {
-      if (method === "GET") return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId));
-      if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req)));
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId)); }
+      if (!segments[5] && method === "PATCH") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req))); }
     }
     if (segments[4] === "usage" && !segments[5] && method === "GET") {
       assertOnlySearchParams(url, ["endpointId"]);
@@ -1745,6 +1752,7 @@ function asEndpointModelDiscoveryInput(body: Record<string, unknown>): DiscoverE
 
 function asPolicyInput(body: Record<string, unknown>): import("../../contracts/src/api.js").UpdateProjectResourcePolicyRequest {
   const fields = ["activeTasksLimit", "providerRequestsLimit", "providerTokensLimit", "providerCostLimit", "projectFileBytesLimit"] as const;
+  assertOnlyKeys(body, [...fields, "endpointWindows", "expectedUpdatedAt"]);
   const input: import("../../contracts/src/api.js").UpdateProjectResourcePolicyRequest = { expectedUpdatedAt: asRequiredIsoTimestamp(body.expectedUpdatedAt, "expectedUpdatedAt") };
   for (const field of fields) {
     const value = body[field];

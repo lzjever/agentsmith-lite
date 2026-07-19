@@ -22,6 +22,9 @@ describe("PATCH project policy", () => {
       const currentProfile = await (await fetch(`${api.baseUrl}/api/v1/me/profile`, { headers: { cookie } })).json() as { preferences: { updatedAt: string } };
       await requestJson(api.baseUrl, "PATCH", "/api/v1/me/profile", { displayName: "Policy Owner", expectedUpdatedAt: currentProfile.preferences.updatedAt }, cookie, csrf);
       const currentPolicy = await (await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { headers: { cookie } })).json() as { updatedAt: string };
+      assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy?explain=true`, { headers: { cookie } })).status, 400);
+      const removedPolicyField = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: currentPolicy.updatedAt, subjects: [] }) });
+      assert.equal(removedPolicyField.status, 400);
 
       const policy = await requestJson(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/policy`, {
         expectedUpdatedAt: currentPolicy.updatedAt,

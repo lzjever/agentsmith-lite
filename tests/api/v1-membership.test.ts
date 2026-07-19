@@ -75,6 +75,10 @@ describe("v1 project membership API", () => {
     const missingMembershipKey = await fetch(`${api.baseUrl}/api/v1/workspaces/${workspaceId}/members`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken, "content-type": "application/json" }, body: JSON.stringify({ email: "member@example.test", role: "viewer" }) });
     assert.equal(missingMembershipKey.status, 400);
     assert.deepEqual(await missingMembershipKey.json(), { error: "Idempotency-Key header is required" });
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/workspaces/${workspaceId}/members?includePermissions=true`, { headers: { cookie } })).status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/members?includePermissions=true`, { headers: { cookie } })).status, 400);
+    const removedWorkspaceMemberField = await request("POST", `/api/v1/workspaces/${workspaceId}/members`, { email: "member@example.test", role: "viewer", invitationMessage: "legacy" });
+    assert.equal(removedWorkspaceMemberField.response.status, 400);
     for (const resource of ["alerts", "audit"]) {
       const response = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/${resource}`, {
         headers: { cookie: `asl_session=${memberSession}` }
@@ -97,6 +101,8 @@ describe("v1 project membership API", () => {
       role: "member",
       expectedUpdatedAt: workspaceMember.updatedAt
     });
+    const removedWorkspaceRoleField = await request("PATCH", `/api/v1/workspaces/${workspaceId}/members`, { userId: "user_member", role: "viewer", expectedUpdatedAt: updatedWorkspaceMember.updatedAt, permissions: [] });
+    assert.equal(removedWorkspaceRoleField.response.status, 400);
     const staleWorkspaceUpdate = await request("PATCH", `/api/v1/workspaces/${workspaceId}/members`, {
       userId: "user_member",
       role: "admin",
@@ -109,6 +115,8 @@ describe("v1 project membership API", () => {
       expectedUpdatedAt: workspaceMember.updatedAt
     });
     assert.equal(staleWorkspaceDelete.response.status, 409);
+    const removedProjectMemberField = await request("POST", `/api/v1/projects/${projectId}/members`, { userId: "user_member", role: "viewer", permissions: [] });
+    assert.equal(removedProjectMemberField.response.status, 400);
     const created = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
       userId: "user_member",
       role: "viewer"
@@ -160,6 +168,10 @@ describe("v1 project membership API", () => {
       expectedUpdatedAt: created.updatedAt
     });
     assert.equal(updated.role, "member");
+    const removedProjectRoleField = await request("PATCH", `/api/v1/projects/${projectId}/members`, { userId: "user_member", role: "viewer", expectedUpdatedAt: updated.updatedAt, permissions: [] });
+    assert.equal(removedProjectRoleField.response.status, 400);
+    const removedProjectDeleteField = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: "user_member", expectedUpdatedAt: updated.updatedAt, force: true });
+    assert.equal(removedProjectDeleteField.response.status, 400);
     const staleUpdate = await request("PATCH", `/api/v1/projects/${projectId}/members`, {
       userId: "user_member",
       role: "admin",
