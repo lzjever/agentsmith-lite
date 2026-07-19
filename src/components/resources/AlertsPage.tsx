@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   Bell,
@@ -40,24 +41,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-
-const labels: Record<ProjectAlert["type"], string> = {
-  active_tasks_limit: "Task capacity reached",
-  provider_requests_limit: "Project request limit reached",
-  provider_tokens_limit: "Token quota exceeded",
-  provider_cost_limit: "Cost quota exceeded",
-  project_file_bytes_limit: "File quota reached",
-  endpoint_failure: "Endpoint failure",
-  provider_failure: "Provider failure",
-  task_failure: "Task failure",
-  sandbox_failure: "Sandbox failure",
-};
+import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
 
 export function AlertsPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
   return <ProjectAlertsPage key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
 }
 
 function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
+  const routeSearchParams = useSearchParams();
   const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
@@ -68,6 +59,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
+  const [view, setView] = useState<"instances" | "rules">("instances");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [dismiss, setDismiss] = useState<ProjectAlert | null>(null);
   const [retry, setRetry] = useState<{
@@ -75,7 +67,6 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     action: "ack" | "silence";
     silencedUntil?: string | null;
   } | null>(null);
-  const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -126,20 +117,26 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
   useEffect(() => {
     void load();
   }, [load]);
+  const requestedAlertId =
+    routeSearchParams?.get("alertId") ??
+    (typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("alertId"));
+  const selectedAlertId =
+    state === "ready" &&
+    requestedAlertId &&
+    alerts.some((alert) => alert.id === requestedAlertId)
+      ? requestedAlertId
+      : null;
   useEffect(() => {
-    setSelectedAlertId(
-      typeof window === "undefined"
-        ? null
-        : new URLSearchParams(window.location.search).get("alertId"),
-    );
-  }, [projectId]);
-  useEffect(() => {
-    if (state !== "ready" || !selectedAlertId || alerts.some((alert) => alert.id === selectedAlertId)) return;
+    if (state !== "ready" || !requestedAlertId || selectedAlertId) return;
     const url = new URL(window.location.href);
     url.searchParams.delete("alertId");
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-    setSelectedAlertId(null);
-  }, [alerts, selectedAlertId, state]);
+  }, [requestedAlertId, selectedAlertId, state]);
+  useEffect(() => {
+    if (selectedAlertId) setView("instances");
+  }, [selectedAlertId]);
   const canManage = capabilities?.canManagePolicy === true;
   async function transition(
     alert: ProjectAlert,
@@ -234,7 +231,6 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       setCapabilitiesError("");
       setRetry(null);
       setDismiss(null);
-      setSelectedAlertId(null);
       setState("loading");
       void load();
       return;
@@ -297,7 +293,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       {state === "ready" && capabilitiesError ? <p className="mb-3 border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</p> : null}
       {state === "ready" && error ? <p className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}
       {state === "ready" ? (
-        <Tabs defaultValue="instances">
+        <Tabs value={view} onValueChange={(next) => setView(next as "instances" | "rules")}>
           <TabsList aria-label="Alerts view">
             <TabsTrigger value="instances">
               Instances ({activeCount} active)
@@ -570,9 +566,7 @@ function formatDate(value: string) {
 }
 
 function alertLabel(alert: ProjectAlert) {
-  return alert.type === "provider_requests_limit" && alert.endpointId
-    ? "Endpoint request limit reached"
-    : labels[alert.type];
+  return projectAlertTypeLabel(alert.type, Boolean(alert.endpointId));
 }
 
 function alertElementId(alertId: string) {

@@ -1,4 +1,4 @@
-import { sanitizeProjectAuditDetail, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
+import { projectAlertTypeLabel, sanitizeProjectAuditDetail, type AlertRuleMetric, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 
@@ -52,8 +52,8 @@ export async function evaluateProjectAlertRules(
       dismissedAt: null,
     });
     if (isSilenced(alert, timestamp)) continue;
-    const title = `Project alert: ${alertLabel(type)}`;
-    const body = project ? `${project.name}: ${alertLabel(type)}.` : `A project reported ${alertLabel(type)}.`;
+    const title = projectAlertTypeLabel(type, endpointId !== null);
+    const body = project ? alertNotificationBody(project.name, alert, title) : `A project reported: ${title}.`;
     const linkPath = project ? `/workspaces/${project.workspaceId}/projects/${project.id}/alerts?alertId=${encodeURIComponent(alert.id)}` : null;
     const deliveries = await Promise.allSettled(
       members
@@ -175,5 +175,19 @@ async function resolveAlert(store: ProductStore, alert: ProjectAlert, timestamp:
 function isSilenced(alert: ProjectAlert, timestamp: string): boolean {
   return Boolean(alert.silencedUntil && alert.silencedUntil > timestamp);
 }
-function alertLabel(type: ProjectAlertType): string { return type.replaceAll("_", " "); }
+function alertNotificationBody(projectName: string, alert: ProjectAlert, title: string): string {
+  if (!alert.metric || alert.metricValue === null || alert.metricValue === undefined) return `${projectName}: ${title}.`;
+  const threshold = alert.threshold === null || alert.threshold === undefined ? "" : ` of ${alert.threshold}`;
+  return `${projectName}: ${alertMetricLabel(alert.metric)} ${alert.metricValue}${threshold}.`;
+}
+function alertMetricLabel(metric: AlertRuleMetric): string {
+  return {
+    active_tasks: "Active tasks",
+    provider_requests: "Provider requests",
+    provider_tokens: "Provider tokens",
+    provider_cost: "Provider cost",
+    project_file_bytes: "File storage",
+    failure_count: "Failures",
+  }[metric];
+}
 function isFailureAlertType(type: ProjectAlertType): type is FailureAlertType { return type === "endpoint_failure" || type === "provider_failure" || type === "sandbox_failure"; }

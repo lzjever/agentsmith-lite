@@ -166,6 +166,20 @@ export interface ProjectUsageOverview {
 }
 
 export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure";
+export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = false): string {
+  if (type === "provider_requests_limit" && endpointScoped) return "Endpoint request limit reached";
+  return {
+    active_tasks_limit: "Task capacity reached",
+    provider_requests_limit: "Project request limit reached",
+    provider_tokens_limit: "Token quota exceeded",
+    provider_cost_limit: "Cost quota exceeded",
+    project_file_bytes_limit: "File quota reached",
+    endpoint_failure: "Endpoint failure",
+    provider_failure: "Provider failure",
+    task_failure: "Task failure",
+    sandbox_failure: "Sandbox failure",
+  }[type];
+}
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
 export type ProjectAlertDeliveryStatus = "not_configured" | "pending" | "delivered" | "failed";
 export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","chat.thread.create","chat.thread.update","chat.thread.delete","chat.message.send","chat.message.retry","chat.message.stop","chat.message.edit","chat.message.delete","chat.message.branch","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.failed","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
