@@ -3,7 +3,6 @@ import type {
   AgentTaskArtifact,
   TaskAssistantMessageInteraction,
   TaskBackgroundTaskInteraction,
-  TaskExecutionBoundaryInteraction,
   TaskFileInteraction,
   TaskInteractionContentMode,
   TaskInteractionDeliveryStatus,
@@ -64,14 +63,6 @@ export interface MessageDeliveryInteractionSource extends ProductSourceBase {
   status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
 }
 
-export interface SuccessorCreatedInteractionSource extends ProductSourceBase {
-  type: "successor_created";
-  boundaryId: string;
-  status: "successor_pending" | "successor_created" | "failed";
-  targetTaskId: string | null;
-  message?: string;
-}
-
 export interface TurnAbortedInteractionSource extends ProductSourceBase {
   type: "turn_aborted";
   turnId: string;
@@ -88,7 +79,6 @@ export type ProductTaskInteractionSource =
   | TaskCreatedInteractionSource
   | MessageAdmittedInteractionSource
   | MessageDeliveryInteractionSource
-  | SuccessorCreatedInteractionSource
   | TurnAbortedInteractionSource
   | BackgroundWorkStoppedInteractionSource;
 
@@ -217,21 +207,6 @@ function projectProduct(
 
   if (source.type === "background_work_stopped") {
     return projectBackgroundWorkStopped(source, previous);
-  }
-
-  if (source.type === "successor_created") {
-    const text = optionalRedacted(source.message, redaction);
-    const old = previous?.interaction.kind === "execution_boundary" ? previous.interaction : null;
-    const interaction: TaskExecutionBoundaryInteraction = {
-      ...base(source.taskId, old?.id ?? interactionId(source.taskId, `Boundary:${source.boundaryId}`), source, old ?? undefined),
-      kind: "execution_boundary",
-      title: "Continued in new execution",
-      body: text.text,
-      contentMode: contentMode(text),
-      status: source.status,
-      targetTaskId: source.targetTaskId
-    };
-    return { interaction };
   }
 
   const old = previous?.interaction.kind === "user_message" ? previous.interaction : null;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, rmdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -18,7 +18,7 @@ describe("file library service", () => {
 
     await assert.rejects(() => services.fileLibraries.create(viewerId, projectId, { name: "Viewer library" }), /Project access denied/);
     const created = await services.fileLibraries.create(ownerId, projectId, { name: "Workspace" });
-    assert.match(created.rootSubPath, new RegExp(`^libraries/${created.id}/home/workspace$`));
+    assert.match(created.rootSubPath, new RegExp(`^libraries/${created.id}/home$`));
     assert.deepEqual((await services.fileLibraries.list(viewerId, projectId)).map((item) => item.id), [created.id]);
 
     const renamed = await services.fileLibraries.rename(ownerId, projectId, created.id, { name: "Renamed", expectedUpdatedAt: created.updatedAt });
@@ -31,9 +31,11 @@ describe("file library service", () => {
     await services.files.uploadLibraryFile(projectRoot, renamed.rootSubPath, { path: "notes/today.txt", bytes: Buffer.from("hello") });
     await assert.rejects(() => services.fileLibraries.remove(ownerId, projectId, renamed.id), /File Library is not empty/);
     await services.files.deleteLibraryFile(projectRoot, renamed.rootSubPath, "notes/today.txt");
+    await rmdir(path.join(projectRoot,renamed.rootSubPath,"notes"));
 
     const store = services.store;
     (store as ProductStore).findTaskBoundToFileLibrary = async () => ({ kind: "bound", task: { id: "task_one", title: "Bound task" } });
+    (store as ProductStore).deleteFileLibraryIfUnbound = async () => "bound";
     const boundProjection = (await services.fileLibraries.list(ownerId, projectId))[0]!;
     assert.equal(boundProjection.boundTask?.id, "task_one");
     assert.equal(boundProjection.capabilities.canDelete, false);
@@ -103,10 +105,9 @@ describe("file library service", () => {
     const projectRoot = services.projectAbsoluteRoot(project.rootPath);
 
     await services.files.uploadLibraryFile(projectRoot, first.rootSubPath, { path: "same.bin", bytes: Uint8Array.from([0, 255, 1]) });
-    await services.files.uploadFile(projectRoot,{path:"files/legacy.txt",bytes:Buffer.from("old")});
     assert.deepEqual((await services.files.listLibraryFiles(projectRoot, first.rootSubPath)).entries.map((entry) => entry.path), ["same.bin"]);
     assert.deepEqual((await services.files.listLibraryFiles(projectRoot, second.rootSubPath)).entries, []);
-    assert.equal(await services.fileLibraries.measureProjectFileBytes(ownerId,projectId),6);
+    assert.equal(await services.fileLibraries.measureProjectFileBytes(ownerId,projectId),3);
     assert.deepEqual(Array.from((await services.files.downloadLibraryFile(projectRoot, first.rootSubPath, "same.bin")).bytes), [0, 255, 1]);
     await assert.rejects(() => services.files.uploadLibraryFile(projectRoot, first.rootSubPath, { path: "../escape", bytes: Buffer.from("no") }), /traversal/);
 
@@ -114,6 +115,9 @@ describe("file library service", () => {
     await writeFile(outside, "secret");
     await symlink(outside, path.join(projectRoot, first.rootSubPath, "link"));
     await assert.rejects(() => services.files.downloadLibraryFile(projectRoot, first.rootSubPath, "link"), /symlink|escapes/);
+    assert.equal("uploadFile" in services.files,false);
+    assert.equal("normalizeProjectFilesPath" in services.files,false);
+    await assert.rejects(()=>services.files.ensureLibraryRoot(projectRoot,"files"),/Library root path is invalid/);
   });
 });
 

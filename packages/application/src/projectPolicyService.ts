@@ -229,11 +229,11 @@ export class ProjectPolicyService {
   }
   async reconcileFileLibraryBytes(projectId: string, fileLibraryBytes: number): Promise<void> {
     if (!Number.isSafeInteger(fileLibraryBytes) || fileLibraryBytes < 0) throw new ProductError("Project file bytes must be a non-negative integer");
-    const bytes = fileLibraryBytes + await this.store.measureProjectArtifactBytes(projectId);
-    if (!Number.isSafeInteger(bytes)) throw new ProductError("Project file usage exceeds the supported size");
-    const usage = await this.store.setProjectFileBytes(projectId, bytes, nowIso());
+    const usage = await this.store.setProjectFileBytes(projectId, fileLibraryBytes, nowIso());
     if (!usage) throw new ProductError("Project policy usage not found", 409);
     await this.bestEffortFileProjection("file reconciliation projection",async()=>{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")});
+    const policy=await this.requirePolicy(projectId);
+    if(policy.projectFileBytesLimit!==null&&fileLibraryBytes>policy.projectFileBytesLimit){await this.bestEffortFileProjection("file quota projection",()=>this.openAlert(projectId,"project_file_bytes_limit"));throw new ProductError("Project file bytes limit reached",409,"project_file_bytes_limit_reached");}
   }
   async recordFileMutation(projectId:string,actorId:string,action:Extract<ProjectAuditAction,"file.upload"|"file.delete">,resourceId:string,filePath:string,delta:number,bytes:number,mediaType:string):Promise<void>{
     await this.recordFileBytes(projectId,actorId,filePath,delta);

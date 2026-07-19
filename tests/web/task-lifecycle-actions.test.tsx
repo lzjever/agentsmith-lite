@@ -16,7 +16,7 @@ describe("TaskLifecycleActions", () => {
     let edits = 0;
     apiClient.editTask = async () => { edits += 1; return task; };
     try {
-      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => undefined} />);
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={async () => undefined} />);
       fireEvent.pointerDown(screen.getByRole("button", { name:"Task actions" }), { button:0, ctrlKey:false });
       fireEvent.click(await screen.findByRole("menuitem", { name:"Rename" }));
       const input = await screen.findByLabelText("Task title") as HTMLInputElement;
@@ -41,7 +41,7 @@ describe("TaskLifecycleActions", () => {
     let refreshes = 0;
     apiClient.editTask = async (taskId, title, key) => { edits.push({ taskId, title, key }); return { ...task, title }; };
     try {
-      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => { refreshes += 1; }} />);
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={async () => { refreshes += 1; }} />);
       fireEvent.pointerDown(screen.getByRole("button", { name:"Task actions" }), { button:0, ctrlKey:false });
       fireEvent.click(await screen.findByRole("menuitem", { name:"Rename" }));
       const input = await screen.findByLabelText("Task title");
@@ -60,7 +60,7 @@ describe("TaskLifecycleActions", () => {
     let refreshes = 0;
     apiClient.editTask = async () => { throw new ApiError(404, "Task not found"); };
     try {
-      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => { refreshes += 1; }} />);
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={async () => { refreshes += 1; }} />);
       fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
       fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
       fireEvent.change(await screen.findByLabelText("Task title"), { target: { value: "Missing task" } });
@@ -80,7 +80,7 @@ describe("TaskLifecycleActions", () => {
       return { ...task, title };
     };
     try {
-      render(<TaskLifecycleActions task={task} capabilities={capabilities} basePath="/tasks" onRefresh={async () => { refreshes += 1; }} />);
+      render(<TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={async () => { refreshes += 1; }} />);
       fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
       fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
       fireEvent.change(await screen.findByLabelText("Task title"), { target: { value: "Recovered title" } });
@@ -94,14 +94,30 @@ describe("TaskLifecycleActions", () => {
     } finally { apiClient.editTask = original; }
   });
 
+  it("does not expose removed retry or duplicate actions", async () => {
+    render(<TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={async () => undefined} />);
+    fireEvent.pointerDown(screen.getByRole("button", { name:"Task actions" }), { button:0, ctrlKey:false });
+    await screen.findByRole("menuitem", { name:"Rename" });
+    assert.equal(screen.queryByRole("menuitem", { name:"Retry" }), null);
+    assert.equal(screen.queryByRole("menuitem", { name:"Duplicate" }), null);
+  });
+
   it("does not expose lifecycle actions without a server capability", () => {
-    render(<TaskLifecycleActions task={task} capabilities={{ ...capabilities, editTask:false, duplicateTask:false }} basePath="/tasks" onRefresh={async () => undefined} />);
+    render(<TaskLifecycleActions task={task} capabilities={{ ...capabilities, editTask:false }} onRefresh={async () => undefined} />);
     assert.equal(screen.queryByRole("button", { name:"Task actions" }), null);
+  });
+
+  it("describes archived task retention in terms of File Library files", async () => {
+    render(<TaskLifecycleActions task={task} capabilities={{ ...capabilities, archiveTask:true }} onRefresh={async () => undefined} />);
+    fireEvent.pointerDown(screen.getByRole("button", { name:"Task actions" }), { button:0,ctrlKey:false });
+    fireEvent.click(await screen.findByRole("menuitem", { name:"Archive" }));
+    assert.ok(screen.getByText(/File Library files/));
+    assert.equal(screen.queryByText(/inputs/), null);
   });
 });
 
-const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:true, openTerminal:true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask:false };
-const task: Task = { id:"task_1", workspaceId:"workspace_1", projectId:"project_1", endpointId:"endpoint_1", title:"Investigate", prompt:"Inspect the workspace", status:"running", runId:"run_1", executionMode:"live", sandbox:{ namespace:"task-1" }, createdAt:"2026-07-16T00:00:00.000Z", updatedAt:"2026-07-16T00:00:00.000Z" };
+const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:true, openTerminal:true, editTask:true, archiveTask:false, deleteTask:false };
+const task: Task = { id:"task_1", workspaceId:"workspace_1", projectId:"project_1", endpointId:"endpoint_1", fileLibraryId:"library_1", title:"Investigate", prompt:"Inspect the workspace", status:"running", runId:"run_1", executionMode:"live", sandbox:{ namespace:"task-1" }, createdAt:"2026-07-16T00:00:00.000Z", updatedAt:"2026-07-16T00:00:00.000Z" };
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url:"http://localhost" });

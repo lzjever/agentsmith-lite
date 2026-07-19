@@ -1,6 +1,6 @@
 "use client";
 
-import type { FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
@@ -81,27 +81,9 @@ export interface EndpointInput {
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: string; lastRotatedAt: string | null; updatedAt: string; }
 export type TaskStatus = "queued" | "starting" | "running" | "stopping" | "completed" | "failed" | "expired" | "cleaned" | "cancelled";
 export type TaskExecutionMode = "dry-run" | "live";
-export interface Task {
-  id: string; workspaceId: string; projectId: string; endpointId: string; prompt: string; status: TaskStatus; runId: string;
-  title?: string;
-  inputPaths?: string[];
-  archivedAt?: string | null;
-  deletedAt?: string | null;
-  terminalReason?: "completed" | "failed" | "cancelled" | "expired" | "not_executed" | "cleaned_legacy" | null;
-  terminalizedAt?: string | null;
-  artifactProjectionStatus?: "pending" | "draining" | "drained" | "failed";
-  artifactProjectionError?: string | null;
-  cleanupStatus?: "pending" | "running" | "completed" | "failed";
-  cleanupError?: string | null;
-  sourceTaskId?: string | null;
-  finalizationIntentStatus?: Extract<TaskStatus, "completed" | "failed" | "expired" | "cleaned"> | null;
-  executionMode: TaskExecutionMode;
-  sandbox: { namespace: string };
-  createdAt: string; updatedAt: string;
-}
+export type Task = AgentTask;
 export interface TaskDetail { task: Task; capabilities: TaskCapabilities; }
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
-export interface TaskInput { path: string; name: string; bytes: number; sha256: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
 export type ChatRole = "system" | "user" | "assistant";
 export interface ChatMessage { role: ChatRole; content: string; }
@@ -336,23 +318,6 @@ export const apiClient = {
     if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.blob();
   },
-  files: (projectId: string, path = "files") => request<{ entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`),
-  async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean; idempotencyKey?: string } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {
-    if (!csrfToken) await apiClient.currentIdentity();
-    const params = new URLSearchParams({ path, ...(options.overwrite ? { overwrite: "true" } : {}) });
-    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/files?${params}`, {
-      method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream", "idempotency-key": options.idempotencyKey ?? newIdempotencyKey("file-upload") }, body: file
-    }));
-    if (!response.ok) throw await apiResponseError(response);
-    return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
-  },
-  deleteFile: (projectId: string, path: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/files`, "DELETE", idempotencyKey, { path }),
-  fileDownloadUrl: (projectId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}`,
-  async downloadProjectFile(projectId: string, path: string, signal?: AbortSignal): Promise<Blob> {
-    const response = observeSession(await fetch(apiClient.fileDownloadUrl(projectId, path), { credentials:"same-origin", ...(signal ? { signal } : {}) }));
-    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
-    return response.blob();
-  },
   tasks: (projectId: string, query: TaskListQuery = {}) => {
     const params = new URLSearchParams();
     if (query.search) params.set("search", query.search);
@@ -364,11 +329,9 @@ export const apiClient = {
     if (query.limit) params.set("limit", String(query.limit));
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
-  createTask: (projectId: string, input: { prompt: string; endpointId: string; title?: string; inputPaths?: string[] }, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
+  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
   task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
-  taskInputs: (taskId: string) => request<TaskInput[]>(`/tasks/${encodeURIComponent(taskId)}/inputs`),
-  taskInputDownloadUrl: (taskId: string, path: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/inputs/download?path=${encodeURIComponent(path)}`,
   taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
   async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
@@ -413,8 +376,6 @@ export const apiClient = {
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
   stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
   editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
-  retryTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/retry`, "POST", idempotencyKey, {}),
-  duplicateTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/duplicate`, "POST", idempotencyKey, {}),
   archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
@@ -496,14 +457,13 @@ function isTaskCapabilities(value: unknown): value is TaskCapabilities {
     && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
     && typeof value.abortTurn === "boolean" && typeof value.cancelTask === "boolean"
     && typeof value.openTerminal === "boolean" && typeof value.editTask === "boolean"
-    && typeof value.retryTask === "boolean" && typeof value.duplicateTask === "boolean"
     && typeof value.archiveTask === "boolean" && typeof value.deleteTask === "boolean";
 }
 
 function isTaskQueuedMessageArray(value: unknown): value is TaskQueuedMessage[] {
   return Array.isArray(value) && value.every((message) => isRecord(message)
     && typeof message.id === "string" && typeof message.content === "string"
-    && isStringUnion(message.deliveryStatus, ["pending", "dispatching", "terminal_pending", "failed"])
+    && isStringUnion(message.deliveryStatus, ["pending", "dispatching", "failed"])
     && typeof message.editable === "boolean" && typeof message.deletable === "boolean" && typeof message.updatedAt === "string");
 }
 
@@ -519,14 +479,13 @@ function isTaskInteractionItem(value: unknown): value is TaskInteractionItem {
     case "task_result": return isStringUnion(value.executionStatus, ["completed", "failed", "cancelled", "timed_out", "lost"]) && isDeliveryStatus(value.deliveryStatus) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";
     case "subagent_result": return isStringUnion(value.executionStatus, ["completed", "failed", "cancelled"]) && isDeliveryStatus(value.deliveryStatus) && typeof value.name === "string" && isNullableString(value.purpose) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";
     case "file": return isStringUnion(value.status, ["available", "failed"]) && typeof value.artifactId === "string" && typeof value.name === "string" && isNullableString(value.mediaType) && typeof value.bytes === "number";
-    case "execution_boundary": return isStringUnion(value.status, ["successor_pending", "successor_created", "failed"]) && isNullableString(value.targetTaskId);
     case "system_error": return isStringUnion(value.status, ["active", "resolved"]) && isNullableString(value.code) && typeof value.retryable === "boolean" && typeof value.detailsOmitted === "boolean";
   }
 }
 
 function isTaskInteractionBase(value: unknown): value is Record<string, unknown> & { kind: TaskInteractionItem["kind"] } {
   return isRecord(value) && typeof value.id === "string" && typeof value.revision === "number" && typeof value.taskId === "string"
-    && isStringUnion(value.kind, ["user_message", "assistant_message", "tool", "background_task", "task_question", "task_notice", "task_result", "subagent_result", "file", "execution_boundary", "system_error"])
+    && isStringUnion(value.kind, ["user_message", "assistant_message", "tool", "background_task", "task_question", "task_notice", "task_result", "subagent_result", "file", "system_error"])
     && typeof value.title === "string" && isNullableString(value.body) && isStringUnion(value.contentMode, ["full", "preview", "none"])
     && typeof value.position === "number" && typeof value.occurredAt === "string" && typeof value.updatedAt === "string";
 }

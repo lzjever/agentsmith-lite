@@ -8,13 +8,10 @@ import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
 import type { FileService } from "./fileService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 
-interface ProjectFileScope {
-  projectRoot: string;
-  rootSubPaths: string[];
-}
-
-interface LibraryFileScope extends ProjectFileScope {
+interface LibraryFileScope {
   library: FileLibrary;
+  projectRoot:string;
+  rootSubPaths:string[];
 }
 
 export class FileLibraryService {
@@ -50,7 +47,7 @@ export class FileLibraryService {
         workspaceId: currentProject.workspaceId,
         projectId,
         name,
-        rootSubPath: `libraries/${id}/home/workspace`,
+        rootSubPath: `libraries/${id}/home`,
         createdByUserId: userId,
         createdAt: timestamp,
         updatedAt: timestamp
@@ -95,12 +92,11 @@ export class FileLibraryService {
     return withFileLibraryLifecycleLock(projectId, async () => {
       const project = await this.authorization.requireProject(userId, projectId, "write");
       const library = await this.requireInProject(projectId, libraryId);
-      const binding = await this.store.findTaskBoundToFileLibrary(libraryId);
-      if (binding.kind === "bound") throw new ProductError("File Library is bound to a Task", 409);
-      if (binding.kind === "unavailable") throw new ProductError("File Library binding status is unavailable", 409);
       await this.files.removeEmptyLibraryRoot(this.projectAbsoluteRoot(project.rootPath), library.rootSubPath);
-      if (!await this.store.deleteFileLibrary(projectId, libraryId)) {
+      const deleted=await this.store.deleteFileLibraryIfUnbound(projectId,libraryId);
+      if(deleted!=="deleted"){
         await this.files.ensureLibraryRoot(this.projectAbsoluteRoot(project.rootPath), library.rootSubPath);
+        if(deleted==="bound")throw new ProductError("File Library is bound to a Task",409);
         throw new NotFoundError("File Library not found");
       }
       return { deleted: true };
@@ -111,16 +107,6 @@ export class FileLibraryService {
     const project = await this.authorization.requireProject(userId, projectId, write ? "write" : "view");
     const library = await this.requireInProject(projectId, libraryId);
     return { library, projectRoot: this.projectAbsoluteRoot(project.rootPath) };
-  }
-
-  async withProjectFileMutation<T>(userId: string, projectId: string, write: boolean, action: (scope: ProjectFileScope) => Promise<T>): Promise<T> {
-    return withFileLibraryLifecycleLock(projectId, async () => {
-      const project = await this.authorization.requireProject(userId, projectId, write ? "write" : "view");
-      return action({
-        projectRoot: this.projectAbsoluteRoot(project.rootPath),
-        rootSubPaths: await this.rootSubPaths(projectId)
-      });
-    });
   }
 
   async withLibraryMutation<T>(userId: string, projectId: string, libraryId: string, action: (scope: LibraryFileScope) => Promise<T>): Promise<T> {
@@ -136,19 +122,23 @@ export class FileLibraryService {
   }
 
   async measureProjectFileBytes(userId: string, projectId: string): Promise<number> {
-    return this.withProjectFileMutation(userId, projectId, false, ({ projectRoot, rootSubPaths }) =>
-      this.files.measureFileRootsBytes(projectRoot, rootSubPaths)
-    );
+    const project=await this.authorization.requireProject(userId,projectId,"view");
+    return this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId));
   }
 
   async reconcileProjectFileBytes(userId:string,projectId:string,reconcile:(bytes:number)=>Promise<void>):Promise<void>{
-    await this.withProjectFileMutation(userId,projectId,false,async({projectRoot,rootSubPaths})=>{
-      await reconcile(await this.files.measureFileRootsBytes(projectRoot,rootSubPaths));
-    });
+    const project=await this.authorization.requireProject(userId,projectId,"view");
+    await reconcile(await this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId)));
+  }
+
+  async reconcileStoredProjectFileBytes(projectId:string,reconcile:(bytes:number)=>Promise<void>):Promise<void>{
+    const project=await this.store.findProject(projectId);
+    if(!project)throw new NotFoundError("Project not found");
+    await reconcile(await this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId)));
   }
 
   private async rootSubPaths(projectId: string): Promise<string[]> {
-    return ["files", ...(await this.store.listFileLibrariesForProject(projectId)).map((library) => library.rootSubPath)];
+    return (await this.store.listFileLibrariesForProject(projectId)).map((library) => library.rootSubPath);
   }
 
   private async requireInProject(projectId: string, id: string): Promise<FileLibrary> {

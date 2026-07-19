@@ -1,7 +1,6 @@
 "use client";
 
 import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Square, Wrench } from "lucide-react";
-import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import type { TaskInteractionItem, TaskInteractionStreamEvent } from "../../lib/api/client";
 import { Markdown } from "../ui/markdown";
@@ -16,12 +15,12 @@ export type AssistantPreview = Extract<TaskInteractionStreamEvent, { type: "assi
 
 export { upsertTaskInteractions } from "./task-conversation-state";
 
-export function TaskInteractionList({ taskId, items, preview, basePath, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: AssistantPreview; basePath: string; onStopWork: (interactionId: string) => Promise<void> }) {
+export function TaskInteractionList({ taskId, items, preview, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: AssistantPreview; onStopWork: (interactionId: string) => Promise<void> }) {
   if (items.length === 0 && !preview) return <div className="grid min-h-52 place-items-center border border-dashed border-border px-5 text-center"><div><Loader2 className="mx-auto size-5 animate-spin text-icon-default" /><p className="mt-2 text-sm text-secondary">Waiting for task messages.</p></div></div>;
-  return <TooltipProvider><ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} basePath={basePath} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol></TooltipProvider>;
+  return <TooltipProvider><ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol></TooltipProvider>;
 }
 
-function TaskInteractionItemView({ taskId, item, basePath, onStopWork }: { taskId: string; item: TaskInteractionItem; basePath: string; onStopWork: (interactionId: string) => Promise<void> }) {
+function TaskInteractionItemView({ taskId, item, onStopWork }: { taskId: string; item: TaskInteractionItem; onStopWork: (interactionId: string) => Promise<void> }) {
   switch (item.kind) {
     case "user_message": return <UserMessage item={item} />;
     case "assistant_message": return <AssistantMessage item={item} />;
@@ -32,7 +31,6 @@ function TaskInteractionItemView({ taskId, item, basePath, onStopWork }: { taskI
     case "task_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} onStopWork={onStopWork} />;
     case "subagent_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} onStopWork={onStopWork} />;
     case "file": return <FileItem taskId={taskId} item={item} />;
-    case "execution_boundary": return <ExecutionBoundary item={item} basePath={basePath} />;
     case "system_error": return <SystemError item={item} />;
     default: return assertNever(item);
   }
@@ -88,10 +86,6 @@ function NoticeItem({ item, label }: { item: Extract<TaskInteractionItem, { kind
 function FileItem({ taskId, item }: { taskId: string; item: Extract<TaskInteractionItem, { kind: "file" }> }) {
   const available = item.status === "available";
   return <li><article className={`border-l-2 px-4 py-3 ${available ? "border-success/60" : "border-error/60 bg-error/5"}`}><div className="flex min-w-0 gap-2"><FileOutput className="mt-0.5 size-4 shrink-0 text-icon-default" /><div className="min-w-0"><p className="break-words text-sm font-medium text-foreground">{item.name}</p><p className={`mt-1 text-xs ${available ? "text-secondary" : "text-error"}`}>{available ? [item.mediaType, formatArtifactBytes(item.bytes)].filter(Boolean).join(" · ") : "Artifact unavailable"}</p></div></div><TaskArtifactActions taskId={taskId} artifact={{ id: item.artifactId, name: item.name, mediaType: item.mediaType, bytes: item.bytes }} available={available} className="mt-2" />{item.body ? <p className={`mt-2 whitespace-pre-wrap break-words text-sm ${available ? "text-secondary" : "text-error"}`}>{item.body}</p> : null}</article></li>;
-}
-
-function ExecutionBoundary({ item, basePath }: { item: Extract<TaskInteractionItem, { kind: "execution_boundary" }>; basePath: string }) {
-  return <li><article className="border border-border bg-surface-low px-4 py-3"><ItemHeader title="Continued in new execution" timestamp={item.occurredAt} status={item.status} />{item.body ? <p className="mt-2 text-sm text-secondary">{item.body}</p> : null}{item.targetTaskId ? <Link className="mt-3 inline-flex text-sm text-foreground underline underline-offset-2" href={`${basePath}/${item.targetTaskId}`}>Open new execution</Link> : null}</article></li>;
 }
 
 function SystemError({ item }: { item: Extract<TaskInteractionItem, { kind: "system_error" }> }) {

@@ -26,6 +26,7 @@ export interface SandboxRenderInput {
   image: string;
   pvcName: string;
   projectSubPath: string;
+  fileLibraryRootSubPath: string;
   botifiedPort: number;
   serviceKeySecretName: string;
   serviceKeySecretKey?: string;
@@ -48,7 +49,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const serviceKeySecretName = kubernetesDnsLabelName(input.serviceKeySecretName);
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
   const taskSubPath = `${input.projectSubPath}/tasks/${input.taskId}`;
-  const inputSubPath = `${taskSubPath}/inputs`;
+  const librarySubPath=`${input.projectSubPath}/${input.fileLibraryRootSubPath}`;
   const modelCaVolume = input.modelCa
     ? {
         name: "model-ca",
@@ -137,7 +138,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "botified-server",
             image: input.image,
             imagePullPolicy: "IfNotPresent",
-            workingDir: "/workspace/task/home",
+            workingDir: "/workspace/task/home/workspace",
             command: ["botified", "serve", "--config", "/etc/botified/botified-config.yaml"],
             ports: [{ name: "http", containerPort: input.botifiedPort }],
             readinessProbe: {
@@ -181,24 +182,13 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             volumeMounts: [
               {
                 name: "project-files",
-                mountPath: "/workspace/project",
-                subPath: inputSubPath,
-                readOnly: true
-              },
-              {
-                name: "project-files",
                 mountPath: "/workspace/task/home",
-                subPath: `${taskSubPath}/home`
+                subPath: librarySubPath
               },
               {
                 name: "project-files",
                 mountPath: "/workspace/task/botified",
                 subPath: `${taskSubPath}/botified`
-              },
-              {
-                name: "project-files",
-                mountPath: "/workspace/task/artifacts",
-                subPath: `${taskSubPath}/artifacts`
               },
               {
                 name: "botified-config",
@@ -207,7 +197,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               },
               {
                 name: "botified-instructions",
-                mountPath: "/workspace/task/home/AGENTS.md",
+                mountPath: "/workspace/task/home/workspace/AGENTS.md",
                 subPath: "AGENTS.md",
                 readOnly: true
               },
@@ -218,7 +208,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "bash-executor",
             image: input.image,
             imagePullPolicy: "IfNotPresent",
-            workingDir: "/workspace/task/home",
+            workingDir: "/workspace/task/home/workspace",
             command: ["bash-executor", "--listen", "127.0.0.1:3110"],
             readinessProbe: {
               exec: {
@@ -253,19 +243,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             volumeMounts: [
               {
                 name: "project-files",
-                mountPath: "/workspace/project",
-                subPath: inputSubPath,
-                readOnly: true
-              },
-              {
-                name: "project-files",
                 mountPath: "/workspace/task/home",
-                subPath: `${taskSubPath}/home`
-              },
-              {
-                name: "project-files",
-                mountPath: "/workspace/task/artifacts",
-                subPath: `${taskSubPath}/artifacts`
+                subPath: librarySubPath
               }
             ]
           }

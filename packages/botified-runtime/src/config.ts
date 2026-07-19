@@ -8,7 +8,6 @@ const MAX_BASH_TIMEOUT_SECS = 35 * 60;
 
 export interface BotifiedTaskRuntimeInput {
   taskId: string;
-  projectMountPath: string;
   taskHomePath: string;
   botifiedDataPath: string;
   serviceKeyEnv: string;
@@ -153,7 +152,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
       retention_days: 14
     },
     files: {
-      root_dir: "files",
+      root_dir:`.artifacts/${input.task.taskId}`,
       max_file_bytes: MAX_TASK_ARTIFACT_BYTES,
       max_upload_files: 16,
       max_upload_request_bytes: 104_857_600,

@@ -12,7 +12,7 @@ import {
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, type ChatMessage, type CreateEndpointInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
+import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
@@ -715,35 +715,6 @@ async function routeApi(
         }
       }
     }
-    if (segments[4] === "files") {
-      if (!segments[5] && method === "GET") {
-        assertOnlySearchParams(url, ["path"]);
-        return sendJson(res,200,await services.fileLibraries.withProjectFileMutation(user.id,projectId,false,({projectRoot,rootSubPaths})=>services.files.listFilesWithAccounting(projectRoot,url.searchParams.get("path")??"files",{rootSubPaths,reconcile:(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes),record:async()=>undefined})));
-      }
-      if (!segments[5] && method === "PUT") {
-        assertOnlySearchParams(url, ["path", "overwrite"]);
-        const idempotencyKey = requireIdempotencyKey(req);
-        const filePath = requiredSearchParam(url, "path");
-        const overwrite = optionalBooleanSearchParam(url, "overwrite");
-        const bytes = await readRawProjectFileBytes(req);
-        const written=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.upload",idempotencyKey,{projectId,filePath,overwrite,contentSha256:createHash("sha256").update(bytes).digest("base64url")},filePath,()=>services.fileLibraries.withProjectFileMutation(user.id,projectId,true,({projectRoot,rootSubPaths})=>services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes,overwrite},{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.upload",storedPath,storedPath,delta,file.bytes,file.mediaType)})));
-        return sendJson(res, 200, written);
-      }
-      if (!segments[5] && method === "DELETE") {
-        const idempotencyKey = requireIdempotencyKey(req);
-        const body = await readJson(req);
-        assertOnlyKeys(body, ["path"]);
-        const filePath = asString(body.path);
-        const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,()=>services.fileLibraries.withProjectFileMutation(user.id,projectId,true,async({projectRoot,rootSubPaths})=>(await services.files.deleteFileWithAccounting(projectRoot,filePath,{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",storedPath,storedPath,delta,file.bytes,file.mediaType)})).response));
-        return sendJson(res, 200, response);
-      }
-      if (segments[5] === "download" && method === "GET") {
-        assertOnlySearchParams(url, ["path"]);
-        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
-        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
-        return sendProjectFileDownload(res, await services.files.downloadFile(projectRoot, requiredSearchParam(url, "path")));
-      }
-    }
     if (segments[4] === "tasks") {
       if (segments[5] === "summaries" && !segments[6] && method === "GET") { assertOnlySearchParams(url, []);return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId)); }
       if (!segments[5] && method === "GET") {
@@ -753,12 +724,13 @@ async function routeApi(
       if (!segments[5] && method === "POST") {
         assertOnlySearchParams(url, []);
         const body = await readJson(req);
-        assertOnlyKeys(body,["prompt","endpointId","title","inputPaths"]);
+        assertOnlyKeys(body,["prompt","endpointId","title","fileLibrary"]);
+        const fileLibrary=asTaskFileLibrary(body.fileLibrary);
         return sendJson(res, 200, await services.tasks.createTask(user.id, projectId, {
           prompt: asString(body.prompt),
           endpointId: asString(body.endpointId),
           ...(body.title!==undefined?{title:asString(body.title)}:{}),
-          ...(body.inputPaths!==undefined?{inputPaths:asStringArray(body.inputPaths,"inputPaths")}:{})
+          fileLibrary
         },requireIdempotencyKey(req)));
       }
     }
@@ -771,15 +743,11 @@ async function routeApi(
     if (!segments[4] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
     if (!segments[4] && method === "DELETE") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));}
     if (segments[4] === "summary" && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId)); }
-    if (segments[4] === "inputs" && !segments[5] && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.listTaskInputs(user.id,taskId)); }
-    if (segments[4] === "inputs" && segments[5] === "download" && method === "GET") { assertOnlySearchParams(url, ["path"]); return sendTaskInputDownload(res,await services.tasks.downloadTaskInput(user.id,taskId,requiredSearchParam(url,"path"))); }
     if (segments[4] === "messages") {
       if(!segments[5]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
       if(segments[5]&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
       if(segments[5]&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));}
     }
-    if (segments[4] === "retry" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.retryTask(user.id,taskId,requireIdempotencyKey(req))); }
-    if (segments[4] === "duplicate" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.duplicateTask(user.id,taskId,requireIdempotencyKey(req))); }
     if (segments[4] === "archive" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req))); }
     if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
     if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
@@ -1104,9 +1072,8 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/files(?:\/download)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1382,16 +1349,6 @@ function sendArtifactDownload(
   res.end(download.bytes);
 }
 
-function sendTaskInputDownload(res: ServerResponse, download: Awaited<ReturnType<Services["tasks"]["downloadTaskInput"]>>): void {
-  res.writeHead(200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(download.bytes.byteLength),
-    "content-disposition": contentDispositionFilename(download.input.name),
-    "x-content-type-options": "nosniff"
-  });
-  res.end(download.bytes);
-}
-
 function sendProjectFileDownload(
   res: ServerResponse,
   download: Awaited<ReturnType<Services["files"]["downloadFile"]>>
@@ -1511,6 +1468,14 @@ function asTaskListQuery(params:URLSearchParams):TaskListQuery{
 function asBoolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new ProductError(`${field} must be a boolean`); return value; }
 function asPositiveInteger(value:unknown,field:string):number{if(typeof value!=="number"||!Number.isInteger(value)||value<1)throw new ProductError(`${field} must be a positive integer`);return value;}
 function assertOnlyKeys(value:Record<string,unknown>,allowed:string[]):void{const unexpected=Object.keys(value).find((key)=>!allowed.includes(key));if(unexpected)throw new ProductError(`Unsupported field: ${unexpected}`,400);}
+
+function asTaskFileLibrary(value:unknown):CreateTaskInput["fileLibrary"]{
+  if(!value||typeof value!=="object"||Array.isArray(value))throw new ProductError("task.fileLibrary is required",400);
+  const input=value as Record<string,unknown>;
+  if(input.mode==="create_new"){assertOnlyKeys(input,["mode","name"]);return{mode:"create_new",name:asString(input.name)};}
+  if(input.mode==="use_existing"){assertOnlyKeys(input,["mode","id"]);return{mode:"use_existing",id:asString(input.id)};}
+  throw new ProductError("task.fileLibrary.mode must be create_new or use_existing",400);
+}
 
 function contextTargetFromQuery(url: URL): { workspaceId: string; projectId?: string; scope: ProjectContextScope } {
   return {

@@ -126,6 +126,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     image: "agentsmith-lite/botified-runner:test",
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws1/projects/proj1",
+    fileLibraryRootSubPath: "libraries/library-task1/home",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task1",
@@ -140,8 +141,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       key: "BOTIFIED_SERVICE_KEY"
     },
     directories: {
-      taskHome: "/workspace/project/tasks/task1/home",
-      artifacts: "/workspace/project/tasks/task1/artifacts",
+      libraryHome: "/workspace/project/libraries/library-task1/home",
       botified: "/workspace/project/tasks/task1/botified"
     },
     resourceLimits: {

@@ -15,11 +15,12 @@ afterEach(() => {
 
 describe("tasks page loading", () => {
   it("describes task work according to the projected create capability", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
     const manager: ProjectCapabilities = { ...readOnly, canCreateTasks: true };
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => [];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async (projectId) => projectId === "project_1" ? readOnly : manager;
     try {
       const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -35,10 +36,11 @@ describe("tasks page loading", () => {
   });
 
   it("uses the task list URL as the filter source and restores it on browser navigation", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     const calls: Array<Parameters<typeof apiClient.tasks>[1]> = [];
     apiClient.tasks = async (_projectId, query) => { calls.push(query); return { items: [], total: 0, nextCursor: null }; };
     apiClient.endpoints = async () => [];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async () => ({ canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false });
     window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=failed&archived=include&sort=title&direction=asc&search=release");
     try {
@@ -56,9 +58,10 @@ describe("tasks page loading", () => {
   });
 
   it("writes task search changes to the URL and omits default filters", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => [];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async () => ({ canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false });
     window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=unknown&sort=title&direction=desc");
     try {
@@ -85,9 +88,10 @@ describe("tasks page loading", () => {
   });
 
   it("links managers to endpoint configuration when task creation is blocked", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => [];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async () => ({ canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true });
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -99,10 +103,11 @@ describe("tasks page loading", () => {
   });
 
   it("explains when configured endpoints need a successful health check", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     const unavailable: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, health: { status: "unavailable", checkedAt: task.updatedAt, errorCategory: "auth" }, hasCredentialRef: true, taskEligible: false, createdAt: task.createdAt, updatedAt: task.updatedAt };
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => [unavailable];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async () => ({ canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true });
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -115,7 +120,7 @@ describe("tasks page loading", () => {
   });
 
   it("starts from the first task page after switching projects", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     const calls: Array<{ projectId: string; cursor?: string }> = [];
     const secondProjectTask = { ...task, id: "task_2", projectId: "project_2", prompt: "Project two task" };
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
@@ -125,6 +130,7 @@ describe("tasks page loading", () => {
       return { items: [task], total: 2, nextCursor: query.cursor ? null : "project_1_cursor" };
     };
     apiClient.endpoints = async () => [];
+    apiClient.fileLibraries = async () => [];
     apiClient.projectCapabilities = async () => readOnly;
     try {
       const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -142,7 +148,7 @@ describe("tasks page loading", () => {
   });
 
   it("does not navigate to a task created for a project the user has left", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     const readOnly = { ...manager, canCreateTasks: false, canWriteFiles: false };
@@ -152,7 +158,7 @@ describe("tasks page loading", () => {
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async (projectId) => projectId === "project_1" ? [eligible] : [];
     apiClient.projectCapabilities = async (projectId) => projectId === "project_1" ? manager : readOnly;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async () => { createStarted = true; return new Promise((resolve) => { finishCreate = resolve; }); };
     try {
       const view = render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={(path) => navigations.push(path)} />);
@@ -172,7 +178,7 @@ describe("tasks page loading", () => {
   });
 
   it("uses a new task creation key after a definitive API failure", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     const keys: string[] = [];
@@ -180,7 +186,7 @@ describe("tasks page loading", () => {
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async (_projectId, _input, key) => {
       keys.push(key);
       if (keys.length === 1) throw new ApiError(409, "Project active tasks limit reached", "active_tasks_limit_reached");
@@ -205,7 +211,7 @@ describe("tasks page loading", () => {
   });
 
   it("refreshes task endpoints when the selected endpoint disappears", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Removed endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model-1", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const replacement: Endpoint = { ...eligible, id: "endpoint_2", name: "Replacement endpoint", model: "model-2", credentialId: "credential_2" };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
@@ -214,7 +220,7 @@ describe("tasks page loading", () => {
     apiClient.tasks = async () => ({ items: [], total: 0, nextCursor: null });
     apiClient.endpoints = async () => ++endpointReads === 1 ? [eligible] : new Promise((resolve) => { finishEndpointRefresh = resolve; });
     apiClient.projectCapabilities = async () => manager;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async () => { throw new ApiError(404, "Endpoint not found"); };
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -233,14 +239,14 @@ describe("tasks page loading", () => {
   });
 
   it("closes task creation when the project is archived during creation", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     let attempts = 0;
     apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async () => { attempts++; throw new ApiError(409, "Project is archived"); };
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -257,7 +263,7 @@ describe("tasks page loading", () => {
   });
 
   it("keeps tasks readable when creation discovers write access was removed", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
@@ -265,7 +271,7 @@ describe("tasks page loading", () => {
     apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? manager : readOnly;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async () => { throw new ApiError(403, "Task creation is not allowed"); };
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -284,7 +290,7 @@ describe("tasks page loading", () => {
   });
 
   it("clears tasks when creation discovers project access was removed", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, files: apiClient.files, createTask: apiClient.createTask };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries, createTask: apiClient.createTask };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     let removed = false;
@@ -294,7 +300,7 @@ describe("tasks page loading", () => {
     };
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
     apiClient.createTask = async () => { removed = true; throw new ApiError(403, "Project not found"); };
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
@@ -311,13 +317,14 @@ describe("tasks page loading", () => {
   });
 
   it("keeps the newest endpoint and permission refresh for task creation", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
     let endpointReads = 0; let capabilityReads = 0;
     let resolveOldEndpoints!: (value: Endpoint[]) => void;
     let resolveOldCapabilities!: (value: ProjectCapabilities) => void;
     apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.fileLibraries = async () => [];
     apiClient.endpoints = async () => ++endpointReads === 1 ? new Promise((resolve) => { resolveOldEndpoints = resolve; }) : [];
     apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? new Promise((resolve) => { resolveOldCapabilities = resolve; }) : readOnly;
     try {
@@ -338,8 +345,9 @@ describe("tasks page loading", () => {
   });
 
   it("keeps the task list readable when create-form dependencies fail", async () => {
-    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities };
+    const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
     apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.fileLibraries = async () => [];
     apiClient.endpoints = async () => { throw new Error("Endpoints unavailable"); };
     apiClient.projectCapabilities = async () => { throw new Error("Permissions unavailable"); };
     try {
@@ -359,6 +367,7 @@ const task: Task = {
   workspaceId: "workspace_1",
   projectId: "project_1",
   endpointId: "endpoint_1",
+  fileLibraryId: "library_1",
   prompt: "Prepare release notes",
   status: "completed",
   runId: "run_1",

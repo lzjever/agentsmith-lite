@@ -156,6 +156,7 @@ async function sandboxSetup(secret: string) {
     workspaceId: setup.workspaceId,
     projectId: setup.projectId,
     endpointId: "endpoint-sandbox-alert",
+    fileLibraryId: `library-${run.taskId}`,
     prompt: `sandbox failed with ${secret}`,
     status: "running",
     runId: run.runId,
@@ -164,7 +165,21 @@ async function sandboxSetup(secret: string) {
     createdAt: timestamp,
     updatedAt: timestamp
   };
-  await setup.store.createTask(task);
+  const created = await setup.store.createTaskAtomically({
+    task,
+    newFileLibrary: {
+      id: task.fileLibraryId!,
+      workspaceId: task.workspaceId,
+      projectId: task.projectId,
+      name: "Sandbox alert",
+      rootSubPath: run.fileLibraryRootSubPath,
+      createdByUserId: setup.userId,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    reserveActive: false
+  });
+  assert.equal(created.kind, "created");
   await setup.store.sandboxRuns.put(run);
   const resources = resourcesForRun(run);
   const pod = resources.find((resource) => resource.kind === "Pod");
@@ -197,10 +212,11 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     image: "agentsmith-lite/botified-runner:test",
     pvcName: "agentsmith-lite-files",
     projectSubPath,
+    fileLibraryRootSubPath: `libraries/library-${taskId}/home`,
     botifiedPort: 3099,
     resourceNames: { pod: `asl-${taskId}`, service: `asl-${taskId}`, configMap: `asl-${taskId}-config`, secret: `asl-${taskId}-secret`, serviceAccount: `asl-${taskId}`, networkPolicy: `asl-${taskId}` },
     serviceKeySecretRef: { name: `asl-${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" },
-    directories: { taskHome: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/home`, artifacts: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/artifacts`, botified: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/botified` },
+    directories: { libraryHome: `/tmp/agentsmith-failure-alerts/${projectSubPath}/libraries/library-${taskId}/home`, botified: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/botified` },
     resourceLimits: { cpuRequest: "250m", memoryRequest: "512Mi", cpuLimit: "1", memoryLimit: "1Gi" },
     expiresAt: new Date(Date.parse(timestamp)+86400000).toISOString(),
     idleExpiresAt: new Date(Date.parse(timestamp)+86400000).toISOString(),

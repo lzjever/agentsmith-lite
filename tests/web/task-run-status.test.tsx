@@ -29,7 +29,7 @@ describe("TaskRunStatus", () => {
   });
 });
 
-const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:false, openTerminal:false, editTask:false, retryTask:false, duplicateTask:false, archiveTask:false, deleteTask:false };
+const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:false, openTerminal:false, editTask:false, archiveTask:false, deleteTask:false };
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url:"http://localhost" });

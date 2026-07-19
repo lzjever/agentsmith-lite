@@ -47,7 +47,8 @@ export interface PersistedDeliveryReceipt {
   cursor?: string;
 }
 
-export interface PersistedAgentTask extends Omit<AgentTask, "sandbox"> {
+export interface PersistedAgentTask extends Omit<AgentTask, "sandbox" | "fileLibraryId"> {
+  fileLibraryId: string | null;
   sandbox: SandboxRenderResult;
   createdByUserId?: string | null;
   agentContext?: string;
@@ -76,14 +77,13 @@ export interface PersistedTaskArtifact extends AgentTaskArtifact {
   fileId: string;
 }
 
-export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed";
+export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "accepted" | "failed";
 
 export interface PersistedTaskMessage {
   id: string;
   taskId: string;
   actorId?: string | null;
   content: string;
-  targetTaskId?: string | null;
   deliveryKey?: string | null;
   requestHash?: string | null;
   claimToken?: string | null;
@@ -139,8 +139,6 @@ export interface TaskInteractionTerminalLifecycleMutation {
   terminalReason: TaskTerminalReason;
   updatedAt: string;
   auditEvent: ProjectAuditEvent;
-  successors: TaskLifecycleSuccessor[];
-  terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
   terminalInteractionChanges?: TaskInteractionChangeInput[];
 }
 
@@ -233,6 +231,7 @@ export interface PersistedSandboxRunState {
   image: string;
   pvcName: string;
   projectSubPath: string;
+  fileLibraryRootSubPath:string;
   botifiedPort: number;
   resourceNames: PersistedSandboxRunResourceNames;
   serviceKeySecretRef: {
@@ -240,8 +239,7 @@ export interface PersistedSandboxRunState {
     key: string;
   };
   directories: {
-    taskHome: string;
-    artifacts: string;
+    libraryHome: string;
     botified: string;
   };
   resourceLimits: {
@@ -401,7 +399,7 @@ export interface ProductStore {
   findFileLibrary(id: string): Promise<FileLibrary | null>;
   listFileLibrariesForProject(projectId: string): Promise<FileLibrary[]>;
   renameFileLibrary(projectId: string, id: string, name: string, expectedUpdatedAt: string, updatedAt: string): Promise<FileLibrary | null>;
-  deleteFileLibrary(projectId: string, id: string): Promise<boolean>;
+  deleteFileLibraryIfUnbound(projectId: string, id: string): Promise<"deleted" | "bound" | "not_found">;
   findTaskBoundToFileLibrary(fileLibraryId: string): Promise<FileLibraryBindingLookup>;
   createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry | null>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
@@ -426,7 +424,6 @@ export interface ProductStore {
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;
   findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null>;
   upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage>;
-  measureProjectArtifactBytes(projectId: string): Promise<number>;
   setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null>;
   adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null>;
   reserveProjectProviderSettlement(input: ReserveProjectProviderSettlementInput): Promise<ProjectProviderSettlement | null>;
@@ -485,10 +482,7 @@ export interface ProductStore {
   editProjectChatMessageAndTruncate(threadId: string, messageId: string, expectedVersion: number, content: string, updatedAt: string): Promise<ProjectChatMessage | null>;
   deleteProjectChatMessageAndFollowing(threadId: string, messageId: string, expectedVersion: number): Promise<boolean>;
 
-  createTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
-  createTaskAtomically(input: AtomicTaskCreateInput): Promise<PersistedAgentTask | null>;
-  createTaskWithActiveReservation(task: PersistedAgentTask): Promise<PersistedAgentTask | null>;
-  createTaskWithActiveReservationAndMessage(task: PersistedAgentTask, message: PersistedTaskMessage): Promise<PersistedAgentTask | null>;
+  createTaskAtomically(input: AtomicTaskCreateInput): Promise<AtomicTaskCreateResult>;
   updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
   updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
   updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
@@ -498,7 +492,6 @@ export interface ProductStore {
   findTask(id: string): Promise<PersistedAgentTask | null>;
   updateTaskTitle(taskId: string, title: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
   archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
-  softDeleteTask(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
   deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null>;
   listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]>;
   claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null>;
@@ -524,7 +517,7 @@ export interface ProductStore {
   findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null>;
   findTaskInteractionByCorrelation(taskId: string, correlation: TaskInteractionCorrelation): Promise<TaskInteractionItem | null>;
   appendTaskArtifacts(artifacts: PersistedTaskArtifact[]): Promise<void>;
-  persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing" | "limit_exceeded">;
+  persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing">;
   listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]>;
   createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage>;
   createPendingTaskMessage(message: PersistedTaskMessage, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
@@ -538,18 +531,24 @@ export interface ProductStore {
   recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null>;
   deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null>;
   failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
-  createTerminalTaskMessage(input: CreateTerminalTaskMessageInput): Promise<PersistedTaskMessage | null>;
-  resolveTerminalPendingMessage(input: ResolveTerminalPendingMessageInput): Promise<PersistedTaskMessage | null>;
   findTaskSummary(taskId: string): Promise<TaskSummary | null>;
   listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]>;
 }
 
 export interface AtomicTaskCreateInput {
   task: PersistedAgentTask;
+  newFileLibrary?: FileLibrary;
   reserveActive: boolean;
   runtimeState?: Record<string, unknown>;
   sandboxRun?: PersistedSandboxRunState;
 }
+
+export type AtomicTaskCreateResult=
+  | {kind:"created";task:PersistedAgentTask}
+  | {kind:"library_name_conflict"}
+  | {kind:"library_not_found"}
+  | {kind:"already_bound"}
+  | {kind:"capacity_rejected"};
 
 export interface PersistTaskArtifactProjectionInput {
   projectId: string;
@@ -610,34 +609,17 @@ export interface TaskDeliveryFailureInput {
   updatedAt: string;
 }
 
-export interface TaskLifecycleSuccessor {
-  messageId: string;
-  create: AtomicTaskCreateInput;
-  messageSuccessInteractionChange?: TaskInteractionChangeInput;
-  messageFailureInteractionChange?: TaskInteractionChangeInput;
-  successorInteractionChange?: TaskInteractionChangeInput;
-}
-
-export interface TaskLifecycleTerminalPendingChange {
-  messageId: string;
-  interactionChange: TaskInteractionChangeInput;
-}
-
 export interface FinalizeTaskLifecycleInput {
   taskId: string;
   terminalReason: TaskTerminalReason;
   updatedAt: string;
   auditEvent: ProjectAuditEvent;
-  successors: TaskLifecycleSuccessor[];
-  terminalPendingChanges?: TaskLifecycleTerminalPendingChange[];
   terminalInteractionChanges?: TaskInteractionChangeInput[];
 }
 
 export interface FinalizeTaskLifecycleResult {
   task: PersistedAgentTask;
   applied: boolean;
-  successorTaskIds: string[];
-  missingPendingMessageIds: string[];
 }
 
 export interface TaskStageClaimInput {
@@ -658,7 +640,7 @@ export interface TaskStageFailureInput extends TaskStageCompleteInput {
   nextRetryAt: string;
 }
 
-export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;
@@ -687,22 +669,6 @@ export interface CompleteTaskIdempotencyInput extends TaskIdempotencyScope {
   responseStatus: number;
   responseBody: unknown;
   updatedAt: string;
-}
-
-export interface CreateTerminalTaskMessageInput {
-  message: PersistedTaskMessage;
-  successor: AtomicTaskCreateInput;
-  messageInteractionChange?: TaskInteractionChangeInput;
-  successorInteractionChange?: TaskInteractionChangeInput;
-}
-
-export interface ResolveTerminalPendingMessageInput {
-  messageId: string;
-  expectedClaimToken: string;
-  successor: AtomicTaskCreateInput;
-  updatedAt: string;
-  messageInteractionChange?: TaskInteractionChangeInput;
-  successorInteractionChange?: TaskInteractionChangeInput;
 }
 
 export interface ReserveProjectProviderSettlementInput {

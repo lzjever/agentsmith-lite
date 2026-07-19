@@ -18,6 +18,7 @@ describe("sandbox manifest renderer", () => {
       image: "example/botified-runner@sha256:abc",
       pvcName: "agentsmith-lite-files",
       projectSubPath: "workspaces/workspace_live_test/projects/project_live_test",
+      fileLibraryRootSubPath: "libraries/library-task/home",
       botifiedPort: 3099,
       serviceKeySecretName: `asl-botified-${taskId}`,
       cpuRequest: "250m",
@@ -75,6 +76,7 @@ describe("sandbox manifest renderer", () => {
       image: "example/botified-runner@sha256:abc",
       pvcName: "agentsmith-lite-files",
       projectSubPath: "workspaces/w1/projects/p1",
+      fileLibraryRootSubPath: "libraries/library_one/home",
       botifiedPort: 3099,
       serviceKeySecretName: "botified-t1",
       cpuRequest: "250m",
@@ -121,19 +123,15 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(pod?.spec.containers.map((candidate) => candidate.name), ["botified-server", "bash-executor"]);
     const container = pod?.spec.containers.find((candidate) => candidate.name === "botified-server");
     const executor = pod?.spec.containers.find((candidate) => candidate.name === "bash-executor");
-    const projectMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/project");
-    const taskHomeMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
+    const libraryMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
     const botifiedMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/botified");
-    const artifactMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/artifacts");
-    const instructionsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home/AGENTS.md");
+    const instructionsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home/workspace/AGENTS.md");
     assert.ok(container);
     assert.ok(executor);
-    assert.ok(projectMount);
-    assert.ok(taskHomeMount);
+    assert.ok(libraryMount);
     assert.ok(botifiedMount);
-    assert.ok(artifactMount);
-    assert.deepEqual(instructionsMount, { name: "botified-instructions", mountPath: "/workspace/task/home/AGENTS.md", subPath: "AGENTS.md", readOnly: true });
-    assert.equal(container.workingDir, "/workspace/task/home");
+    assert.deepEqual(instructionsMount, { name: "botified-instructions", mountPath: "/workspace/task/home/workspace/AGENTS.md", subPath: "AGENTS.md", readOnly: true });
+    assert.equal(container.workingDir, "/workspace/task/home/workspace");
     assert.deepEqual(container.env, [
       {
         name: "HOME",
@@ -167,21 +165,15 @@ describe("sandbox manifest renderer", () => {
     assert.equal(container.securityContext.allowPrivilegeEscalation, false);
     assert.notEqual(container.securityContext.privileged, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
-    assert.equal(projectMount.mountPath, "/workspace/project");
-    assert.equal(projectMount.subPath, "workspaces/w1/projects/p1/tasks/t1/inputs");
-    assert.equal(projectMount.readOnly, true);
-    assert.equal(taskHomeMount.subPath, "workspaces/w1/projects/p1/tasks/t1/home");
-    assert.notEqual(taskHomeMount.readOnly, true);
+    assert.equal(libraryMount.subPath, "workspaces/w1/projects/p1/libraries/library_one/home");
+    assert.notEqual(libraryMount.readOnly, true);
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
     assert.notEqual(botifiedMount.readOnly, true);
-    assert.equal(artifactMount.subPath, "workspaces/w1/projects/p1/tasks/t1/artifacts");
-    assert.notEqual(artifactMount.readOnly, true);
-    assert.equal(executor.workingDir, "/workspace/task/home");
+    assert.equal(container.volumeMounts.filter((mount) => mount.name === "project-files").length, 2);
+    assert.equal(executor.workingDir, "/workspace/task/home/workspace");
     assert.deepEqual(executor.env, [{ name: "HOME", value: "/workspace/task/home" }]);
     assert.equal(executor.securityContext.runAsUser, 10002);
-    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/project" && mount.readOnly === true), true);
-    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/home" && mount.readOnly !== true), true);
-    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/artifacts" && mount.subPath === "workspaces/w1/projects/p1/tasks/t1/artifacts" && mount.readOnly !== true), true);
+    assert.deepEqual(executor.volumeMounts, [{ name: "project-files", mountPath: "/workspace/task/home", subPath: "workspaces/w1/projects/p1/libraries/library_one/home" }]);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/botified"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-instructions" || mount.mountPath === "/workspace/task/home/AGENTS.md"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
@@ -252,6 +244,7 @@ describe("sandbox manifest renderer", () => {
       image: "example/botified-runner@sha256:abc",
       pvcName: "agentsmith-lite-files",
       projectSubPath: "workspaces/w1/projects/p1",
+      fileLibraryRootSubPath: "libraries/library-t1/home",
       botifiedPort: 3099,
       serviceKeySecretName: "botified-t1",
       cpuRequest: "250m",
@@ -286,6 +279,7 @@ describe("sandbox manifest renderer", () => {
       image: "example/botified-runner@sha256:abc",
       pvcName: "agentsmith-lite-files",
       projectSubPath: "workspaces/w1/projects/p1",
+      fileLibraryRootSubPath: "libraries/library-t1/home",
       botifiedPort: 3099,
       serviceKeySecretName: "botified-t1",
       cpuRequest: "250m",

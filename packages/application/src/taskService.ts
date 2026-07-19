@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { chmod, chown, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -9,6 +9,7 @@ import type {
   AgentTaskArtifact,
   AgentTaskStatus,
   CreateTaskInput,
+  FileLibrary,
   KubernetesResource,
   ModelEndpoint,
   TaskCapabilities,
@@ -21,7 +22,6 @@ import type {
   TaskQueuedMessage,
   TaskRunState,
   TaskRuntimeReachability,
-  TaskInputSnapshotEntry,
   TaskListPage,
   TaskListQuery,
   TaskSummary,
@@ -33,6 +33,7 @@ import { DEFAULT_SANDBOX_NAMESPACE_LIMIT, MAX_TASK_ARTIFACT_BYTES } from "../../
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
+import type { FileLibraryService } from "./fileLibraryService.js";
 import { BotifiedHttpError, type BotifiedDeliveryReceipt, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
 import type {
   AtomicTaskCreateInput,
@@ -48,9 +49,7 @@ import type {
   TaskInteractionChangeInput,
   TaskInteractionCorrelation,
   TaskInteractionLifecycleMutation,
-  TaskInteractionPageAnchor,
-  TaskLifecycleSuccessor,
-  TaskLifecycleTerminalPendingChange
+  TaskInteractionPageAnchor
 } from "../../ports/src/store.js";
 import {
   projectTaskInteraction,
@@ -81,8 +80,7 @@ import {
   type SandboxTerminalFailureSyncResult
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
-import { FilePathValidationService } from "./filePathValidationService.js";
-import { detectProjectFileMediaType, readRegularFileWithoutFollowingSymlink, withProjectFileLock } from "./fileService.js";
+import { detectProjectFileMediaType,readRegularFileWithoutFollowingSymlink,withProjectFileLock } from "./fileService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import type { ProjectPermission } from "./authorizationService.js";
 import type { ContextService } from "./contextService.js";
@@ -189,11 +187,6 @@ export interface TaskArtifactDownload {
   bytes: Buffer;
 }
 
-export interface TaskInputDownload {
-  input: TaskInputSnapshotEntry;
-  bytes: Buffer;
-}
-
 export interface TaskTerminalConnection {
   baseUrl: string;
   serviceKey: string;
@@ -203,10 +196,8 @@ const BOTIFIED_RUNNER_UID = 10001;
 const BOTIFIED_RUNNER_GID = 10001;
 const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
-const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home";
+const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home/workspace";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
-const BOTIFIED_ARTIFACT_PATH = "/workspace/task/artifacts";
-const TASK_WORKSPACE_GUIDANCE = `# AgentSmith Task Workspace\n\nSave files that should appear in the product Artifacts panel under \`${BOTIFIED_ARTIFACT_PATH}\`. Project inputs are read-only under \`/workspace/project/files\`.\n`;
 const ACTIVE_TASKS_LIMIT_MESSAGE = "Project active tasks limit reached";
 const ACTIVE_TASKS_LIMIT_CODE = "active_tasks_limit_reached";
 const MAX_TASK_ARTIFACT_FILES = 128;
@@ -224,12 +215,6 @@ function activeTasksLimitError(): ProductError {
   return new ProductError(ACTIVE_TASKS_LIMIT_MESSAGE, 409, ACTIVE_TASKS_LIMIT_CODE);
 }
 const INTERACTION_LOOKUP_LIMIT = 1_000;
-
-interface TaskInputManifestEntry {
-  path: string;
-  size: number;
-  digest: string;
-}
 
 function requireTaskEndpointCapabilities(endpoint: ModelEndpoint): void {
   const missing = TASK_ENDPOINT_CAPABILITIES.filter((capability) => !endpoint.capabilities.includes(capability));
@@ -286,53 +271,59 @@ export class TaskService {
     private readonly endpoints: EndpointService,
     private readonly botified: BotifiedRuntimeHttpClient,
     private readonly config: TaskServiceConfig,
-    private readonly policies: ProjectPolicyService
+    private readonly policies: ProjectPolicyService,
+    private readonly fileLibraries:FileLibraryService
   ) {}
 
   async createTask(userId: string, projectId: string, input: CreateTaskInput, idempotencyKey?: string): Promise<AgentTask> {
-    return this.createTaskOperation(userId, projectId, input, "create", idempotencyKey);
-  }
-
-  private async createTaskOperation(userId: string, projectId: string, input: CreateTaskInput, operation: Extract<TaskIdempotencyOperation, "create" | "retry" | "duplicate">, idempotencyKey?: string, sourceTaskId: string | null = null): Promise<AgentTask> {
     const endpointId = requireNonEmptyString(input.endpointId, "task.endpointId");
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const title = normalizeTaskTitle(input.title, prompt);
-    const inputPaths = normalizeTaskInputPaths(input.inputPaths);
     const project = await this.workspaces.requireProjectForUser(userId, projectId, "write");
     const result = await this.runIdempotentTaskOperation({
       actorId: userId,
       projectId,
-      operation,
+      operation: "create",
       key: idempotencyKey,
-      request: { endpointId, prompt, title, inputPaths, sourceTaskId }
+      request: { endpointId, prompt, title, fileLibrary:input.fileLibrary }
     }, newId("task"), async (id) => {
       const existing = await this.store.findTask(id);
       if (existing) return publicTask(existing);
-      if(sourceTaskId){const source=await this.store.findTask(sourceTaskId);if(!source||source.deletedAt||source.projectId!==projectId)throw new ProductError("Source task not found",404);if(operation==="retry"&&!isTerminalTask(source))throw new ProductError("Task must be terminal before retry",409);}
       const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
       requireTaskEndpointCapabilities(endpoint);
       if (this.config.liveSandbox) await this.requireNamespaceSandboxCapacity();
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
+      const timestamp=nowIso();
+      const selection=input.fileLibrary.mode==="create_new"?{prepare:true,library:{
+        id:`library_${id.slice("task_".length)}`,workspaceId:project.workspaceId,projectId,name:requireNonEmptyString(input.fileLibrary.name,"task.fileLibrary.name",160),rootSubPath:`libraries/library_${id.slice("task_".length)}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp
+      }}:await this.taskLibraryCandidate(project.workspaceId,projectId,input.fileLibrary.id,userId,timestamp);
+      const library=selection.library;
+      const preparedDirectory=selection.prepare&&await this.prepareLibraryWorkspace(project.rootPath,library);
+      const preparedTaskArtifactDirectory=selection.prepare&&await this.prepareTaskArtifactDirectory(project.rootPath,library,id);
+      const ownsDirectory=input.fileLibrary.mode==="create_new"&&preparedDirectory;
       let create: AtomicTaskCreateInput;
       try {
-        create = await this.prepareTaskCreate({ id, project, endpoint, prompt, title, inputPaths, sourceTaskId, agentContext, createdByUserId:userId });
+        create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library,agentContext,createdByUserId:userId});
+        if(input.fileLibrary.mode==="create_new")create.newFileLibrary=library;
       } catch (error) {
-        await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,id);
+        if(preparedTaskArtifactDirectory)await this.removeTaskArtifactDirectory(project.rootPath,library,id);
+        if(ownsDirectory)await this.compensateLibraryWorkspace(project.rootPath,library);
         throw error;
       }
-      let persisted: PersistedAgentTask | null = null;
+      let persisted:PersistedAgentTask;
       try {
-        persisted = await this.store.createTaskAtomically(create);
-        if (!persisted) {
-          if (sourceTaskId) {
-            const source = await this.store.findTask(sourceTaskId);
-            if (!source || source.deletedAt || source.projectId !== projectId) throw new ProductError("Source task not found",404);
-          }
-          await this.policies.recordTaskReservationRejected(projectId, userId, id);
+        const created=await this.store.createTaskAtomically(create);
+        if(created.kind!=="created"){
+          if(created.kind==="library_not_found")throw new ProductError("File Library not found",404,"file_library_not_found");
+          if(created.kind==="already_bound")throw new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
+          if(created.kind==="library_name_conflict")throw new ProductError("File Library name already exists",409,"file_library_name_conflict");
+          await this.policies.recordTaskReservationRejected(projectId,userId,id);
           throw activeTasksLimitError();
         }
+        persisted=created.task;
       } catch (error) {
-        if (create.task.executionMode === "live") await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,id);
+        if(preparedTaskArtifactDirectory)await this.removeTaskArtifactDirectory(project.rootPath,library,id);
+        if(ownsDirectory)await this.compensateLibraryWorkspace(project.rootPath,library);
         throw error;
       }
       await this.persistInitialPromptInteraction(persisted);
@@ -340,7 +331,42 @@ export class TaskService {
       return publicTask(persisted);
     });
     const persisted = await this.store.findTask(result.id);
-    return persisted ? publicTask(persisted) : result;
+    return persisted&&!persisted.deletedAt?publicTask(persisted):result;
+  }
+
+  private async taskLibraryCandidate(workspaceId:string,projectId:string,idValue:unknown,userId:string,timestamp:string):Promise<{library:FileLibrary;prepare:boolean}>{
+    const id=requireNonEmptyString(idValue,"task.fileLibrary.id");
+    const library=await this.store.findFileLibrary(id);
+    if(library&&library.workspaceId===workspaceId&&library.projectId===projectId)return{library,prepare:true};
+    return{prepare:false,library:{id,workspaceId,projectId,name:"Selected Library",rootSubPath:`libraries/${id}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp}};
+  }
+
+  private async prepareLibraryWorkspace(projectRootPath:string,library:FileLibrary):Promise<boolean>{
+    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
+    const root=path.resolve(projectRoot,library.rootSubPath);
+    assertPathInside(projectRoot,root,"File Library root is outside the Project");
+    const created=await mkdir(root,{recursive:true});
+    await mkdir(path.join(root,"workspace",".artifacts"),{recursive:true});
+    return created!==undefined;
+  }
+
+  private async compensateLibraryWorkspace(projectRootPath:string,library:FileLibrary):Promise<void>{
+    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath),root=path.resolve(projectRoot,library.rootSubPath);
+    try{await rmdir(path.join(root,"workspace",".artifacts"));await rmdir(path.join(root,"workspace"));await rmdir(root);}catch(error){if(!isNotFound(error)&&!isDirectoryNotEmpty(error))console.error(`Failed to compensate File Library ${library.id}: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
+  }
+
+  private async prepareTaskArtifactDirectory(projectRootPath:string,library:FileLibrary,taskId:string):Promise<boolean>{
+    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
+    const root=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts",taskId);
+    assertPathInside(projectRoot,root,"File Library artifact directory is outside the Project");
+    return(await mkdir(root,{recursive:true}))!==undefined;
+  }
+
+  private async removeTaskArtifactDirectory(projectRootPath:string,library:FileLibrary,taskId:string):Promise<void>{
+    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
+    const root=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts",taskId);
+    assertPathInside(projectRoot,root,"File Library artifact directory is outside the Project");
+    try{await rmdir(root);}catch(error){if(!isNotFound(error)&&!isDirectoryNotEmpty(error))throw error;}
   }
 
   private async prepareTaskCreate(input: {
@@ -349,8 +375,7 @@ export class TaskService {
     endpoint: ModelEndpoint;
     prompt: string;
     title: string;
-    inputPaths: string[];
-    sourceTaskId: string | null;
+    library: FileLibrary;
     agentContext: string;
     createdByUserId: string | null;
   }): Promise<AtomicTaskCreateInput> {
@@ -370,6 +395,7 @@ export class TaskService {
       image: this.config.botifiedRunnerImage,
       pvcName: this.config.pvcName,
       projectSubPath: input.project.rootPath,
+      fileLibraryRootSubPath: input.library.rootSubPath,
       botifiedPort,
       serviceKeySecretName: resourceNames.secret,
       cpuRequest: "250m",
@@ -384,12 +410,11 @@ export class TaskService {
       workspaceId: input.project.workspaceId,
       projectId: input.project.id,
       endpointId: input.endpoint.id,
+      fileLibraryId: input.library.id,
       title: input.title,
       prompt: input.prompt,
-      inputPaths: input.inputPaths,
       status: live ? "starting" : "completed",
       runId,
-      sourceTaskId: input.sourceTaskId,
       createdByUserId: input.createdByUserId,
       executionMode: live ? "live" : "dry-run",
       sandbox,
@@ -421,15 +446,8 @@ export class TaskService {
     if (!live) return { task, reserveActive: false };
     const serviceKey = this.serviceKeyForTask(task);
     requireBotifiedServiceKey(serviceKey);
-    if (input.sourceTaskId) {
-      await this.snapshotRetainedTaskInputs(input.project.id, input.project.rootPath, input.id, input.sourceTaskId);
-    } else {
-      await this.snapshotProjectInputs(input.project.rootPath, input.id, input.inputPaths);
-    }
-    const runtimeState: Record<string, unknown> = {
-      botifiedBaseUrl: this.botifiedBaseUrlForTask(input.id, botifiedPort)
-    };
-    const sandboxRun = this.buildLiveSandboxRun({ task, timestamp, botifiedPort, projectSubPath: input.project.rootPath, resourceNames });
+    const runtimeState:Record<string,unknown>={botifiedBaseUrl:this.botifiedBaseUrlForTask(input.id,botifiedPort)};
+    const sandboxRun = this.buildLiveSandboxRun({ task, timestamp, botifiedPort, projectSubPath: input.project.rootPath, resourceNames, fileLibraryRootSubPath:input.library.rootSubPath });
     return { task, reserveActive: true, runtimeState, sandboxRun };
   }
 
@@ -577,48 +595,9 @@ export class TaskService {
     }
   }
 
-  async listTaskInputs(userId: string, taskId: string): Promise<TaskInputSnapshotEntry[]> {
-    const task = await this.requireTaskForUser(userId, taskId, "view");
-    if (task.executionMode !== "live") return [];
-    const manifest = await this.readTaskInputManifest(task);
-    return manifest.map((entry) => ({
-      path: entry.path,
-      name: path.posix.basename(entry.path),
-      bytes: entry.size,
-      sha256: entry.digest.replace(/^sha256:/, "")
-    }));
-  }
-
-  async downloadTaskInput(userId: string, taskId: string, inputPath: string): Promise<TaskInputDownload> {
-    const task = await this.requireTaskForUser(userId, taskId, "view");
-    const normalized = normalizeTaskInputPaths([inputPath])[0];
-    if (!normalized) throw new ProductError("Task input path is required", 400);
-    const manifest = await this.readTaskInputManifest(task);
-    const entry = manifest.find((candidate) => candidate.path === normalized);
-    if (!entry) throw new ProductError("Task input not found", 404);
-    const project = await this.store.findProject(task.projectId);
-    if (!project) throw new ProductError("Task project not found", 409);
-    const snapshotRoot = path.resolve(this.config.dataRoot, project.rootPath, "tasks", task.id, "inputs");
-    const filePath = path.resolve(snapshotRoot, ...entry.path.split("/"));
-    assertPathInside(snapshotRoot, filePath, "Task input path is outside the snapshot");
-    try {
-      const bytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task input source");
-      const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-      if (bytes.byteLength !== entry.size || digest !== entry.digest) {
-        throw new ProductError("Task input snapshot no longer matches its manifest", 409);
-      }
-      return {
-        input: { path: entry.path, name: path.posix.basename(entry.path), bytes: entry.size, sha256: entry.digest.replace(/^sha256:/, "") },
-        bytes
-      };
-    } catch (error) {
-      if (isNotFound(error)) throw new ProductError("Task input file not found", 404);
-      throw error;
-    }
-  }
-
   async sendTaskMessage(userId: string, taskId: string, content: string, idempotencyKey?: string): Promise<TaskMessageReceipt> {
     const task = await this.requireTaskRecordForUser(userId, taskId, "write");
+    if(isTerminalTask(task))throw new ProductError("Terminal Tasks cannot receive messages",409);
     const text = requireNonEmptyString(content, "task.message.content");
     return this.runIdempotentTaskOperation({
       actorId: userId,
@@ -631,6 +610,7 @@ export class TaskService {
       if (existing) return this.messageReceipt(userId, await this.dispatchTaskMessage(existing), false);
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
+      if(isTerminalTask(current))throw new ProductError("Terminal Tasks cannot receive messages",409);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to receive messages", 409);
       const timestamp = nowIso();
       const message: PersistedTaskMessage = {
@@ -638,7 +618,6 @@ export class TaskService {
         taskId: task.id,
         actorId: userId,
         content: text,
-        targetTaskId: null,
         deliveryKey: deliveryKeyForMessage(id, task.runId),
         requestHash: deliveryRequestHash(text),
         claimToken: null,
@@ -654,19 +633,9 @@ export class TaskService {
         updatedAt: timestamp,
         deletedAt: null
       };
-      let persisted: PersistedTaskMessage;
-      if (isTerminalTask(current)) {
-        persisted = await this.createTerminalTaskMessage(message, current);
-      } else {
-        const pendingProjection = await this.prepareProductInteractionChange(messageProductSource(message));
-        const queued = await this.store.createPendingTaskMessage(message, pendingProjection?.change);
-        if (queued) persisted = queued;
-        else {
-          const terminalSource = await this.store.findTask(task.id);
-          if (!terminalSource) throw new ProductError("Task not found", 404);
-          persisted = await this.createTerminalTaskMessage(message, terminalSource);
-        }
-      }
+      const pendingProjection = await this.prepareProductInteractionChange(messageProductSource(message));
+      const persisted = await this.store.createPendingTaskMessage(message, pendingProjection?.change);
+      if(!persisted)throw new ProductError("Task message could not be queued",409);
       const dispatched = await this.dispatchTaskMessage(persisted);
       await this.policies.recordOperation(task.projectId, userId, "task.message.create", "accepted", task.id, "task", messageAuditDetail(task.id, dispatched));
       return this.messageReceipt(userId, dispatched, false);
@@ -703,18 +672,8 @@ export class TaskService {
       const deleted = message.deletedAt ? message : await this.store.deleteQueuedTaskMessage(messageId, deletedAt);
       if (!deleted) throw new ProductError("Only a pending or failed message can be deleted", 409);
       await this.policies.recordOperation(task.projectId,userId,"task.message.delete","accepted",task.id,"task",{taskId:task.id,messageId});
-      return { messageId, disposition:"accepted_by_active_run", targetTaskId:task.id, duplicate:false, queuedMessage:null, interaction:null, capabilities:await this.taskCapabilities(userId, source) };
+      return { messageId, disposition:"accepted_by_active_run", duplicate:false, queuedMessage:null, interaction:null, capabilities:await this.taskCapabilities(userId, source) };
     });
-  }
-
-  async retryTask(userId: string, taskId: string, idempotencyKey?: string): Promise<AgentTask> {
-    const task = await this.requireTaskRecordForUser(userId, taskId, "write");
-    return this.createTaskOperation(userId,task.projectId,{endpointId:task.endpointId,prompt:task.prompt,...(task.title?{title:task.title}:{}),...(task.inputPaths?{inputPaths:task.inputPaths}:{})},"retry",idempotencyKey,task.id);
-  }
-
-  async duplicateTask(userId: string, taskId: string, idempotencyKey?: string): Promise<AgentTask> {
-    const task = await this.requireTaskRecordForUser(userId, taskId, "write");
-    return this.createTaskOperation(userId,task.projectId,{endpointId:task.endpointId,prompt:task.prompt,...(task.title?{title:task.title}:{}),...(task.inputPaths?{inputPaths:task.inputPaths}:{})},"duplicate",idempotencyKey,task.id);
   }
 
   async editTask(userId:string,taskId:string,title:string,idempotencyKey?:string):Promise<AgentTask>{
@@ -730,7 +689,36 @@ export class TaskService {
 
   async deleteTask(userId:string,taskId:string,idempotencyKey?:string):Promise<{deleted:true;taskId:string}>{
     const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);await this.workspaces.requireProjectForUser(userId,task.projectId,"write");
-    return this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"delete",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current)throw new ProductError("Task not found",404);if(!current.terminalReason)throw new ProductError("Only a terminal task can be deleted",409);if(current.executionMode==="live"&&current.cleanupStatus!=="completed")throw new ProductError("Task cleanup is still pending",409);const project=await this.store.findProject(task.projectId);if(!project)throw new ProductError("Task project not found",409);const taskRoot=path.resolve(this.config.dataRoot,project.rootPath,"tasks",task.id);assertPathInside(path.resolve(this.config.dataRoot),taskRoot,"Task data directory is outside the data root");await rm(taskRoot,{recursive:true,force:true});const deleted=await this.store.deleteTaskData(task.id,nowIso());if(!deleted)throw new ProductError("Only a terminal task can be deleted",409);await this.policies.refreshFileAlerts(task.projectId);await this.policies.recordOperation(task.projectId,userId,"task.delete","accepted",task.id,"task",{taskId:task.id});return{deleted:true as const,taskId};});
+    return this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"delete",key:idempotencyKey,request:{taskId}},task.id,async()=>{
+      const current=await this.store.findTask(task.id);if(!current)throw new ProductError("Task not found",404);
+      if(!current.terminalReason)throw new ProductError("Only a terminal task can be deleted",409);
+      if(current.executionMode==="live"&&current.cleanupStatus!=="completed")throw new ProductError("Task cleanup is still pending",409);
+      const project=await this.store.findProject(task.projectId);if(!project)throw new ProductError("Task project not found",409);
+      if(!current.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
+      const library=await this.store.findFileLibrary(current.fileLibraryId);
+      if(!library||library.projectId!==project.id)throw new ProductError("Task File Library is unavailable",409);
+      const projectRoot=path.resolve(this.config.dataRoot,project.rootPath);
+      assertPathInside(path.resolve(this.config.dataRoot),projectRoot,"Project data directory is outside the data root");
+      await withProjectFileLock(projectRoot,async()=>{
+        const taskRoot=path.resolve(projectRoot,"tasks",task.id);
+        assertPathInside(projectRoot,taskRoot,"Task data directory is outside the Project");
+        await rm(taskRoot,{recursive:true,force:true});
+        await this.removeEmptyDeletedTaskArtifactDirectory(projectRoot,library,task.id);
+        const deleted=await this.store.deleteTaskData(task.id,nowIso());
+        if(!deleted)throw new ProductError("Only a terminal task can be deleted",409);
+      });
+      await this.policies.refreshFileAlerts(task.projectId);
+      await this.policies.recordOperation(task.projectId,userId,"task.delete","accepted",task.id,"task",{taskId:task.id});
+      return{deleted:true as const,taskId};
+    });
+  }
+
+  private async removeEmptyDeletedTaskArtifactDirectory(projectRoot:string,library:FileLibrary,taskId:string):Promise<void>{
+    const artifactsRoot=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts");
+    const taskArtifacts=path.resolve(artifactsRoot,taskId);
+    assertPathInside(projectRoot,taskArtifacts,"Task artifact directory is outside the Project");
+    try{await rmdir(taskArtifacts);}catch(error){if(isDirectoryNotEmpty(error)||isNotFound(error))return;throw error;}
+    try{await rmdir(artifactsRoot);}catch(error){if(!isDirectoryNotEmpty(error)&&!isNotFound(error))throw error;}
   }
 
   async syncActiveTasksOnce(): Promise<ActiveTaskSyncResult> {
@@ -851,7 +839,7 @@ export class TaskService {
 
   private async dispatchTaskMessageExclusive(candidate: PersistedTaskMessage, completeIdempotency: boolean): Promise<PersistedTaskMessage> {
     let message = await this.store.findTaskMessage(candidate.id) ?? candidate;
-    if (message.deletedAt || ["accepted", "successor_created", "failed"].includes(message.deliveryStatus ?? "")) {
+    if (message.deletedAt || ["accepted", "failed"].includes(message.deliveryStatus ?? "")) {
       if (completeIdempotency) await this.completeMessageIdempotency(message);
       return message;
     }
@@ -859,11 +847,11 @@ export class TaskService {
     if (!source) throw new ProductError("Task not found", 404);
     if (!isTerminalTask(source) && source.startIntentStatus !== "dispatched") return message;
     if ((message.deliveryStatus ?? "pending") === "pending") {
-      const firstWaiting = (await this.store.listTaskMessages(source.id)).find((candidate) => ["pending", "dispatching", "terminal_pending"].includes(candidate.deliveryStatus ?? "pending"));
+      const firstWaiting = (await this.store.listTaskMessages(source.id)).find((candidate) => ["pending", "dispatching"].includes(candidate.deliveryStatus ?? "pending"));
       if (firstWaiting?.id !== message.id || !await this.runtimeCanStartTaskTurn(source)) return message;
     }
     const timestamp = nowIso();
-    if (message.deliveryStatus === "dispatching" || message.deliveryStatus === "terminal_pending") {
+    if (message.deliveryStatus === "dispatching") {
       if (!message.claimToken || !message.leaseExpiresAt || message.leaseExpiresAt > timestamp) return message;
       const reconciled = await this.reconcileTaskMessageDelivery(message, source);
       if (reconciled) {
@@ -872,7 +860,7 @@ export class TaskService {
         return reconciled;
       }
       source = await this.store.findTask(source.id) ?? source;
-      if (isTerminalTask(source)) return this.createSuccessorForClaimedMessage(message, source, completeIdempotency);
+      if (isTerminalTask(source)) return message;
       const reclaimed = await this.store.reclaimTaskMessage({ id:message.id, expectedClaimToken:message.claimToken, claimToken:newId("delivery_claim"), claimedAt:timestamp, leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs()) });
       if (!reclaimed) return await this.store.findTaskMessage(message.id) ?? message;
       message = reclaimed;
@@ -883,7 +871,7 @@ export class TaskService {
       message = claimed;
       await this.persistMessageInteraction(message);
       source = await this.store.findTask(source.id) ?? source;
-      if (isTerminalTask(source)) return this.createSuccessorForClaimedMessage(message, source, completeIdempotency);
+      if (isTerminalTask(source)){const failed=await this.store.failTaskMessage({id:message.id,claimToken:message.claimToken!,safeError:"Task became terminal before delivery",updatedAt:nowIso()});return failed??message;}
     }
     const claimToken = message.claimToken!;
     const serviceKey = this.serviceKeyForTask(source);
@@ -930,80 +918,14 @@ export class TaskService {
       ?? await this.store.findTaskMessage(message.id);
   }
 
-  private async createTerminalTaskMessage(message: PersistedTaskMessage, source: PersistedAgentTask): Promise<PersistedTaskMessage> {
-    const successor = await this.prepareSuccessorCreate(source, message);
-    const projectedMessage = { ...message, targetTaskId:successor.task.id, deliveryStatus:"successor_created" as const };
-    const messageProjection = await this.prepareProductInteractionChange(messageProductSource(projectedMessage));
-    const successorProjection = await this.prepareProductInteractionChange(initialPromptProductSource(successor.task), successor.task);
-    let created:PersistedTaskMessage|null;
-    try{created=await this.store.createTerminalTaskMessage({ message, successor, ...(messageProjection?{messageInteractionChange:messageProjection.change}:{}), ...(successorProjection?{successorInteractionChange:successorProjection.change}:{}) });}
-    catch(error){await this.cleanupUnusedTaskCreate(successor);throw error;}
-    if (!created) {
-      await this.cleanupUnusedTaskCreate(successor);
-      throw activeTasksLimitError();
-    }
-    return created;
-  }
-
-  private async createSuccessorForClaimedMessage(message: PersistedTaskMessage, source: PersistedAgentTask, completeIdempotency = false): Promise<PersistedTaskMessage> {
-    const successor = await this.prepareSuccessorCreate(source, message);
-    const updatedAt=nowIso();
-    const projectedMessage={...message,targetTaskId:successor.task.id,deliveryStatus:"successor_created" as const,updatedAt};
-    const messageProjection=await this.prepareProductInteractionChange(messageProductSource(projectedMessage));
-    const successorProjection=await this.prepareProductInteractionChange(initialPromptProductSource(successor.task),successor.task);
-    let resolved:PersistedTaskMessage|null;
-    try{resolved=await this.store.resolveTerminalPendingMessage({ messageId:message.id, expectedClaimToken:message.claimToken!, successor, updatedAt, ...(messageProjection?{messageInteractionChange:messageProjection.change}:{}), ...(successorProjection?{successorInteractionChange:successorProjection.change}:{}) });}
-    catch(error){await this.cleanupUnusedTaskCreate(successor);throw error;}
-    if (!resolved) {
-      await this.cleanupUnusedTaskCreate(successor);
-      return await this.store.findTaskMessage(message.id) ?? message;
-    }
-    if (completeIdempotency) await this.completeMessageIdempotency(resolved);
-    return resolved;
-  }
-
-  private async prepareSuccessorCreate(source: PersistedAgentTask, message: PersistedTaskMessage): Promise<AtomicTaskCreateInput> {
-    const project = await this.store.findProject(source.projectId);
-    if (!project) throw new ProductError("Task project not found", 409);
-    const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(source.projectId, source.endpointId);
-    return this.prepareTaskCreate({ id:newId("task"), project, endpoint, prompt:message.content, title:normalizeTaskTitle(undefined,message.content), inputPaths:source.inputPaths??[], sourceTaskId:source.id, agentContext:source.agentContext??"", createdByUserId:message.actorId??source.createdByUserId??null });
-  }
-
-  private async cleanupUnusedTaskCreate(create:AtomicTaskCreateInput):Promise<void>{if(create.task.executionMode!=="live")return;const project=await this.store.findProject(create.task.projectId);if(project)await this.bestEffortRemoveUnpersistedTaskData(project.rootPath,create.task.id);}
-
   private async finalizeTaskLifecycle(taskId:string,reason:TaskTerminalReason,actorId:string|null):Promise<PersistedAgentTask>{
-    for(let attempt=0;attempt<3;attempt+=1){
-      const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);if(task.terminalReason){if(task.terminalReason==="failed")await this.policies.evaluateTaskFailure(task.projectId,task.endpointId);return task;}
-      const messages=await this.store.listTaskMessages(taskId);
-      const pending=messages.filter((message)=>(message.deliveryStatus??"pending")==="pending");
-      const successors:Awaited<ReturnType<TaskService["prepareSuccessorCreate"]>>[]=[];
-      for(const message of pending)successors.push(await this.prepareSuccessorCreate(task,message));
-      const timestamp=nowIso();const auditAction=taskAuditActionForReason(reason);
-      const successorInputs:TaskLifecycleSuccessor[]=[];
-      for(let index=0;index<pending.length;index+=1){
-        const message=pending[index]!;const create=successors[index]!;
-        const success=await this.prepareProductInteractionChange(messageProductSource({...message,targetTaskId:create.task.id,deliveryStatus:"successor_created",updatedAt:timestamp}));
-        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:ACTIVE_TASKS_LIMIT_MESSAGE,updatedAt:timestamp}));
-        const successorPrompt=await this.prepareProductInteractionChange(initialPromptProductSource(create.task),create.task);
-        successorInputs.push({messageId:message.id,create,...(success?{messageSuccessInteractionChange:success.change}:{}),...(failure?{messageFailureInteractionChange:failure.change}:{}),...(successorPrompt?{successorInteractionChange:successorPrompt.change}:{})});
-      }
-      const terminalPendingChanges:TaskLifecycleTerminalPendingChange[]=[];
-      for(const message of messages.filter((candidate)=>["pending","dispatching"].includes(candidate.deliveryStatus??"pending"))){
-        const projection=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"terminal_pending",updatedAt:timestamp}));
-        if(projection)terminalPendingChanges.push({messageId:message.id,interactionChange:projection.change});
-      }
-      const terminalInteractionChanges=await this.prepareTerminalInteractionChanges(task,reason,timestamp);
-      let result:FinalizeTaskLifecycleResult|null;
-      try{result=await this.store.finalizeTaskLifecycle({taskId,terminalReason:reason,updatedAt:timestamp,auditEvent:{id:newId("audit"),projectId:task.projectId,actorId,action:auditAction,status:"accepted",resourceKind:"task",resourceId:task.id,detail:{endpointId:task.endpointId},createdAt:timestamp},successors:successorInputs,terminalPendingChanges,terminalInteractionChanges});}
-      catch(error){for(const create of successors)await this.cleanupUnusedTaskCreate(create);throw error;}
-      if(!result)throw new ProductError("Task not found",404);
-      if(result.missingPendingMessageIds.length){for(const create of successors)await this.cleanupUnusedTaskCreate(create);continue;}
-      const created=new Set(result.successorTaskIds);for(const create of successors)if(!created.has(create.task.id))await this.cleanupUnusedTaskCreate(create);
-      for(const message of await this.store.listTaskMessages(task.id))if(["accepted","terminal_pending","successor_created","failed"].includes(message.deliveryStatus??""))await this.completeMessageIdempotency(message);
-      if(result.task.terminalReason==="failed")await this.policies.evaluateTaskFailure(result.task.projectId,result.task.endpointId);
-      return result.task;
-    }
-    throw new ProductError("Task message state changed during finalization",409);
+    const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);if(task.terminalReason)return task;
+    const timestamp=nowIso(),terminalInteractionChanges=await this.prepareTerminalInteractionChanges(task,reason,timestamp);
+    const result=await this.store.finalizeTaskLifecycle({taskId,terminalReason:reason,updatedAt:timestamp,auditEvent:{id:newId("audit"),projectId:task.projectId,actorId,action:taskAuditActionForReason(reason),status:"accepted",resourceKind:"task",resourceId:task.id,detail:{endpointId:task.endpointId},createdAt:timestamp},terminalInteractionChanges});
+    if(!result)throw new ProductError("Task not found",404);
+    for(const message of await this.store.listTaskMessages(task.id))if(["accepted","failed"].includes(message.deliveryStatus??""))await this.completeMessageIdempotency(message);
+    if(result.task.terminalReason==="failed")await this.policies.evaluateTaskFailure(result.task.projectId,result.task.endpointId);
+    return result.task;
   }
 
   private async prepareTerminalInteractionChanges(task:PersistedAgentTask,reason:TaskTerminalReason,updatedAt:string):Promise<TaskInteractionChangeInput[]>{
@@ -1027,7 +949,7 @@ export class TaskService {
   private async drainTaskArtifacts(task:PersistedAgentTask):Promise<void>{
     const timestamp=nowIso();const claimToken=newId("artifact_claim");const claimed=await this.store.claimTaskArtifactProjection({id:task.id,claimToken,claimedAt:timestamp,leaseExpiresAt:deadlineIso(timestamp,this.maintenanceLeaseMs())});if(!claimed)return;
     try{
-      const unresolvedMessage=(await this.store.listTaskMessages(claimed.id)).some((message)=>message.deliveryStatus==="dispatching"||message.deliveryStatus==="terminal_pending");
+      const unresolvedMessage=(await this.store.listTaskMessages(claimed.id)).some((message)=>message.deliveryStatus==="dispatching");
       if(unresolvedMessage)throw new ProductError("Task message delivery reconciliation is pending",409);
       try {
         let delivered:PersistedAgentTask|null=claimed;
@@ -1260,7 +1182,7 @@ export class TaskService {
       throw new ProductError("Task artifact not found", 404);
     }
     const stored = await this.taskArtifactStoragePath(task, artifact);
-    for (const filePath of [stored.filePath, ...(stored.legacyFilePath ? [stored.legacyFilePath] : [])]) {
+    for (const filePath of [stored.filePath]) {
       try {
         const bytes = await readRegularFileWithoutFollowingSymlink(filePath, "Task artifact");
         if (bytes.byteLength !== artifact.bytes || artifact.sha256 && createHash("sha256").update(bytes).digest("hex") !== artifact.sha256.toLowerCase()) {
@@ -1274,15 +1196,8 @@ export class TaskService {
     throw new ProductError("Task artifact file not found", 404);
   }
 
-  taskRuntimePaths(task: AgentTask): { projectMountPath: string; taskHomePath: string; botifiedDataPath: string; artifactPath: string } {
-    const projectMountPath = "/workspace/project";
-    const taskBase = path.posix.join(projectMountPath, "tasks", task.id);
-    return {
-      projectMountPath,
-      taskHomePath: path.posix.join(taskBase, "home"),
-      botifiedDataPath: path.posix.join(taskBase, "botified"),
-      artifactPath: BOTIFIED_ARTIFACT_PATH
-    };
+  taskRuntimePaths(task:Pick<AgentTask,"id">):{taskHomePath:string;botifiedDataPath:string;artifactPath:string}{
+    return{taskHomePath:BOTIFIED_TASK_HOME_PATH,botifiedDataPath:BOTIFIED_DATA_PATH,artifactPath:botifiedArtifactPath(task.id)};
   }
 
   private async requireTaskForUser(
@@ -1428,36 +1343,19 @@ export class TaskService {
       ? task.status
       : nextStatusForTimeline(task.status, timeline.events, canComplete);
     let lifecycle: TaskInteractionLifecycleMutation | undefined;
-    const terminalSuccessors: AtomicTaskCreateInput[] = [];
     if (projectedStatus !== task.status && isInteractionLifecycleStatus(task.status) && isInteractionLifecycleStatus(projectedStatus)) {
       lifecycle = { kind:"active", expectedStatus:task.status, status:projectedStatus, updatedAt:syncedAt };
     } else if (projectedStatus !== task.status && isTerminalTaskStatus(projectedStatus)) {
-      const pending = lifecycleMessages.filter((message) => (message.deliveryStatus ?? "pending") === "pending");
-      for (const message of pending) terminalSuccessors.push(await this.prepareSuccessorCreate(task, message));
-      const successorInputs:TaskLifecycleSuccessor[]=[];
-      for (let index = 0; index < pending.length; index += 1) {
-        const message=pending[index]!;const create=terminalSuccessors[index]!;
-        const success=await this.prepareProductInteractionChange(messageProductSource({...message,targetTaskId:create.task.id,deliveryStatus:"successor_created",updatedAt:syncedAt}));
-        const failure=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"failed",safeError:ACTIVE_TASKS_LIMIT_MESSAGE,updatedAt:syncedAt}));
-        const successorPrompt=await this.prepareProductInteractionChange(initialPromptProductSource(create.task),create.task);
-        successorInputs.push({messageId:message.id,create,...(success?{messageSuccessInteractionChange:success.change}:{}),...(failure?{messageFailureInteractionChange:failure.change}:{}),...(successorPrompt?{successorInteractionChange:successorPrompt.change}:{})});
-      }
-      const terminalPendingChanges:TaskLifecycleTerminalPendingChange[]=[];
-      for(const message of lifecycleMessages.filter((candidate)=>["pending","dispatching"].includes(candidate.deliveryStatus??"pending"))){
-        const projection=await this.prepareProductInteractionChange(messageProductSource({...message,deliveryStatus:"terminal_pending",updatedAt:syncedAt}));
-        if(projection)terminalPendingChanges.push({messageId:message.id,interactionChange:projection.change});
-      }
       lifecycle = {
         kind:"terminal",
         terminalReason:terminalReasonForStatus(projectedStatus),
         updatedAt:syncedAt,
         auditEvent:{ id:newId("audit"), projectId:task.projectId, actorId:null, action:taskAuditActionForReason(terminalReasonForStatus(projectedStatus)), status:"accepted", resourceKind:"task", resourceId:task.id, detail:{endpointId:task.endpointId}, createdAt:syncedAt },
-        successors:successorInputs,
-        terminalPendingChanges,
         terminalInteractionChanges:await this.prepareTerminalInteractionChanges(task,terminalReasonForStatus(projectedStatus),syncedAt)
       };
     }
     try {
+      if(artifactProjections.length)await this.reconcileTaskLibraryBytes(task);
       await this.store.persistTaskInteractionMutation({
         taskId: task.id,
         changes,
@@ -1472,15 +1370,11 @@ export class TaskService {
       });
     } catch (error) {
       for (const filePath of newlyWrittenArtifactPaths) await rm(filePath, { force:true });
-      for (const successor of terminalSuccessors) await this.cleanupUnusedTaskCreate(successor);
-      if (error instanceof Error && /file bytes limit/i.test(error.message)) {
-        await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
-        throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
-      }
+      if(newlyWrittenArtifactPaths.length)await this.reconcileTaskLibraryBytes(task).catch((reconcileError)=>console.error("Task artifact usage rollback reconciliation failed",reconcileError));
       throw error;
     }
     if (lifecycle?.kind === "terminal") {
-      for (const message of await this.store.listTaskMessages(task.id)) if (isSettledMessage(message)||message.deliveryStatus==="terminal_pending") await this.completeMessageIdempotency(message);
+      for (const message of await this.store.listTaskMessages(task.id)) if (isSettledMessage(message)) await this.completeMessageIdempotency(message);
       if (lifecycle.terminalReason === "failed") await this.policies.evaluateTaskFailure(task.projectId, task.endpointId);
     }
     await this.writeRuntimeState(task.id, { ...state, lastSyncedAt:syncedAt });
@@ -1579,7 +1473,7 @@ export class TaskService {
       return this.rebuildRuntimeStateFromBotified(task, serviceKey);
     }
     const baseUrl = stringDocumentField(document, "botifiedBaseUrl");
-    const state: BotifiedTaskRuntimeState = { baseUrl, ...(task.startDeliveryKey?{startDeliveryKey:task.startDeliveryKey}:{}), ...(task.startRequestHash?{startRequestHash:task.startRequestHash}:{}), ...(task.startClaimToken?{startClaimToken:task.startClaimToken}:{}), ...(task.startReceipt&&task.startDeliveryKey&&task.startRequestHash?{startReceipt:{...task.startReceipt,deliveryKey:task.startDeliveryKey,requestHash:task.startRequestHash}}:{}) };
+    const state:BotifiedTaskRuntimeState={baseUrl,...(task.startDeliveryKey?{startDeliveryKey:task.startDeliveryKey}:{}),...(task.startRequestHash?{startRequestHash:task.startRequestHash}:{}),...(task.startClaimToken?{startClaimToken:task.startClaimToken}:{}),...(task.startReceipt&&task.startDeliveryKey&&task.startRequestHash?{startReceipt:{...task.startReceipt,deliveryKey:task.startDeliveryKey,requestHash:task.startRequestHash}}:{})};
     const timelineCursor = safeRuntimeCursor(optionalStringDocumentField(document, "timelineCursor"));
     const lastSyncedAt = optionalStringDocumentField(document, "lastSyncedAt");
     if (timelineCursor !== undefined) {
@@ -1616,9 +1510,7 @@ export class TaskService {
   }
 
   private async writeRuntimeState(taskId: string, state: BotifiedTaskRuntimeState): Promise<void> {
-    const document: Record<string, unknown> = {
-      botifiedBaseUrl: state.baseUrl
-    };
+    const document:Record<string,unknown>={botifiedBaseUrl:state.baseUrl};
     const timelineCursor = safeRuntimeCursor(state.timelineCursor);
     if (timelineCursor !== undefined) {
       document.timelineCursor = timelineCursor;
@@ -1735,47 +1627,50 @@ export class TaskService {
     };
   }
 
-  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{ root: string; filePath: string; legacyFilePath?: string }> {
+  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{ root: string; filePath: string }> {
     const project = await this.store.findProject(task.projectId);
     if (!project) {
       throw new ProductError("Task project not found", 409);
     }
     const dataRoot = path.resolve(this.config.dataRoot);
-    const taskRoot = path.resolve(dataRoot, project.rootPath, "tasks", task.id);
-    assertPathInside(dataRoot, taskRoot, "Task artifact directory is outside the data root");
-    const legacySandboxArtifact = artifact.fileId.startsWith("sandbox:");
-    const root = path.resolve(taskRoot, legacySandboxArtifact ? "artifacts" : "published-artifacts");
+    if(!task.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
+    const library=await this.store.findFileLibrary(task.fileLibraryId);
+    if(!library||library.projectId!==task.projectId)throw new ProductError("Task File Library is unavailable",409);
+    const root=path.resolve(dataRoot,project.rootPath,library.rootSubPath,"workspace",".artifacts",task.id);
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
-    const sandboxPath = legacySandboxArtifact ? artifact.fileId.slice("sandbox:".length) : null;
+    const sandboxPath = artifact.fileId.startsWith("sandbox-published:") ? artifact.fileId.slice("sandbox-published:".length) : null;
     const filename = `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`;
     const filePath = sandboxPath ? path.resolve(root, ...sandboxPath.split("/")) : path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
-    if (legacySandboxArtifact) return { root, filePath };
-    const legacyRoot = path.resolve(taskRoot, "artifacts");
-    const legacyFilePath = path.resolve(legacyRoot, filename);
-    assertPathInside(legacyRoot, legacyFilePath, "Legacy task artifact path is outside the artifact directory");
-    return { root, filePath, legacyFilePath };
+    return { root, filePath };
   }
 
   private async projectSandboxArtifactFiles(task: PersistedAgentTask): Promise<void> {
     const project = await this.store.findProject(task.projectId);
     if (!project) throw new ProductError("Task project not found", 409);
     const dataRoot = path.resolve(this.config.dataRoot);
-    const root = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "artifacts");
+    if(!task.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
+    const library=await this.store.findFileLibrary(task.fileLibraryId);
+    if(!library||library.projectId!==task.projectId)throw new ProductError("Task File Library is unavailable",409);
+    const root=path.resolve(dataRoot,project.rootPath,library.rootSubPath,"workspace",".artifacts",task.id);
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
     const existing = await this.store.listTaskArtifacts(task.id);
     const existingFileIds = new Set(existing.map((artifact) => artifact.fileId));
-    const productStoredNames = new Set(existing.filter((artifact) => !artifact.fileId.startsWith("sandbox:")).map((artifact) => `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`));
-    const files = await listRegularArtifactFiles(root, MAX_TASK_ARTIFACT_FILES);
+    const productStoredNames = new Set(existing
+      .filter((artifact)=>!artifact.fileId.startsWith("sandbox-published:"))
+      .map((artifact)=>`${artifactStorageSegment(artifact.id,"artifact")}-${artifactStorageSegment(artifact.name,artifact.fileId)}`));
+    const files = await listRegularArtifactFiles(root);
+    await this.reconcileTaskLibraryBytes(task);
+    let discovered=0;
     for (const relativePath of files) {
-      if (productStoredNames.has(relativePath)) continue;
       const fileId = `sandbox-published:${relativePath}`;
       const filePath = path.resolve(root, ...relativePath.split("/"));
       assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
-      if (existingFileIds.has(fileId)) {
-        await rm(filePath, { force: true });
+      if(existingFileIds.has(fileId)||productStoredNames.has(relativePath)) {
         continue;
       }
+      discovered+=1;
+      if(discovered>MAX_TASK_ARTIFACT_FILES)throw new ProductError(`Task artifacts may contain at most ${MAX_TASK_ARTIFACT_FILES} files`,409);
       const bytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task input source");
       if (bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) throw new ProductError("Task artifact exceeds the maximum file size", 409);
       const artifact: PersistedTaskArtifact = {
@@ -1788,33 +1683,18 @@ export class TaskService {
         ...artifactPreview(bytes, relativePath),
         createdAt: nowIso()
       };
-      const stored = await this.taskArtifactStoragePath(task, artifact);
-      await mkdir(stored.root, { recursive: true });
-      try {
-        await writeFile(stored.filePath, bytes, { flag: "wx" });
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error;
-        const existingBytes = await readRegularFileWithoutFollowingSymlink(stored.filePath, "Task artifact");
-        if (existingBytes.byteLength !== bytes.byteLength || createHash("sha256").update(existingBytes).digest("hex") !== artifact.sha256) {
-          throw new ProductError("Stored task artifact does not match the sandbox publication", 409);
-        }
-      }
-      const persisted = await this.store.persistTaskArtifactProjection({
+      await this.store.persistTaskArtifactProjection({
         projectId: task.projectId,
         artifact,
         auditEvent: { id: `audit_artifact_${artifact.id}`, projectId: task.projectId, actorId: null, action: "artifact.project", status: "accepted", resourceKind: "artifact", resourceId: artifact.id, createdAt: nowIso() },
         updatedAt: nowIso()
       });
-      if (persisted === "limit_exceeded") {
-        await rm(stored.filePath, { force: true });
-        await rm(filePath, { force: true });
-        await this.policies.raiseAlert(task.projectId, "project_file_bytes_limit");
-        await this.policies.recordOperation(task.projectId, null, "file.quota", "rejected", artifact.id, "file_quota");
-        throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
-      }
-      await rm(filePath, { force: true });
       existingFileIds.add(fileId);
     }
+  }
+
+  private async reconcileTaskLibraryBytes(task:PersistedAgentTask):Promise<void>{
+    await this.fileLibraries.reconcileStoredProjectFileBytes(task.projectId,(bytes)=>this.policies.reconcileFileLibraryBytes(task.projectId,bytes));
   }
 
   async authorizeBotifiedChatCompletion(taskId: string, runId: string, serviceKey: string): Promise<AuthorizedBotifiedChatCompletion> {
@@ -1843,6 +1723,7 @@ export class TaskService {
     timestamp: string;
     botifiedPort: number;
     projectSubPath: string;
+    fileLibraryRootSubPath:string;
     resourceNames: SandboxRunState["resourceNames"];
   }): SandboxRunState {
     const paths = this.taskRuntimePaths(input.task);
@@ -1856,6 +1737,7 @@ export class TaskService {
       image: this.config.botifiedRunnerImage,
       pvcName: this.config.pvcName,
       projectSubPath: input.projectSubPath,
+      fileLibraryRootSubPath:input.fileLibraryRootSubPath,
       botifiedPort: input.botifiedPort,
       resourceNames: input.resourceNames,
       serviceKeySecretRef: {
@@ -1863,8 +1745,7 @@ export class TaskService {
         key: "BOTIFIED_SERVICE_KEY"
       },
       directories: {
-        taskHome: paths.taskHomePath,
-        artifacts: paths.artifactPath,
+        libraryHome: paths.taskHomePath,
         botified: paths.botifiedDataPath
       },
       resourceLimits: {
@@ -1904,7 +1785,6 @@ export class TaskService {
       endpoint: input.endpoint,
       task: {
         taskId: input.task.id,
-        projectMountPath: "/workspace/project",
         taskHomePath: BOTIFIED_TASK_HOME_PATH,
         botifiedDataPath: BOTIFIED_DATA_PATH,
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
@@ -1931,123 +1811,13 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
     assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
-    const runnerWritableDirectories = [path.resolve(taskRoot, "home"), path.resolve(taskRoot, "botified"), path.resolve(taskRoot, "artifacts")];
+    const runnerWritableDirectories = [path.resolve(taskRoot, "botified")];
     for (const directory of runnerWritableDirectories) {
       assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
     }
     for (const directory of runnerWritableDirectories) {
       await prepareRunnerWritableDirectory(directory);
     }
-    await writeFile(path.resolve(taskRoot, "home", "AGENTS.md"), TASK_WORKSPACE_GUIDANCE, { mode: 0o664 });
-  }
-
-  private async snapshotProjectInputs(projectRootPath: string, taskId: string, inputPaths: string[]): Promise<void> {
-    const dataRoot = path.resolve(this.config.dataRoot);
-    const paths = new FilePathValidationService();
-    const projectRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, projectRootPath);
-    const taskRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, path.posix.join(projectRootPath, "tasks", taskId));
-
-    const snapshotRoot = path.resolve(taskRoot, "inputs");
-    const temporaryRoot = path.resolve(taskRoot, `inputs-${taskId}.tmp`);
-    assertPathInside(dataRoot, snapshotRoot, "Task input snapshot is outside the data root");
-    assertPathInside(dataRoot, temporaryRoot, "Task input snapshot is outside the data root");
-    await withProjectFileLock(projectRoot, async () => {
-      await rm(temporaryRoot, { recursive: true, force: true });
-      await mkdir(path.join(temporaryRoot, "files"), { recursive: true });
-      try {
-        const entries: TaskInputManifestEntry[] = [];
-        for(const selectedPath of collapseSelectedInputPaths(inputPaths)){
-          const source=path.resolve(projectRoot,...selectedPath.split("/"));
-          const destination=path.resolve(temporaryRoot,...selectedPath.split("/"));
-          assertPathInside(projectRoot,source,"Task input source is outside the project");
-          assertPathInside(temporaryRoot,destination,"Task input snapshot is outside the task directory");
-          await copyProjectInputTree(source,destination,selectedPath,entries,true);
-        }
-        await writeFile(path.join(temporaryRoot, "manifest.json"), JSON.stringify({ version: 1, files: entries }) + "\n");
-        await rename(temporaryRoot, snapshotRoot);
-      } catch (error) {
-        await rm(temporaryRoot, { recursive: true, force: true });
-        throw error;
-      }
-    });
-  }
-
-  private async snapshotRetainedTaskInputs(projectId: string, projectRootPath: string, taskId: string, sourceTaskId: string): Promise<void> {
-    const sourceTask = await this.store.findTask(sourceTaskId);
-    if (!sourceTask || sourceTask.deletedAt || sourceTask.projectId !== projectId) {
-      throw new ProductError("Source task not found", 404);
-    }
-    const entries = await this.readTaskInputManifest(sourceTask, true);
-    const dataRoot = path.resolve(this.config.dataRoot);
-    const paths = new FilePathValidationService();
-    const projectRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, projectRootPath);
-    const sourceRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, path.posix.join(projectRootPath, "tasks", sourceTaskId, "inputs"));
-    const taskRoot = await paths.resolveSafeProjectPathNoSymlinks(dataRoot, path.posix.join(projectRootPath, "tasks", taskId));
-    const snapshotRoot = path.resolve(taskRoot, "inputs");
-    const temporaryRoot = path.resolve(taskRoot, `inputs-${taskId}.tmp`);
-    assertPathInside(dataRoot, sourceRoot, "Source task input snapshot is outside the data root");
-    assertPathInside(dataRoot, snapshotRoot, "Task input snapshot is outside the data root");
-    assertPathInside(dataRoot, temporaryRoot, "Task input snapshot is outside the data root");
-
-    await withProjectFileLock(projectRoot, async () => {
-      await rm(temporaryRoot, { recursive: true, force: true });
-      await mkdir(path.join(temporaryRoot, "files"), { recursive: true });
-      try {
-        for (const entry of entries) {
-          const source = path.resolve(sourceRoot, ...entry.path.split("/"));
-          const destination = path.resolve(temporaryRoot, ...entry.path.split("/"));
-          assertPathInside(sourceRoot, source, "Source task input is outside its snapshot");
-          assertPathInside(temporaryRoot, destination, "Task input snapshot is outside the task directory");
-          let bytes: Buffer;
-          try {
-            bytes = await readRegularFileWithoutFollowingSymlink(source, "Source task input");
-          } catch (error) {
-            if (isNotFound(error)) throw new ProductError("Source task input snapshot is unavailable", 409);
-            throw error;
-          }
-          const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-          if (bytes.byteLength !== entry.size || digest !== entry.digest) {
-            throw new ProductError("Source task input snapshot is invalid", 409);
-          }
-          await mkdir(path.dirname(destination), { recursive: true });
-          await writeFile(destination, bytes);
-        }
-        await writeFile(path.join(temporaryRoot, "manifest.json"), JSON.stringify({ version: 1, files: entries }) + "\n");
-        await rename(temporaryRoot, snapshotRoot);
-      } catch (error) {
-        await rm(temporaryRoot, { recursive: true, force: true });
-        throw error;
-      }
-    });
-  }
-
-  private async readTaskInputManifest(task: PersistedAgentTask, required = false): Promise<TaskInputManifestEntry[]> {
-    const project = await this.store.findProject(task.projectId);
-    if (!project) throw new ProductError("Task project not found", 409);
-    const dataRoot = path.resolve(this.config.dataRoot);
-    const manifestPath = path.resolve(dataRoot, project.rootPath, "tasks", task.id, "inputs", "manifest.json");
-    assertPathInside(dataRoot, manifestPath, "Task input manifest is outside the data root");
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse((await readRegularFileWithoutFollowingSymlink(manifestPath,"Task input manifest")).toString("utf8"));
-    } catch (error) {
-      if (isNotFound(error)) {
-        if (required) throw new ProductError("Source task input snapshot is unavailable", 409);
-        return [];
-      }
-      throw new ProductError("Task input manifest is unavailable", 500);
-    }
-    if (!isUnknownRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.files)) {
-      throw new ProductError("Task input manifest is invalid", 500);
-    }
-    return parsed.files.map((value) => {
-      if (!isUnknownRecord(value) || typeof value.path !== "string" || typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size < 0 || typeof value.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.digest)) {
-        throw new ProductError("Task input manifest is invalid", 500);
-      }
-      const normalized = normalizeTaskInputPaths([value.path])[0];
-      if (normalized !== value.path) throw new ProductError("Task input manifest is invalid", 500);
-      return { path: value.path, size: value.size, digest: value.digest };
-    });
   }
 
   private async removeUnpersistedTaskData(projectRootPath: string, taskId: string): Promise<void> {
@@ -2266,10 +2036,9 @@ export class TaskService {
     return {
       messageId: message.id,
       disposition,
-      targetTaskId: message.targetTaskId ?? message.taskId,
       duplicate,
       queuedMessage: isQueuedMessage(message) ? queuedMessage(message) : null,
-      interaction: disposition === "queued_for_active_run" ? null : presentedInteraction?.kind === "user_message" || presentedInteraction?.kind === "execution_boundary" ? presentedInteraction : null,
+      interaction: disposition === "queued_for_active_run" ? null : presentedInteraction?.kind === "user_message" ? presentedInteraction : null,
       capabilities: userId ? await this.taskCapabilities(userId, task, undefined, queued) : defaultTaskCapabilities(task),
       ...(disposition === "failed" ? { safeError:safeMessageFailure(message.safeError) } : {})
     };
@@ -2340,7 +2109,7 @@ export class TaskService {
     ]);
     const canWrite = projectAccess.canWrite && projectAccess.writableLifecycle;
     const retained = !task.deletedAt && !task.archivedAt;
-    const canInteract = canWrite && retained && executionEligible;
+    const canInteract = canWrite && retained && executionEligible && !isTerminalTask(task);
     const runState = knownRunState ?? (await this.taskRuntimePresentation(task)).runState;
     return {
       sendMessage: canInteract,
@@ -2349,8 +2118,6 @@ export class TaskService {
       cancelTask: canWrite && retained && !task.terminalReason && isActiveTaskStatus(task.status),
       openTerminal: canInteract && task.executionMode === "live" && !task.terminalReason && isActiveTaskStatus(task.status) && !this.occupiedTerminalTaskIds.has(task.id),
       editTask: canWrite && !task.deletedAt,
-      retryTask: canWrite && !task.deletedAt && Boolean(task.terminalReason),
-      duplicateTask: canWrite && !task.deletedAt,
       archiveTask: canWrite && !task.deletedAt && !task.archivedAt && Boolean(task.terminalReason),
       deleteTask: canWrite && Boolean(task.terminalReason) && (task.executionMode !== "live" || task.cleanupStatus === "completed")
     };
@@ -2367,7 +2134,7 @@ export class TaskService {
   }
 
   private async runtimeCanStartTaskTurn(task: PersistedAgentTask): Promise<boolean> {
-    if (isTerminalTask(task)) return true;
+    if (isTerminalTask(task)) return false;
     try {
       const serviceKey = this.serviceKeyForTask(task);
       const runtime = await this.readRuntimeState(task, serviceKey);
@@ -2435,50 +2202,6 @@ export class TaskService {
   }
 }
 
-async function copyProjectInputTree(
-  source: string,
-  destination: string,
-  relativePath: string,
-  manifest: TaskInputManifestEntry[],
-  required = false
-): Promise<void> {
-  let sourceStat;
-  try {
-    sourceStat = await lstat(source);
-  } catch (error) {
-    if (isNotFound(error)) {
-      if(required)throw new ProductError(`Task input path not found: ${relativePath}`,404);
-      return;
-    }
-    throw error;
-  }
-  if (sourceStat.isSymbolicLink()) {
-    throw new ProductError("Task input source uses a symlink");
-  }
-  if (sourceStat.isDirectory()) {
-    const entries = await readdir(source, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      const childRelativePath = path.posix.join(relativePath, entry.name);
-      const childSource = path.join(source, entry.name);
-      const childDestination = path.join(destination, entry.name);
-      await copyProjectInputTree(childSource, childDestination, childRelativePath, manifest);
-    }
-    return;
-  }
-  if (!sourceStat.isFile()) {
-    throw new ProductError("Task input source must contain regular files and directories");
-  }
-
-  const bytes = await readRegularFileWithoutFollowingSymlink(source,"Task input source");
-  await mkdir(path.dirname(destination), { recursive: true });
-  await writeFile(destination, bytes);
-  manifest.push({
-    path: relativePath,
-    size: bytes.byteLength,
-    digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`
-  });
-}
-
 function normalizeTaskTitle(value: string | undefined, prompt: string): string {
   const title = value === undefined ? prompt.replace(/[\r\n]+/g, " ").trim().slice(0, 160) : value.trim();
   if (!title) throw new ProductError("task.title must not be empty", 400);
@@ -2492,12 +2215,11 @@ function publicTask(task: PersistedAgentTask): AgentTask {
     workspaceId:task.workspaceId,
     projectId:task.projectId,
     endpointId:task.endpointId,
+    fileLibraryId:task.fileLibraryId!,
     ...(task.title !== undefined ? { title:task.title } : {}),
     prompt:task.prompt,
-    ...(task.inputPaths !== undefined ? { inputPaths:[...task.inputPaths] } : {}),
     status:task.status,
     runId:task.runId,
-    ...(task.sourceTaskId !== undefined ? { sourceTaskId:task.sourceTaskId } : {}),
     executionMode:task.executionMode,
     sandbox:{ namespace:task.sandbox.namespace },
     ...(task.activeReservation !== undefined ? { activeReservation:task.activeReservation } : {}),
@@ -2528,24 +2250,6 @@ function publicArtifact(artifact: PersistedTaskArtifact): AgentTaskArtifact {
     ...(artifact.previewText !== undefined ? { previewText:artifact.previewText } : {}),
     createdAt:artifact.createdAt
   };
-}
-
-function normalizeTaskInputPaths(paths: string[] | undefined): string[] {
-  if (paths === undefined) return [];
-  if (!Array.isArray(paths) || paths.some((value) => typeof value !== "string")) throw new ProductError("task.inputPaths must be an array of file paths", 400);
-  const normalized = paths.map((value) => value.replace(/\\/g, "/").replace(/^\/+/, "").trim()).filter(Boolean);
-  for (const value of normalized) {
-    if ((value !== "files" && !value.startsWith("files/")) || value.split("/").some((part) => part === "" || part === "." || part === "..")) {
-      throw new ProductError("task.inputPaths must stay under files/", 400);
-    }
-  }
-  return [...new Set(normalized)].sort();
-}
-
-function collapseSelectedInputPaths(paths:string[]):string[]{
-  const collapsed:string[]=[];
-  for(const selected of paths){if(collapsed.some((parent)=>selected===parent||selected.startsWith(`${parent}/`)))continue;collapsed.push(selected);}
-  return collapsed;
 }
 
 function normalizeIdempotencyKey(value:string|undefined):string{
@@ -2627,20 +2331,6 @@ function timelinePosition(event: BotifiedTimelineEvent): number {
 function messageProductSource(message: PersistedTaskMessage): ProductTaskInteractionSource {
   const updatedAt = message.updatedAt ?? message.createdAt;
   const status = message.deliveryStatus ?? "pending";
-  if (status === "terminal_pending" || status === "successor_created") {
-    return {
-      sourceKind: "product",
-      type: "successor_created",
-      taskId: message.taskId,
-      sourceId: `message:${message.id}:boundary`,
-      sourceRevision: productSourceRevision(updatedAt, status === "successor_created" ? 2 : 1),
-      occurredAt: updatedAt,
-      position: productPosition(message.createdAt, `${message.id}:boundary`),
-      boundaryId: message.id,
-      status: status === "successor_created" ? "successor_created" : "successor_pending",
-      targetTaskId: message.targetTaskId ?? null
-    };
-  }
   const projectedStatus = status === "accepted" ? "accepted"
     : status === "failed" ? "failed"
       : status === "dispatching" && message.safeError ? "retrying"
@@ -2715,7 +2405,7 @@ function activeTurnIdentity(state: BotifiedRuntimeStateResult, task: PersistedAg
 
 function queuedMessage(message: PersistedTaskMessage): TaskQueuedMessage {
   const status = message.deliveryStatus ?? "pending";
-  const deliveryStatus: TaskQueuedMessage["deliveryStatus"] = status === "accepted" || status === "successor_created" ? "failed" : status;
+  const deliveryStatus: TaskQueuedMessage["deliveryStatus"] = status === "accepted" ? "failed" : status;
   return {
     id: message.id,
     content: message.content,
@@ -2728,17 +2418,15 @@ function queuedMessage(message: PersistedTaskMessage): TaskQueuedMessage {
 }
 
 function isQueuedMessage(message: PersistedTaskMessage): boolean {
-  return ["pending", "dispatching", "terminal_pending", "failed"].includes(message.deliveryStatus ?? "pending") && !message.deletedAt;
+  return ["pending", "dispatching", "failed"].includes(message.deliveryStatus ?? "pending") && !message.deletedAt;
 }
 
 function isSettledMessage(message: PersistedTaskMessage): boolean {
-  return ["accepted", "successor_created", "failed"].includes(message.deliveryStatus ?? "");
+  return ["accepted", "failed"].includes(message.deliveryStatus ?? "");
 }
 
 function messageDisposition(message: PersistedTaskMessage, interaction: TaskInteractionItem | null): TaskMessageReceipt["disposition"] {
   switch (message.deliveryStatus) {
-    case "successor_created": return "successor_created";
-    case "terminal_pending": return "successor_pending";
     case "failed": return "failed";
     case "accepted": return interaction?.kind === "user_message" && interaction.status === "queued" ? "queued_for_active_run" : "accepted_by_active_run";
     default: return "queued_for_active_run";
@@ -2780,7 +2468,7 @@ function stableTaskInteractionId(taskId: string, sourceId: string): string {
 
 function defaultTaskCapabilities(task: PersistedAgentTask): TaskCapabilities {
   const active = !task.terminalReason && isActiveTaskStatus(task.status);
-  return { sendMessage:!task.deletedAt, editQueuedMessage:false, abortTurn:false, cancelTask:active, openTerminal:active&&task.executionMode==="live", editTask:!task.deletedAt, retryTask:!task.deletedAt&&Boolean(task.terminalReason), duplicateTask:!task.deletedAt, archiveTask:!task.deletedAt&&!task.archivedAt&&Boolean(task.terminalReason), deleteTask:Boolean(task.terminalReason)&&(task.executionMode!=="live"||task.cleanupStatus==="completed") };
+  return { sendMessage:!task.deletedAt&&!task.terminalReason, editQueuedMessage:false, abortTurn:false, cancelTask:active, openTerminal:active&&task.executionMode==="live", editTask:!task.deletedAt, archiveTask:!task.deletedAt&&!task.archivedAt&&Boolean(task.terminalReason), deleteTask:Boolean(task.terminalReason)&&(task.executionMode!=="live"||task.cleanupStatus==="completed") };
 }
 
 function normalizeTaskStatuses(statuses: AgentTaskStatus[] | undefined): AgentTaskStatus[] {
@@ -2821,7 +2509,7 @@ function stableSandboxArtifactId(taskId: string, fileId: string): string {
   return `art_${createHash("sha256").update(taskId).update("\0").update(fileId).digest("base64url").slice(0, 24)}`;
 }
 
-async function listRegularArtifactFiles(root: string, limit: number): Promise<string[]> {
+async function listRegularArtifactFiles(root:string):Promise<string[]> {
   const files: string[] = [];
   const pending = [""];
   while (pending.length > 0) {
@@ -2841,7 +2529,6 @@ async function listRegularArtifactFiles(root: string, limit: number): Promise<st
         pending.push(relativePath);
       } else if (entry.isFile()) {
         files.push(relativePath);
-        if (files.length > limit) throw new ProductError(`Task artifacts may contain at most ${limit} files`, 409);
       }
     }
   }
@@ -2915,8 +2602,11 @@ function materializeLiveCreateActions(
 }
 
 function taskAgentInstructions(task: PersistedAgentTask): string {
-  return task.agentContext ? `${TASK_WORKSPACE_GUIDANCE}\n${task.agentContext}` : TASK_WORKSPACE_GUIDANCE;
+  const guidance=`# AgentSmith Task Workspace\n\nWork in \`${BOTIFIED_TASK_HOME_PATH}\`. Save published files under \`${botifiedArtifactPath(task.id)}\`.\n`;
+  return task.agentContext?`${guidance}\n${task.agentContext}`:guidance;
 }
+
+function botifiedArtifactPath(taskId:string):string{return `${BOTIFIED_TASK_HOME_PATH}/.artifacts/${taskId}`;}
 
 function constantTimeEqual(value: string, expected: string): boolean {
   const actualBytes = Buffer.from(value);
@@ -3021,7 +2711,7 @@ function nextStatusForTimeline(current: AgentTaskStatus, events: BotifiedTimelin
 }
 
 function isPendingTaskMessage(message: PersistedTaskMessage): boolean {
-  return !message.deletedAt && ["pending", "dispatching", "terminal_pending"].includes(message.deliveryStatus ?? "pending");
+  return !message.deletedAt && ["pending", "dispatching"].includes(message.deliveryStatus ?? "pending");
 }
 
 function isBotifiedSessionQuiescent(state: BotifiedRuntimeStateResult, timelineCursor: string | null): boolean {
@@ -3104,6 +2794,7 @@ function optionalStringDocumentField(document: Record<string, unknown>, field: s
   const value = document[field];
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
+
 
 function safeRuntimeCursor(cursor: string | null | undefined): string | undefined {
   if (cursor === null || cursor === undefined || isSecretLikeText(cursor)) {
@@ -3195,6 +2886,7 @@ function assertPathInside(root: string, candidate: string, message: string): voi
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
+function isDirectoryNotEmpty(error:unknown):boolean{return error instanceof Error&&"code" in error&&(error as NodeJS.ErrnoException).code==="ENOTEMPTY";}
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";

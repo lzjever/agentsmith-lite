@@ -37,8 +37,7 @@ export interface SandboxServiceKeySecretRef {
 }
 
 export interface SandboxRunDirectories {
-  taskHome: string;
-  artifacts: string;
+  libraryHome: string;
   botified: string;
 }
 
@@ -61,6 +60,7 @@ export interface SandboxRunState extends SandboxIdentity {
   image: string;
   pvcName: string;
   projectSubPath: string;
+  fileLibraryRootSubPath:string;
   botifiedPort: number;
   resourceNames: SandboxRunResourceNames;
   serviceKeySecretRef: SandboxServiceKeySecretRef;
@@ -357,6 +357,7 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     image: run.image,
     pvcName: run.pvcName,
     projectSubPath: run.projectSubPath,
+    fileLibraryRootSubPath:run.fileLibraryRootSubPath,
     botifiedPort: run.botifiedPort,
     serviceKeySecretName: run.resourceNames.secret,
     serviceKeySecretKey: run.serviceKeySecretRef.key,

@@ -47,6 +47,7 @@ describe("api product workflow", () => {
 
     const workspace = await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf);
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
+    const library=await postJson(`/api/v1/projects/${project.id}/file-libraries`,{name:"Task files"},cookie,csrf);
     const emptyOverview = await requestJson("GET", `/api/v1/projects/${project.id}/overview`, undefined, cookie);
     assert.deepEqual(emptyOverview.recommendedActions, ["configure_endpoint", "add_collaborator"]);
     const pinnedProject = await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: true }, cookie, csrf);
@@ -130,64 +131,60 @@ describe("api product workflow", () => {
     const thread = await postJson(`/api/v1/projects/${project.id}/chat/threads`, { endpointId: endpoint.id }, cookie, csrf);
     const chat = await postChatStream(`/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, { content: "hello", afterMessageId: null }, cookie, csrf);
     const chatHistory = await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, undefined, cookie);
-    const filePath = "files/docs/readme.md";
+    const filePath = "docs/readme.md";
     const fileContent = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
-    const uploadedFile = await requestRawFile(project.id, filePath, fileContent, cookie, csrf);
+    const uploadedFile = await requestRawFile(project.id,library.id,filePath,fileContent,cookie,csrf);
     await assertApiError(
-      await requestRawFileResponse(project.id, filePath, Buffer.from("unconfirmed replacement"), cookie, csrf),
+      await requestRawFileResponse(project.id,library.id,filePath,Buffer.from("unconfirmed replacement"),cookie,csrf),
       409,
       "Project file already exists"
     );
-    await requestRawFile(project.id, filePath, fileContent, cookie, csrf, "application/octet-stream", true);
-    const listedRootFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=files`, undefined, cookie);
-    const listedNestedFiles = await requestJson("GET", `/api/v1/projects/${project.id}/files?path=${encodeURIComponent("files/docs")}`, undefined, cookie);
+    await requestRawFile(project.id,library.id,filePath,fileContent,cookie,csrf,"application/octet-stream",true);
+    const listedRootFiles = await requestJson("GET", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files`, undefined, cookie);
+    const listedNestedFiles = await requestJson("GET", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files?path=docs`, undefined, cookie);
     const downloadedFile = await request(
       "GET",
-      `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(filePath)}`,
+      `/api/v1/projects/${project.id}/file-libraries/${library.id}/files/download?path=${encodeURIComponent(filePath)}`,
       undefined,
       cookie
     );
-    const unicodeFilePath = "files/docs/报告.md";
+    const unicodeFilePath = "docs/报告.md";
     const unicodeFileContent = Uint8Array.from([0x75, 0x6e, 0x69, 0x63, 0x6f, 0x64, 0x65]);
-    await requestRawFile(project.id, unicodeFilePath, unicodeFileContent, cookie, csrf);
+    await requestRawFile(project.id,library.id,unicodeFilePath,unicodeFileContent,cookie,csrf);
     const downloadedUnicodeFile = await request(
       "GET",
-      `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
+      `/api/v1/projects/${project.id}/file-libraries/${library.id}/files/download?path=${encodeURIComponent(unicodeFilePath)}`,
       undefined,
       cookie
     );
     await assertApiError(
-      await request("GET", `/api/v1/projects/${project.id}/files/download`, undefined, cookie),
+      await request("GET", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files/download`, undefined, cookie),
       400,
       "Missing path query parameter"
     );
     await assertApiError(
       await request(
         "GET",
-        `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent("files/docs")}`,
+        `/api/v1/projects/${project.id}/file-libraries/${library.id}/files/download?path=docs`,
         undefined,
         cookie
       ),
       400,
       "Path is a directory"
     );
+    assert.equal((await requestJson("GET", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files`, undefined, cookie)).entries.length,1);
     await assertApiError(
-      await request("DELETE", `/api/v1/projects/${project.id}/files`, { path: "files" }, cookie, csrf),
-      400,
-      "Cannot delete the files root"
-    );
-    assert.equal((await requestJson("GET", `/api/v1/projects/${project.id}/files?path=files`, undefined, cookie)).entries.length, 1);
-    await assertApiError(
-      await request("DELETE", `/api/v1/projects/${project.id}/files`, { path: "files/missing.txt" }, cookie, csrf),
+      await request("DELETE", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files`, { path: "missing.txt" }, cookie, csrf),
       404,
       "File not found"
     );
-    const deletedFile = await requestJson("DELETE", `/api/v1/projects/${project.id}/files`, {
+    const deletedFile = await requestJson("DELETE", `/api/v1/projects/${project.id}/file-libraries/${library.id}/files`, {
       path: filePath
     }, cookie, csrf);
     const task = await postJson(`/api/v1/projects/${project.id}/tasks`, {
       prompt: "write a file",
-      endpointId: endpoint.id
+      endpointId: endpoint.id,
+      fileLibrary:{mode:"use_existing",id:library.id}
     }, cookie, csrf);
     const dashboard = await requestJson("GET", "/api/v1/dashboard", undefined, cookie);
 
@@ -210,7 +207,7 @@ describe("api product workflow", () => {
     assert.deepEqual(uploadedFileDetails, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
     assert.equal(Number.isNaN(Date.parse(uploadedAt)), false);
     assert.equal(listedRootFiles.entries.some((entry: { name: string; path: string; type: string }) =>
-      entry.path === "files/docs" && entry.name === "docs" && entry.type === "directory"
+      entry.path === "docs" && entry.name === "docs" && entry.type === "directory"
     ), true);
     assert.equal(listedNestedFiles.entries.some((entry: { name: string; path: string; type: string }) =>
       entry.name === "readme.md" && entry.path === filePath && entry.type === "file"
@@ -241,7 +238,7 @@ describe("api product workflow", () => {
       .find((item: { id: string }) => item.id === thread.id);
     assert.equal(threadAfterBlockedDelete?.endpointId, endpoint.id);
 
-    const traversal = await fetch(baseUrl + `/api/v1/projects/${project.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
+    const traversal = await fetch(baseUrl + `/api/v1/projects/${project.id}/file-libraries/${library.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
       method: "PUT",
       headers: {
         "content-type": "application/octet-stream",
@@ -252,7 +249,7 @@ describe("api product workflow", () => {
     });
     assert.equal(traversal.status, 400);
 
-    const unauthenticatedUpload = await fetch(baseUrl + `/api/v1/projects/${project.id}/files?path=files/forbidden.bin`, {
+    const unauthenticatedUpload = await fetch(baseUrl + `/api/v1/projects/${project.id}/file-libraries/${library.id}/files?path=forbidden.bin`, {
       method: "PUT",
       headers: { "content-type": "application/octet-stream" },
       body: Buffer.from([0x01])
@@ -260,7 +257,7 @@ describe("api product workflow", () => {
     assert.equal(unauthenticatedUpload.status, 401);
 
     const tooLargeUpload = await rawRequest(
-      `/api/v1/projects/${project.id}/files?path=files/too-large.bin`,
+      `/api/v1/projects/${project.id}/file-libraries/${library.id}/files?path=too-large.bin`,
       cookie,
       csrf,
       { "content-length": String(MAX_PROJECT_FILE_BYTES + 1) }
@@ -286,19 +283,20 @@ describe("api product workflow", () => {
     const csrf = (await login.json()).csrfToken;
     const workspace = await postJson("/api/v1/workspaces", { name: "Upload MIME types" }, cookie, csrf);
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Browser files" }, cookie, csrf);
+    const library=await postJson(`/api/v1/projects/${project.id}/file-libraries`,{name:"Browser files"},cookie,csrf);
     const uploads = [
-      { path: "files/note.txt", contentType: "text/plain;charset=UTF-8", bytes: Uint8Array.from([0x7b, 0x22, 0x6e, 0x6f, 0x74, 0x65, 0x22, 0x7d]) },
-      { path: "files/image.png", contentType: "image/png", bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
-      { path: "files/data.bin", contentType: "application/octet-stream", bytes: Uint8Array.from([0x00, 0xff, 0x41]) }
+      { path: "note.txt", contentType: "text/plain;charset=UTF-8", bytes: Uint8Array.from([0x7b, 0x22, 0x6e, 0x6f, 0x74, 0x65, 0x22, 0x7d]) },
+      { path: "image.png", contentType: "image/png", bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+      { path: "data.bin", contentType: "application/octet-stream", bytes: Uint8Array.from([0x00, 0xff, 0x41]) }
     ];
 
     for (const upload of uploads) {
-      const { updatedAt, ...written } = await requestRawFile(project.id, upload.path, upload.bytes, cookie, csrf, upload.contentType);
+      const { updatedAt, ...written } = await requestRawFile(project.id,library.id,upload.path,upload.bytes,cookie,csrf,upload.contentType);
       assert.deepEqual(written, { path: upload.path, bytes: upload.bytes.byteLength, mediaType: upload.contentType.split(";", 1)[0] });
       assert.equal(Number.isNaN(Date.parse(updatedAt)), false);
       const downloaded = await request(
         "GET",
-        `/api/v1/projects/${project.id}/files/download?path=${encodeURIComponent(upload.path)}`,
+        `/api/v1/projects/${project.id}/file-libraries/${library.id}/files/download?path=${encodeURIComponent(upload.path)}`,
         undefined,
         cookie
       );
@@ -347,10 +345,10 @@ describe("api product workflow", () => {
     if (/\/endpoints\/[^/]+(?:\/health)?$/.test(pathname) && ["POST", "PATCH", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
-    if (/\/projects\/[^/]+\/files$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
+    if (/\/projects\/[^/]+\/file-libraries\/[^/]+\/files$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
-    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
+    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|file-libraries)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
       headers["idempotency-key"] = crypto.randomUUID();
     }
     const requestInit: RequestInit = { method, headers };
@@ -362,6 +360,7 @@ describe("api product workflow", () => {
 
   async function requestRawFile(
     projectId: string,
+    libraryId:string,
     filePath: string,
     bytes: Uint8Array,
     cookie: string,
@@ -369,16 +368,16 @@ describe("api product workflow", () => {
     contentType = "application/octet-stream",
     overwrite = false
   ) {
-    const response = await requestRawFileResponse(projectId, filePath, bytes, cookie, csrf, contentType, overwrite);
+    const response = await requestRawFileResponse(projectId,libraryId,filePath,bytes,cookie,csrf,contentType,overwrite);
     if (response.status !== 200) {
       assert.fail(await response.text());
     }
     return response.json();
   }
 
-  async function requestRawFileResponse(projectId: string, filePath: string, bytes: Uint8Array, cookie: string, csrf: string, contentType = "application/octet-stream", overwrite = false) {
+  async function requestRawFileResponse(projectId:string,libraryId:string,filePath:string,bytes:Uint8Array,cookie:string,csrf:string,contentType="application/octet-stream",overwrite=false) {
     const query = new URLSearchParams({ path: filePath, ...(overwrite ? { overwrite: "true" } : {}) });
-    return fetch(baseUrl + `/api/v1/projects/${projectId}/files?${query}`, {
+    return fetch(baseUrl + `/api/v1/projects/${projectId}/file-libraries/${libraryId}/files?${query}`, {
       method: "PUT",
       headers: {
         "content-type": contentType,

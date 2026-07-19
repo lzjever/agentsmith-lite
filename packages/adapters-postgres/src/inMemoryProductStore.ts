@@ -56,8 +56,6 @@ import type {
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
-  CreateTerminalTaskMessageInput,
-  ResolveTerminalPendingMessageInput,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
@@ -305,8 +303,13 @@ export class InMemoryProductStore implements ProductStore {
     if(!current||current.projectId!==projectId||current.updatedAt!==expectedUpdatedAt||[...this.fileLibraries.values()].some((item)=>item.id!==id&&item.projectId===projectId&&item.name.trim().toLowerCase()===name.trim().toLowerCase()))return null;
     const updated={...current,name,updatedAt};this.fileLibraries.set(id,clone(updated));return clone(updated);
   }
-  async deleteFileLibrary(projectId:string,id:string){const current=this.fileLibraries.get(id);return current?.projectId===projectId&&this.fileLibraries.delete(id)}
-  async findTaskBoundToFileLibrary(_fileLibraryId:string){return{kind:"unbound" as const}}
+  async deleteFileLibraryIfUnbound(projectId:string,id:string){
+    const current=this.fileLibraries.get(id);
+    if(!current||current.projectId!==projectId)return"not_found" as const;
+    if([...this.tasks.values()].some((task)=>!task.deletedAt&&task.fileLibraryId===id))return"bound" as const;
+    this.fileLibraries.delete(id);return"deleted" as const;
+  }
+  async findTaskBoundToFileLibrary(fileLibraryId:string){const task=[...this.tasks.values()].find((candidate)=>!candidate.deletedAt&&candidate.fileLibraryId===fileLibraryId);return task?{kind:"bound" as const,task:{id:task.id,title:task.title??null}}:{kind:"unbound" as const}}
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string){const current=this.projects.get(projectId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
   async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
@@ -407,9 +410,6 @@ export class InMemoryProductStore implements ProductStore {
   }
   async findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null> { return clone(this.usage.get(projectId) ?? null); }
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> { this.usage.set(usage.projectId, clone(usage)); return clone(usage); }
-  async measureProjectArtifactBytes(projectId: string): Promise<number> {
-    return this.artifacts.reduce((total, artifact) => total + (this.tasks.get(artifact.taskId)?.projectId === projectId ? artifact.bytes : 0), 0);
-  }
   async setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null> {
     const usage = this.usage.get(projectId);
     if (!usage) return null;
@@ -637,53 +637,29 @@ export class InMemoryProductStore implements ProductStore {
   async editProjectChatMessageAndTruncate(threadId:string,messageId:string,expectedVersion:number,content:string,updatedAt:string):Promise<ProjectChatMessage|null>{if(this.chatMessages.some((message)=>message.threadId===threadId&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return null;const index=this.chatMessages.findIndex((message)=>message.id===messageId&&message.threadId===threadId);if(index<0||this.chatMessages[index]!.version!==expectedVersion)return null;const target=this.chatMessages[index]!;const updated={...target,content,version:target.version+1,updatedAt};for(let cursor=this.chatMessages.length-1;cursor>=0;cursor--){const message=this.chatMessages[cursor]!;if(message.threadId===threadId&&message.sequence>target.sequence)this.chatMessages.splice(cursor,1);}this.chatMessages[index]=clone(updated);return clone(updated);}
   async deleteProjectChatMessageAndFollowing(threadId:string,messageId:string,expectedVersion:number):Promise<boolean>{if(this.chatMessages.some((message)=>message.threadId===threadId&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return false;const target=this.chatMessages.find((message)=>message.id===messageId&&message.threadId===threadId);if(!target||target.version!==expectedVersion)return false;for(let index=this.chatMessages.length-1;index>=0;index--){const message=this.chatMessages[index]!;if(message.threadId===threadId&&message.sequence>=target.sequence)this.chatMessages.splice(index,1);}return true;}
 
-  async createTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
-    this.tasks.set(task.id, clone(task));
-    this.initializeTaskInteractionSync(task.id);
-    return clone(task);
-  }
-
-  async createTaskAtomically(input: AtomicTaskCreateInput): Promise<PersistedAgentTask | null> {
+  async createTaskAtomically(input: AtomicTaskCreateInput) {
     if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
-    if (input.task.sourceTaskId) {
-      const source = this.tasks.get(input.task.sourceTaskId);
-      if (!source || source.deletedAt || source.projectId !== input.task.projectId) return null;
-    }
+    let library=input.task.fileLibraryId?this.fileLibraries.get(input.task.fileLibraryId):undefined;
+    if(input.newFileLibrary){if(library||await this.createFileLibrary(input.newFileLibrary)===null)return{kind:"library_name_conflict" as const};library=input.newFileLibrary;}
+    if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_not_found" as const};}
+    if([...this.tasks.values()].some((task)=>!task.deletedAt&&task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
     const task = normalizeStoredTask(input.task, input.reserveActive);
-    if (input.reserveActive && !this.reserveActiveTask(task.projectId, task.updatedAt)) return null;
+    if (input.reserveActive && !this.reserveActiveTask(task.projectId, task.updatedAt)) { if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id); return{kind:"capacity_rejected" as const}; }
     this.tasks.set(task.id, clone(task));
     this.initializeTaskInteractionSync(task.id);
     try {
       if (input.runtimeState) await this.jsonDocs.put("sandbox_runtime_state", task.id, input.runtimeState);
       if (input.sandboxRun) await this.sandboxRuns.put(input.sandboxRun);
-      return clone(task);
+      return{kind:"created" as const,task:clone(task)};
     } catch (error) {
       this.tasks.delete(task.id);
+      if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);
       this.interactionSync.delete(task.id);
       if (input.reserveActive) this.releaseActiveTask(task.projectId, task.updatedAt);
       await this.jsonDocs.delete("sandbox_runtime_state", task.id);
       if (input.sandboxRun) await this.jsonDocs.delete("sandbox_run_state", input.sandboxRun.runId);
       throw error;
     }
-  }
-
-  async createTaskWithActiveReservation(task: PersistedAgentTask): Promise<PersistedAgentTask | null> {
-    return this.createTaskAtomically({ task, reserveActive: true });
-  }
-
-  async createTaskWithActiveReservationAndMessage(task: PersistedAgentTask, message: PersistedTaskMessage): Promise<PersistedAgentTask | null> {
-    if (this.tasks.has(task.id) || this.messages.some((value) => value.id === message.id)) {
-      throw new Error("Task or message already exists");
-    }
-    const policy = this.policies.get(task.projectId);
-    const usage = this.usage.get(task.projectId);
-    if (this.projects.get(task.projectId)?.lifecycleStatus === "deleting" || !policy || !usage || (policy.activeTasksLimit !== null && usage.activeTasks + 1 > policy.activeTasksLimit)) return null;
-    const storedTask = normalizeStoredTask(task, true);
-    this.tasks.set(task.id, clone(storedTask));
-    this.initializeTaskInteractionSync(task.id);
-    this.messages.push(normalizeStoredMessage(message));
-    this.usage.set(task.projectId, clone({ ...usage, activeTasks: usage.activeTasks + 1, updatedAt: task.updatedAt }));
-    return clone(storedTask);
   }
 
   async updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
@@ -756,30 +732,17 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
   }
 
-  async softDeleteTask(taskId: string, deletedAt: string): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(taskId);
-    if (!current || current.deletedAt || !isTerminalTask(current)) return null;
-    const updated = { ...current, deletedAt, updatedAt: deletedAt };
-    this.tasks.set(taskId, clone(updated));
-    return clone(updated);
-  }
-
   async deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null> {
     const current = this.tasks.get(taskId);
     if (!current || !isTerminalTask(current)) return null;
-    const releasedArtifactBytes = this.artifacts.filter((artifact) => artifact.taskId === taskId).reduce((total, artifact) => total + artifact.bytes, 0);
+    const releasedArtifactBytes = 0;
     this.artifacts.splice(0, this.artifacts.length, ...this.artifacts.filter((artifact) => artifact.taskId !== taskId));
     this.messages.splice(0, this.messages.length, ...this.messages.filter((message) => message.taskId !== taskId));
     this.interactionChanges.splice(0, this.interactionChanges.length, ...this.interactionChanges.filter((change) => change.interaction.taskId !== taskId));
     this.interactionSync.delete(taskId);
     await this.jsonDocs.delete("sandbox_runtime_state", taskId);
     await this.jsonDocs.delete("sandbox_run_state", current.runId);
-    const usage = this.usage.get(current.projectId);
-    if (usage) this.usage.set(current.projectId, clone({ ...usage, projectFileBytes: Math.max(0, usage.projectFileBytes - releasedArtifactBytes), updatedAt: deletedAt }));
-    for (const [id, candidate] of this.tasks) {
-      if (candidate.sourceTaskId === taskId) this.tasks.set(id, clone({ ...candidate, sourceTaskId: null, updatedAt: deletedAt }));
-    }
-    const task = { ...current, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
+    const task = { ...current, fileLibraryId:null, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
     this.tasks.set(taskId, clone(task));
     return { task: clone(task), releasedArtifactBytes };
   }
@@ -832,14 +795,9 @@ export class InMemoryProductStore implements ProductStore {
   }
 
   async finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
-    return this.atomicTaskMessageMutation(input.successors.map((successor) => successor.create), async () => {
     const current = this.tasks.get(input.taskId);
     if (!current) return null;
-    if (current.terminalReason) return { task: clone(current), applied: false, successorTaskIds: [], missingPendingMessageIds: [] };
-    const pending = this.messages.filter((message) => message.taskId === current.id && !message.deletedAt && (message.deliveryStatus ?? "pending") === "pending");
-    const successors = new Map(input.successors.map((candidate) => [candidate.messageId, candidate]));
-    const missingPendingMessageIds = pending.filter((message) => !successors.has(message.id) || successors.get(message.id)!.create.task.prompt !== message.content).map((message) => message.id);
-    if (missingPendingMessageIds.length > 0) return { task: clone(current), applied: false, successorTaskIds: [], missingPendingMessageIds };
+    if (current.terminalReason) return { task: clone(current), applied: false };
 
     if (current.activeReservation) this.releaseActiveTask(current.projectId, input.updatedAt);
     const terminal: PersistedAgentTask = {
@@ -860,33 +818,13 @@ export class InMemoryProductStore implements ProductStore {
     };
     this.tasks.set(current.id, clone(terminal));
 
-    const successorTaskIds: string[] = [];
-    for (const message of pending) {
-      const candidate = successors.get(message.id)!;
-      const created = await this.createTaskAtomically(candidate.create);
-      const index = this.messages.findIndex((value) => value.id === message.id);
-      if (created) {
-        successorTaskIds.push(created.id);
-        this.messages[index] = clone({ ...message, targetTaskId: created.id, deliveryStatus: "successor_created", safeError: null, updatedAt: input.updatedAt });
-        this.appendInteractionChanges(current.id, candidate.messageSuccessInteractionChange ? [candidate.messageSuccessInteractionChange] : []);
-        this.appendInteractionChanges(created.id, candidate.successorInteractionChange ? [candidate.successorInteractionChange] : []);
-      } else {
-        this.messages[index] = clone({ ...message, deliveryStatus: "failed", safeError: "Project active tasks limit reached", updatedAt: input.updatedAt });
-        this.appendInteractionChanges(current.id, candidate.messageFailureInteractionChange ? [candidate.messageFailureInteractionChange] : []);
-      }
-    }
     for (let index = 0; index < this.messages.length; index += 1) {
       const message = this.messages[index]!;
-      if (message.taskId === current.id && !message.deletedAt && message.deliveryStatus === "dispatching") {
-        this.messages[index] = clone({ ...message, deliveryStatus: "terminal_pending", updatedAt: input.updatedAt });
-        const pendingChange = input.terminalPendingChanges?.find((candidate) => candidate.messageId === message.id);
-        this.appendInteractionChanges(current.id, pendingChange ? [pendingChange.interactionChange] : []);
-      }
+      if(message.taskId===current.id&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending"))this.messages[index]=clone({...message,deliveryStatus:"failed",safeError:"Task became terminal before delivery",updatedAt:input.updatedAt});
     }
     this.appendInteractionChanges(current.id, input.terminalInteractionChanges ?? []);
     if (!this.auditEvents.some((event) => event.id === input.auditEvent.id)) this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
-    return { task: clone(terminal), applied: true, successorTaskIds, missingPendingMessageIds: [] };
-    });
+    return { task: clone(terminal), applied: true };
   }
 
   async listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]> {
@@ -946,12 +884,6 @@ export class InMemoryProductStore implements ProductStore {
     const previousMessages = this.messages.map(clone);
     const previousUsage = [...this.usage.entries()].map(([id, value]) => [id, clone(value)] as const);
     const previousSync = clone(this.interactionSync.get(input.taskId));
-    const lifecycleDocuments = input.lifecycle?.kind === "terminal"
-      ? await Promise.all(input.lifecycle.successors.flatMap((successor) => [
-          this.jsonDocs.get("sandbox_runtime_state", successor.create.task.id).then((document) => ["sandbox_runtime_state", successor.create.task.id, document] as const),
-          ...(successor.create.sandboxRun ? [this.jsonDocs.get("sandbox_run_state", successor.create.sandboxRun.runId).then((document) => ["sandbox_run_state", successor.create.sandboxRun!.runId, document] as const)] : [])
-        ]))
-      : [];
     try {
       const sync = this.interactionSync.get(input.taskId) ?? { sourceCursor: null, historyStatus: "gap" as const, lastSyncedAt: null };
       if (input.sourceSync && input.sourceSync.expectedSourceCursor !== undefined && input.sourceSync.expectedSourceCursor !== sync.sourceCursor) {
@@ -963,12 +895,7 @@ export class InMemoryProductStore implements ProductStore {
         const existing = this.artifacts.find((value) => value.taskId === artifact.taskId && value.fileId === artifact.fileId);
         if (!existing) {
           if (this.artifacts.some((value) => value.id === artifact.id)) throw new Error("Task artifact already exists");
-          const policy = this.policies.get(projection.projectId);
-          const usage = this.usage.get(projection.projectId);
-          if (!policy || !usage) throw new Error("Project policy usage not found");
-          if (policy.projectFileBytesLimit !== null && usage.projectFileBytes + artifact.bytes > policy.projectFileBytesLimit) throw new Error("Project file bytes limit reached");
           this.artifacts.push(clone(artifact));
-          this.usage.set(projection.projectId, { ...usage, projectFileBytes:usage.projectFileBytes+artifact.bytes, updatedAt:projection.updatedAt });
         }
         if (!this.auditEvents.some((event) => event.id === projection.auditEvent.id)) this.auditEvents.push(clone({...projection.auditEvent,detail:sanitizeProjectAuditDetail(projection.auditEvent.detail)}));
       }
@@ -980,7 +907,7 @@ export class InMemoryProductStore implements ProductStore {
       }
       if (input.lifecycle?.kind === "terminal") {
         const finalized = await this.finalizeTaskLifecycle({ taskId: input.taskId, ...input.lifecycle });
-        if (!finalized || finalized.missingPendingMessageIds.length > 0) throw new Error("Task interaction lifecycle conflict");
+        if (!finalized) throw new Error("Task interaction lifecycle conflict");
       }
       if (input.sourceSync) {
         this.interactionSync.set(input.taskId, { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt });
@@ -997,10 +924,6 @@ export class InMemoryProductStore implements ProductStore {
       this.messages.splice(0, this.messages.length, ...previousMessages);
       this.usage.clear();
       for (const [id, value] of previousUsage) this.usage.set(id, value);
-      for (const [collection, id, document] of lifecycleDocuments) {
-        if (document) await this.jsonDocs.put(collection, id, document);
-        else await this.jsonDocs.delete(collection, id);
-      }
       if (previousSync) this.interactionSync.set(input.taskId, previousSync);
       else this.interactionSync.delete(input.taskId);
       throw error;
@@ -1015,8 +938,8 @@ export class InMemoryProductStore implements ProductStore {
     const page = eligible.slice(Math.max(0, eligible.length - Math.max(1, limit)));
     const hasMoreBefore = eligible.length > page.length;
     const sync = this.interactionSync.get(taskId) ?? { sourceCursor: null, historyStatus: "gap" as const, lastSyncedAt: null };
-    const queuedMessages = this.messages.filter((message) => message.taskId === taskId && !message.deletedAt && ["pending","dispatching","terminal_pending","failed"].includes(message.deliveryStatus ?? "pending")).sort((left,right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).map(clone);
-    const suppressedMessageIds = new Set(this.messages.filter((message) => message.taskId === taskId && (Boolean(message.deletedAt) || ["pending","dispatching","terminal_pending","failed"].includes(message.deliveryStatus ?? "pending"))).map((message) => message.id));
+    const queuedMessages = this.messages.filter((message) => message.taskId === taskId && !message.deletedAt && ["pending","dispatching","failed"].includes(message.deliveryStatus ?? "pending")).sort((left,right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).map(clone);
+    const suppressedMessageIds = new Set(this.messages.filter((message) => message.taskId === taskId && (Boolean(message.deletedAt) || ["pending","dispatching","failed"].includes(message.deliveryStatus ?? "pending"))).map((message) => message.id));
     const suppressedInteractionIds = [...new Set(this.interactionChanges.filter((change) => change.interaction.taskId === taskId && change.sourceKind === "product" && change.sourceId.startsWith("message:") && !change.sourceId.endsWith(":boundary") && suppressedMessageIds.has(change.sourceId.slice("message:".length))).map((change) => change.interaction.id))];
     return { items: page.map(clone), queuedMessages, suppressedInteractionIds, nextPageAnchor: hasMoreBefore && page[0] ? { position: page[0].position, interactionId: page[0].id } : null, hasMoreBefore, latestChangeSeq: maximum, sourceCursor: sync.sourceCursor, historyStatus: sync.historyStatus, lastSyncedAt: sync.lastSyncedAt };
   }
@@ -1043,7 +966,7 @@ export class InMemoryProductStore implements ProductStore {
     }
   }
 
-  async persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing" | "limit_exceeded"> {
+  async persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing"> {
     const task = this.tasks.get(input.artifact.taskId);
     if (!task || task.projectId !== input.projectId) throw new Error("Task artifact project mismatch");
     const existing = this.artifacts.find((artifact) => artifact.taskId === input.artifact.taskId && artifact.fileId === input.artifact.fileId);
@@ -1052,12 +975,7 @@ export class InMemoryProductStore implements ProductStore {
       return "existing";
     }
     if (this.artifacts.some((artifact) => artifact.id === input.artifact.id)) throw new Error("Task artifact already exists");
-    const policy = this.policies.get(input.projectId);
-    const usage = this.usage.get(input.projectId);
-    if (!policy || !usage) throw new Error("Project policy usage not found");
-    if (policy.projectFileBytesLimit !== null && usage.projectFileBytes + input.artifact.bytes > policy.projectFileBytesLimit) return "limit_exceeded";
     this.artifacts.push(clone(input.artifact));
-    this.usage.set(input.projectId, clone({ ...usage, projectFileBytes: usage.projectFileBytes + input.artifact.bytes, updatedAt: input.updatedAt }));
     if (!this.auditEvents.some((event) => event.id === input.auditEvent.id)) this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
     return "created";
   }
@@ -1096,7 +1014,7 @@ export class InMemoryProductStore implements ProductStore {
   async listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]> {
     return this.messages.filter((message) => !message.deletedAt && (
       (message.deliveryStatus ?? "pending") === "pending" && (!message.nextRetryAt || message.nextRetryAt <= now) ||
-      (message.deliveryStatus === "dispatching" || message.deliveryStatus === "terminal_pending") && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now) && (!message.nextRetryAt || message.nextRetryAt <= now)
+      message.deliveryStatus === "dispatching" && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now) && (!message.nextRetryAt || message.nextRetryAt <= now)
     )).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).slice(0, limit).map(clone);
   }
   async claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null> {
@@ -1120,7 +1038,7 @@ export class InMemoryProductStore implements ProductStore {
   async recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null> {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
-    if (!current || current.deletedAt || !["dispatching", "terminal_pending"].includes(current.deliveryStatus ?? "") || current.claimToken !== input.claimToken || current.deliveryKey !== input.receipt.deliveryKey || current.requestHash !== input.receipt.requestHash || !input.receipt.accepted || current.deliveryStatus === "successor_created") return null;
+    if (!current || current.deletedAt || current.deliveryStatus!=="dispatching" || current.claimToken !== input.claimToken || current.deliveryKey !== input.receipt.deliveryKey || current.requestHash !== input.receipt.requestHash || !input.receipt.accepted) return null;
     const updated: PersistedTaskMessage = { ...current, receipt: clone(input.receipt), timelineCursor: input.timelineCursor, deliveryStatus: "accepted", leaseExpiresAt: null, nextRetryAt: null, safeError: null, updatedAt: input.updatedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1128,7 +1046,7 @@ export class InMemoryProductStore implements ProductStore {
   async deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null> {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
-    if (!current || current.deletedAt || !["dispatching", "terminal_pending"].includes(current.deliveryStatus ?? "") || current.claimToken !== input.claimToken) return null;
+    if (!current || current.deletedAt || current.deliveryStatus!=="dispatching" || current.claimToken !== input.claimToken) return null;
     const updated: PersistedTaskMessage = { ...current, deliveryStatus: input.releaseClaim ? "pending" : current.deliveryStatus ?? "dispatching", claimToken: input.releaseClaim ? null : current.claimToken ?? null, claimedAt: input.releaseClaim ? null : current.claimedAt ?? null, leaseExpiresAt: input.releaseClaim ? null : current.leaseExpiresAt ?? null, safeError: input.safeError, nextRetryAt: input.nextRetryAt, updatedAt: input.updatedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1140,34 +1058,6 @@ export class InMemoryProductStore implements ProductStore {
     const updated: PersistedTaskMessage = { ...current, deliveryStatus: "failed", safeError: input.safeError, leaseExpiresAt: null, updatedAt: input.updatedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
-  }
-  async createTerminalTaskMessage(input: CreateTerminalTaskMessageInput): Promise<PersistedTaskMessage | null> {
-    return this.atomicTaskMessageMutation([input.successor], async () => {
-    const source = this.tasks.get(input.message.taskId);
-    if (!source || source.deletedAt || !source.terminalReason || this.messages.some((value) => value.id === input.message.id)) return null;
-    const successor = await this.createTaskAtomically(input.successor);
-    if (!successor) return null;
-    const message = normalizeStoredMessage({ ...input.message, targetTaskId: successor.id, deliveryStatus: "successor_created" });
-    this.messages.push(clone(message));
-    this.appendInteractionChanges(source.id, input.messageInteractionChange ? [input.messageInteractionChange] : []);
-    this.appendInteractionChanges(successor.id, input.successorInteractionChange ? [input.successorInteractionChange] : []);
-    return clone(message);
-    });
-  }
-  async resolveTerminalPendingMessage(input: ResolveTerminalPendingMessageInput): Promise<PersistedTaskMessage | null> {
-    return this.atomicTaskMessageMutation([input.successor], async () => {
-    const index = this.messages.findIndex((value) => value.id === input.messageId);
-    const current = this.messages[index];
-    const source = current ? this.tasks.get(current.taskId) : undefined;
-    if (!current || source?.deletedAt || !source?.terminalReason || !["dispatching","terminal_pending"].includes(current.deliveryStatus ?? "") || current.claimToken !== input.expectedClaimToken || current.receipt?.accepted) return null;
-    const successor = await this.createTaskAtomically(input.successor);
-    if (!successor) return null;
-    const updated: PersistedTaskMessage = { ...current, targetTaskId: successor.id, deliveryStatus: "successor_created", leaseExpiresAt: null, nextRetryAt: null, safeError: null, updatedAt: input.updatedAt };
-    this.messages[index] = clone(updated);
-    this.appendInteractionChanges(source.id, input.messageInteractionChange ? [input.messageInteractionChange] : []);
-    this.appendInteractionChanges(successor.id, input.successorInteractionChange ? [input.successorInteractionChange] : []);
-    return clone(updated);
-    });
   }
   async findTaskSummary(taskId: string): Promise<TaskSummary | null> { const task=this.tasks.get(taskId); return task ? this.taskSummary(task) : null; }
   async listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]> { return [...this.tasks.values()].filter((task) => task.projectId === projectId && !task.deletedAt).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).map((task) => this.taskSummary(task)); }
@@ -1487,7 +1377,6 @@ function normalizeStoredTask(task: PersistedAgentTask, activeReservation: boolea
   return {
     ...clone(task),
     title: task.title ?? task.prompt.replace(/[\r\n]+/g, " ").slice(0, 160),
-    inputPaths: [...(task.inputPaths ?? [])],
     activeReservation,
     archivedAt: task.archivedAt ?? null,
     deletedAt: task.deletedAt ?? null,
@@ -1520,7 +1409,6 @@ function normalizeStoredTask(task: PersistedAgentTask, activeReservation: boolea
 function normalizeStoredMessage(message: PersistedTaskMessage): PersistedTaskMessage {
   return {
     ...clone(message),
-    targetTaskId: message.targetTaskId ?? null,
     deliveryKey: message.deliveryKey ?? null,
     requestHash: message.requestHash ?? null,
     claimToken: message.claimToken ?? null,

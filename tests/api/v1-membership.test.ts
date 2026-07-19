@@ -14,6 +14,7 @@ describe("v1 project membership API", () => {
   let workspaceId = "";
   let projectId = "";
   let ownerUserId = "";
+  let fileLibraryId="";
   const memberSession = "member-session";
 
   before(async () => {
@@ -60,6 +61,7 @@ describe("v1 project membership API", () => {
     const project = await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Membership project" });
     projectId = project.id;
     ownerUserId = project.ownerUserId;
+    fileLibraryId=(await requestJson("POST",`/api/v1/projects/${projectId}/file-libraries`,{name:"Membership files"})).id;
   });
 
   after(async () => {
@@ -145,20 +147,20 @@ describe("v1 project membership API", () => {
       headers: { cookie: `asl_session=${memberSession}` }
     });
     assert.deepEqual(await capabilities.json(), { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false });
-    const fileList = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files`, {
+    const fileList = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${fileLibraryId}/files`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });
     assert.equal(fileList.status, 200);
-    const viewerUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Fviewer.txt`, {
+    const viewerUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${fileLibraryId}/files?path=viewer.txt`, {
       method: "PUT",
       headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream", "idempotency-key": "viewer-upload" },
       body: "viewer"
     });
     assert.equal(viewerUpload.status, 403);
-    const viewerDelete = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files`, {
+    const viewerDelete = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${fileLibraryId}/files`, {
       method: "DELETE",
       headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/json", "idempotency-key": "viewer-delete" },
-      body: JSON.stringify({ path: "files/viewer.txt" })
+      body: JSON.stringify({ path: "viewer.txt" })
     });
     assert.equal(viewerDelete.status, 403);
 
@@ -183,7 +185,7 @@ describe("v1 project membership API", () => {
       expectedUpdatedAt: created.updatedAt
     });
     assert.equal(staleDelete.response.status, 409);
-    const memberUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Fmember.txt`, {
+    const memberUpload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${fileLibraryId}/files?path=member.txt`, {
       method: "PUT",
       headers: { cookie: `asl_session=${memberSession}`, "x-csrf-token": "member-csrf-token", "content-type": "application/octet-stream", "idempotency-key": "member-upload" },
       body: "member"

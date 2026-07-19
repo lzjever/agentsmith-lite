@@ -55,9 +55,11 @@ describe("file library API", () => {
     assert.equal(preview.headers.get("content-disposition"),"inline");
     assert.equal(await preview.text(),"preview");
 
-    await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/files?path=files%2Flegacy.txt`,{method:"PUT",headers:{cookie,"x-csrf-token":csrf,"content-type":"application/octet-stream","idempotency-key":crypto.randomUUID()},body:"old"});
-    await raw("GET",`/api/v1/projects/${projectId}/files?path=files`);
-    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,13);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,10);
+    const fileAudits=await store.listProjectAuditEvents(projectId);
+    const uploadAudits=fileAudits.filter((item)=>item.action==="file.upload");
+    assert.equal(uploadAudits.length,2);
+    assert.equal(uploadAudits.every((item)=>item.detail?.filePath?.startsWith(`libraries/${first.id}/home/`)),true);
 
     const originalAudit=store.appendProjectAuditEvent.bind(store);
     store.appendProjectAuditEvent=async event=>{if(event.action==="file.upload")throw new Error("audit unavailable");return originalAudit(event)};

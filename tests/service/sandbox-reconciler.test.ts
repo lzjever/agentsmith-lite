@@ -139,8 +139,7 @@ describe("sandbox reconciler", () => {
         key: "BOTIFIED_SERVICE_KEY"
       },
       directories: {
-        taskHome: `/workspace/project/tasks/${taskId}/home`,
-        artifacts: `/workspace/project/tasks/${taskId}/artifacts`,
+        libraryHome: `/workspace/project/libraries/library-${taskId}/home`,
         botified: `/workspace/project/tasks/${taskId}/botified`
       }
     });
@@ -584,6 +583,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     image: "example/botified-runner@sha256:abc",
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/w1/projects/p1",
+    fileLibraryRootSubPath: "libraries/library-t1/home",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-t1",
@@ -596,8 +596,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       key: "BOTIFIED_SERVICE_KEY"
     },
     directories: {
-      taskHome: "/workspace/project/tasks/t1/home",
-      artifacts: "/workspace/project/tasks/t1/artifacts",
+      libraryHome: "/workspace/project/libraries/library-t1/home",
       botified: "/workspace/project/tasks/t1/botified"
     },
     resourceLimits: {
@@ -627,6 +626,7 @@ function renderedResource(run: SandboxRunState, kind: string): KubernetesResourc
     image: run.image,
     pvcName: run.pvcName,
     projectSubPath: run.projectSubPath,
+    fileLibraryRootSubPath: run.fileLibraryRootSubPath,
     botifiedPort: run.botifiedPort,
     serviceKeySecretName: run.resourceNames.secret,
     serviceKeySecretKey: run.serviceKeySecretRef.key,

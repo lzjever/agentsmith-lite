@@ -142,7 +142,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     endpoints,
     input.botifiedClient ?? new DryRunBotifiedRuntimeHttpClient(),
     taskConfig,
-    policies
+    policies,
+    fileLibraries
   );
   const runtime = new RuntimeService(tasks, sandboxLifecycle, policies, {
     ...(input.runtimeTickIntervalMs !== undefined ? { tickIntervalMs: input.runtimeTickIntervalMs } : {})

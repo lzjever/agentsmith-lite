@@ -22,7 +22,7 @@ describe("task interaction API client", () => {
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input); calls.push({ url, init });
       if (url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "user@example.test" }, csrfToken: "csrf" });
-      return Response.json({ messageId: "message_1", disposition: "queued_for_active_run", targetTaskId: "task_1", duplicate: false, queuedMessage: null, interaction: null, capabilities: { sendMessage: true, editQueuedMessage: true, abortTurn: true, cancelTask: true, openTerminal: true, editTask:true, retryTask:true, duplicateTask:true, archiveTask:true, deleteTask: true } });
+      return Response.json({ messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, capabilities: { sendMessage: true, editQueuedMessage: true, abortTurn: true, cancelTask: true, openTerminal: true, editTask:true, archiveTask:true, deleteTask: true } });
     };
 
     await apiClient.currentIdentity();
@@ -33,18 +33,14 @@ describe("task interaction API client", () => {
     await apiClient.abortTaskTurn("task/1", "abort-key");
     await apiClient.stopTaskWork("task/1", "interaction/1", "stop-key");
     await apiClient.editTask("task/1", "New title", "task-edit-key");
-    await apiClient.retryTask("task/1", "retry-key");
-    await apiClient.duplicateTask("task/1", "duplicate-key");
     await apiClient.archiveTask("task/1", "archive-key");
     await apiClient.cancelTask("task/1", "cancel-key");
 
     assert.match(calls[1]!.url, /tasks\/task%2F1\/interactions\?cursor=before\+1$/);
-    assert.deepEqual(calls.slice(2).map((call) => [call.init.method, new Headers(call.init.headers).get("idempotency-key")]), [["POST", "send-key"], ["PATCH", "edit-key"], ["DELETE", "delete-key"], ["POST", "abort-key"], ["POST", "stop-key"], ["PATCH", "task-edit-key"], ["POST", "retry-key"], ["POST", "duplicate-key"], ["POST", "archive-key"], ["POST", "cancel-key"]]);
+    assert.deepEqual(calls.slice(2).map((call) => [call.init.method, new Headers(call.init.headers).get("idempotency-key")]), [["POST", "send-key"], ["PATCH", "edit-key"], ["DELETE", "delete-key"], ["POST", "abort-key"], ["POST", "stop-key"], ["PATCH", "task-edit-key"], ["POST", "archive-key"], ["POST", "cancel-key"]]);
     assert.match(calls[6]!.url, /tasks\/task%2F1\/work\/interaction%2F1\/stop$/);
     assert.match(calls[7]!.url, /tasks\/task%2F1$/);
-    assert.match(calls[8]!.url, /tasks\/task%2F1\/retry$/);
-    assert.match(calls[9]!.url, /tasks\/task%2F1\/duplicate$/);
-    assert.match(calls[10]!.url, /tasks\/task%2F1\/archive$/);
+    assert.match(calls[8]!.url, /tasks\/task%2F1\/archive$/);
     assert.equal(sent.disposition, "queued_for_active_run");
     assert.equal(edited.messageId, "message_1");
     assert.equal(deleted.messageId, "message_1");
@@ -65,7 +61,7 @@ describe("task interaction API client", () => {
   it("parses independent authoritative transient state events", async () => {
     const encoder = new TextEncoder();
     const queuedMessages = [{ id: "message_1", content: "Queued", deliveryStatus: "pending", editable: true, deletable: true, updatedAt: "2026-07-13T00:00:00.000Z" }];
-    const capabilities = { sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:true, duplicateTask:true, archiveTask:true, deleteTask: true };
+    const capabilities = { sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, archiveTask:true, deleteTask: true };
     const state = { queuedMessages, capabilities };
     const runState = { runState:"running" };
     const connection = { connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:"2026-07-13T00:00:01.000Z", message:null };

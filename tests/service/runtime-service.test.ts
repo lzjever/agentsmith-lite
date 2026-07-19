@@ -46,7 +46,7 @@ describe("live sandbox runtime service", () => {
     ]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const task = await services.tasks.createTask(userId, projectId, { prompt: "wait for service", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, taskInput("wait for service", endpointId));
 
     await services.tasks.syncActiveTasksOnce();
 
@@ -62,7 +62,7 @@ describe("live sandbox runtime service", () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "evt_s1_0" }]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const task = await services.tasks.createTask(userId, projectId, { prompt: "cancel after restart", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, taskInput("cancel after restart", endpointId));
     const run = await store.sandboxRuns.get(task.runId);
     assert.ok(run);
     await store.updateTaskStatusIfNonterminal(task.id, "stopping", task.updatedAt);
@@ -98,7 +98,7 @@ describe("live sandbox runtime service", () => {
     ]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const task = await services.tasks.createTask(userId, projectId, { prompt: "recover after crash", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, taskInput("recover after crash", endpointId));
     await services.tasks.syncActiveTasksOnce();
     await services.tasks.syncActiveTasksOnce();
     livePort.markPodFailed();
@@ -131,7 +131,7 @@ describe("live sandbox runtime service", () => {
     ]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const task = await services.tasks.createTask(userId, projectId, { prompt: "crash after ready", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, taskInput("crash after ready", endpointId));
     await services.tasks.syncActiveTasksOnce();
     await services.tasks.syncActiveTasksOnce();
     livePort.markPodFailed();
@@ -176,7 +176,7 @@ describe("live sandbox runtime service", () => {
     ]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const task = await services.tasks.createTask(userId, projectId, { prompt: "finish later", endpointId });
+    const task = await services.tasks.createTask(userId, projectId, taskInput("finish later", endpointId));
     await services.tasks.syncActiveTasksOnce();
     await services.tasks.syncActiveTasksOnce();
     assert.equal((await store.findTask(task.id))?.status, "running");
@@ -220,8 +220,8 @@ describe("live sandbox runtime service", () => {
     ]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
-    const firstTask = await services.tasks.createTask(userId, projectId, { prompt: "first", endpointId });
-    const secondTask = await services.tasks.createTask(userId, projectId, { prompt: "second", endpointId });
+    const firstTask = await services.tasks.createTask(userId, projectId, taskInput("first", endpointId));
+    const secondTask = await services.tasks.createTask(userId, projectId, taskInput("second", endpointId));
     await services.tasks.syncActiveTasksOnce();
     await services.tasks.syncActiveTasksOnce();
 
@@ -351,6 +351,10 @@ function timelineEvent(seq: number, sessionId: string, type: string, data: Recor
 
 function emptyReapResult(input: SandboxReapInput) {
   return { namespace: "agentsmith", runCounts: { total: 0, active: 0, cleanupRequested: 0, deleting: 0, cleaned: 0, starting: 0, running: 0, stopping: 0, expired: 0 }, activeTaskCount: 0, observedResourceCounts: {}, cleanupPlan: { targets: [], recentFailures: [] }, recentCleanupFailures: [], actionSummary: [], errors: [], dryRun: input.apply !== true, storedRunIds: [] };
+}
+
+function taskInput(prompt: string, endpointId: string) {
+  return { prompt, endpointId, fileLibrary: { mode: "create_new" as const, name: `Library ${prompt}` } };
 }
 
 async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: FakeLiveSandboxPort) {

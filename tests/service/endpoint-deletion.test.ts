@@ -60,22 +60,14 @@ describe("endpoint deletion", () => {
   });
 
   it("returns a 409 product conflict without unlinking anything when a task references the endpoint", async () => {
-    const { services, store, userId, workspaceId, projectId, credentialId } = await setup();
+    const { services, store, userId, projectId, credentialId } = await setup();
     const endpoint = await services.endpoints.createEndpoint(userId, projectId, endpointInput("Task endpoint", credentialId));
     const thread = await services.chat.createThread(userId, projectId, endpoint.id);
     const timestamp = "2026-07-12T12:00:00.000Z";
-    await store.createTask({
-      id: "task_endpoint_reference",
-      workspaceId,
-      projectId,
-      endpointId: endpoint.id,
+    const task = await services.tasks.createTask(userId, projectId, {
       prompt: "Keep endpoint",
-      status: "completed",
-      runId: "run_endpoint_reference",
-      executionMode: "dry-run",
-      sandbox: { namespace: "agentsmith", resources: [] },
-      createdAt: timestamp,
-      updatedAt: timestamp
+      endpointId: endpoint.id,
+      fileLibrary: { mode: "create_new", name: "Endpoint reference" }
     });
 
     await assert.rejects(
@@ -86,7 +78,7 @@ describe("endpoint deletion", () => {
     assert.equal((await store.findEndpoint(endpoint.id))?.id, endpoint.id);
     assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, endpoint.id);
 
-    assert.ok(await store.softDeleteTask("task_endpoint_reference", "2026-07-12T12:01:00.000Z"));
+    await services.tasks.deleteTask(userId, task.id);
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
     assert.equal(await store.findEndpoint(endpoint.id), null);
     assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, null);
@@ -108,7 +100,7 @@ async function setup() {
   const store = createLocalInMemoryProductStore();
   const services = createApplicationServices({
     store,
-    dataRoot: "/agentsmith-lite",
+    dataRoot: "/tmp/agentsmith-lite-endpoint-deletion",
     builtinAdminPassword: "admin-password",
     providerClient: healthyProvider
   });

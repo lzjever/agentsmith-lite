@@ -133,19 +133,6 @@ describe("task interaction projection", () => {
       assert.equal(result.interaction?.position, event.seq, event.type);
     }
 
-    const boundary = projectProduct({
-      sourceKind: "product",
-      taskId: "task-1",
-      sourceId: "successor-message-1",
-      sourceRevision: 1,
-      occurredAt: "2026-07-13T10:01:00.000Z",
-      position: 11,
-      type: "successor_created",
-      boundaryId: "boundary-1",
-      status: "successor_created",
-      targetTaskId: "task-2"
-    });
-    assert.equal(boundary.interaction?.kind, "execution_boundary");
   });
 
   it("skips canonical tool-call-only assistant completions without disturbing a visible final projection", () => {

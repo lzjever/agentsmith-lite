@@ -81,7 +81,7 @@ export interface RuntimeDirectoryCleaner {
   removeRuntimePath(absolutePath: string): Promise<void>;
 }
 
-export type SandboxRuntimeDirectoryName = "home" | "botified" | "inputs" | "artifacts";
+export type SandboxRuntimeDirectoryName = "botified";
 
 export interface SandboxRuntimeDirectoryTarget {
   type: "runtime_directory";
@@ -847,35 +847,7 @@ function runtimeCleanupRunIds(actions: SandboxReconcileAction[]): Set<string> {
 }
 
 function runtimeDirectoryTargets(run: PersistedSandboxRunState, dataRoot?: string): SandboxRuntimeDirectoryTarget[] {
-  const paths = runtimeDirectoryPaths(run, dataRoot);
-  return [
-    runtimeDirectoryTarget(run, "home", paths.home, "delete", "cleanup_candidate"),
-    runtimeDirectoryTarget(run, "botified", paths.botified, "delete", "cleanup_candidate"),
-    runtimeDirectoryTarget(run, "inputs", paths.inputs, "retain", "durable"),
-    runtimeDirectoryTarget(run, "artifacts", paths.artifacts, "retain", "durable")
-  ];
-}
-
-function runtimeDirectoryPaths(
-  run: PersistedSandboxRunState,
-  dataRoot?: string
-): Record<SandboxRuntimeDirectoryName, string> {
-  if (!dataRoot) {
-    const taskRoot = path.posix.dirname(run.directories.taskHome);
-    return {
-      home: run.directories.taskHome,
-      botified: run.directories.botified,
-      inputs: path.posix.join(taskRoot, "inputs"),
-      artifacts: run.directories.artifacts
-    };
-  }
-  const taskRoot = path.resolve(dataRoot, run.projectSubPath, "tasks", run.taskId);
-  return {
-    home: path.resolve(taskRoot, "home"),
-    botified: path.resolve(taskRoot, "botified"),
-    inputs: path.resolve(taskRoot, "inputs"),
-    artifacts: path.resolve(taskRoot, "artifacts")
-  };
+  void run;void dataRoot;return[];
 }
 
 function runtimeDirectoryTarget(

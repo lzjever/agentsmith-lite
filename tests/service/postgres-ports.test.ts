@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
 
 describe("postgres adapter ports", () => {
@@ -46,8 +45,24 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migration.sql, /file_library_id.*agent_tasks|sandbox/i);
   });
 
-  it("reports PostgreSQL task binding lookup as unavailable until Phase 2", async () => {
-    const store = Object.create(PostgresProductStore.prototype) as PostgresProductStore;
-    assert.deepEqual(await store.findTaskBoundToFileLibrary("library_one"), { kind: "unavailable" });
+  it("defines the sole Phase 2 Task File Library binding in migration 061",async()=>{
+    const migrations = await readPostgresMigrations();
+    const interactionMigration = migrations.find((item) => item.id === "047_task_interaction_changes");
+    const migration=migrations.find((item)=>item.id==="061_task_file_library_binding");
+    assert.ok(interactionMigration);
+    assert.ok(migration);
+    assert.match(interactionMigration.sql, /alter table task_follow_ups rename to task_messages/i);
+    assert.match(interactionMigration.sql, /drop table agent_task_events/i);
+    assert.match(migration.sql,/delete from agent_tasks/i);
+    assert.match(migration.sql,/delete from task_messages/i);
+    assert.match(migration.sql,/delete from task_interaction_changes/i);
+    assert.match(migration.sql,/delete from agent_task_artifacts/i);
+    assert.match(migration.sql,/foreign key \(file_library_id, workspace_id, project_id\)[\s\S]*references file_libraries\(id, workspace_id, project_id\)[\s\S]*on delete restrict/i);
+    assert.match(migration.sql,/deleted_at is null and file_library_id is not null[\s\S]*deleted_at is not null and file_library_id is null/i);
+    assert.match(migration.sql,/unique index agent_tasks_file_library_active_unique[\s\S]*where deleted_at is null/i);
+    assert.match(migration.sql,/drop column if exists input_paths/i);
+    assert.match(migration.sql,/drop column if exists source_task_id/i);
+    assert.doesNotMatch(migration.sql,/\btask_follow_ups\b/i);
+    assert.doesNotMatch(migration.sql,/\bagent_task_events\b/i);
   });
 });

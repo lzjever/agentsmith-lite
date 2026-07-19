@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -209,42 +206,12 @@ describe("sandbox lifecycle service", () => {
     assert.equal(stored?.phase, "running");
     assert.equal(stored?.cleanupStatus, "active");
     assert.equal((await store.sandboxRuns.get(laterRun.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task2/botified"
-    ]);
-  });
-
-  it("does not overwrite a completion that races cleanup-complete task advancement", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
-    await store.createTask(taskForRun(run, "running"));
-    await store.sandboxRuns.put(run);
-    const cleaner: RuntimeDirectoryCleaner = {
-      async removeRuntimePath() {
-        const task = await store.findTask(run.taskId);
-        assert.ok(task);
-        await store.updateTask({ ...task, status: "completed", updatedAt: "2026-07-04T00:00:01.000Z" });
-      }
-    };
-    const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-      dataRoot: "/workspace",
-      namespace: run.namespace,
-      port: new FakeLifecyclePort([]),
-      runtimeDirectoryCleaner: cleaner,
-      now: () => new Date("2026-07-04T00:00:00.000Z")
-    });
-
-    await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
-
-    assert.equal((await store.findTask(run.taskId))?.status, "completed");
   });
 
   it("does not increment a terminal sync retry after another actor settles it", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.createTask(taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -299,7 +266,7 @@ describe("sandbox lifecycle service", () => {
     for (const variant of ["activity", "cleaned"] as const) {
       const store = createLocalInMemoryProductStore();
       const run = sandboxRun();
-      await store.createTask(taskForRun(run, "running"));
+      await createTaskForRun(store, taskForRun(run, "running"));
       await store.sandboxRuns.put(run);
       const resources = createdResourcesForRun(run);
       const pod = resources.find((resource) => resource.kind === "Pod");
@@ -354,7 +321,7 @@ describe("sandbox lifecycle service", () => {
   it("redacts terminal-failure sync callback errors before returning them", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.createTask(taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -394,7 +361,7 @@ describe("sandbox lifecycle service", () => {
   it("runs one final terminal-failure sync before deleting the Pod and retains its persisted artifact", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.createTask(taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -435,7 +402,7 @@ describe("sandbox lifecycle service", () => {
   it("does not replace a completion recorded during terminal-failure sync with failed", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.createTask(taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -466,7 +433,7 @@ describe("sandbox lifecycle service", () => {
   it("does not replace an already terminal task when recovering a failed Pod", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.createTask(taskForRun(run, "completed"));
+    await createTaskForRun(store, taskForRun(run, "completed"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -489,7 +456,7 @@ describe("sandbox lifecycle service", () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
     const otherRun = sandboxRunFor("task2", "run2");
-    await store.createTask(taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
     await store.sandboxRuns.put(run);
     const resources = createdResourcesForRun(run);
     const pod = resources.find((resource) => resource.kind === "Pod");
@@ -520,10 +487,6 @@ describe("sandbox lifecycle service", () => {
     assert.equal(stored?.terminalFailure?.reason, "runner_terminated");
     assert.equal(stored?.terminalFailure?.exitCode, 41);
     assert.equal(stored?.terminalFailure?.syncStatus, "synced");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
     assert.equal(
       port.deletedRefs.some((ref) => Object.values(otherRun.resourceNames).includes(ref.name)),
       false
@@ -533,8 +496,8 @@ describe("sandbox lifecycle service", () => {
   it("returns persisted and observed state without exposing secrets", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.createTask(taskForRun(run, "running"));
-    await store.createTask(taskForRun(sandboxRunFor("task2", "run2"), "running"));
+    await createTaskForRun(store, taskForRun(run, "running"));
+    await createTaskForRun(store, taskForRun(sandboxRunFor("task2", "run2"), "running"));
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const service = new SandboxLifecycleService(store, {
@@ -554,17 +517,6 @@ describe("sandbox lifecycle service", () => {
     assert.ok(status.actionSummary.some((action) => action.type === "delete_resource" && action.kind === "Pod"));
     assert.ok(status.cleanupPlan.targets.some((target) => target.type === "delete_resource" && target.kind === "Pod"));
     assert.ok(status.cleanupPlan.targets.some((target) => target.type === "store_run_state" && target.runId === run.runId));
-    assert.deepEqual(
-      status.cleanupPlan.targets
-        .filter((target) => target.type === "runtime_directory")
-        .map((target) => [target.directory, target.action]),
-      [
-        ["home", "delete"],
-        ["botified", "delete"],
-        ["inputs", "retain"],
-        ["artifacts", "retain"]
-      ]
-    );
     assert.doesNotMatch(JSON.stringify(status), /bsk_|sk-real|MODEL_API_KEY/);
   });
 
@@ -625,10 +577,6 @@ describe("sandbox lifecycle service", () => {
       "Secret:asl-botified-task1",
       "ServiceAccount:asl-task-task1"
     ]);
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
     const saved = await store.sandboxRuns.get(run.runId);
     assert.equal(saved?.phase, "cleaned");
     assert.equal(saved?.cleanupStatus, "cleaned");
@@ -667,10 +615,6 @@ describe("sandbox lifecycle service", () => {
     ]);
     assert.deepEqual(result.storedRunIds, [run.runId]);
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
   });
 
   it("keeps a delete error when fresh observe sees the same target with mismatched labels or UID", async () => {
@@ -835,10 +779,6 @@ describe("sandbox lifecycle service", () => {
     assert.deepEqual(result.errors, []);
     assert.equal(result.observedResourceCounts.Service, 1);
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
   });
 
   it("retries Service delete HTTP 400 confirmation until a fresh observe no longer sees the target", async () => {
@@ -880,10 +820,6 @@ describe("sandbox lifecycle service", () => {
       ["active", "active", "active", "missing"]
     );
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
   });
 
   it("uses the bounded default delete error confirmation attempts", async () => {
@@ -923,10 +859,6 @@ describe("sandbox lifecycle service", () => {
       ]
     );
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
   });
 
   it("keeps Service delete HTTP 400 when confirmation retries still see the target active", async () => {
@@ -986,175 +918,6 @@ describe("sandbox lifecycle service", () => {
     assert.notEqual((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
   });
 
-  it("rejects cleanup through an ancestor symlink to an external directory", async () => {
-    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
-    const outside = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-outside-"));
-    try {
-      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-      const outsideHome = path.join(outside, "proj1", "tasks", run.taskId, "home");
-      await mkdir(outsideHome, { recursive: true });
-      await writeFile(path.join(outsideHome, "keep.txt"), "keep");
-      await mkdir(path.join(dataRoot, "workspaces", run.workspaceId), { recursive: true });
-      await symlink(outside, path.join(dataRoot, "workspaces", run.workspaceId, "projects"));
-      const store = createLocalInMemoryProductStore();
-      await store.sandboxRuns.put(run);
-      const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-        dataRoot,
-        namespace: run.namespace,
-        port: new FakeLifecyclePort([])
-      });
-
-      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
-
-      assert.match(result.errors[0] ?? "", /symlink/);
-      assert.equal(await readFile(path.join(outsideHome, "keep.txt"), "utf8"), "keep");
-      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
-    } finally {
-      await rm(dataRoot, { recursive: true, force: true });
-      await rm(outside, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects cleanup through an ancestor symlink to another in-root task", async () => {
-    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
-    try {
-      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-      const taskRoot = path.join(dataRoot, run.projectSubPath, "tasks");
-      const otherTaskHome = path.join(taskRoot, "task2", "home");
-      await mkdir(otherTaskHome, { recursive: true });
-      await writeFile(path.join(otherTaskHome, "keep.txt"), "keep");
-      await symlink("task2", path.join(taskRoot, run.taskId));
-      const store = createLocalInMemoryProductStore();
-      await store.sandboxRuns.put(run);
-      const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-        dataRoot,
-        namespace: run.namespace,
-        port: new FakeLifecyclePort([])
-      });
-
-      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
-
-      assert.match(result.errors[0] ?? "", /symlink/);
-      assert.equal(await readFile(path.join(otherTaskHome, "keep.txt"), "utf8"), "keep");
-      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleanup_requested");
-    } finally {
-      await rm(dataRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("unlinks a final runtime target symlink without deleting its target", async () => {
-    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
-    const outside = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-outside-"));
-    try {
-      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-      const taskRoot = path.join(dataRoot, run.projectSubPath, "tasks", run.taskId);
-      const outsideTarget = path.join(outside, "home");
-      await mkdir(taskRoot, { recursive: true });
-      await mkdir(outsideTarget);
-      await writeFile(path.join(outsideTarget, "keep.txt"), "keep");
-      await symlink(outsideTarget, path.join(taskRoot, "home"));
-      const store = createLocalInMemoryProductStore();
-      await store.sandboxRuns.put(run);
-      const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-        dataRoot,
-        namespace: run.namespace,
-        port: new FakeLifecyclePort([])
-      });
-
-      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
-
-      await assert.rejects(() => lstat(path.join(taskRoot, "home")), { code: "ENOENT" });
-      assert.equal(await readFile(path.join(outsideTarget, "keep.txt"), "utf8"), "keep");
-      assert.deepEqual(result.errors, []);
-      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    } finally {
-      await rm(dataRoot, { recursive: true, force: true });
-      await rm(outside, { recursive: true, force: true });
-    }
-  });
-
-  it("treats a missing runtime parent as successful cleanup", async () => {
-    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-sandbox-cleanup-"));
-    try {
-      const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-      const store = createLocalInMemoryProductStore();
-      await store.sandboxRuns.put(run);
-      const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-        dataRoot,
-        namespace: run.namespace,
-        port: new FakeLifecyclePort([])
-      });
-
-      const result = await service.reapSandboxRunsOnce({ runId: run.runId, apply: true });
-
-      assert.deepEqual(result.errors, []);
-      assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
-    } finally {
-      await rm(dataRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects runtime directory cleanup that escapes dataRoot without deleting or marking cleaned", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({
-      cleanupStatus: "cleanup_requested",
-      phase: "stopping",
-      projectSubPath: "../escaped-project"
-    });
-    await store.sandboxRuns.put(run);
-    const cleaner = new FakeRuntimeDirectoryCleaner();
-    const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-      dataRoot: "/workspace",
-      namespace: "agentsmith",
-      port: new FakeLifecyclePort([]),
-      runtimeDirectoryCleaner: cleaner
-    });
-
-    const result = await service.reapSandboxRunsOnce({ apply: true });
-
-    assert.match(result.errors[0] ?? "", /outside the data root/);
-    assert.deepEqual(cleaner.removedPaths, []);
-    const saved = await store.sandboxRuns.get(run.runId);
-    assert.equal(saved?.cleanupStatus, "cleanup_requested");
-    assert.equal(saved?.lastCleanupError?.target, "runtime_directory:home");
-  });
-
-  it("records runtime cleanup failures without marking the run cleaned", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
-    const cleaner = new FakeRuntimeDirectoryCleaner({ failPath: "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified" });
-    const service = new SandboxLifecycleService(store, {
-      taskLifecycle: taskLifecycleFor(store),
-      dataRoot: "/workspace",
-      namespace: "agentsmith",
-      port: new FakeLifecyclePort([]),
-      runtimeDirectoryCleaner: cleaner,
-      now: () => new Date("2026-07-04T00:00:01.000Z")
-    });
-
-    const result = await service.reapSandboxRunsOnce({ apply: true });
-
-    assert.match(result.errors[0] ?? "", /remove failed/);
-    assert.deepEqual(cleaner.removedPaths, [
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/home",
-      "/workspace/workspaces/ws1/projects/proj1/tasks/task1/botified"
-    ]);
-    const saved = await store.sandboxRuns.get(run.runId);
-    assert.equal(saved?.cleanupStatus, "cleanup_requested");
-    assert.equal(saved?.cleanupAttempts, 1);
-    assert.equal(saved?.lastCleanupAt, "2026-07-04T00:00:01.000Z");
-    assert.equal(saved?.lastCleanupError?.target, "runtime_directory:botified");
-    assert.match(saved?.lastCleanupError?.message ?? "", /remove failed/);
-    assert.ok(result.recentCleanupFailures.some((failure) => failure.runId === run.runId));
-    assert.doesNotMatch(JSON.stringify({ result, saved }), /bsk_|sk-real|MODEL_API_KEY/);
-  });
-
   it("finalizes expiring sandbox tasks before runtime cleanup without overwriting an existing terminal status", async () => {
     const store = createLocalInMemoryProductStore();
     const runningRun = sandboxRun({
@@ -1165,8 +928,8 @@ describe("sandbox lifecycle service", () => {
       expiresAt: "2026-07-03T23:59:59.000Z",
       idleExpiresAt: "2026-07-04T00:30:00.000Z"
     });
-    await store.createTask(taskForRun(runningRun, "running"));
-    await store.createTask(taskForRun(completedRun, "completed"));
+    await createTaskForRun(store, taskForRun(runningRun, "running"));
+    await createTaskForRun(store, taskForRun(completedRun, "completed"));
     await store.sandboxRuns.put(runningRun);
     await store.sandboxRuns.put(completedRun);
     const port = new FakeLifecyclePort([
@@ -1195,8 +958,8 @@ describe("sandbox lifecycle service", () => {
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
     await store.createProject({ id: run.projectId, workspaceId: run.workspaceId, name: "P", ownerUserId: "user1", rootPath: run.projectSubPath, taskConcurrencyLimit: 1, createdAt: run.createdAt, updatedAt: run.updatedAt });
     await store.createProjectResourcePolicy({ projectId: run.projectId, activeTasksLimit: 1, providerRequestsLimit: null, providerTokensLimit: null, providerCostLimit: null, projectFileBytesLimit: null, createdAt: run.createdAt, updatedAt: run.updatedAt });
-    await store.upsertProjectResourceUsage({ projectId: run.projectId, activeTasks: 1, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: run.updatedAt });
-    await store.createTask({ ...taskForRun(run, "running"), activeReservation: true });
+    await store.upsertProjectResourceUsage({ projectId: run.projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: run.updatedAt });
+    await createTaskForRun(store, taskForRun(run, "running"), true);
     await store.sandboxRuns.put(run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const service = new SandboxLifecycleService(store, {
@@ -1423,6 +1186,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     image: "agentsmith-lite/botified-runner:test",
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws1/projects/proj1",
+    fileLibraryRootSubPath: "libraries/library-task1/home",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task1",
@@ -1437,8 +1201,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       key: "BOTIFIED_SERVICE_KEY"
     },
     directories: {
-      taskHome: "/workspace/project/tasks/task1/home",
-      artifacts: "/workspace/project/tasks/task1/artifacts",
+      libraryHome: "/workspace/project/libraries/library-task1/home",
       botified: "/workspace/project/tasks/task1/botified"
     },
     resourceLimits: {
@@ -1461,6 +1224,7 @@ function sandboxRunFor(taskId: string, runId: string, overrides: Partial<Sandbox
   return sandboxRun({
     taskId,
     runId,
+    fileLibraryRootSubPath: `libraries/library-${taskId}/home`,
     resourceNames: {
       pod: `asl-task-${taskId}`,
       service: `asl-task-${taskId}`,
@@ -1474,8 +1238,7 @@ function sandboxRunFor(taskId: string, runId: string, overrides: Partial<Sandbox
       key: "BOTIFIED_SERVICE_KEY"
     },
     directories: {
-      taskHome: `/workspace/project/tasks/${taskId}/home`,
-      artifacts: `/workspace/project/tasks/${taskId}/artifacts`,
+      libraryHome: `/workspace/project/libraries/library-${taskId}/home`,
       botified: `/workspace/project/tasks/${taskId}/botified`
     },
     ...overrides
@@ -1488,6 +1251,7 @@ function taskForRun(run: SandboxRunState, status: "running" | "completed") {
     workspaceId: run.workspaceId,
     projectId: run.projectId,
     endpointId: `endpoint-${run.taskId}`,
+    fileLibraryId: `library-${run.taskId}`,
     prompt: "build",
     status,
     runId: run.runId,
@@ -1499,6 +1263,28 @@ function taskForRun(run: SandboxRunState, status: "running" | "completed") {
     createdAt: run.createdAt,
     updatedAt: run.updatedAt
   };
+}
+
+async function createTaskForRun(
+  store: ReturnType<typeof createLocalInMemoryProductStore>,
+  task: ReturnType<typeof taskForRun>,
+  reserveActive = false
+) {
+  const created = await store.createTaskAtomically({
+    task,
+    newFileLibrary: {
+      id: task.fileLibraryId,
+      workspaceId: task.workspaceId,
+      projectId: task.projectId,
+      name: `Library ${task.id}`,
+      rootSubPath: `libraries/${task.fileLibraryId}/home`,
+      createdByUserId: "user-test",
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt
+    },
+    reserveActive
+  });
+  assert.equal(created.kind, "created");
 }
 
 function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {

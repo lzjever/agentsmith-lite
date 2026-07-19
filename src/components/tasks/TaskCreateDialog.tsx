@@ -1,71 +1,58 @@
 "use client";
 
-import { AlertCircle, ChevronRight, FileText, Folder, FolderUp, Upload, X } from "lucide-react";
+import { AlertCircle, Library, Plus, X } from "lucide-react";
 import Link from "next/link";
-import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectFile } from "../../lib/api/client";
-import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { fileBreadcrumbs, parentFilePath, PROJECT_FILES_ROOT, sortFileEntries } from "../files/fileBrowserState";
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
 import { Button } from "../ui/button";
-import { Checkbox } from "../ui/checkbox";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 
-interface TaskCreateValue { title: string; prompt: string; endpointId: string; inputPaths: string[]; }
+export type TaskCreateValue = {
+  title: string;
+  prompt: string;
+  endpointId: string;
+  fileLibrary: { mode: "create_new"; name: string } | { mode: "use_existing"; id: string };
+};
 
 export function TaskCreateDialog({
-  endpoints, projectFiles, projectFilesLoading, projectId, policyHref = "policy", canWriteFiles = false,
-  open, saving, onClose, onCreate
+  endpoints, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
 }: {
   endpoints: Endpoint[];
-  projectFiles: ProjectFile[];
-  projectFilesLoading: boolean;
-  projectId?: string;
+  libraries: FileLibrary[];
+  librariesLoading: boolean;
   policyHref?: string;
-  canWriteFiles?: boolean;
   open: boolean;
   saving: boolean;
   onClose: () => void;
   onCreate: (input: TaskCreateValue) => Promise<void>;
 }) {
-  const mutationKeys = useMutationKeys();
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [endpointId, setEndpointId] = useState("");
-  const [inputPaths, setInputPaths] = useState<string[]>([]);
-  const [browserPath, setBrowserPath] = useState(PROJECT_FILES_ROOT);
-  const [browserEntries, setBrowserEntries] = useState<ProjectFile[]>(projectFiles);
-  const [browserLoading, setBrowserLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [libraryMode, setLibraryMode] = useState<"create_new" | "use_existing">("create_new");
+  const [libraryName, setLibraryName] = useState("Task workspace");
+  const [libraryNameEdited, setLibraryNameEdited] = useState(false);
+  const [libraryId, setLibraryId] = useState("");
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
-  const uploadInput = useRef<HTMLInputElement>(null);
   const wasOpen = useRef(false);
-  const browserPathRef = useRef(PROJECT_FILES_ROOT);
-  const browserLoadVersion = useRef(0);
+  const availableLibraries = libraries.filter((library) => library.boundTask === null && library.capabilities.canWriteFiles);
 
   useEffect(() => {
-    if (!open) {
-      mutationKeys.clear("task-input.upload");
-      wasOpen.current = false;
-      browserLoadVersion.current += 1;
-      setBrowserLoading(false);
-      return;
-    }
+    if (!open) { wasOpen.current = false; return; }
     if (wasOpen.current) return;
     wasOpen.current = true;
     setTitle("");
     setPrompt("");
-    setInputPaths([]);
-    browserPathRef.current = PROJECT_FILES_ROOT;
-    browserLoadVersion.current += 1;
-    setBrowserLoading(false);
-    setBrowserPath(PROJECT_FILES_ROOT);
-    setBrowserEntries(sortFileEntries(projectFiles));
+    setLibraryMode("create_new");
+    setLibraryName("Task workspace");
+    setLibraryNameEdited(false);
+    setLibraryId("");
     clearError();
-  }, [endpoints, open, projectFiles]);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -73,109 +60,61 @@ export function TaskCreateDialog({
   }, [endpoints, open]);
 
   useEffect(() => {
-    if (open && browserPathRef.current === PROJECT_FILES_ROOT) setBrowserEntries(sortFileEntries(projectFiles));
-  }, [browserPath, open, projectFiles]);
+    if (!open) return;
+    setLibraryId((current) => availableLibraries.some((library) => library.id === current) ? current : (availableLibraries[0]?.id ?? ""));
+  }, [libraries, open]);
 
-  async function navigate(path: string) {
-    if (!projectId) return;
-    browserPathRef.current = path;
-    const version = ++browserLoadVersion.current;
-    setBrowserPath(path);
-    setBrowserLoading(true);
-    clearError();
-    try {
-      const loaded = await apiClient.files(projectId, path);
-      if (version !== browserLoadVersion.current || browserPathRef.current !== path) return;
-      setBrowserEntries(sortFileEntries(loaded.entries));
-    } catch (reason) {
-      if (version === browserLoadVersion.current && browserPathRef.current === path) showError(reason, "Project files could not be loaded.");
-    } finally {
-      if (version === browserLoadVersion.current && browserPathRef.current === path) setBrowserLoading(false);
-    }
-  }
-
-  async function upload(file: File) {
-    if (!projectId) return;
-    const uploadPath = browserPathRef.current;
-    setUploading(true);
-    clearError();
-    const filePath = `${uploadPath}/${file.name}`;
-    const requestIdentity = `${filePath}:${file.size}:${file.lastModified}`;
-    try {
-      const written = await apiClient.uploadFile(projectId, filePath, file, { idempotencyKey: mutationKeys.key("task-input.upload", requestIdentity) });
-      mutationKeys.complete("task-input.upload", requestIdentity);
-      setInputPaths((current) => current.includes(written.path) ? current : [...current, written.path]);
-      if (browserPathRef.current === uploadPath) await navigate(uploadPath);
-    } catch (reason) {
-      if (reason instanceof ApiError) mutationKeys.complete("task-input.upload", requestIdentity);
-      showError(reason, "The file could not be uploaded.");
-    } finally { setUploading(false); }
-  }
-
-  function selectUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (file) void upload(file);
+  function changeTitle(nextTitle: string) {
+    setTitle(nextTitle);
+    if (!libraryNameEdited) setLibraryName(generatedLibraryName(nextTitle));
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!prompt.trim() || !endpointId || saving) return;
+    const fileLibrary = libraryMode === "create_new"
+      ? { mode: "create_new" as const, name: libraryName.trim() }
+      : { mode: "use_existing" as const, id: libraryId };
+    if (!prompt.trim() || !endpointId || saving || (fileLibrary.mode === "create_new" ? !fileLibrary.name : !fileLibrary.id)) return;
     clearError();
     try {
-      await onCreate({ title: title.trim(), prompt: prompt.trim(), endpointId, inputPaths });
+      await onCreate({ title: title.trim(), prompt: prompt.trim(), endpointId, fileLibrary });
     } catch (reason) {
-      showError(reason, "The task could not be created.");
+      setError(reason instanceof Error ? reason.message : "The task could not be created.");
+      setErrorCode(reason instanceof ApiError ? reason.code ?? "" : "");
     }
   }
 
-  const parent = parentFilePath(browserPath);
-  const crumbs = fileBreadcrumbs(browserPath);
-  const entries = projectId ? browserEntries : projectFiles;
-  const loadingFiles = projectFilesLoading || browserLoading;
-  const busy = saving || uploading;
-
+  const busy = saving;
+  const validLibrary = libraryMode === "create_new" ? Boolean(libraryName.trim()) : Boolean(libraryId);
   return <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
-    <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl overflow-y-auto">
+    <DialogContent className="max-h-[calc(100vh-2rem)] max-w-2xl overflow-y-auto">
       <form onSubmit={(event) => void submit(event)} aria-label="Create task">
         <DialogHeader><div className="flex items-start justify-between gap-4"><div><DialogTitle className="type-title text-foreground">Create task</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Describe the work for the Botified sandbox.</DialogDescription></div><DialogClose asChild><Button variant="quiet" size="icon" aria-label="Close create task" disabled={busy}><X size={17} /></Button></DialogClose></div></DialogHeader>
-        {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : errorCode === "project_file_bytes_limit_reached" ? <><p className="font-medium">File storage limit reached.</p><p className="mt-1 text-secondary">Delete project files or ask a project administrator to change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
-        <div className="grid gap-4 px-5 py-5">
+        {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
+        <div className="grid gap-5 px-5 py-5">
           {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="grid gap-1.5 text-sm text-secondary">Title <span className="text-tertiary">(optional)</span><Input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="Task title" autoFocus disabled={busy} /></label>
+              <label className="grid gap-1.5 text-sm text-secondary">Title <span className="text-tertiary">(optional)</span><Input value={title} onChange={(event) => changeTitle(event.target.value)} maxLength={160} placeholder="Task title" autoFocus disabled={busy} /></label>
               <label className="grid gap-1.5 text-sm text-secondary">Endpoint<Select value={endpointId} onValueChange={setEndpointId} disabled={busy}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{endpoints.map((endpoint) => <SelectItem key={endpoint.id} value={endpoint.id}>{endpoint.name} ({endpoint.model})</SelectItem>)}</SelectContent></Select></label>
             </div>
-            <fieldset className="grid gap-2">
-              <div className="flex flex-wrap items-center justify-between gap-2"><legend className="text-sm text-secondary">Project inputs <span className="text-tertiary">({inputPaths.length} selected)</span></legend>{projectId && canWriteFiles ? <><Button type="button" variant="quiet" size="sm" disabled={busy} onClick={() => uploadInput.current?.click()}><Upload size={15} />{uploading ? "Uploading..." : "Upload and attach"}</Button><input ref={uploadInput} hidden type="file" onChange={selectUpload} /></> : null}</div>
-              {projectId ? <nav className="flex min-h-9 items-center gap-1 overflow-x-auto border border-subtle px-2" aria-label="Task input path"><ol className="flex min-w-max items-center gap-1 text-xs text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index ? <ChevronRight size={13} className="text-tertiary" /> : null}<button type="button" className="px-1 py-1 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav> : null}
-              {loadingFiles ? <p className="text-sm text-tertiary">Loading project files...</p> : entries.length || parent ? <div className="max-h-48 divide-y divide-subtle overflow-y-auto border border-subtle">{parent ? <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-secondary hover:bg-surface-low disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void navigate(parent)}><FolderUp className="size-4" />Up one folder</button> : null}{entries.map((file) => <FileChoice key={file.path} file={file} selected={inputPaths.includes(file.path)} disabled={busy} onToggle={() => setInputPaths((current) => current.includes(file.path) ? current.filter((path) => path !== file.path) : [...current, file.path])} onOpen={() => void navigate(file.path)} />)}</div> : <p className="text-sm text-tertiary">No project files available.</p>}
-              {inputPaths.length ? <div className="flex flex-wrap gap-1.5">{inputPaths.map((path) => <button type="button" key={path} className="inline-flex max-w-full items-center gap-1 border border-border bg-surface-low px-2 py-1 text-xs text-secondary disabled:cursor-not-allowed disabled:opacity-50" title={`Remove ${path}`} disabled={busy} onClick={() => setInputPaths((current) => current.filter((candidate) => candidate !== path))}><span className="truncate">{path.replace(/^files\//, "")}</span><X size={12} /></button>)}</div> : null}
+            <fieldset className="grid gap-3"><legend className="text-sm text-secondary">File Library</legend>
+              <label className={`flex cursor-pointer items-start gap-3 border px-3 py-3 ${libraryMode === "create_new" ? "border-foreground bg-surface-low" : "border-border"}`}><input type="radio" name="file-library-mode" value="create_new" checked={libraryMode === "create_new"} disabled={busy} onChange={() => setLibraryMode("create_new")} /><Plus className="mt-0.5 size-4 shrink-0 text-icon-default" /><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Create new library</span><span className="mt-1 block text-xs text-secondary">Start this task with its own workspace.</span></span></label>
+              {libraryMode === "create_new" ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library name<Input value={libraryName} onChange={(event) => { setLibraryName(event.target.value); setLibraryNameEdited(true); }} maxLength={160} disabled={busy} /></label> : null}
+              <label className={`flex cursor-pointer items-start gap-3 border px-3 py-3 ${libraryMode === "use_existing" ? "border-foreground bg-surface-low" : "border-border"}`}><input type="radio" name="file-library-mode" value="use_existing" checked={libraryMode === "use_existing"} disabled={busy || availableLibraries.length === 0} onChange={() => setLibraryMode("use_existing")} /><Library className="mt-0.5 size-4 shrink-0 text-icon-default" /><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Use existing library</span><span className="mt-1 block text-xs text-secondary">Choose an available library you can bind to this task.</span></span></label>
+              {libraryMode === "use_existing" ? librariesLoading ? <p className="ml-7 text-sm text-tertiary">Loading File Libraries...</p> : availableLibraries.length > 0 ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library<Select value={libraryId} onValueChange={setLibraryId} disabled={busy}><SelectTrigger aria-label="Existing File Library"><SelectValue /></SelectTrigger><SelectContent>{availableLibraries.map((library) => <SelectItem key={library.id} value={library.id}>{library.name}</SelectItem>)}</SelectContent></Select></label> : <p className="ml-7 text-sm text-tertiary">No unbound File Library is available.</p> : null}
             </fieldset>
             <label className="grid gap-1.5 text-sm text-secondary">Task prompt<Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-36 resize-y" placeholder="Describe the result you need" disabled={busy} /></label>
           </>}
         </div>
-        <DialogFooter><Button type="button" variant="quiet" onClick={onClose} disabled={busy}>Cancel</Button><Button type="submit" disabled={!prompt.trim() || !endpointId || busy}>{saving ? "Creating..." : "Create task"}</Button></DialogFooter>
+        <DialogFooter><Button type="button" variant="quiet" onClick={onClose} disabled={busy}>Cancel</Button><Button type="submit" disabled={!prompt.trim() || !endpointId || !validLibrary || busy}>{saving ? "Creating..." : "Create task"}</Button></DialogFooter>
       </form>
     </DialogContent>
   </Dialog>;
 
-  function clearError() {
-    setError("");
-    setErrorCode("");
-  }
-
-  function showError(reason: unknown, fallback: string) {
-    setError(errorMessage(reason, fallback));
-    setErrorCode(reason instanceof ApiError ? reason.code ?? "" : "");
-  }
+  function clearError() { setError(""); setErrorCode(""); }
 }
 
-function FileChoice({ file, selected, disabled, onToggle, onOpen }: { file: ProjectFile; selected: boolean; disabled: boolean; onToggle: () => void; onOpen: () => void }) {
-  const directory = file.type === "directory";
-  return <div className="flex items-center gap-2 px-3 py-2 text-sm text-foreground"><Checkbox aria-label={`Attach ${file.name}`} checked={selected} disabled={disabled} onChange={onToggle} />{directory ? <Folder className="size-4 text-icon-default" /> : <FileText className="size-4 text-icon-default" />}<button type="button" className="min-w-0 flex-1 truncate text-left hover:underline disabled:cursor-not-allowed disabled:opacity-50" disabled={disabled} onClick={directory ? onOpen : onToggle}>{file.name}</button>{directory ? <button type="button" className="text-xs text-tertiary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" disabled={disabled} onClick={onOpen}>Open</button> : null}</div>;
-}
-
-function errorMessage(reason: unknown, fallback: string): string {
-  return reason instanceof Error ? reason.message : fallback;
+function generatedLibraryName(title: string): string {
+  const trimmed = title.trim();
+  return `${trimmed.slice(0, 150) || "Task"} workspace`;
 }

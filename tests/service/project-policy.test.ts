@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
-import type { ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type ChatResponse, type ModelEndpoint } from "../../packages/contracts/src/api.js";
 import type { PersistedAgentTask } from "../../packages/ports/src/store.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("project resource policy", () => {
+  it("retains only canonical Library HOME file paths in audit details",()=>{
+    assert.equal(sanitizeProjectAuditDetail({filePath:"libraries/library_1/home/notes/result.txt"}).filePath,"libraries/library_1/home/notes/result.txt");
+    for(const filePath of ["files/notes/result.txt","notes/result.txt","libraries/library_1/home/../secret","libraries/library_1/workspace/result.txt"]){
+      assert.equal(sanitizeProjectAuditDetail({filePath}).filePath,undefined);
+    }
+  });
+
   it("creates the owner membership, default policy, and zero usage with the project", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-project", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
@@ -68,7 +75,7 @@ describe("project resource policy", () => {
 
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 0 }, timestamp);
     await assert.rejects(
-      () => services.policies.recordFileBytes(project.id, user.id, "files/blocked.txt", 1),
+      () => services.policies.recordFileBytes(project.id,user.id,"libraries/library_blocked/home/blocked.txt",1),
       (error: unknown) => error instanceof ProductError && error.code === "project_file_bytes_limit_reached"
     );
     assert.equal(await adjust(1), null);
@@ -82,21 +89,22 @@ describe("project resource policy", () => {
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 1);
   });
 
-  it("reconciles file usage to the storage truth without applying the quota as a write gate", async () => {
+  it("uses measured Library bytes as the sole truth despite artifact metadata", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-file-reconcile", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 5 }, "2026-07-12T00:00:00.000Z");
-    const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "running", runId: "run_file_reconcile", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
-    await store.createTask(task);
+    const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_file_reconcile", title:"Task", prompt: "not audited", status: "running", runId: "run_file_reconcile", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false})).kind,"created");
     await store.appendTaskArtifacts([{ id: "artifact_file_reconcile", taskId: task.id, fileId: "file_reconcile", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: project.createdAt }]);
 
-    await services.policies.reconcileFileLibraryBytes(project.id, 8);
-    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 10);
+    await assert.rejects(()=>services.policies.reconcileFileLibraryBytes(project.id,8),/Project file bytes limit reached/);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,8);
     await services.policies.reconcileFileLibraryBytes(project.id, 3);
-    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 5);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,3);
   });
 
   it("rejects a duplicate in-memory task id without charging active capacity twice", async () => {
@@ -105,9 +113,10 @@ describe("project resource policy", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 2 });
-    const task: PersistedAgentTask = { id: "task_duplicate", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "starting", runId: "run_duplicate", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
-    await store.createTaskWithActiveReservation(task);
-    await assert.rejects(() => store.createTaskWithActiveReservation(task), /Task already exists/);
+    const task: PersistedAgentTask = { id: "task_duplicate", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_duplicate", title:"Task", prompt: "not audited", status: "starting", runId: "run_duplicate", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:"libraries/library_duplicate/home",createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
+    assert.equal((await store.createTaskAtomically({task,reserveActive:true})).kind,"created");
+    await assert.rejects(()=>store.createTaskAtomically({task,reserveActive:true}),/Task already exists/);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
     assert.equal(current.activeTasks, 1);
   });
@@ -118,12 +127,13 @@ describe("project resource policy", () => {
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    const task: PersistedAgentTask = { id: "task_intent", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", prompt: "not audited", status: "running", runId: "run_intent", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
-    await store.createTaskWithActiveReservation(task);
+    const task: PersistedAgentTask = { id: "task_intent", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_intent", title:"Task", prompt: "not audited", status: "running", runId: "run_intent", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:"libraries/library_intent/home",createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
+    assert.equal((await store.createTaskAtomically({task,reserveActive:true})).kind,"created");
     const timestamp = new Date().toISOString();
     const [failed, completed] = await Promise.all([
-      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "failed", updatedAt: timestamp, auditEvent: { id: "audit_task_failed", projectId: project.id, actorId: null, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp }, successors: [] }),
-      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "completed", updatedAt: timestamp, auditEvent: { id: "audit_task_completed", projectId: project.id, actorId: null, action: "task.completed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp }, successors: [] })
+      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "failed", updatedAt: timestamp, auditEvent: { id: "audit_task_failed", projectId: project.id, actorId: null, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp } }),
+      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "completed", updatedAt: timestamp, auditEvent: { id: "audit_task_completed", projectId: project.id, actorId: null, action: "task.completed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp } })
     ]);
     assert.equal([failed, completed].filter((result) => result?.applied).length, 1);
     const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);

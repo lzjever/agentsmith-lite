@@ -260,8 +260,9 @@ export interface ProjectAuditEvent {
   detail?: ProjectAuditSafeDetail;
   createdAt: ISODateString;
 }
-export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "terminal_pending" | "accepted" | "successor_created" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
-export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","terminal_pending","accepted","successor_created","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(typeof source.filePath==="string"&&source.filePath.length<=1024&&source.filePath.startsWith("files/")&&!source.filePath.split("/").includes(".."))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
+export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "accepted" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
+export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","accepted","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(isCanonicalLibraryAuditPath(source.filePath))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
+function isCanonicalLibraryAuditPath(input:unknown):input is string{if(typeof input!=="string"||input.length>1024||input.includes("\\")||/[\u0000-\u001f]/.test(input))return false;const segments=input.split("/");return segments.length>=4&&segments[0]==="libraries"&&/^[A-Za-z0-9._:-]+$/.test(segments[1]??"")&&segments[2]==="home"&&segments.slice(3).every((segment)=>segment!==""&&segment!=="."&&segment!=="..");}
 
 export interface ProjectAuditEventView extends ProjectAuditEvent {
   actorDisplayName: string | null;
@@ -394,12 +395,11 @@ export interface AgentTask {
   workspaceId: string;
   projectId: string;
   endpointId: string;
+  fileLibraryId: string;
   title?: string;
   prompt: string;
-  inputPaths?: string[];
   status: AgentTaskStatus;
   runId: string;
-  sourceTaskId?: string | null;
   executionMode: TaskExecutionMode;
   sandbox: TaskSandboxSummary;
   activeReservation?: boolean;
@@ -448,12 +448,6 @@ export interface AgentTaskArtifact {
   previewText?: string | null;
   createdAt: ISODateString;
 }
-export interface TaskInputSnapshotEntry {
-  path: string;
-  name: string;
-  bytes: number;
-  sha256: string;
-}
 export interface TaskSummary { taskId: string; artifactCount: number; updatedAt: ISODateString; }
 
 export type TaskInteractionKind =
@@ -466,7 +460,6 @@ export type TaskInteractionKind =
   | "task_result"
   | "subagent_result"
   | "file"
-  | "execution_boundary"
   | "system_error";
 
 export type TaskInteractionContentMode = "full" | "preview" | "none";
@@ -563,12 +556,6 @@ export interface TaskFileInteraction extends TaskInteractionBase {
   bytes: number;
 }
 
-export interface TaskExecutionBoundaryInteraction extends TaskInteractionBase {
-  kind: "execution_boundary";
-  status: "successor_pending" | "successor_created" | "failed";
-  targetTaskId: string | null;
-}
-
 export interface TaskSystemErrorInteraction extends TaskInteractionBase {
   kind: "system_error";
   status: "active" | "resolved";
@@ -587,7 +574,6 @@ export type TaskInteractionItem =
   | TaskResultInteraction
   | TaskSubagentResultInteraction
   | TaskFileInteraction
-  | TaskExecutionBoundaryInteraction
   | TaskSystemErrorInteraction;
 
 export interface TaskCapabilities {
@@ -597,8 +583,6 @@ export interface TaskCapabilities {
   cancelTask: boolean;
   openTerminal: boolean;
   editTask: boolean;
-  retryTask: boolean;
-  duplicateTask: boolean;
   archiveTask: boolean;
   deleteTask: boolean;
 }
@@ -615,7 +599,7 @@ export type TaskHistoryStatus = "complete" | "gap";
 export interface TaskQueuedMessage {
   id: string;
   content: string;
-  deliveryStatus: "pending" | "dispatching" | "terminal_pending" | "failed";
+  deliveryStatus: "pending" | "dispatching" | "failed";
   editable: boolean;
   deletable: boolean;
   safeError?: string;
@@ -644,17 +628,14 @@ export interface TaskInteractionSnapshot extends TaskInteractionHistoryPage, Tas
 export type TaskMessageDisposition =
   | "accepted_by_active_run"
   | "queued_for_active_run"
-  | "successor_pending"
-  | "successor_created"
   | "failed";
 
 export interface TaskMessageReceipt {
   messageId: string;
   disposition: TaskMessageDisposition;
-  targetTaskId: string;
   duplicate: boolean;
   queuedMessage: TaskQueuedMessage | null;
-  interaction: TaskUserMessageInteraction | TaskExecutionBoundaryInteraction | null;
+  interaction: TaskUserMessageInteraction | null;
   capabilities: TaskCapabilities;
   safeError?: string;
 }
@@ -756,7 +737,9 @@ export interface CreateTaskInput {
   prompt: string;
   endpointId: string;
   title?: string;
-  inputPaths?: string[];
+  fileLibrary:
+    | { mode: "create_new"; name: string }
+    | { mode: "use_existing"; id: string };
 }
 
 export type ProjectFileEntryType = "file" | "directory";

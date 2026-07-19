@@ -20,8 +20,7 @@ describe("botified runtime integration", () => {
       },
       task: {
         taskId: "t1",
-        projectMountPath: "/workspace/project",
-        taskHomePath: "/runner/task-home",
+        taskHomePath: "/workspace/task/home/workspace",
         botifiedDataPath: "/runner/botified-data",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
@@ -79,11 +78,11 @@ describe("botified runtime integration", () => {
     assert.equal(config.service.max_queue_messages > 0, true);
     assert.equal(config.service.max_queue_bytes > 0, true);
     assert.deepEqual(Object.keys(config.runtime).sort(), ["cwd", "data_dir", "session"].sort());
-    assert.equal(config.runtime.cwd, "/runner/task-home");
+    assert.equal(config.runtime.cwd, "/workspace/task/home/workspace");
     assert.equal(config.runtime.data_dir, "/runner/botified-data");
     assert.equal(config.runtime.session, "t1");
-    assert.equal(config.files.root_dir, "files");
-    assert.equal(pathIsInside(config.runtime.cwd, "/runner"), true);
+    assert.equal(config.files.root_dir,".artifacts/t1");
+    assert.equal(pathIsInside(config.runtime.cwd, "/workspace/task/home"), true);
     assert.equal(pathIsInside(config.runtime.data_dir, "/runner"), true);
     assert.notEqual(config.runtime.cwd, config.runtime.data_dir);
     assert.notEqual(config.files.root_dir, "/workspace/task/artifacts");
@@ -108,7 +107,7 @@ describe("botified runtime integration", () => {
         createdAt: "2026-07-04T00:00:00.000Z", updatedAt: "2026-07-04T00:00:00.000Z"
       },
       task: {
-        taskId: "t1", projectMountPath: "/workspace/project", taskHomePath: "/runner/task-home",
+        taskId: "t1", taskHomePath: "/runner/task-home",
         botifiedDataPath: "/runner/botified-data", serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY", providerBaseUrl: "http://broker/v1"
       }
@@ -143,7 +142,6 @@ describe("botified runtime integration", () => {
       },
       task: {
         taskId: "t1",
-        projectMountPath: "/workspace/project",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
@@ -178,7 +176,6 @@ describe("botified runtime integration", () => {
       },
       task: {
         taskId: "t1",
-        projectMountPath: "/workspace/project",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
@@ -211,7 +208,6 @@ describe("botified runtime integration", () => {
       },
       task: {
         taskId: "t1",
-        projectMountPath: "/workspace/project",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",

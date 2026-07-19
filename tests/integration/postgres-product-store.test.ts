@@ -9,6 +9,28 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
 import { readPostgresTestUrl } from "./postgres-test-database.js";
 
+type TaskFixture = Omit<PersistedAgentTask, "fileLibraryId"> & { fileLibraryId?: string | null };
+
+async function createTaskWithLibrary(store: PostgresProductStore, input: TaskFixture, reserveActive = false) {
+  const project = await store.findProject(input.projectId);
+  assert.ok(project);
+  const fileLibraryId = input.fileLibraryId ?? `library_${input.id}`;
+  return store.createTaskAtomically({
+    task: { ...input, fileLibraryId },
+    newFileLibrary: {
+      id: fileLibraryId,
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      name: `Library ${input.id}`,
+      rootSubPath: `libraries/${fileLibraryId}/home`,
+      createdByUserId: project.ownerUserId,
+      createdAt: input.createdAt,
+      updatedAt: input.updatedAt
+    },
+    reserveActive
+  });
+}
+
 const postgresUrl = readPostgresTestUrl();
 const postgresDescribe = postgresUrl ? describe : describe.skip;
 
@@ -204,7 +226,7 @@ postgresDescribe("postgres product store", () => {
     await store.createProject({ id: "proj_interaction_sync", workspaceId: "ws_interaction_sync", name: "Interaction sync", ownerUserId: "user_interaction_sync", rootPath: "workspaces/ws_interaction_sync/projects/proj_interaction_sync", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
     await createTestCredential(store, "proj_interaction_sync", "cred_interaction_sync", timestamp);
     await store.createEndpoint(endpointRecord("endpoint_interaction_sync", "proj_interaction_sync", "cred_interaction_sync", timestamp));
-    await store.createTask({ id: "task_interaction_sync", workspaceId: "ws_interaction_sync", projectId: "proj_interaction_sync", endpointId: "endpoint_interaction_sync", prompt: "hello", status: "starting", runId: "run_interaction_sync", executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
+    await createTaskWithLibrary(store, { id: "task_interaction_sync", workspaceId: "ws_interaction_sync", projectId: "proj_interaction_sync", endpointId: "endpoint_interaction_sync", prompt: "hello", status: "starting", runId: "run_interaction_sync", executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
 
     const snapshot = await store.readTaskInteractionSnapshot("task_interaction_sync", null, 10);
     assert.equal(snapshot?.sourceCursor, null);
@@ -234,9 +256,8 @@ postgresDescribe("postgres product store", () => {
     await store.createProject({ id: "proj_quota", workspaceId: "ws_quota", name: "Quota", ownerUserId: "user_quota", rootPath: "workspaces/ws_quota/projects/proj_quota", taskConcurrencyLimit: 1, createdAt: timestamp, updatedAt: timestamp });
     await createTestCredential(store, "proj_quota", "cred_quota", timestamp);
     await store.createEndpoint(endpointRecord("endpoint_quota", "proj_quota", "cred_quota", timestamp));
-    await store.createTask({ id: "task_quota", workspaceId: "ws_quota", projectId: "proj_quota", endpointId: "endpoint_quota", prompt: "quota", status: "completed", runId: "run_quota", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
+    await createTaskWithLibrary(store, { id: "task_quota", workspaceId: "ws_quota", projectId: "proj_quota", endpointId: "endpoint_quota", prompt: "quota", status: "completed", runId: "run_quota", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp });
     await store.appendTaskArtifacts([{ id: "artifact_quota", taskId: "task_quota", fileId: "file_quota", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: timestamp }]);
-    assert.equal(await store.measureProjectArtifactBytes("proj_quota"), 2);
 
     await store.patchProjectResourcePolicy("proj_quota", { projectFileBytesLimit: 0 }, timestamp);
     assert.equal(await adjustFileBytes(store, "proj_quota", 1, timestamp), null);
@@ -281,7 +302,7 @@ postgresDescribe("postgres product store", () => {
     await store.createEndpoint(blockedEndpoint);
     const blockedThread = await store.createProjectChatThread({ id: "thread_endpoint_delete_blocked", projectId: blockedEndpoint.projectId, ownerUserId: "user_endpoint_delete", endpointId: blockedEndpoint.id, title: "Blocked history", createdAt: timestamp, updatedAt: timestamp });
     await settleProvider(store, "settlement_endpoint_delete_blocked", blockedEndpoint.projectId, blockedEndpoint.id, timestamp);
-    await store.createTask({
+    await createTaskWithLibrary(store, {
       id: "task_endpoint_delete_blocked",
       workspaceId: "ws_endpoint_delete",
       projectId: blockedEndpoint.projectId,
@@ -330,26 +351,6 @@ postgresDescribe("postgres product store", () => {
     assert.equal((await store.transitionProjectAlert(first.projectId, first.id, "resolved", "2026-07-12T00:02:00.000Z"))?.status, "resolved");
     await store.upsertActiveProjectAlert({ id: "alert_history_2", projectId: first.projectId, type: first.type, status: "active", deliveryStatus: "not_configured", createdAt: "2026-07-12T00:03:00.000Z", updatedAt: "2026-07-12T00:03:00.000Z", resolvedAt: null, dismissedAt: null });
     assert.deepEqual((await store.listProjectAlerts(first.projectId)).map((alert) => [alert.id, alert.status]), [["alert_history_2", "active"], ["alert_history_1", "resolved"]]);
-  });
-
-  it("atomically round-trips a terminal message successor and rolls back a duplicate linkage", async () => {
-    const timestamp = "2026-07-11T00:00:00.000Z";
-    await store.createUser({ id: "user_follow_up", email: "follow-up@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
-    await store.createWorkspace({ id: "ws_follow_up", name: "Follow up", ownerUserId: "user_follow_up", createdAt: timestamp, updatedAt: timestamp });
-    await store.createProject({ id: "proj_follow_up", workspaceId: "ws_follow_up", name: "Follow up", ownerUserId: "user_follow_up", rootPath: "workspaces/ws_follow_up/projects/proj_follow_up", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp });
-    await store.createProjectCredential({ id: "cred_follow_up", projectId: "proj_follow_up", name: "Provider", type: "api_key", baseUrl: "https://models.example.test/v1", keyId: "test", nonce: Buffer.alloc(12), ciphertext: Buffer.from("ciphertext"), authTag: Buffer.alloc(16), fingerprint: "fingerprint", version: 1, createdAt: timestamp, lastRotatedAt: null, updatedAt: timestamp });
-    await store.createEndpoint({ id: "endpoint_follow_up", projectId: "proj_follow_up", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "m", credentialId: "cred_follow_up", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, createdAt: timestamp, updatedAt: timestamp });
-    const source: PersistedAgentTask = { id: "task_follow_source", workspaceId: "ws_follow_up", projectId: "proj_follow_up", endpointId: "endpoint_follow_up", prompt: "source", status: "completed", runId: "run_follow_source", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
-    const successor: PersistedAgentTask = { ...source, id: "task_follow_successor", prompt: "continue", status: "starting", runId: "run_follow_successor", sourceTaskId: source.id };
-    await store.createTask(source);
-    const linked = await store.createTaskWithActiveReservationAndMessage(successor, { id: "message_link", taskId: source.id, content: successor.prompt, targetTaskId: successor.id, deliveryStatus:"successor_created",createdAt: timestamp });
-    assert.equal(linked?.id, successor.id);
-    assert.equal((await store.findTask(successor.id))?.sourceTaskId, source.id);
-    assert.deepEqual((await store.listTaskMessages(source.id)).map((message) => message.targetTaskId), [successor.id]);
-
-    const rejected = { ...successor, id: "task_follow_rollback", runId: "run_follow_rollback" };
-    await assert.rejects(() => store.createTaskWithActiveReservationAndMessage(rejected, { id: "message_link", taskId: source.id, content: rejected.prompt, targetTaskId: rejected.id, deliveryStatus:"successor_created",createdAt: timestamp }));
-    assert.equal(await store.findTask(rejected.id), null);
   });
 
   it("imports a legacy endpoint alias into a credential binding and clears the alias", async () => {
@@ -426,7 +427,7 @@ postgresDescribe("postgres product store", () => {
     await createTestCredential(store, "proj_task_reservation", "cred_test", timestamp);
     await store.createEndpoint({ id: "endpoint_reservation", projectId: "proj_task_reservation", name: "Endpoint", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "m", credentialId: "cred_test", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: timestamp, updatedAt: timestamp });
 
-    const created = await Promise.all(Array.from({ length: 8 }, (_, index) => store.createTaskWithActiveReservation({
+    const created = await Promise.all(Array.from({ length: 8 }, (_, index) => createTaskWithLibrary(store, {
       id: `task_reservation_${index}`,
       workspaceId: "ws_task_reservation",
       projectId: "proj_task_reservation",
@@ -438,9 +439,9 @@ postgresDescribe("postgres product store", () => {
       sandbox: { namespace: "agentsmith", resources: [] },
       createdAt: timestamp,
       updatedAt: timestamp
-    })));
+    }, true)));
 
-    assert.equal(created.filter(Boolean).length, 1);
+    assert.equal(created.filter((result) => result.kind === "created").length, 1);
     assert.equal((await store.listTasksForProject("proj_task_reservation")).length, 1);
     assert.equal((await store.findProjectResourceUsage("proj_task_reservation"))?.activeTasks, 1);
   });
@@ -617,8 +618,8 @@ postgresDescribe("postgres product store", () => {
     const lateUsage = await store.findProjectResourceUsage("proj_ledger");
     assert.equal(lateUsage?.providerTokens, 9);
     assert.ok(Math.abs((lateUsage?.providerCost ?? 0) - 0.01) < 1e-9);
-    const task: PersistedAgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
-    await store.createTaskWithActiveReservation(task);
+    const task: PersistedAgentTask = { id: "task_ledger", workspaceId: "ws_ledger", projectId: "proj_ledger", endpointId: "endpoint_ledger", fileLibraryId: "library_task_ledger", prompt: "task", status: "running", runId: "run_ledger", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: timestamp, updatedAt: timestamp };
+    await createTaskWithLibrary(store, task, true);
     await Promise.all([store.requestTaskFinalization(task.id, "failed", timestamp), store.requestTaskFinalization(task.id, "completed", timestamp)]);
     await Promise.all([store.finalizeTaskAndReleaseActiveReservation(task.id, "failed", timestamp), store.finalizeTaskAndReleaseActiveReservation(task.id, "completed", timestamp)]);
     assert.equal((await store.findProjectResourceUsage("proj_ledger"))?.activeTasks, 0);
@@ -695,6 +696,7 @@ postgresDescribe("postgres product store", () => {
       workspaceId: workspace.id,
       projectId: project.id,
       endpointId: endpoint.id,
+      fileLibraryId: "library_task_pg",
       prompt: "build",
       status: "starting",
       runId: "run_pg",
@@ -769,7 +771,7 @@ postgresDescribe("postgres product store", () => {
     await store.upsertProjectMembership(membership);
     await createTestCredential(store, project.id, endpoint.credentialId, endpoint.createdAt);
     await store.createEndpoint(endpoint);
-    await store.createTask({ ...task, createdByUserId:user.id });
+    await createTaskWithLibrary(store, { ...task, createdByUserId:user.id });
     await store.createTaskMessage({ id:"message_pg", taskId:task.id, actorId:user.id, content:"continue", deliveryStatus:"pending", createdAt:task.createdAt, updatedAt:task.updatedAt });
     assert.equal(
       (await store.updateTaskStatusIfStarting(task.id, "running", "2026-07-04T00:07:00.000Z"))?.status,
@@ -805,7 +807,7 @@ postgresDescribe("postgres product store", () => {
     await store.createProject({ id:"proj_interaction_bigint",workspaceId:"ws_interaction_bigint",name:"Interaction bigint",ownerUserId:"user_interaction_bigint",rootPath:"workspaces/ws_interaction_bigint/projects/proj_interaction_bigint",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
     await createTestCredential(store,"proj_interaction_bigint","cred_interaction_bigint",timestamp);
     await store.createEndpoint(endpointRecord("endpoint_interaction_bigint","proj_interaction_bigint","cred_interaction_bigint",timestamp));
-    await store.createTask({ id:"task_interaction_bigint",workspaceId:"ws_interaction_bigint",projectId:"proj_interaction_bigint",endpointId:"endpoint_interaction_bigint",prompt:"hello",status:"running",runId:"run_interaction_bigint",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},createdAt:timestamp,updatedAt:timestamp });
+    await createTaskWithLibrary(store, { id:"task_interaction_bigint",workspaceId:"ws_interaction_bigint",projectId:"proj_interaction_bigint",endpointId:"endpoint_interaction_bigint",prompt:"hello",status:"running",runId:"run_interaction_bigint",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},createdAt:timestamp,updatedAt:timestamp });
 
     const sourceRevision = 17_840_091_560_973;
     const interaction:TaskAssistantMessageInteraction={ id:"assistant_interaction_bigint",revision:1,taskId:"task_interaction_bigint",kind:"assistant_message",title:"Assistant",body:"hello",contentMode:"full",position:1,status:"completed",occurredAt:timestamp,updatedAt:timestamp };
@@ -1040,6 +1042,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     image: "agentsmith-lite/botified-runner:test",
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws_pg/projects/proj_pg",
+    fileLibraryRootSubPath: "libraries/library_task_pg/home",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task_pg",
@@ -1054,8 +1057,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       key: "BOTIFIED_SERVICE_KEY"
     },
     directories: {
-      taskHome: "/workspace/project/tasks/task_pg/home",
-      artifacts: "/workspace/project/tasks/task_pg/artifacts",
+      libraryHome: "/workspace/project/libraries/library_task_pg/home",
       botified: "/workspace/project/tasks/task_pg/botified"
     },
     resourceLimits: {

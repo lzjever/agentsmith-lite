@@ -38,13 +38,11 @@ export class DeletionService {
 
   private async finishProject(project: Project): Promise<void> {
     const root = this.projectRoot(project);
+    await this.tasks.stopTasksForProjectDeletion(project.id);
     await withProjectFileLock(root, async () => {
-      await this.tasks.stopTasksForProjectDeletion(project.id);
       await rm(root, { recursive: true, force: true, maxRetries: 2 });
-      if (!(await this.store.deleteProjectDependenciesAndProject(project.id))) {
-        throw new ProductError("Project deletion is still pending", 409);
-      }
     });
+    if (!(await this.store.deleteProjectDependenciesAndProject(project.id))) throw new ProductError("Project deletion is still pending",409);
   }
 
   private async requireProjectOwner(userId: string, projectId: string): Promise<Project> {

@@ -30,8 +30,9 @@ describe("app manifest rendering", () => {
     });
     for (const manifest of manifests) {
       const phase = manifest.metadata.labels?.["agentsmith-lite.io/deploy-phase"];
-      assert.ok(["base", "migration", "workload"].includes(phase ?? ""));
-      assert.equal(phase, manifest.kind === "Job" ? "migration" : manifest.kind === "Deployment" ? "workload" : "base");
+      assert.ok(["base","migration","upgrade","workload"].includes(phase??""));
+      const expected=manifest.kind==="Job"?(manifest.metadata.name==="agentsmith-lite-project-files-upgrade"?"upgrade":"migration"):manifest.kind==="Deployment"?"workload":"base";
+      assert.equal(phase,expected);
     }
   });
 
@@ -721,6 +722,15 @@ describe("app manifest rendering", () => {
     assert.match(serializedJob, /agentsmith-lite-app-secrets/);
     assert.doesNotMatch(serializedJob, /S3_SECRET_KEY/);
     assert.doesNotMatch(serializedJob, /raw-secret/);
+
+    const upgrade=manifests.find((manifest)=>manifest.kind==="Job"&&manifest.metadata.name==="agentsmith-lite-project-files-upgrade") as JobResource|undefined;
+    assert.ok(upgrade);
+    assert.equal(upgrade.metadata.labels?.["agentsmith-lite.io/deploy-phase"],"upgrade");
+    const upgradeContainer=upgrade.spec.template.spec.containers[0];
+    assert.deepEqual(upgradeContainer?.command,["node","dist/packages/api-entry-node/src/upgradeProjectFiles.js"]);
+    assert.deepEqual(upgradeContainer?.envFrom,[{configMapRef:{name:"agentsmith-lite-config"}},{secretRef:{name:"agentsmith-lite-app-secrets"}}]);
+    assert.deepEqual(upgradeContainer?.volumeMounts,[{name:"project-files",mountPath:"/agentsmith-lite"}]);
+    assert.equal(upgrade.spec.template.spec.volumes[0]?.persistentVolumeClaim.claimName,"agentsmith-lite-files");
   });
 });
 
@@ -783,6 +793,7 @@ interface JobResource {
   metadata: {
     name: string;
     namespace?: string;
+    labels?:Record<string,string>;
   };
   spec: {
     backoffLimit: number;
@@ -793,12 +804,11 @@ interface JobResource {
         restartPolicy: string;
         containers: Array<{
           name: string;
-          envFrom?: Array<{
-            secretRef: {
-              name: string;
-            };
-          }>;
+          command?:string[];
+          envFrom?:Array<{secretRef?:{name:string};configMapRef?:{name:string}}>;
+          volumeMounts?:Array<{name:string;mountPath:string}>;
         }>;
+        volumes:Array<{persistentVolumeClaim:{claimName:string}}>;
       };
     };
   };

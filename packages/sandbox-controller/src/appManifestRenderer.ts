@@ -249,6 +249,30 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       }
     },
     {
+      apiVersion:"batch/v1",
+      kind:"Job",
+      metadata:{name:"agentsmith-lite-project-files-upgrade",namespace:input.namespace,labels},
+      spec:{
+        backoffLimit:2,
+        activeDeadlineSeconds:300,
+        ttlSecondsAfterFinished:600,
+        template:{
+          metadata:{labels},
+          spec:{
+            restartPolicy:"OnFailure",
+            containers:[{
+              name:"project-files-upgrade",
+              image:appImage,
+              command:["node","dist/packages/api-entry-node/src/upgradeProjectFiles.js"],
+              envFrom:[{configMapRef:{name:"agentsmith-lite-config"}},{secretRef:{name:"agentsmith-lite-app-secrets"}}],
+              volumeMounts:[{name:"project-files",mountPath:appDataRoot}]
+            }],
+            volumes:[{name:"project-files",persistentVolumeClaim:{claimName:input.env.JUICEFS_PVC_NAME??"agentsmith-lite-files"}}]
+          }
+        }
+      }
+    },
+    {
       apiVersion: "v1",
       kind: "ServiceAccount",
       metadata: { name: "agentsmith-lite-api", namespace: input.namespace, labels }
@@ -314,7 +338,9 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       ...resource.metadata,
       labels: {
         ...resource.metadata.labels,
-        [DEPLOY_PHASE_LABEL]: resource.kind === "Job" ? "migration" : resource.kind === "Deployment" ? "workload" : "base"
+        [DEPLOY_PHASE_LABEL]: resource.kind === "Job"
+          ? resource.metadata.name === "agentsmith-lite-project-files-upgrade" ? "upgrade" : "migration"
+          : resource.kind === "Deployment" ? "workload" : "base"
       }
     }
   }));

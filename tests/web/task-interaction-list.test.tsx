@@ -23,9 +23,9 @@ describe("task interaction list", () => {
   });
 
   it("renders server-owned interaction kinds without exposing raw payloads", () => {
-    const items = (["user_message", "assistant_message", "tool", "background_task", "task_question", "task_notice", "task_result", "subagent_result", "file", "execution_boundary", "system_error"] as const).map((kind, index) => itemFor(kind, index));
-    render(<TaskInteractionList taskId="task_1" items={items} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
-    assert.equal(screen.getAllByRole("listitem").length, 11);
+    const items = (["user_message", "assistant_message", "tool", "background_task", "task_question", "task_notice", "task_result", "subagent_result", "file", "system_error"] as const).map((kind, index) => itemFor(kind, index));
+    render(<TaskInteractionList taskId="task_1" items={items} preview={null} onStopWork={async () => undefined} />);
+    assert.equal(screen.getAllByRole("listitem").length, 10);
     assert.equal(screen.queryByText("cursor"), null);
     assert.ok(screen.getByText("pwd"));
     assert.ok(screen.getByText("Packaging"));
@@ -35,7 +35,7 @@ describe("task interaction list", () => {
   it("labels partial and omitted content from the server contract", () => {
     const user = { ...itemFor("user_message", 1), contentMode: "preview" } as TaskInteractionItem;
     const tool = { ...itemFor("tool", 2), contentMode: "none", detailsOmitted: true } as TaskInteractionItem;
-    render(<TaskInteractionList taskId="task_1" items={[user, tool]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+    render(<TaskInteractionList taskId="task_1" items={[user, tool]} preview={null} onStopWork={async () => undefined} />);
     assert.ok(screen.getByText("Preview only"));
     assert.ok(screen.getByText("Content omitted · Some details omitted"));
   });
@@ -43,7 +43,7 @@ describe("task interaction list", () => {
   it("copies assistant message content with the retained icon action", async () => {
     const writes: string[] = [];
     Object.assign(navigator, { clipboard: { writeText: async (value: string) => { writes.push(value); } } });
-    render(<TaskInteractionList taskId="task_1" items={[itemFor("assistant_message", 1)]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+    render(<TaskInteractionList taskId="task_1" items={[itemFor("assistant_message", 1)]} preview={null} onStopWork={async () => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
     await waitFor(() => assert.deepEqual(writes, ["Details"]));
   });
@@ -53,7 +53,7 @@ describe("task interaction list", () => {
       ...itemFor("assistant_message", 1),
       body: "| Task | Started | Completed | Output |\n| --- | --- | --- | --- |\n| Background command | 12:22:36 | 12:24:12 | wait completed |",
     } as TaskInteractionItem;
-    render(<TaskInteractionList taskId="task_1" items={[assistant]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+    render(<TaskInteractionList taskId="task_1" items={[assistant]} preview={null} onStopWork={async () => undefined} />);
 
     const table = screen.getByRole("table");
     const region = table.closest('[role="region"]');
@@ -67,7 +67,7 @@ describe("task interaction list", () => {
   it("states system error retryability without offering an unsupported retry action", () => {
     const retryable = itemFor("system_error", 1);
     const terminal = { ...itemFor("system_error", 2), id: "error_terminal", retryable: false } as TaskInteractionItem;
-    render(<TaskInteractionList taskId="task_1" items={[retryable, terminal]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+    render(<TaskInteractionList taskId="task_1" items={[retryable, terminal]} preview={null} onStopWork={async () => undefined} />);
     assert.ok(screen.getByText("Retryable"));
     assert.ok(screen.getByText("Not retryable"));
     assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
@@ -76,7 +76,7 @@ describe("task interaction list", () => {
   it("keeps background work stoppable when the request fails", async () => {
     const running = { ...itemFor("background_task", 1), executionStatus:"running", canStop:true } as TaskInteractionItem;
     let attempts = 0;
-    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} basePath="/tasks" onStopWork={async () => { attempts += 1; throw new Error("Work could not be stopped."); }} />);
+    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} onStopWork={async () => { attempts += 1; throw new Error("Work could not be stopped."); }} />);
     fireEvent.click(screen.getByRole("button", { name:"Stop work" }));
     assert.ok(await screen.findByRole("alert"));
     assert.ok(screen.getByText("Work could not be stopped."));
@@ -87,7 +87,7 @@ describe("task interaction list", () => {
   it("keeps an accepted work stop disabled until server state updates", async () => {
     const running = { ...itemFor("background_task", 1), executionStatus:"running", canStop:true } as TaskInteractionItem;
     let attempts = 0;
-    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} basePath="/tasks" onStopWork={async () => { attempts += 1; }} />);
+    render(<TaskInteractionList taskId="task_1" items={[running]} preview={null} onStopWork={async () => { attempts += 1; }} />);
     fireEvent.click(screen.getByRole("button", { name:"Stop work" }));
     const accepted = await screen.findByRole("button", { name:"Stop requested" }) as HTMLButtonElement;
     assert.equal(accepted.disabled, true);
@@ -97,7 +97,7 @@ describe("task interaction list", () => {
 
   it("does not offer a download for a failed file projection", () => {
     const failed = { ...itemFor("file", 1), status: "failed", body: "Artifact projection failed" } as TaskInteractionItem;
-    render(<TaskInteractionList taskId="task_1" items={[failed]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+    render(<TaskInteractionList taskId="task_1" items={[failed]} preview={null} onStopWork={async () => undefined} />);
     assert.ok(screen.getByText("Artifact unavailable"));
     assert.equal(screen.queryByRole("button", { name: "Preview" }), null);
     assert.equal(screen.queryByRole("link", { name: "Download result.txt" }), null);
@@ -107,7 +107,7 @@ describe("task interaction list", () => {
     const original = apiClient.downloadTaskArtifact;
     apiClient.downloadTaskArtifact = async () => new Blob(["interaction preview"], { type: "text/plain" });
     try {
-      render(<TaskInteractionList taskId="task_1" items={[itemFor("file", 1)]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+      render(<TaskInteractionList taskId="task_1" items={[itemFor("file", 1)]} preview={null} onStopWork={async () => undefined} />);
       assert.match(screen.getByRole("link", { name: "Download result.txt" }).getAttribute("href") ?? "", /\/api\/v1\/tasks\/task_1\/artifacts\/artifact_1\/download$/);
       fireEvent.click(screen.getByRole("button", { name: "Preview" }));
       assert.equal((await screen.findByText("interaction preview")).textContent, "interaction preview");
@@ -123,7 +123,7 @@ describe("task interaction list", () => {
     URL.revokeObjectURL = () => undefined;
     try {
       const image = { ...itemFor("file", 1), name: "result.png", mediaType: "image/png" } as TaskInteractionItem;
-      render(<TaskInteractionList taskId="task_1" items={[image]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+      render(<TaskInteractionList taskId="task_1" items={[image]} preview={null} onStopWork={async () => undefined} />);
       fireEvent.click(screen.getByRole("button", { name: "View result.png" }));
       await screen.findByRole("img", { name: "result.png" });
     } finally {
@@ -146,7 +146,6 @@ function itemFor(kind: TaskInteractionItem["kind"], position: number): TaskInter
     case "task_result": return { ...shared, kind, executionStatus: "completed", deliveryStatus: "delivered", result: "Complete", error: null, detailsOmitted: false };
     case "subagent_result": return { ...shared, kind, executionStatus: "completed", deliveryStatus: "delivered", name: "Research", purpose: "Check inputs", result: "Complete", error: null, detailsOmitted: false };
     case "file": return { ...shared, kind, status: "available", artifactId: "artifact_1", name: "result.txt", mediaType: "text/plain", bytes: 42 };
-    case "execution_boundary": return { ...shared, kind, status: "successor_created", targetTaskId: "task_2" };
     case "system_error": return { ...shared, kind, status: "active", code: "runtime_unavailable", retryable: true, detailsOmitted: false };
     default: throw new Error(`Unsupported kind: ${kind}`);
   }

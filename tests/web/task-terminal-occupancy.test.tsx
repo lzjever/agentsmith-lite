@@ -58,14 +58,13 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("invalidates a loaded task when refresh discovers it was removed", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions };
     let reads = 0;
     apiClient.taskDetail = async () => {
       if (reads++ === 0) return { task, capabilities: available };
       throw new ApiError(404, "Task not found");
     };
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
@@ -78,12 +77,11 @@ describe("TaskDetailPage terminal occupancy", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
-  it("shows the retained execution and sandbox summary in task details", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
-    const continued: Task = { ...task, sourceTaskId:"task_source", cleanupStatus:"pending" };
+  it("links the bound File Library from task details", async () => {
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const continued: Task = { ...task, cleanupStatus:"pending" };
     apiClient.taskDetail = async () => ({ task: continued, capabilities: available });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
@@ -98,19 +96,19 @@ describe("TaskDetailPage terminal occupancy", () => {
       assert.ok(screen.getByText(task.runId));
       assert.ok(screen.getByText(task.sandbox.namespace));
       assert.ok(screen.getByText("Pending"));
-      assert.equal(screen.getByRole("link", { name:"task_source" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks/task_source");
+      assert.equal(screen.getByRole("link", { name:task.fileLibraryId }).getAttribute("href"), `/workspaces/workspace_1/projects/project_1/files?libraryId=${task.fileLibraryId}`);
+      assert.equal(screen.queryByText(/task inputs/i), null);
     } finally {
       Object.assign(apiClient, original);
     }
   });
 
   it("makes an archived task explicit while retaining its saved workspace", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const archived: Task = { ...task, status: "cancelled", archivedAt: "2026-07-14T01:00:00.000Z" };
     const readOnly = { ...available, sendMessage: false, cancelTask: false, openTerminal: false, archiveTask: false };
     apiClient.taskDetail = async () => ({ task: archived, capabilities: readOnly });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => ({ ...snapshot(readOnly), runState: "terminal" });
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -119,7 +117,7 @@ describe("TaskDetailPage terminal occupancy", () => {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
 
       await screen.findByText(`Cancelled · Archived · ${task.id}`);
-      assert.ok(screen.getByText("This task is archived. Its conversation, inputs, and artifacts remain available."));
+      assert.ok(screen.getByText("This task is archived. Its conversation, files, and artifacts remain available."));
       assert.ok(screen.getByText("Task was cancelled"));
     } finally {
       Object.assign(apiClient, original);
@@ -160,11 +158,10 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("keeps the owner's terminal mounted across occupancy and terminal-state updates until the user leaves", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
     apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal, onEvent) => {
       receive = onEvent;
@@ -214,19 +211,16 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("loads the artifacts-only view without touching broken conversation APIs", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions };
     let interactionReads = 0;
-    let inputReads = 0;
     const artifact: TaskArtifact = { id: "artifact_1", taskId: task.id, fileId: "file_1", name: "result.txt", bytes: 12, mediaType: "text/plain", createdAt: "2026-07-14T00:01:00.000Z" };
     apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [artifact];
-    apiClient.taskInputs = async () => { inputReads += 1; throw new Error("Inputs unavailable"); };
     apiClient.getTaskInteractions = async () => { interactionReads += 1; throw new Error("Conversation unavailable"); };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
       await screen.findByText("result.txt");
       assert.equal(interactionReads, 0);
-      assert.equal(inputReads, 0);
       assert.ok(screen.getByRole("link", { name: "Download result.txt" }));
     } finally {
       Object.assign(apiClient, original);
@@ -265,12 +259,11 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("rejects a task projected for a different project before loading child resources", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts };
     let artifactReads = 0;
     const wrongTask = { ...task, workspaceId: "workspace_other", projectId: "project_other" };
     apiClient.taskDetail = async () => ({ task: wrongTask, capabilities: available });
     apiClient.taskArtifacts = async () => { artifactReads += 1; return []; };
-    apiClient.taskInputs = async () => [];
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
       assert.ok(await screen.findByRole("heading", { name: "Task not found" }));
@@ -332,32 +325,10 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
-  it("keeps conversation readable when artifact and input panels fail", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
-    apiClient.taskDetail = async () => ({ task, capabilities: available });
-    apiClient.taskArtifacts = async () => { throw new Error("Artifact storage unavailable"); };
-    apiClient.taskInputs = async () => { throw new Error("Input snapshot unavailable"); };
-    apiClient.getTaskInteractions = async () => snapshot(available);
-    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
-      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
-    };
-    try {
-      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
-      await screen.findByRole("region", { name: "Task conversation workspace" });
-      assert.ok(screen.getByText("Artifacts unavailable"));
-      assert.ok(screen.getByText("Task inputs unavailable"));
-      assert.ok(screen.getByText("Artifact storage unavailable"));
-      assert.ok(screen.getByText("Input snapshot unavailable"));
-    } finally {
-      Object.assign(apiClient, original);
-    }
-  });
-
   it("keeps task lifecycle controls available when conversation loading fails", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions };
     apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
@@ -368,38 +339,11 @@ describe("TaskDetailPage terminal occupancy", () => {
     }
   });
 
-  it("locks competing task actions while a lifecycle mutation is pending", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, duplicateTask: apiClient.duplicateTask };
-    let duplicateStarted = false;
-    apiClient.taskDetail = async () => ({ task, capabilities: available });
-    apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
-    apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
-    apiClient.duplicateTask = async () => {
-      duplicateStarted = true;
-      return new Promise(() => undefined);
-    };
-    try {
-      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
-      await screen.findByText("Conversation could not be loaded.");
-      fireEvent.pointerDown(screen.getByRole("button", { name: "Task actions" }), { button: 0, ctrlKey: false });
-      fireEvent.click(await screen.findByRole("menuitem", { name: "Duplicate" }));
-      await waitFor(() => assert.equal(duplicateStarted, true));
-
-      assert.equal((screen.getByRole("button", { name: "Refresh task" }) as HTMLButtonElement).disabled, true);
-      assert.equal((screen.getByRole("button", { name: "Task actions" }) as HTMLButtonElement).disabled, true);
-      assert.equal((screen.getByRole("button", { name: "Cancel task" }) as HTMLButtonElement).disabled, true);
-    } finally {
-      Object.assign(apiClient, original);
-    }
-  });
-
   it("closes lifecycle confirmation when streamed capabilities revoke access", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
     apiClient.taskDetail = async () => ({ task, capabilities: available });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal, onEvent) => {
       receive = onEvent;
@@ -419,11 +363,10 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("removes the cancel action when the project is archived during cancellation", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, cancelTask: apiClient.cancelTask };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, cancelTask: apiClient.cancelTask };
     let detailReads = 0;
     apiClient.taskDetail = async () => ({ task, capabilities: detailReads++ === 0 ? available : { ...available, cancelTask: false } });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => { throw new Error("Conversation unavailable"); };
     apiClient.cancelTask = async () => { throw new ApiError(409, "Project is archived"); };
     try {
@@ -440,12 +383,11 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("does not refresh an old task after cancellation finishes on another task", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, cancelTask: apiClient.cancelTask };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions, cancelTask: apiClient.cancelTask };
     const secondTask: Task = { ...task, id: "task_second", title: "Second task", runId: "run_2" };
     let finishCancel: (() => void) | undefined;
     apiClient.taskDetail = async (requestedTaskId) => ({ task: requestedTaskId === task.id ? task : secondTask, capabilities: available });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -468,11 +410,10 @@ describe("TaskDetailPage terminal occupancy", () => {
   });
 
   it("keeps the terminal result visible while explaining delayed artifact recovery", async () => {
-    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, taskInputs: apiClient.taskInputs, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    const original = { taskDetail: apiClient.taskDetail, taskArtifacts: apiClient.taskArtifacts, getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const delayed: Task = { ...task, status:"completed", terminalReason:"completed", artifactProjectionStatus:"failed", artifactProjectionError:"Artifact storage is temporarily unavailable", cleanupStatus:"pending" };
     apiClient.taskDetail = async () => ({ task: delayed, capabilities: { ...available, sendMessage: false, cancelTask: false, openTerminal: false } });
     apiClient.taskArtifacts = async () => [];
-    apiClient.taskInputs = async () => [];
     apiClient.getTaskInteractions = async () => ({ ...snapshot({ ...available, sendMessage:false, cancelTask:false, openTerminal:false }), runState:"finalizing" });
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal) => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
@@ -498,9 +439,9 @@ function sentOperations(socket: TestWebSocket, operation: string): number {
   }).length;
 }
 
-const available: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, retryTask:false, duplicateTask:true, archiveTask:false, deleteTask: false };
+const available: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, archiveTask:false, deleteTask: false };
 const occupied: TaskCapabilities = { ...available, openTerminal: false };
-const task: Task = { id: "task_fa832", workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", prompt: "Inspect the workspace", status: "running", runId: "run_1", executionMode: "live", sandbox: { namespace: "task-f58" }, createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z" };
+const task: Task = { id: "task_fa832", workspaceId: "workspace_1", projectId: "project_1", endpointId: "endpoint_1", fileLibraryId:"library_1", prompt: "Inspect the workspace", status: "running", runId: "run_1", executionMode: "live", sandbox: { namespace: "task-f58" }, createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z" };
 
 function snapshot(capabilities: TaskCapabilities) {
   return { items: [], nextPageCursor: null, hasMoreBefore: false, streamCursor: "cursor_1", historyStatus: "complete" as const, queuedMessages: [], runState: "running" as const, runtimeReachability: "reachable" as const, lastSyncedAt: "2026-07-14T00:00:00.000Z", capabilities };

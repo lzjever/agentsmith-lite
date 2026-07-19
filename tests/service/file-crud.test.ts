@@ -7,37 +7,39 @@ import { FileService, readRegularFileWithoutFollowingSymlink } from "../../packa
 import { ProductError } from "../../packages/domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 
+const LIBRARY_ROOT="libraries/library_test/home";
+
 describe("file CRUD service", () => {
-  it("uploads, lists, downloads, and deletes arbitrary project file bytes under files/", async () => {
+  it("uploads, lists, downloads, and deletes arbitrary Library file bytes", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
 
       const content = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
-      const uploaded = await service.uploadFile(root, {
-        path: "files/notes/../notes/plan.md",
+      const uploaded = await service.uploadLibraryFile(root, LIBRARY_ROOT, {
+        path: "notes/../notes/plan.md",
         bytes: content
       });
-      assert.equal(uploaded.path, "files/notes/plan.md");
-      assert.deepEqual([...await readFile(path.join(root, "files", "notes", "plan.md"))], [...content]);
+      assert.equal(uploaded.path, "notes/plan.md");
+      assert.deepEqual([...await readFile(path.join(root, LIBRARY_ROOT, "notes", "plan.md"))], [...content]);
       await assert.rejects(
-        () => service.uploadFile(root, { path: "files/notes/plan.md", bytes: Buffer.from("replacement") }),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "notes/plan.md", bytes: Buffer.from("replacement") }),
         (error) => productError(error, 409, /already exists/)
       );
 
-      const listed = await service.listFiles(root, "files");
-      assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.path, entry.type]), [["notes", "files/notes", "directory"]]);
+      const listed = await service.listLibraryFiles(root, LIBRARY_ROOT, "");
+      assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.path, entry.type]), [["notes", "notes", "directory"]]);
 
-      const nested = await service.listFiles(root, "files/notes");
-      assert.deepEqual(nested.entries.map((entry) => [entry.name, entry.path, entry.type, entry.size]), [["plan.md", "files/notes/plan.md", "file", 4]]);
+      const nested = await service.listLibraryFiles(root, LIBRARY_ROOT, "notes");
+      assert.deepEqual(nested.entries.map((entry) => [entry.name, entry.path, entry.type, entry.size]), [["plan.md", "notes/plan.md", "file", 4]]);
 
-      const downloaded = await service.downloadFile(root, "files/notes/plan.md");
-      assert.equal(downloaded.path, "files/notes/plan.md");
+      const downloaded = await service.downloadLibraryFile(root, LIBRARY_ROOT, "notes/plan.md");
+      assert.equal(downloaded.path, "notes/plan.md");
       assert.equal(downloaded.filename, "plan.md");
       assert.deepEqual([...downloaded.bytes], [...content]);
 
-      assert.deepEqual(await service.deleteFile(root, "files/notes/plan.md"), { deleted: true });
-      assert.deepEqual((await service.listFiles(root, "files/notes")).entries, []);
+      assert.deepEqual(await service.deleteLibraryFile(root, LIBRARY_ROOT, "notes/plan.md"), { deleted: true });
+      assert.deepEqual((await service.listLibraryFiles(root, LIBRARY_ROOT, "notes")).entries, []);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -48,7 +50,7 @@ describe("file CRUD service", () => {
     try {
       const service = new FileService();
       await assert.rejects(
-        () => service.uploadFile(root, { path: "files/too-large.bin", bytes: new Uint8Array(MAX_PROJECT_FILE_BYTES + 1) }),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "too-large.bin", bytes: new Uint8Array(MAX_PROJECT_FILE_BYTES + 1) }),
         (error) => productError(error, 413, /Project file exceeds the .*byte limit/)
       );
     } finally {
@@ -58,13 +60,13 @@ describe("file CRUD service", () => {
 
   it("lists file metadata without hydrating file contents", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-metadata-"));
-    const filePath = path.join(root, "files", "large-notes.txt");
+    const filePath = path.join(root, LIBRARY_ROOT, "large-notes.txt");
     try {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, "metadata only");
       await chmod(filePath, 0o000);
 
-      const listed = await new FileService().listFiles(root);
+      const listed = await new FileService().listLibraryFiles(root, LIBRARY_ROOT);
 
       assert.deepEqual(listed.entries.map((entry) => [entry.name, entry.size, entry.mediaType]), [["large-notes.txt", 13, "text/plain"]]);
     } finally {
@@ -72,26 +74,26 @@ describe("file CRUD service", () => {
     }
   });
 
-  it("rejects paths outside the files/ subtree and protected roots", async () => {
+  it("requires an explicit canonical Library root and rejects unsafe relative paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
 
       await assert.rejects(
-        () => service.uploadFile(root, { path: "notes/plan.md", bytes: new Uint8Array() }),
-        /Project files must be under files\//
+        () => service.uploadLibraryFile(root, "files", { path: "notes/plan.md", bytes: new Uint8Array() }),
+        /File Library root path is invalid/
       );
       await assert.rejects(
-        () => service.uploadFile(root, { path: "../files/plan.md", bytes: new Uint8Array() }),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "../files/plan.md", bytes: new Uint8Array() }),
         /Path traversal is not allowed/
       );
       await assert.rejects(
-        () => service.uploadFile(root, { path: "files\\plan.md", bytes: new Uint8Array() }),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "files\\plan.md", bytes: new Uint8Array() }),
         /Backslash paths are not allowed/
       );
       await assert.rejects(
-        () => service.deleteFile(root, "files"),
-        (error) => productError(error, 400, /Cannot delete the files root/)
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, ""),
+        (error) => productError(error, 400, /Cannot delete the File Library root/)
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -102,23 +104,23 @@ describe("file CRUD service", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
-      await mkdir(path.join(root, "files", "notes"), { recursive: true });
+      await mkdir(path.join(root, LIBRARY_ROOT, "notes"), { recursive: true });
 
       await assert.rejects(
-        () => service.downloadFile(root, "files/notes"),
+        () => service.downloadLibraryFile(root, LIBRARY_ROOT, "notes"),
         (error) => productError(error, 400, /Path is a directory/)
       );
       await assert.rejects(
-        () => service.deleteFile(root, "files/notes"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "notes"),
         (error) => productError(error, 400, /Path is not a regular file/)
       );
       await assert.rejects(
-        () => service.deleteFile(root, "files/missing.txt"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "missing.txt"),
         (error) => productError(error, 404, /File not found/)
       );
       await assert.rejects(
-        () => service.deleteFile(root, "files"),
-        (error) => productError(error, 400, /Cannot delete the files root/)
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, ""),
+        (error) => productError(error, 400, /Cannot delete the File Library root/)
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -129,19 +131,19 @@ describe("file CRUD service", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
-      await mkdir(path.join(root, "files"), { recursive: true });
-      await writeFile(path.join(root, "files", "plain.txt"), "not a directory");
+      await mkdir(path.join(root, LIBRARY_ROOT), { recursive: true });
+      await writeFile(path.join(root, LIBRARY_ROOT, "plain.txt"), "not a directory");
 
       await assert.rejects(
-        () => service.listFiles(root, "files/plain.txt/child"),
+        () => service.listLibraryFiles(root, LIBRARY_ROOT, "plain.txt/child"),
         (error) => productError(error, 400, /Path is not a directory/)
       );
       await assert.rejects(
-        () => service.downloadFile(root, "files/plain.txt/child.txt"),
+        () => service.downloadLibraryFile(root, LIBRARY_ROOT, "plain.txt/child.txt"),
         (error) => productError(error, 400, /Path is not a directory/)
       );
       await assert.rejects(
-        () => service.deleteFile(root, "files/plain.txt/child.txt"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "plain.txt/child.txt"),
         (error) => productError(error, 400, /Path is not a directory/)
       );
     } finally {
@@ -153,27 +155,27 @@ describe("file CRUD service", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     const outside = await mkdtemp(path.join(tmpdir(), "asl-outside-"));
     try {
-      await mkdir(path.join(root, "files"));
-      await mkdir(path.join(root, "files", "safe"));
-      await writeFile(path.join(root, "files", "safe", "ok.txt"), "ok");
+      await mkdir(path.join(root, LIBRARY_ROOT),{recursive:true});
+      await mkdir(path.join(root, LIBRARY_ROOT, "safe"));
+      await writeFile(path.join(root, LIBRARY_ROOT, "safe", "ok.txt"), "ok");
       await writeFile(path.join(outside, "secret.txt"), "nope");
-      await symlink(outside, path.join(root, "files", "escape"));
-      await symlink(path.join(outside,"secret.txt"),path.join(root,"files","secret-link.txt"));
+      await symlink(outside, path.join(root, LIBRARY_ROOT, "escape"));
+      await symlink(path.join(outside,"secret.txt"),path.join(root,LIBRARY_ROOT,"secret-link.txt"));
 
       const service = new FileService();
-      const listed = await service.listFiles(root, "files");
-      assert.deepEqual(listed.entries.map((entry) => entry.path), ["files/safe"]);
+      const listed = await service.listLibraryFiles(root, LIBRARY_ROOT, "");
+      assert.deepEqual(listed.entries.map((entry) => entry.path), ["safe"]);
       await assert.rejects(
-        () => readRegularFileWithoutFollowingSymlink(path.join(root,"files","secret-link.txt"),"Project file"),
+        () => readRegularFileWithoutFollowingSymlink(path.join(root,LIBRARY_ROOT,"secret-link.txt"),"Project file"),
         /Project file uses a symlink/
       );
 
       await assert.rejects(
-        () => service.downloadFile(root, "files/escape/secret.txt"),
+        () => service.downloadLibraryFile(root, LIBRARY_ROOT, "escape/secret.txt"),
         /Path escapes the project root/
       );
       await assert.rejects(
-        () => service.uploadFile(root, { path: "files/escape/new.txt", bytes: new Uint8Array() }),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "escape/new.txt", bytes: new Uint8Array() }),
         /Path escapes the project root/
       );
     } finally {
@@ -182,17 +184,17 @@ describe("file CRUD service", () => {
     }
   });
 
-  it("rejects deletion through a symlink parent inside project files", async () => {
+  it("rejects deletion through a symlink parent inside Library files", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
-      await mkdir(path.join(root, "files", "safe"), { recursive: true });
-      const targetPath = path.join(root, "files", "safe", "target.txt");
+      await mkdir(path.join(root, LIBRARY_ROOT, "safe"), { recursive: true });
+      const targetPath = path.join(root, LIBRARY_ROOT, "safe", "target.txt");
       await writeFile(targetPath, "keep me");
-      await symlink(path.join(root, "files", "safe"), path.join(root, "files", "link"));
+      await symlink(path.join(root, LIBRARY_ROOT, "safe"), path.join(root, LIBRARY_ROOT, "link"));
 
       const service = new FileService();
       await assert.rejects(
-        () => service.deleteFile(root, "files/link/target.txt"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "link/target.txt"),
         (error) => productError(error, 400, /Path uses a symlink/)
       );
       assert.equal(await readFile(targetPath, "utf8"), "keep me");
@@ -205,13 +207,13 @@ describe("file CRUD service", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
-      const target = path.join(root, "files", "snapshot.txt");
+      const target = path.join(root, LIBRARY_ROOT, "snapshot.txt");
       const previous = Buffer.alloc(1024 * 1024, "a");
       const replacement = Buffer.alloc(8 * 1024 * 1024, "b");
-      await service.uploadFile(root, { path: "files/snapshot.txt", bytes: previous });
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "snapshot.txt", bytes: previous });
 
       let complete = false;
-      const upload = service.uploadFile(root, { path: "files/snapshot.txt", bytes: replacement, overwrite: true }).finally(() => {
+      const upload = service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "snapshot.txt", bytes: replacement, overwrite: true }).finally(() => {
         complete = true;
       });
       while (!complete) {
@@ -230,14 +232,14 @@ describe("file CRUD service", () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-accounting-"));
     const service = new FileService();
     try {
-      await service.uploadFile(root, { path: "files/locked.txt", bytes: Buffer.from("before") });
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "locked.txt", bytes: Buffer.from("before") });
       await assert.rejects(
-        () => service.uploadFileWithAccounting(root, { path: "files/locked.txt", bytes: Buffer.from("after"), overwrite: true }, {
+        () => service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "locked.txt", bytes: Buffer.from("after"), overwrite: true }, {
           record: async () => { throw new ProductError("Project file bytes limit reached", 409); }
         }),
         /project file bytes limit reached/i
       );
-      assert.equal(Buffer.from((await service.downloadFile(root, "files/locked.txt")).bytes).toString(), "before");
+      assert.equal(Buffer.from((await service.downloadLibraryFile(root, LIBRARY_ROOT, "locked.txt")).bytes).toString(), "before");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -255,7 +257,7 @@ describe("file CRUD service", () => {
       accountingStarted = resolve;
     });
     try {
-      const upload = service.uploadFileWithAccounting(root, { path: "files/rejected.txt", bytes: Buffer.from("temporary") }, {
+      const upload = service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "rejected.txt", bytes: Buffer.from("temporary") }, {
         record: async () => {
           accountingStarted();
           await accountingBlocked;
@@ -268,7 +270,7 @@ describe("file CRUD service", () => {
       await accountingEntered;
 
       let listCompleted = false;
-      const listed = service.listFiles(root).finally(() => {
+      const listed = service.listLibraryFiles(root, LIBRARY_ROOT).finally(() => {
         listCompleted = true;
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -295,12 +297,12 @@ describe("file CRUD service", () => {
     };
     try {
       const results = await Promise.allSettled([
-        service.uploadFileWithAccounting(root, { path: "files/one.txt", bytes: Buffer.from("four") }, accounting),
-        service.uploadFileWithAccounting(root, { path: "files/two.txt", bytes: Buffer.from("four") }, accounting)
+        service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "one.txt", bytes: Buffer.from("four") }, accounting),
+        service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "two.txt", bytes: Buffer.from("four") }, accounting)
       ]);
       assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
       assert.equal(used, 4);
-      assert.equal((await service.listFiles(root)).entries.filter((entry) => entry.type === "file").length, 1);
+      assert.equal((await service.listLibraryFiles(root, LIBRARY_ROOT)).entries.filter((entry) => entry.type === "file").length, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -312,8 +314,8 @@ describe("file CRUD service", () => {
     let used = 0;
     const reconciled: number[] = [];
     try {
-      await service.uploadFile(root, { path: "files/unaccounted.txt", bytes: Buffer.from("four") });
-      await service.uploadFileWithAccounting(root, { path: "files/next.txt", bytes: Buffer.from("ok") }, {
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "unaccounted.txt", bytes: Buffer.from("four") });
+      await service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "next.txt", bytes: Buffer.from("ok") }, {
         async reconcile(bytes) {
           reconciled.push(bytes);
           used = bytes;

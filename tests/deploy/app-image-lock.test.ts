@@ -39,12 +39,14 @@ describe("deploy app images.lock", () => {
     const job = manifests.find((manifest) => manifest.kind === "Job" && manifest.metadata.name === "agentsmith-lite-schema-bootstrap") as
       | JobResource
       | undefined;
+    const upgradeJob=manifests.find((manifest)=>manifest.kind==="Job"&&manifest.metadata.name==="agentsmith-lite-project-files-upgrade") as JobResource|undefined;
     const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config") as
       | ConfigMapResource
       | undefined;
 
     assert.equal(deployment?.spec.template.spec.containers[0]?.image, appDigestRef);
     assert.equal(job?.spec.template.spec.containers[0]?.image, appDigestRef);
+    assert.equal(upgradeJob?.spec.template.spec.containers[0]?.image,appDigestRef);
     assert.equal(configMap?.data.BOTIFIED_RUNNER_IMAGE, runnerDigestRef);
     assert.equal(configMap?.data.APP_PUBLIC_BASE_URL, "https://agentsmith.example.test/");
   });

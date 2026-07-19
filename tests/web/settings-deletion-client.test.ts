@@ -115,7 +115,7 @@ describe("settings deletion API client", () => {
     globalThis.fetch = async () => Response.json({ error: "Unauthorized" }, { status: 401 });
     try {
       await assert.rejects(apiClient.workspaces(), (error: unknown) => error instanceof ApiError && error.status === 401);
-      await assert.rejects(apiClient.downloadProjectFile("project_1", "files/input.txt"), (error: unknown) => error instanceof ApiError && error.status === 401);
+      await assert.rejects(apiClient.previewLibraryFile("project_1", "library_1", "input.txt"), (error: unknown) => error instanceof ApiError && error.status === 401);
       assert.equal(expirations, 2);
     } finally {
       globalThis.fetch = originalFetch;
