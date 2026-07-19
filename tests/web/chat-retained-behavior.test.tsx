@@ -170,6 +170,35 @@ describe("retained chat and overview behavior", () => {
     }
   });
 
+  it("removes later messages immediately after editing an earlier user message", async () => {
+    const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, editChatMessage: apiClient.editChatMessage };
+    const userMessage = { id: "message_user", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original question", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    const assistantMessage = { id: "message_assistant", threadId: "chat_1", sequence: 2, version: 1, deliveryStatus: "completed" as const, role: "assistant" as const, content: "Answer for the original question", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
+    let saved = [userMessage, assistantMessage];
+    apiClient.endpoints = async () => [endpoint];
+    apiClient.projectCapabilities = async () => ({ ...readOnly, canSendChat: true });
+    apiClient.chatThreads = async () => threads;
+    apiClient.chatMessages = async () => saved;
+    apiClient.editChatMessage = async (_projectId, _threadId, _messageId, input) => {
+      const updated = { ...userMessage, content: input.content, version: 2 };
+      saved = [updated];
+      return updated;
+    };
+    try {
+      render(<ProjectChatPage projectId="project_1" />);
+      await screen.findByText("Answer for the original question");
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Message text" }), { target: { value: "Revised question" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+      await screen.findByText("Revised question");
+      await waitFor(() => assert.equal(screen.queryByText("Answer for the original question"), null));
+      assert.equal(screen.queryByRole("dialog", { name: "Edit message" }), null);
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("keeps an edit draft and retries against refreshed message history", async () => {
     const original = { endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, chatThreads: apiClient.chatThreads, chatMessages: apiClient.chatMessages, editChatMessage: apiClient.editChatMessage };
     const initial = { id: "message_conflict", threadId: "chat_1", sequence: 1, version: 1, deliveryStatus: "completed" as const, role: "user" as const, content: "Original message", createdAt: endpoint.createdAt, updatedAt: endpoint.updatedAt };
