@@ -593,24 +593,26 @@ async function routeApi(
     }
     if (segments[4] === "chat" && segments[5] === "threads") {
       if (!segments[6] && method === "GET") {
+        assertOnlySearchParams(url, ["query"]);
         const query = url.searchParams.get("query")?.trim();
         return sendJson(res, 200, query ? await services.chat.searchThreads(user.id, projectId, query) : await services.chat.listThreads(user.id, projectId));
       }
       if (!segments[6] && method === "POST") {
+        assertOnlySearchParams(url, []);
         const body = await readJson(req);
         assertOnlyKeys(body,["endpointId"]);
         return sendJson(res, 200, await services.chat.createThread(user.id, projectId, asString(body.endpointId), requireIdempotencyKey(req)));
       }
-      if (segments[6] && !segments[7] && method === "PATCH") { const body=await readJson(req);assertOnlyKeys(body,["title","pinned","starred"]); return sendJson(res,200,await services.chat.updateThreadMetadata(user.id,projectId,segments[6],{...(Object.hasOwn(body,"title")?{title:body.title===null?null:asString(body.title)}:{}),...(Object.hasOwn(body,"pinned")?{pinned:asBoolean(body.pinned,"pinned")}:{}) ,...(Object.hasOwn(body,"starred")?{starred:asBoolean(body.starred,"starred")}:{})},requireIdempotencyKey(req))); }
-      if (segments[6] && !segments[7] && method === "DELETE") return sendJson(res,200,await services.chat.deleteThread(user.id,projectId,segments[6],requireIdempotencyKey(req)));
+      if (segments[6] && !segments[7] && method === "PATCH") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title","pinned","starred"]); return sendJson(res,200,await services.chat.updateThreadMetadata(user.id,projectId,segments[6],{...(Object.hasOwn(body,"title")?{title:body.title===null?null:asString(body.title)}:{}),...(Object.hasOwn(body,"pinned")?{pinned:asBoolean(body.pinned,"pinned")}:{}) ,...(Object.hasOwn(body,"starred")?{starred:asBoolean(body.starred,"starred")}:{})},requireIdempotencyKey(req))); }
+      if (segments[6] && !segments[7] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.chat.deleteThread(user.id,projectId,segments[6],requireIdempotencyKey(req))); }
       if (segments[6] && segments[7] === "messages") {
         const threadId=segments[6];const messageId=segments[8];const action=segments[9];
-        if(messageId&&!action&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["content","expectedVersion"]);return sendJson(res,200,await services.chat.editMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),asString(body.content),requireIdempotencyKey(req)));}
-        if(messageId&&!action&&method==="DELETE"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.deleteMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
-        if(messageId&&action==="branch"&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.branchMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
-        if(messageId&&action==="retry"&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendChatRetryStream(req,res,services,user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"));}
-        if(!messageId&&method==="GET")return sendJson(res,200,await services.chat.listMessages(user.id,projectId,threadId));
-        if(!messageId&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["content","afterMessageId"]);return sendChatStream(req,res,services,user.id,projectId,threadId,asString(body.content),body.afterMessageId===null?null:asString(body.afterMessageId));}
+        if(messageId&&!action&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content","expectedVersion"]);return sendJson(res,200,await services.chat.editMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),asString(body.content),requireIdempotencyKey(req)));}
+        if(messageId&&!action&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.deleteMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
+        if(messageId&&action==="branch"&&!segments[10]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.branchMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
+        if(messageId&&action==="retry"&&!segments[10]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendChatRetryStream(req,res,services,user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"));}
+        if(!messageId&&method==="GET"){assertOnlySearchParams(url,[]);return sendJson(res,200,await services.chat.listMessages(user.id,projectId,threadId));}
+        if(!messageId&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content","afterMessageId"]);return sendChatStream(req,res,services,user.id,projectId,threadId,asString(body.content),body.afterMessageId===null?null:asString(body.afterMessageId));}
       }
     }
     if (segments[4] === "policy") {
