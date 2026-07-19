@@ -13,7 +13,7 @@ const { WorkspaceSettingsPage } = await import("../../src/components/settings/Wo
 afterEach(() => cleanup());
 
 const projectSettings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", ownerUserId: "owner_1", name: "Project Alpha", taskConcurrencyLimit: 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, workspaceLifecycleStatus: "active", capabilities: { canManageSettings: true } };
-const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace Alpha", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
+const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace Alpha", createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
 
 describe("settings deletion", () => {
   it("explains when project settings are read-only because the workspace is archived", async () => {

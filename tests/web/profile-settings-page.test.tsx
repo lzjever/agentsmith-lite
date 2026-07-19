@@ -15,7 +15,7 @@ afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
 const profile: Profile = { user: { id: "user_1", email: "owner@example.test", pictureUrl: "https://idp.test/owner.png", emailVerified: true, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, preferences: { userId: "user_1", displayName: "Owner", timezone: "UTC", bio: "Builds tools", jobTitle: "Engineer", company: "AgentSmith", greetingPreference: "Hello", interests: ["Engineering"], updatedAt: "2026-07-11T00:00:00.000Z" } };
 const settings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", name: "Project", taskConcurrencyLimit: 2, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, workspaceLifecycleStatus: "active", capabilities: { canManageSettings: true } };
-const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", name: "Workspace", ownerUserId: "user_1", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
+const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", name: "Workspace", ownerUserId: "user_1", createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" }, capabilities: { canManageSettings: true } };
 
 describe("profile and settings pages", () => {
   it("renders immutable identity and only sends changed profile/project mutations", async () => {

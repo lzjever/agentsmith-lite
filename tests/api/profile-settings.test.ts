@@ -46,6 +46,12 @@ describe("profile and settings API", () => {
     assert.equal((await call("GET", `/api/v1/projects/${projectId}/overview/legacy`)).response.status, 404);
     assert.equal((await call("GET", `/api/v1/projects/${projectId}/settings/archive`)).response.status, 404);
 
+    const currentWorkspaceSettings = await json("GET", `/api/v1/workspaces/${workspaceId}/settings`);
+    assert.equal(currentWorkspaceSettings.capabilities.canManageSettings, true);
+    assert.equal(currentWorkspaceSettings.workspace.ownerUserId.length > 0, true);
+    assert.equal("projects" in currentWorkspaceSettings.workspace, false);
+    assert.equal("capabilities" in currentWorkspaceSettings.workspace, false);
+
     const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace", expectedName: "Old workspace" }, "workspace-settings");
     assert.equal(workspace.workspace.name, "New workspace");
     const replayedWorkspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace", expectedName: "Old workspace" }, "workspace-settings");

@@ -14,7 +14,7 @@ const { WorkspaceSettingsPage } = await import("../../src/components/settings/Wo
 const timestamp = "2026-07-11T00:00:00.000Z";
 const credentials: ProjectCredential[] = [{ id: "credential_1", projectId: "project_1", name: "DeepSeek", type: "api_key", baseUrl: "https://api.deepseek.test/v1", fingerprint: "key-123", version: 1, createdAt: timestamp, lastRotatedAt: null, updatedAt: timestamp }];
 const projectSettings: ProjectSettings = { project: { id: "project_1", workspaceId: "workspace_1", ownerUserId: "owner_1", name: "Project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp }, workspaceLifecycleStatus: "active", capabilities: { canManageSettings: true } };
-const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace", projects: [], capabilities: { canCreateProject: true, canManageMembers: true }, createdAt: timestamp, updatedAt: timestamp }, capabilities: { canManageSettings: true } };
+const workspaceSettings: WorkspaceSettings = { workspace: { id: "workspace_1", ownerUserId: "owner_1", name: "Workspace", createdAt: timestamp, updatedAt: timestamp }, capabilities: { canManageSettings: true } };
 
 afterEach(() => cleanup());
 

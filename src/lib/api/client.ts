@@ -1,6 +1,6 @@
 "use client";
 
-import type { ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
+import type { ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
@@ -60,7 +60,7 @@ export function isMissingNotification(error: unknown): error is ApiError {
 export interface CurrentUser { id: string; email: string; displayName?: string; pictureUrl?: string; }
 export type Profile = ProfileResponse;
 export interface SettingsCapabilities { canManageSettings: boolean; }
-export interface WorkspaceSettings { workspace: Workspace; capabilities: SettingsCapabilities; }
+export interface WorkspaceSettings { workspace: ApiWorkspace; capabilities: SettingsCapabilities; }
 export interface ProjectSettings { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: SettingsCapabilities; }
 export interface Project { id: string; workspaceId: string; name: string; ownerUserId?: string; lifecycleStatus?: "active" | "archived" | "deleting"; pinnedAt?: string | null; taskConcurrencyLimit: number; createdAt: string; updatedAt: string; }
 export interface Workspace { id: string; name: string; ownerUserId?: string; owner?: { displayName: string | null; email: string }; memberRole?: WorkspaceMemberRole; lifecycleStatus?: "active" | "archived" | "deleting"; projects: Project[]; capabilities: { canCreateProject: boolean; canManageMembers: boolean }; createdAt: string; updatedAt: string; }
