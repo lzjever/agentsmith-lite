@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { TaskCapabilities, TaskInteractionItem, TaskMessageReceipt, TaskQueuedMessage } from "../../src/lib/api/client.js";
 import { applyTaskMessageReceipt, isNearHistoryTop, reduceTaskAssistantPreview, retainedHistoryScrollTop, taskMessageReceiptError } from "../../src/components/tasks/task-conversation-state.js";
 
-const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: true, abortTurn: true, cancelTask: true, openTerminal: true, editTask:true, archiveTask:true, deleteTask: true };
+const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: true, abortTurn: true, openTerminal: true, releaseSandbox:true, editTask:true, archiveTask:true, deleteTask: true };
 const queued = (content: string, updatedAt: string): TaskQueuedMessage => ({ id: "message_1", content, deliveryStatus: "pending", editable: true, deletable: true, updatedAt });
 const interaction = (revision: number, body: string): Extract<TaskInteractionItem, { kind: "user_message" }> => ({ id: "interaction_1", revision, taskId: "task_1", kind: "user_message", title: "You", body, contentMode: "full", position: 1, occurredAt: "2026-07-13T00:00:00.000Z", updatedAt: "2026-07-13T00:00:00.000Z", status: "queued" });
 

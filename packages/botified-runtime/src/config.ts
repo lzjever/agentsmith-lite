@@ -1,8 +1,7 @@
 import type { EndpointCapability, ModelEndpoint } from "../../contracts/src/api.js";
 import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 
-// Keep an ordinary long Bash call attached past the sandbox's 30-minute idle TTL.
-// Both values are intentionally bounded so a task cannot run indefinitely.
+// Bound individual Bash calls independently from sandbox ownership.
 const DEFAULT_BASH_DETACH_AFTER_SECS = 31 * 60;
 const MAX_BASH_TIMEOUT_SECS = 35 * 60;
 

@@ -21,7 +21,7 @@ import type {
   User,
   Workspace,
   ManagedWorkspaceMembershipRole,
-  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, TaskSummary, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
+  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
 import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
@@ -48,14 +48,12 @@ import type {
   TaskMessageReceiptInput,
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
-  FinalizeTaskLifecycleInput,
-  FinalizeTaskLifecycleResult,
-  TaskStageClaimInput,
-  TaskStageCompleteInput,
-  TaskStageFailureInput,
+  StoredTaskSummary,
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
+  TaskSandboxReleaseMutationInput,
+  TaskSandboxReleaseMutationResult,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
@@ -95,7 +93,7 @@ export class InMemoryProductStore implements ProductStore {
 
   readonly jsonDocs: PostgresJsonDocStore = new InMemoryJsonDocStore();
   readonly leases: PostgresLeaseStore = new InMemoryLeaseStore();
-  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs);
+  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs,(run)=>this.releaseReservationForCleanedRun(run));
 
   private readonly users = new Map<string, StoredUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -225,7 +223,7 @@ export class InMemoryProductStore implements ProductStore {
     return clone(this.workspaces.get(id) ?? null);
   }
   async updateWorkspaceName(workspaceId:string,name:string,updatedAt:string,expectedName:string){const current=this.workspaces.get(workspaceId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.workspaces.set(workspaceId,clone(updated));return clone(updated)}
-  async beginWorkspaceDeletion(id:string, updatedAt:string, expectedOwnerUserId?:string){const value=this.workspaces.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.workspaces.set(id,clone(updated));return clone(updated)}
+  async beginWorkspaceDeletion(id:string, updatedAt:string, expectedOwnerUserId?:string){const value=this.workspaces.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};const projects=[...this.projects.values()].filter((project)=>project.workspaceId===id),uncertain:Project[]=[];for(const project of projects)if(!await this.projectSandboxesConfirmedCleaned(project.id))uncertain.push(project);const unownedManifest=(await this.sandboxRuns.list()).some((run)=>run.workspaceId===id&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"&&!projects.some((project)=>project.id===run.projectId));if(uncertain.length||unownedManifest){if(value.lifecycleStatus==="deleting"){this.workspaces.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));for(const affected of uncertain)if(affected.lifecycleStatus==="deleting")this.projects.set(affected.id,clone({...affected,lifecycleStatus:"active" as const,updatedAt}));}return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.workspaces.set(id,clone(updated));for(const project of projects)this.projects.set(project.id,clone({...project,lifecycleStatus:"deleting" as const,updatedAt}));return{kind:"ready" as const,value:clone(updated)}}
   async setWorkspaceLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.workspaces.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.workspaces.set(id,clone(updated));return clone(updated)}
   async transferWorkspaceOwner(workspaceId:string,fromUserId:string,toUserId:string,updatedAt:string){const workspace=this.workspaces.get(workspaceId),target=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,toUserId));if(!workspace||workspace.ownerUserId!==fromUserId||fromUserId===toUserId||!target||workspace.lifecycleStatus!==undefined&&workspace.lifecycleStatus!=="active")return null;const from=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,fromUserId));if(!from)return null;this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,fromUserId),clone({...from,role:"admin",updatedAt}));this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...workspace,ownerUserId:toUserId,updatedAt};this.workspaces.set(workspaceId,clone(updated));return clone(updated)}
   async deleteWorkspaceAfterProjects(id:string){const workspace=this.workspaces.get(id);if(!workspace||workspace.lifecycleStatus!=="deleting"||[...this.projects.values()].some((project)=>project.workspaceId===id))return false;for(const [key,entry] of this.contexts)if(entry.workspaceId===id)this.contexts.delete(key);for(const [key,membership] of this.workspaceMemberships)if(membership.workspaceId===id)this.workspaceMemberships.delete(key);return this.workspaces.delete(id)}
@@ -311,12 +309,12 @@ export class InMemoryProductStore implements ProductStore {
   }
   async findTaskBoundToFileLibrary(fileLibraryId:string){const task=[...this.tasks.values()].find((candidate)=>!candidate.deletedAt&&candidate.fileLibraryId===fileLibraryId);return task?{kind:"bound" as const,task:{id:task.id,title:task.title??null}}:{kind:"unbound" as const}}
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string){const current=this.projects.get(projectId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
-  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
+  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};if(!await this.projectSandboxesConfirmedCleaned(id)){if(value.lifecycleStatus==="deleting")this.projects.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return{kind:"ready" as const,value:clone(updated)}}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string){const project=this.projects.get(projectId),target=this.memberships.get(membershipKey(projectId,toUserId));if(!project||project.ownerUserId!==fromUserId||fromUserId===toUserId||!target||project.lifecycleStatus!==undefined&&project.lifecycleStatus!=="active")return null;const from=this.memberships.get(membershipKey(projectId,fromUserId));if(!from)return null;this.memberships.set(membershipKey(projectId,fromUserId),clone({...from,role:"admin",updatedAt}));this.memberships.set(membershipKey(projectId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...project,ownerUserId:toUserId,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
   async deleteProjectDependenciesAndProject(id:string){
     const project=this.projects.get(id);
-    if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id&&isActiveTaskStatus(task.status)))return false;
+    if(!project||project.lifecycleStatus!=="deleting")return false;
     for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);}
     this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId)));
     this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId)));
@@ -340,8 +338,9 @@ export class InMemoryProductStore implements ProductStore {
     }
     this.policies.delete(id);
     this.usage.delete(id);
-    return this.projects.delete(id);
+    return true;
   }
+  async deleteProjectAfterDependencies(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id))return false;return this.projects.delete(id)}
 
   async listProjectsForUser(userId: string): Promise<Project[]> {
     return [...this.projects.values()]
@@ -650,6 +649,7 @@ export class InMemoryProductStore implements ProductStore {
     try {
       if (input.runtimeState) await this.jsonDocs.put("sandbox_runtime_state", task.id, input.runtimeState);
       if (input.sandboxRun) await this.sandboxRuns.put(input.sandboxRun);
+      if(input.initialMessage)await this.createTaskMessage(input.initialMessage);
       return{kind:"created" as const,task:clone(task)};
     } catch (error) {
       this.tasks.delete(task.id);
@@ -658,6 +658,7 @@ export class InMemoryProductStore implements ProductStore {
       if (input.reserveActive) this.releaseActiveTask(task.projectId, task.updatedAt);
       await this.jsonDocs.delete("sandbox_runtime_state", task.id);
       if (input.sandboxRun) await this.jsonDocs.delete("sandbox_run_state", input.sandboxRun.runId);
+      if(input.initialMessage){const index=this.messages.findIndex((message)=>message.id===input.initialMessage!.id);if(index>=0)this.messages.splice(index,1);}
       throw error;
     }
   }
@@ -687,7 +688,7 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
   }
   async listActiveTasks(): Promise<PersistedAgentTask[]> {
-    return [...this.tasks.values()].filter((task) => isActiveTaskStatus(task.status)).map(clone);
+    return [...this.tasks.values()].filter((task) => !task.deletedAt&&task.activeReservation===true).map(clone);
   }
 
   async listTasksForProject(projectId: string): Promise<PersistedAgentTask[]> {
@@ -696,17 +697,14 @@ export class InMemoryProductStore implements ProductStore {
 
   async queryTasksForProject(projectId: string, query: TaskStoreListQuery): Promise<TaskStoreListPage> {
     const needle = query.search.trim().toLowerCase();
-    const statuses = new Set(query.statuses);
     const filtered = [...this.tasks.values()].filter((task) =>
       task.projectId === projectId && !task.deletedAt &&
       (query.archived === "include" || (query.archived === "only" ? Boolean(task.archivedAt) : !task.archivedAt)) &&
-      (statuses.size === 0 || statuses.has(task.status)) &&
       (!needle || `${task.title ?? ""}\n${task.prompt}`.toLowerCase().includes(needle))
     );
     const direction = query.direction === "asc" ? 1 : -1;
     const field = (task: PersistedAgentTask): string => query.sort === "created_at" ? task.createdAt
       : query.sort === "updated_at" ? task.updatedAt
-      : query.sort === "status" ? task.status
       : task.title ?? "";
     filtered.sort((left, right) => direction * (field(left).localeCompare(field(right)) || left.id.localeCompare(right.id)));
     return { items: filtered.slice(query.offset, query.offset + query.limit).map(clone), total: filtered.length };
@@ -726,7 +724,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async archiveTask(taskId: string, archivedAt: string): Promise<PersistedAgentTask | null> {
     const current = this.tasks.get(taskId);
-    if (!current || current.deletedAt || !isTerminalTask(current)) return null;
+    if (!current || current.deletedAt) return null;
     const updated = { ...current, archivedAt, updatedAt: archivedAt };
     this.tasks.set(taskId, clone(updated));
     return clone(updated);
@@ -734,7 +732,8 @@ export class InMemoryProductStore implements ProductStore {
 
   async deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null> {
     const current = this.tasks.get(taskId);
-    if (!current || !isTerminalTask(current)) return null;
+    if (!current) return null;
+    if(current.activeReservation)this.releaseActiveTask(current.projectId,deletedAt);
     const releasedArtifactBytes = 0;
     this.artifacts.splice(0, this.artifacts.length, ...this.artifacts.filter((artifact) => artifact.taskId !== taskId));
     this.messages.splice(0, this.messages.length, ...this.messages.filter((message) => message.taskId !== taskId));
@@ -742,7 +741,7 @@ export class InMemoryProductStore implements ProductStore {
     this.interactionSync.delete(taskId);
     await this.jsonDocs.delete("sandbox_runtime_state", taskId);
     await this.jsonDocs.delete("sandbox_run_state", current.runId);
-    const task = { ...current, fileLibraryId:null, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
+    const task = { ...current, fileLibraryId:null, activeReservation:false, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
     this.tasks.set(taskId, clone(task));
     return { task: clone(task), releasedArtifactBytes };
   }
@@ -794,62 +793,6 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
   }
 
-  async finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
-    const current = this.tasks.get(input.taskId);
-    if (!current) return null;
-    if (current.terminalReason) return { task: clone(current), applied: false };
-
-    if (current.activeReservation) this.releaseActiveTask(current.projectId, input.updatedAt);
-    const terminal: PersistedAgentTask = {
-      ...current,
-      status: statusForTerminalReason(input.terminalReason),
-      terminalReason: input.terminalReason,
-      terminalizedAt: input.updatedAt,
-      activeReservation: false,
-      ...(current.startIntentStatus === "pending" ? { startIntentStatus:"failed" as const, startSafeError:"Task ended before initial prompt delivery", startNextRetryAt:null } : {}),
-      finalizationIntentStatus: null,
-      finalizationIntentAt: null,
-      artifactProjectionStatus: current.executionMode === "live" ? "draining" : "drained",
-      artifactProjectionError: null,
-      cleanupStatus: current.executionMode === "live" ? "pending" : "completed",
-      cleanupError: null,
-      cleanupCompletedAt: current.executionMode === "live" ? null : input.updatedAt,
-      updatedAt: input.updatedAt
-    };
-    this.tasks.set(current.id, clone(terminal));
-
-    for (let index = 0; index < this.messages.length; index += 1) {
-      const message = this.messages[index]!;
-      if(message.taskId===current.id&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending"))this.messages[index]=clone({...message,deliveryStatus:"failed",safeError:"Task became terminal before delivery",updatedAt:input.updatedAt});
-    }
-    this.appendInteractionChanges(current.id, input.terminalInteractionChanges ?? []);
-    if (!this.auditEvents.some((event) => event.id === input.auditEvent.id)) this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
-    return { task: clone(terminal), applied: true };
-  }
-
-  async listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]> {
-    return [...this.tasks.values()].filter((task) => task.terminalReason && (task.artifactProjectionStatus === "draining" || task.artifactProjectionStatus === "failed") && (!task.artifactProjectionNextRetryAt || task.artifactProjectionNextRetryAt <= now) && (!task.artifactProjectionLeaseExpiresAt || task.artifactProjectionLeaseExpiresAt <= now)).slice(0, limit).map(clone);
-  }
-
-  async claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("artifact", input); }
-  async completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> { return this.completeTaskStage("artifact", input); }
-  async failTaskArtifactProjection(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("artifact", input); }
-
-  async listTasksForCleanup(now: string, limit: number): Promise<PersistedAgentTask[]> {
-    return [...this.tasks.values()].filter((task) => task.terminalReason && task.artifactProjectionStatus === "drained" && (task.cleanupStatus === "pending" || task.cleanupStatus === "running" || task.cleanupStatus === "failed") && (!task.cleanupNextRetryAt || task.cleanupNextRetryAt <= now) && (!task.cleanupLeaseExpiresAt || task.cleanupLeaseExpiresAt <= now)).slice(0, limit).map(clone);
-  }
-
-  async claimTaskCleanup(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("cleanup", input); }
-  async completeTaskCleanup(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> {
-    const completed = await this.completeTaskStage("cleanup", input);
-    if (completed) {
-      await this.jsonDocs.delete("sandbox_runtime_state", completed.id);
-      await this.jsonDocs.delete("sandbox_run_state", completed.runId);
-    }
-    return completed;
-  }
-  async failTaskCleanup(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("cleanup", input); }
-
   async beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult> {
     const key = taskIdempotencyKey(input);
     const existing = this.taskIdempotency.get(key);
@@ -871,6 +814,14 @@ export class InMemoryProductStore implements ProductStore {
     if (!existing || existing.status !== "in_progress" || existing.requestHash !== input.requestHash || existing.claimToken !== input.claimToken) return false;
     this.taskIdempotency.set(key, { ...existing, status: "completed", responseStatus: input.responseStatus, responseBody: clone(input.responseBody), updatedAt: input.updatedAt });
     return true;
+  }
+  async requestTaskSandboxRelease(input:TaskSandboxReleaseMutationInput){
+    const key=taskIdempotencyKey(input.idempotency),record=this.taskIdempotency.get(key);
+    if(!record||record.status!=="in_progress"||record.requestHash!==input.idempotency.requestHash||record.claimToken!==input.idempotency.claimToken)return"conflict" as const;
+    return this.sandboxRuns.requestExplicitCleanup(input,()=>{
+      if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
+      this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
+    });
   }
   async completeTaskIdempotencyForResource(resourceId:string,responseStatus:number,responseBody:unknown,updatedAt:string):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.resourceId!==resourceId||record.status!=="in_progress")continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus,responseBody:clone(responseBody),updatedAt});completed+=1;}return completed;}
 
@@ -902,12 +853,8 @@ export class InMemoryProductStore implements ProductStore {
       const inserted = this.appendInteractionChanges(input.taskId, input.changes);
       if (input.lifecycle?.kind === "active") {
         const current = this.tasks.get(input.taskId)!;
-        if (current.terminalReason || current.status !== input.lifecycle.expectedStatus) throw new Error("Task interaction lifecycle conflict");
+        if (current.status !== input.lifecycle.expectedStatus) throw new Error("Task interaction lifecycle conflict");
         this.tasks.set(input.taskId, { ...current, status: input.lifecycle.status, updatedAt: input.lifecycle.updatedAt });
-      }
-      if (input.lifecycle?.kind === "terminal") {
-        const finalized = await this.finalizeTaskLifecycle({ taskId: input.taskId, ...input.lifecycle });
-        if (!finalized) throw new Error("Task interaction lifecycle conflict");
       }
       if (input.sourceSync) {
         this.interactionSync.set(input.taskId, { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt });
@@ -989,7 +936,7 @@ export class InMemoryProductStore implements ProductStore {
     this.messages.push(clone(stored));
     return clone(stored);
   }
-  async createPendingTaskMessage(v:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return this.atomicTaskMessageMutation([],async()=>{const source=this.tasks.get(v.taskId);if(!source||isTerminalTask(source))return null;const created=await this.createTaskMessage(v);this.appendInteractionChanges(v.taskId,interactionChange?[interactionChange]:[]);return created;});}
+  async createPendingTaskMessage(v:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return this.atomicTaskMessageMutation([],async()=>{const source=this.tasks.get(v.taskId);if(!source||source.deletedAt)return null;const created=await this.createTaskMessage(v);this.appendInteractionChanges(v.taskId,interactionChange?[interactionChange]:[]);return created;});}
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { return this.messages.filter((value) => value.taskId === taskId && !value.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map(clone); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { return clone(this.messages.find((value) => value.id === id) ?? null); }
   async updatePendingTaskMessage(id: string, content: string, requestHash: string, updatedAt: string, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null> {
@@ -1021,7 +968,7 @@ export class InMemoryProductStore implements ProductStore {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     const source=current?this.tasks.get(current.taskId):undefined;
-    if (!current || !source || isTerminalTask(source) || current.deletedAt || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)) return null;
+    if (!current || !source || source.deletedAt || current.deletedAt || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,current)) return null;
     const updated: PersistedTaskMessage = { ...current, deliveryStatus: "dispatching", claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1030,7 +977,7 @@ export class InMemoryProductStore implements ProductStore {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     const source = current ? this.tasks.get(current.taskId) : undefined;
-    if (!current || !source || isTerminalTask(source) || current.deletedAt || current.deliveryStatus !== "dispatching" || current.claimToken !== input.expectedClaimToken || !current.leaseExpiresAt || current.leaseExpiresAt > input.claimedAt || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)) return null;
+    if (!current || !source || source.deletedAt || current.deletedAt || current.deliveryStatus !== "dispatching" || current.claimToken !== input.expectedClaimToken || !current.leaseExpiresAt || current.leaseExpiresAt > input.claimedAt || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,current)) return null;
     const updated: PersistedTaskMessage = { ...current, claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1059,8 +1006,8 @@ export class InMemoryProductStore implements ProductStore {
     this.messages[index] = clone(updated);
     return clone(updated);
   }
-  async findTaskSummary(taskId: string): Promise<TaskSummary | null> { const task=this.tasks.get(taskId); return task ? this.taskSummary(task) : null; }
-  async listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]> { return [...this.tasks.values()].filter((task) => task.projectId === projectId && !task.deletedAt).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).map((task) => this.taskSummary(task)); }
+  async findTaskSummary(taskId: string): Promise<StoredTaskSummary | null> { const task=this.tasks.get(taskId); return task ? this.taskSummary(task) : null; }
+  async listTaskSummariesForProject(projectId: string): Promise<StoredTaskSummary[]> { return [...this.tasks.values()].filter((task) => task.projectId === projectId && !task.deletedAt).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).map((task) => this.taskSummary(task)); }
 
   private appendInteractionChanges(taskId: string, changes: TaskInteractionChangeInput[]): PersistedTaskInteractionChange[] {
     const inserted: PersistedTaskInteractionChange[] = [];
@@ -1111,7 +1058,7 @@ export class InMemoryProductStore implements ProductStore {
   }
 
   private sortedChatThreads(projectId: string, ownerUserId: string): ProjectChatThread[] { return [...this.chatThreads.values()].filter((thread) => thread.projectId === projectId && thread.ownerUserId === ownerUserId && !thread.deletedAt).sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || (right.starredAt ?? "").localeCompare(left.starredAt ?? "") || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || (right.pinnedAt ?? "").localeCompare(left.pinnedAt ?? "") || right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)).map(clone); }
-  private taskSummary(task: PersistedAgentTask): TaskSummary { return { taskId: task.id, artifactCount: this.artifacts.filter((artifact) => artifact.taskId === task.id).length, updatedAt: task.updatedAt }; }
+  private taskSummary(task: PersistedAgentTask): StoredTaskSummary { return { taskId: task.id, artifactCount: this.artifacts.filter((artifact) => artifact.taskId === task.id).length, updatedAt: task.updatedAt }; }
   private initializeTaskInteractionSync(taskId: string): void { this.interactionSync.set(taskId, { sourceCursor: null, historyStatus: "complete", lastSyncedAt: null }); }
 
   private reserveActiveTask(projectId: string, updatedAt: string): boolean {
@@ -1127,44 +1074,22 @@ export class InMemoryProductStore implements ProductStore {
     if (usage) this.usage.set(projectId, clone({ ...usage, activeTasks: Math.max(0, usage.activeTasks - 1), updatedAt }));
   }
 
-  private async claimTaskStage(stage: "artifact" | "cleanup", input: TaskStageClaimInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current?.terminalReason) return null;
-    if (stage === "artifact") {
-      if (!["draining", "failed"].includes(current.artifactProjectionStatus ?? "") || current.artifactProjectionLeaseExpiresAt && current.artifactProjectionLeaseExpiresAt > input.claimedAt || current.artifactProjectionNextRetryAt && current.artifactProjectionNextRetryAt > input.claimedAt) return null;
-      const updated: PersistedAgentTask = { ...current, artifactProjectionStatus: "draining", artifactProjectionClaimToken: input.claimToken, artifactProjectionLeaseExpiresAt: input.leaseExpiresAt, artifactProjectionAttemptCount: (current.artifactProjectionAttemptCount ?? 0) + 1, artifactProjectionError: null, updatedAt: input.claimedAt };
-      this.tasks.set(input.id, clone(updated)); return clone(updated);
+  private async projectSandboxesConfirmedCleaned(projectId:string):Promise<boolean>{
+    for(const task of this.tasks.values()){
+      if(task.projectId!==projectId||task.deletedAt||task.executionMode!=="live")continue;
+      if(task.activeReservation)return false;
+      const run=await this.sandboxRuns.get(task.runId);
+      if(!run||run.taskId!==task.id||run.runId!==task.runId||run.projectId!==task.projectId||run.workspaceId!==task.workspaceId||run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned")return false;
     }
-    if (current.artifactProjectionStatus !== "drained" || !["pending", "running", "failed"].includes(current.cleanupStatus ?? "") || current.cleanupLeaseExpiresAt && current.cleanupLeaseExpiresAt > input.claimedAt || current.cleanupNextRetryAt && current.cleanupNextRetryAt > input.claimedAt) return null;
-    const updated: PersistedAgentTask = { ...current, cleanupStatus: "running", cleanupClaimToken: input.claimToken, cleanupLeaseExpiresAt: input.leaseExpiresAt, cleanupAttemptCount: (current.cleanupAttemptCount ?? 0) + 1, cleanupError: null, updatedAt: input.claimedAt };
-    this.tasks.set(input.id, clone(updated)); return clone(updated);
+    for(const run of await this.sandboxRuns.list())if(run.projectId===projectId&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned")return false;
+    return true;
   }
 
-  private async completeTaskStage(stage: "artifact" | "cleanup", input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current) return null;
-    if (stage === "artifact") {
-      if (current.artifactProjectionStatus !== "draining" || current.artifactProjectionClaimToken !== input.claimToken) return null;
-      const updated: PersistedAgentTask = { ...current, artifactProjectionStatus: "drained", artifactProjectionClaimToken: null, artifactProjectionLeaseExpiresAt: null, artifactProjectionNextRetryAt: null, artifactProjectionError: null, updatedAt: input.updatedAt };
-      this.tasks.set(input.id, clone(updated)); return clone(updated);
-    }
-    if (current.cleanupStatus !== "running" || current.cleanupClaimToken !== input.claimToken) return null;
-    const updated: PersistedAgentTask = { ...current, cleanupStatus: "completed", cleanupClaimToken: null, cleanupLeaseExpiresAt: null, cleanupNextRetryAt: null, cleanupError: null, cleanupCompletedAt: input.updatedAt, updatedAt: input.updatedAt };
-    this.tasks.set(input.id, clone(updated)); return clone(updated);
+  private releaseReservationForCleanedRun(run:PersistedSandboxRunState):void{
+    const task=this.tasks.get(run.taskId);if(!task||task.runId!==run.runId||!task.activeReservation)return;
+    this.tasks.set(task.id,clone({...task,activeReservation:false,updatedAt:run.updatedAt}));this.releaseActiveTask(task.projectId,run.updatedAt);
   }
 
-  private async failTaskStage(stage: "artifact" | "cleanup", input: TaskStageFailureInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current) return null;
-    if (stage === "artifact") {
-      if (current.artifactProjectionStatus !== "draining" || current.artifactProjectionClaimToken !== input.claimToken) return null;
-      const updated: PersistedAgentTask = { ...current, artifactProjectionStatus: "failed", artifactProjectionClaimToken: null, artifactProjectionLeaseExpiresAt: null, artifactProjectionNextRetryAt: input.nextRetryAt, artifactProjectionError: input.safeError, updatedAt: input.updatedAt };
-      this.tasks.set(input.id, clone(updated)); return clone(updated);
-    }
-    if (current.cleanupStatus !== "running" || current.cleanupClaimToken !== input.claimToken) return null;
-    const updated: PersistedAgentTask = { ...current, cleanupStatus: "failed", cleanupClaimToken: null, cleanupLeaseExpiresAt: null, cleanupNextRetryAt: input.nextRetryAt, cleanupError: input.safeError, updatedAt: input.updatedAt };
-    this.tasks.set(input.id, clone(updated)); return clone(updated);
-  }
 }
 
 class InMemoryJsonDocStore implements PostgresJsonDocStore {
@@ -1188,17 +1113,23 @@ class InMemoryJsonDocStore implements PostgresJsonDocStore {
       .filter(([key]) => key.startsWith(prefix))
       .map(([, document]) => clone(document));
   }
+
+  getSync(collection:JsonDocumentCollection,id:string):Record<string,unknown>|null{return clone(this.documents.get(`${collection}:${id}`)??null)}
+  putSync(collection:JsonDocumentCollection,id:string,document:Record<string,unknown>):void{this.documents.set(`${collection}:${id}`,clone(document))}
 }
 
 class InMemorySandboxRunStore {
   private mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly jsonDocs: PostgresJsonDocStore) {}
+  constructor(private readonly jsonDocs: PostgresJsonDocStore,private readonly onCleaned:(run:PersistedSandboxRunState)=>void) {}
 
   async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
+    const previous=await this.get(run.runId);
     const document = prepareSandboxRunDocument(run);
     await this.jsonDocs.put("sandbox_run_state", run.runId, document);
-    return sandboxRunFromDocument(document);
+    const stored=sandboxRunFromDocument(document);
+    if((stored.cleanupStatus==="cleaned"||stored.phase==="cleaned")&&(!previous||previous.cleanupStatus!=="cleaned"&&previous.phase!=="cleaned"))this.onCleaned(stored);
+    return stored;
   }
 
   async get(runId: string): Promise<PersistedSandboxRunState | null> {
@@ -1227,10 +1158,8 @@ class InMemorySandboxRunStore {
       ) {
         return null;
       }
-      const expired = sandboxRunExpired(current, input.claimedAt);
       return this.put({
         ...current,
-        phase: expired ? "expired" : "stopping",
         cleanupStatus: "deleting",
         fencingToken: current.fencingToken + 1,
         updatedAt: input.claimedAt
@@ -1252,6 +1181,20 @@ class InMemorySandboxRunStore {
     });
   }
 
+  async requestExplicitCleanup(input:TaskSandboxReleaseMutationInput,commit:()=>void):Promise<TaskSandboxReleaseMutationResult>{
+    return this.serializeMutation(async()=>{
+      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return"conflict";
+      const document=this.jsonDocs.getSync("sandbox_run_state",input.runId);
+      const current=document?sandboxRunFromDocument(document):null;
+      if(!current||current.taskId!==input.taskId||current.runId!==input.runId)return"conflict";
+      const already=current.cleanupStatus==="cleanup_requested"||current.cleanupStatus==="deleting"||current.cleanupStatus==="cleaned"||current.phase==="cleaned";
+      if(!already&&(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.cleanupStatus!=="cleanup_requested"))return"conflict";
+      commit();
+      if(!already)this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(input.run));
+      return already?"already_requested":"applied";
+    });
+  }
+
   private async serializeMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTail;
     let release!: () => void;
@@ -1265,20 +1208,9 @@ class InMemorySandboxRunStore {
   }
 }
 
-function sandboxRunCleanupEligible(run: PersistedSandboxRunState, claimedAt: string): boolean {
+function sandboxRunCleanupEligible(run: PersistedSandboxRunState, _claimedAt: string): boolean {
   if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") return false;
-  return run.cleanupStatus === "cleanup_requested" ||
-    run.cleanupStatus === "deleting" ||
-    run.phase === "stopping" ||
-    run.phase === "expired" ||
-    sandboxRunExpired(run, claimedAt);
-}
-
-function sandboxRunExpired(run: PersistedSandboxRunState, claimedAt: string): boolean {
-  const now = Date.parse(claimedAt);
-  return [run.expiresAt, run.idleExpiresAt].some((deadline) =>
-    typeof deadline === "string" && Date.parse(deadline) <= now
-  );
+  return run.cleanupStatus === "cleanup_requested" || run.cleanupStatus === "deleting";
 }
 
 class InMemoryLeaseStore implements PostgresLeaseStore {
@@ -1361,10 +1293,6 @@ function isActiveTaskStatus(status: AgentTask["status"]): boolean {
   return status === "queued" || status === "starting" || status === "running" || status === "stopping";
 }
 
-function isTerminalTask(task: PersistedAgentTask): boolean {
-  return Boolean(task.terminalReason) || task.status === "completed" || task.status === "failed" || task.status === "expired" || task.status === "cancelled" || task.status === "cleaned";
-}
-
 function statusForTerminalReason(reason: import("../../contracts/src/api.js").TaskTerminalReason): AgentTask["status"] {
   if (reason === "cancelled") return "cancelled";
   if (reason === "failed") return "failed";
@@ -1440,6 +1368,10 @@ function latestInteractions(changes: PersistedTaskInteractionChange[]): TaskInte
     if (!current || change.interaction.revision > current.interaction.revision || change.interaction.revision === current.interaction.revision && change.changeSeq > current.changeSeq) latest.set(change.interaction.id, change);
   }
   return [...latest.values()].map((change) => change.interaction).sort((left,right) => left.position - right.position || left.id.localeCompare(right.id));
+}
+
+function hasOlderUnresolvedMessage(messages:PersistedTaskMessage[],target:PersistedTaskMessage):boolean{
+  return messages.some((message)=>message.taskId===target.taskId&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending")&&(message.createdAt<target.createdAt||message.createdAt===target.createdAt&&message.id<target.id));
 }
 
 function correlationMatches(stored: TaskInteractionCorrelation | undefined, requested: TaskInteractionCorrelation): boolean {

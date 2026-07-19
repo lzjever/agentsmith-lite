@@ -12,7 +12,7 @@ afterEach(() => cleanup());
 describe("task composer receipts", () => {
   it("keeps queued message save disabled until the content changes", async () => {
     let updates = 0;
-    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => { updates += 1; }} onDeleteQueued={async () => undefined} />);
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, openTerminal: false, releaseSandbox:false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => { updates += 1; }} onDeleteQueued={async () => undefined} />);
     fireEvent.click(screen.getByRole("button", { name:"Edit queued message" }));
     const editor = await screen.findByRole("textbox", { name:"Queued message" }) as HTMLTextAreaElement;
     const save = screen.getByRole("button", { name:"Save message" }) as HTMLButtonElement;
@@ -30,7 +30,7 @@ describe("task composer receipts", () => {
   });
 
   it("retains the draft when the server resolves the mutation with a safe failure", async () => {
-    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[]} busy={false} onSend={async () => { throw new Error("Delivery is unavailable."); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, openTerminal: false, releaseSandbox:false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[]} busy={false} onSend={async () => { throw new Error("Delivery is unavailable."); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
     const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Please continue" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
@@ -39,7 +39,7 @@ describe("task composer receipts", () => {
   });
 
   it("shows why a failed queued message stopped and lets the user remove it", () => {
-    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_failed", content:"Please continue", deliveryStatus:"failed", editable:false, deletable:true, safeError:"Botified rejected this message.", updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, openTerminal: false, releaseSandbox:false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_failed", content:"Please continue", deliveryStatus:"failed", editable:false, deletable:true, safeError:"Botified rejected this message.", updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => undefined} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
 
     assert.ok(screen.getByText("Botified rejected this message."));
     assert.ok(screen.getByRole("button", { name:"Delete queued message" }));
@@ -47,7 +47,7 @@ describe("task composer receipts", () => {
 
   it("locks queued message controls while sending a message", async () => {
     let sendStarted = false;
-    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, cancelTask: false, openTerminal: false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => { sendStarted = true; return new Promise(() => undefined); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
+    render(<TaskComposer capabilities={{ sendMessage: true, editQueuedMessage: true, abortTurn: false, openTerminal: false, releaseSandbox:false, editTask:true, archiveTask:false, deleteTask: false }} queuedMessages={[{ id:"message_1", content:"Please continue", deliveryStatus:"pending", editable:true, deletable:true, updatedAt:"2026-07-16T00:00:00.000Z" }]} busy={false} onSend={async () => { sendStarted = true; return new Promise(() => undefined); }} onUpdateQueued={async () => undefined} onDeleteQueued={async () => undefined} />);
     fireEvent.change(screen.getByRole("textbox", { name:"Message" }), { target:{ value:"One more instruction" } });
     fireEvent.click(screen.getByRole("button", { name:"Send message" }));
     await waitFor(() => assert.equal(sendStarted, true));

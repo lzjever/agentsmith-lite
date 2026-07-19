@@ -72,10 +72,6 @@ export function optionalRuntimeTickIntervalMs(value: string | undefined): number
   return optionalPositiveIntegerMs(value, "AGENTSMITH_LITE_RUNTIME_TICK_MS");
 }
 
-export function optionalLiveSandboxDurationMs(value: string | undefined, name: string): number | undefined {
-  return optionalPositiveIntegerMs(value, name);
-}
-
 function optionalPositiveIntegerMs(value: string | undefined, name: string): number | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {

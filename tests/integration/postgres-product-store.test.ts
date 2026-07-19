@@ -196,12 +196,47 @@ postgresDescribe("postgres product store", () => {
     await store.createProject({ id:"proj_project_delete",workspaceId:"ws_project_delete",name:"Delete",ownerUserId:"user_project_delete",rootPath:"workspaces/ws_project_delete/projects/proj_project_delete",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
     await store.appendProjectAuditEvent({id:"audit_project_delete",projectId:"proj_project_delete",actorId:"user_project_delete",action:"project.delete",status:"accepted",resourceKind:"project",resourceId:"proj_project_delete",createdAt:timestamp});
     await store.createUserNotification({id:"notification_project_delete",userId:"user_project_delete",type:"project_alert",title:"Delete project alert",body:null,projectId:"proj_project_delete",resourceKind:"alert",resourceId:"alert_project_delete",linkPath:"/deleted-project",readAt:null,createdAt:timestamp},"notification-project-delete");
-    await store.beginProjectDeletion("proj_project_delete",timestamp);
+    assert.equal((await store.beginProjectDeletion("proj_project_delete",timestamp)).kind,"ready");
 
     assert.equal(await store.deleteProjectDependenciesAndProject("proj_project_delete"),true);
+    assert.equal((await store.findProject("proj_project_delete"))?.lifecycleStatus,"deleting");
+    assert.equal(await store.deleteProjectAfterDependencies("proj_project_delete"),true);
     assert.equal(await store.findProject("proj_project_delete"),null);
     assert.deepEqual(await store.listProjectAuditEvents("proj_project_delete"),[]);
     assert.deepEqual(await store.listUserNotifications("user_project_delete"),[]);
+  });
+
+  it("reactivates deleting project and workspace retries when sandbox ownership is uncertain",async()=>{
+    const timestamp="2026-07-19T00:00:00.000Z",owner="user_delete_retry",workspaceId="ws_delete_retry",projectId="proj_delete_retry",taskId="task_delete_retry",runId="run_delete_retry";
+    await store.createUser({id:owner,email:"delete-retry@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+    await store.createWorkspace({id:workspaceId,name:"Retry workspace",ownerUserId:owner,createdAt:timestamp,updatedAt:timestamp});
+    await store.createProject({id:projectId,workspaceId,name:"Retry project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+    await createTestCredential(store,projectId,"cred_delete_retry",timestamp);
+    await store.createEndpoint(endpointRecord("endpoint_delete_retry",projectId,"cred_delete_retry",timestamp));
+    const task:TaskFixture={id:taskId,workspaceId,projectId,endpointId:"endpoint_delete_retry",fileLibraryId:"library_delete_retry",title:"Retry Task",prompt:"work",status:"queued",runId,executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:false,createdAt:timestamp,updatedAt:timestamp};
+    assert.equal((await createTaskWithLibrary(store,task,false)).kind,"created");
+    const cleaned=sandboxRun({workspaceId,projectId,taskId,runId,phase:"cleaned",cleanupStatus:"cleaned",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:"libraries/library_delete_retry/home"});
+    await store.sandboxRuns.put(cleaned);
+
+    assert.equal((await store.beginProjectDeletion(projectId,timestamp,owner)).kind,"ready");
+    await store.sandboxRuns.put({...cleaned,phase:"running",cleanupStatus:"active",fencingToken:2});
+    assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:01:00.000Z",owner)).kind,"sandbox_not_released");
+    assert.equal((await store.findProject(projectId))?.lifecycleStatus,"active");
+    assert.equal((await store.updateProjectName(projectId,"Writable retry","2026-07-19T00:02:00.000Z","Retry project"))?.name,"Writable retry");
+
+    await store.sandboxRuns.put({...cleaned,fencingToken:3});
+    assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:03:00.000Z",owner)).kind,"ready");
+    assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:04:00.000Z",owner)).kind,"ready");
+    assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:05:00.000Z",owner)).kind,"ready");
+    await store.sandboxRuns.put({...cleaned,phase:"running",cleanupStatus:"cleanup_requested",fencingToken:4});
+    assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:06:00.000Z",owner)).kind,"sandbox_not_released");
+    assert.equal((await store.findWorkspace(workspaceId))?.lifecycleStatus,"active");
+    assert.equal((await store.findProject(projectId))?.lifecycleStatus,"active");
+    assert.equal((await store.updateWorkspaceName(workspaceId,"Writable workspace","2026-07-19T00:07:00.000Z","Retry workspace"))?.name,"Writable workspace");
+
+    await store.sandboxRuns.put({...cleaned,fencingToken:5});
+    assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:08:00.000Z",owner)).kind,"ready");
+    assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:09:00.000Z",owner)).kind,"ready");
   });
 
   it("filters project audit events by exact resource before pagination", async () => {
@@ -1066,8 +1101,6 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       cpuLimit: "1",
       memoryLimit: "1Gi"
     },
-    expiresAt: "2026-07-04T01:00:00.000Z",
-    idleExpiresAt: "2026-07-04T00:30:00.000Z",
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: "2026-07-04T00:00:00.000Z",

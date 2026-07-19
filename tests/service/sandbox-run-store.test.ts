@@ -150,8 +150,6 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       cpuLimit: "1",
       memoryLimit: "1Gi"
     },
-    expiresAt: "2026-07-04T01:00:00.000Z",
-    idleExpiresAt: "2026-07-04T00:30:00.000Z",
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: "2026-07-04T00:00:00.000Z",

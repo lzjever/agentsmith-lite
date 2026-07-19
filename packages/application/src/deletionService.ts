@@ -6,17 +6,17 @@ import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
 import { withProjectFileLock } from "./fileService.js";
-import { TaskService } from "./taskService.js";
 
 export class DeletionService {
-  constructor(private readonly store: ProductStore, private readonly tasks: TaskService, private readonly dataRoot: string) {}
+  constructor(private readonly store: ProductStore, private readonly dataRoot: string) {}
 
   async deleteProject(userId: string, projectId: string): Promise<{ deleted: true }> {
     return withFileLibraryLifecycleLock(projectId, async () => {
       const project = await this.requireProjectOwner(userId, projectId);
-      const deleting = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
-      if (!deleting) throw await this.projectDeletionConflict(userId, project.id);
-      await this.finishProject(deleting);
+      const deletion = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
+      if(deletion.kind==="sandbox_not_released")throw sandboxReleaseRequiredError();
+      if(deletion.kind==="not_found_or_forbidden")throw await this.projectDeletionConflict(userId,project.id);
+      await this.finishProject(deletion.value);
       return { deleted: true };
     });
   }
@@ -25,12 +25,12 @@ export class DeletionService {
     const workspace = await this.store.findWorkspace(workspaceId);
     if (!workspace) throw new NotFoundError("Workspace not found");
     if ((await this.store.findWorkspaceMembership(workspaceId, userId))?.role !== "owner") throw new ForbiddenError("Workspace access denied");
-    const deleting = await this.store.beginWorkspaceDeletion(workspace.id, nowIso(), userId);
-    if (!deleting) throw await this.workspaceDeletionConflict(userId, workspace.id);
+    const deletion = await this.store.beginWorkspaceDeletion(workspace.id, nowIso(), userId);
+    if(deletion.kind==="sandbox_not_released")throw sandboxReleaseRequiredError();
+    if(deletion.kind==="not_found_or_forbidden")throw await this.workspaceDeletionConflict(userId,workspace.id);
     for (const project of await this.store.listProjectsForWorkspace(workspace.id)) {
       await withFileLibraryLifecycleLock(project.id, async () => {
-        const marked = await this.store.beginProjectDeletion(project.id, nowIso());
-        if (marked) await this.finishProject(marked);
+        await this.finishProject(project);
       });
     }
     if (!(await this.store.deleteWorkspaceAfterProjects(workspace.id))) throw new ProductError("Workspace deletion is still pending", 409);
@@ -38,11 +38,11 @@ export class DeletionService {
 
   private async finishProject(project: Project): Promise<void> {
     const root = this.projectRoot(project);
-    await this.tasks.stopTasksForProjectDeletion(project.id);
+    if(!(await this.store.deleteProjectDependenciesAndProject(project.id)))throw new ProductError("Project deletion preparation is still pending",409);
     await withProjectFileLock(root, async () => {
       await rm(root, { recursive: true, force: true, maxRetries: 2 });
     });
-    if (!(await this.store.deleteProjectDependenciesAndProject(project.id))) throw new ProductError("Project deletion is still pending",409);
+    if(!(await this.store.deleteProjectAfterDependencies(project.id)))throw new ProductError("Project deletion is still pending",409);
   }
 
   private async requireProjectOwner(userId: string, projectId: string): Promise<Project> {
@@ -73,3 +73,5 @@ export class DeletionService {
     return root;
   }
 }
+
+function sandboxReleaseRequiredError():ProductError{return new ProductError("Release every Task sandbox before deletion",409,"task_sandbox_active");}

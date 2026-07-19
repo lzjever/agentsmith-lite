@@ -2,18 +2,18 @@
 
 import { ChevronUp, CircleAlert, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
-import type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt } from "../../lib/api/client";
+import type { TaskCapabilities, TaskDetail, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt } from "../../lib/api/client";
 import { ApiError, apiClient } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { useTaskMutationKeys } from "./task-mutation-key";
 import { TaskComposer } from "./TaskComposer";
 import { type AssistantPreview, TaskInteractionList } from "./TaskInteractionList";
 import { applyTaskMessageReceipt, isNearHistoryTop, reduceTaskAssistantPreview, retainedHistoryScrollTop, taskMessageReceiptError, upsertTaskInteractions } from "./task-conversation-state";
-import { TaskConnectionNotice, TaskPreviewNotice, TaskRunStatus, type TaskRunResult } from "./TaskRunStatus";
+import { TaskConnectionNotice, TaskPreviewNotice, TaskRunStatus } from "./TaskRunStatus";
 
 type ConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
 
-export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, onRunState, onUnavailable, onArtifactPublished }: { taskId: string; taskResult?: TaskRunResult; onCapabilities: (capabilities: TaskCapabilities) => void; onRunState?: (runState: TaskInteractionSnapshot["runState"]) => void; onUnavailable?: () => void; onArtifactPublished: () => void }) {
+export function TaskConversationWorkspace({ taskId, currentTurn, sandboxState, capabilities, onCapabilities, onProjectionChange, onUnavailable, onArtifactPublished }: { taskId: string; currentTurn: TaskDetail["currentTurn"]; sandboxState: TaskDetail["sandboxState"]; capabilities: TaskCapabilities; onCapabilities?: (capabilities: TaskCapabilities) => void; onProjectionChange: () => void; onUnavailable?: () => void; onArtifactPublished: () => void }) {
   const mutationKeys = useTaskMutationKeys();
   const viewport = useRef<HTMLDivElement>(null);
   const streamCursor = useRef<string | undefined>(undefined);
@@ -36,11 +36,10 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
 
   const applySnapshot = useCallback((next: TaskInteractionSnapshot) => {
     setSnapshot(next);
-    onCapabilities(next.capabilities);
-    onRunState?.(next.runState);
+    onCapabilities?.(next.capabilities);
     streamCursor.current = next.streamCursor;
     setItems(next.items);
-  }, [onCapabilities, onRunState]);
+  }, [onCapabilities]);
 
   const load = useCallback(async () => {
     const next = await apiClient.getTaskInteractions(taskId);
@@ -70,7 +69,7 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
         setError("");
         await apiClient.streamTaskInteractions(taskId, streamCursor.current, controller.signal, (event) => {
           if (event.type === "done") done = true;
-          if (!disposed) applyStreamEvent(event, { setItems, setPreview, setSnapshot, setConnection, setError, setPreviewUnavailable, setNewActivity, onCapabilities, onRunState, onArtifactPublished, authoritativeStateVersion, streamCursor, viewport });
+          if (!disposed) applyStreamEvent(event, { setItems, setPreview, setSnapshot, setConnection, setError, setPreviewUnavailable, setNewActivity, onCapabilities, onProjectionChange, onArtifactPublished, authoritativeStateVersion, streamCursor, viewport });
         });
         if (disposed || done) return;
         reconnectCount.current += 1;
@@ -91,7 +90,7 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
     };
     void connect();
     return () => { disposed = true; controller?.abort(); if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current); };
-  }, [load, onArtifactPublished, onCapabilities, onRunState, onUnavailable, refreshGeneration, taskId]);
+  }, [load, onArtifactPublished, onCapabilities, onProjectionChange, onUnavailable, refreshGeneration, taskId]);
 
   async function loadEarlier() {
     if (!snapshot?.nextPageCursor || loadingEarlierRef.current) return;
@@ -120,6 +119,7 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
       applyReceipt(receipt, stateVersion);
       const safeError = taskMessageReceiptError(receipt);
       if (safeError) throw new Error(safeError);
+      onProjectionChange();
     } catch (reason) { mutationKeys.completeApiFailure(reason, "task-message", identity); await recoverMutation(reason); throw reason; }
   }
   async function updateQueued(messageId: string, content: string) {
@@ -164,15 +164,16 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
       const reduced = applyTaskMessageReceipt({ items: [], queuedMessages: current.queuedMessages, capabilities: current.capabilities }, receipt, stateVersion === authoritativeStateVersion.current);
       return { ...current, queuedMessages: reduced.queuedMessages, capabilities: reduced.capabilities };
     });
-    if (stateVersion === authoritativeStateVersion.current) onCapabilities(receipt.capabilities);
+    if (stateVersion === authoritativeStateVersion.current) onCapabilities?.(receipt.capabilities);
   }
   async function abort() {
     setAborting(true);
-    try { await apiClient.abortTaskTurn(taskId, mutationKeys.key("task-turn-abort", taskId)); mutationKeys.complete("task-turn-abort", taskId); }
+    try { await apiClient.abortTaskTurn(taskId, mutationKeys.key("task-turn-abort", taskId)); mutationKeys.complete("task-turn-abort", taskId); onProjectionChange(); }
     catch (reason) { mutationKeys.completeApiFailure(reason, "task-turn-abort", taskId); await recoverMutation(reason); throw reason; }
     finally { setAborting(false); }
   }
   async function stopWork(interactionId: string) {
+    if (!runtimeActionsEnabled(sandboxState)) throw new Error("Sandbox runtime actions are unavailable.");
     try {
       await apiClient.stopTaskWork(taskId, interactionId, mutationKeys.key("task-work-stop", interactionId));
       mutationKeys.complete("task-work-stop", interactionId);
@@ -183,10 +184,30 @@ export function TaskConversationWorkspace({ taskId, taskResult, onCapabilities, 
   function showNewActivity() { const element = viewport.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" }); setNewActivity(false); }
 
   if (!snapshot) return <section className="grid h-full min-h-0 flex-1 place-items-center border border-border bg-surface-low px-5">{error ? <div className="max-w-md text-center" role="alert"><CircleAlert className="mx-auto size-5 text-error" /><p className="mt-2 text-sm font-medium text-foreground">Conversation could not be loaded.</p><p className="mt-1 break-words text-sm text-secondary">{error}</p><Button className="mt-4" variant="quiet" size="sm" onClick={retry}><RefreshCw size={14} />Retry</Button></div> : <p className="text-sm text-secondary">Loading conversation...</p>}</section>;
-  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace"><TaskRunStatus runState={snapshot.runState} {...(taskResult?{taskResult}:{})} capabilities={snapshot.capabilities} aborting={aborting} onAbort={abort} /><TaskConnectionNotice connection={connection} historyStatus={snapshot.historyStatus} runtimeReachability={snapshot.runtimeReachability} error={error} onRetry={retry} />{previewUnavailable && (connection === "connected" || connection === "recovered") ? <TaskPreviewNotice message={previewUnavailable} onRetry={retry} /> : null}<div ref={viewport} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5" onScroll={onScroll}>{snapshot.hasMoreBefore ? <div className="mb-4 text-center">{historyError ? <p className="mb-2 text-sm text-error" role="alert">{historyError}</p> : null}<Button variant="quiet" size="sm" disabled={loadingEarlier} onClick={() => void loadEarlier()}>{loadingEarlier ? "Loading..." : "Load earlier messages"}</Button></div> : null}<TaskInteractionList taskId={taskId} items={items} preview={preview} onStopWork={stopWork} /></div>{newActivity ? <div className="shrink-0 border-t border-border bg-background py-2 text-center"><Button size="sm" onClick={showNewActivity}><ChevronUp size={14} />New activity</Button></div> : null}<TaskComposer capabilities={snapshot.capabilities} queuedMessages={snapshot.queuedMessages} busy={aborting} onSend={send} onUpdateQueued={updateQueued} onDeleteQueued={deleteQueued} /></section>;
+  const unavailableMessage = sandboxState.state === "released" || sandboxState.state === "failed" ? "Sandbox is unavailable" : sandboxState.state === "release_requested" ? "Sandbox is being released" : "Messaging is unavailable";
+  const effectiveCapabilities = taskInteractionCapabilities(capabilities, snapshot.capabilities, sandboxState);
+  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border bg-surface-low" aria-label="Task conversation workspace"><TaskRunStatus currentTurn={currentTurn} sandboxState={sandboxState} capabilities={effectiveCapabilities} aborting={aborting} onAbort={abort} /><TaskConnectionNotice connection={connection} historyStatus={snapshot.historyStatus} runtimeReachability={snapshot.runtimeReachability} error={error} onRetry={retry} />{previewUnavailable && (connection === "connected" || connection === "recovered") ? <TaskPreviewNotice message={previewUnavailable} onRetry={retry} /> : null}<div ref={viewport} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5" onScroll={onScroll}>{snapshot.hasMoreBefore ? <div className="mb-4 text-center">{historyError ? <p className="mb-2 text-sm text-error" role="alert">{historyError}</p> : null}<Button variant="quiet" size="sm" disabled={loadingEarlier} onClick={() => void loadEarlier()}>{loadingEarlier ? "Loading..." : "Load earlier messages"}</Button></div> : null}<TaskInteractionList taskId={taskId} items={items} preview={preview} canStopWork={runtimeActionsEnabled(sandboxState)} onStopWork={stopWork} /></div>{newActivity ? <div className="shrink-0 border-t border-border bg-background py-2 text-center"><Button size="sm" onClick={showNewActivity}><ChevronUp size={14} />New activity</Button></div> : null}<TaskComposer capabilities={effectiveCapabilities} queuedMessages={snapshot.queuedMessages} busy={aborting} unavailableMessage={unavailableMessage} onSend={send} onUpdateQueued={updateQueued} onDeleteQueued={deleteQueued} /></section>;
 }
 
-function applyStreamEvent(event: TaskInteractionStreamEvent, context: { setItems: Dispatch<SetStateAction<TaskInteractionItem[]>>; setPreview: Dispatch<SetStateAction<AssistantPreview>>; setSnapshot: Dispatch<SetStateAction<TaskInteractionSnapshot | undefined>>; setConnection: Dispatch<SetStateAction<ConnectionState>>; setError: Dispatch<SetStateAction<string>>; setPreviewUnavailable: Dispatch<SetStateAction<string>>; setNewActivity: Dispatch<SetStateAction<boolean>>; onCapabilities: (capabilities: TaskCapabilities) => void; onRunState: ((runState: TaskInteractionSnapshot["runState"]) => void) | undefined; onArtifactPublished: () => void; authoritativeStateVersion: MutableRefObject<number>; streamCursor: MutableRefObject<string | undefined>; viewport: RefObject<HTMLDivElement | null> }) {
+function runtimeActionsEnabled(sandboxState: TaskDetail["sandboxState"]): boolean {
+  return sandboxState.state === "starting" || sandboxState.state === "active";
+}
+
+function taskInteractionCapabilities(detail: TaskCapabilities, stream: TaskCapabilities, sandboxState: TaskDetail["sandboxState"]): TaskCapabilities {
+  const usable = sandboxState.state === "starting" || sandboxState.state === "active";
+  return {
+    sendMessage:usable && detail.sendMessage && stream.sendMessage,
+    editQueuedMessage:usable && detail.editQueuedMessage && stream.editQueuedMessage,
+    abortTurn:usable && detail.abortTurn && stream.abortTurn,
+    openTerminal:usable && detail.openTerminal && stream.openTerminal,
+    releaseSandbox:detail.releaseSandbox && stream.releaseSandbox,
+    editTask:detail.editTask && stream.editTask,
+    archiveTask:detail.archiveTask && stream.archiveTask,
+    deleteTask:detail.deleteTask && stream.deleteTask
+  };
+}
+
+function applyStreamEvent(event: TaskInteractionStreamEvent, context: { setItems: Dispatch<SetStateAction<TaskInteractionItem[]>>; setPreview: Dispatch<SetStateAction<AssistantPreview>>; setSnapshot: Dispatch<SetStateAction<TaskInteractionSnapshot | undefined>>; setConnection: Dispatch<SetStateAction<ConnectionState>>; setError: Dispatch<SetStateAction<string>>; setPreviewUnavailable: Dispatch<SetStateAction<string>>; setNewActivity: Dispatch<SetStateAction<boolean>>; onCapabilities: ((capabilities: TaskCapabilities) => void) | undefined; onProjectionChange: () => void; onArtifactPublished: () => void; authoritativeStateVersion: MutableRefObject<number>; streamCursor: MutableRefObject<string | undefined>; viewport: RefObject<HTMLDivElement | null> }) {
   switch (event.type) {
     case "interaction": {
       context.streamCursor.current = event.cursor;
@@ -201,11 +222,11 @@ function applyStreamEvent(event: TaskInteractionStreamEvent, context: { setItems
     }
     case "assistant_preview": context.setPreview((current) => reduceTaskAssistantPreview(current, event)); return;
     case "assistant_preview_clear": context.setPreview((current) => reduceTaskAssistantPreview(current, event)); return;
-    case "state": context.authoritativeStateVersion.current += 1; context.setSnapshot((current) => current ? { ...current, queuedMessages:event.queuedMessages, capabilities:event.capabilities } : current); context.onCapabilities(event.capabilities); return;
-    case "run_state": context.setSnapshot((current) => current ? { ...current, runState:event.runState } : current); context.onRunState?.(event.runState); return;
+    case "state": context.authoritativeStateVersion.current += 1; context.setSnapshot((current) => current ? { ...current, queuedMessages:event.queuedMessages, capabilities:event.capabilities } : current); context.onCapabilities?.(event.capabilities); context.onProjectionChange(); return;
+    case "run_state": context.setSnapshot((current) => current ? { ...current, runState:event.runState } : current); context.onProjectionChange(); return;
     case "connection": context.setSnapshot((current) => current ? { ...current, runtimeReachability:event.runtimeReachability, historyStatus:event.historyStatus, lastSyncedAt:event.lastSyncedAt } : current); context.setConnection((current) => current === "reconnecting" && event.connectionState === "connected" ? "recovered" : event.connectionState); context.setError(event.message ?? ""); return;
     case "preview_status": context.setPreviewUnavailable(event.previewStatus === "unavailable" ? event.message ?? "Live assistant preview is unavailable. Final responses and conversation updates remain available." : ""); return;
-    case "reset": context.authoritativeStateVersion.current += 1; context.streamCursor.current = event.snapshot.streamCursor; context.setSnapshot(event.snapshot); context.setItems(event.snapshot.items); context.setPreview((current) => reduceTaskAssistantPreview(current, event)); context.setPreviewUnavailable(""); context.onCapabilities(event.snapshot.capabilities); context.onRunState?.(event.snapshot.runState); return;
+    case "reset": context.authoritativeStateVersion.current += 1; context.streamCursor.current = event.snapshot.streamCursor; context.setSnapshot(event.snapshot); context.setItems(event.snapshot.items); context.setPreview((current) => reduceTaskAssistantPreview(current, event)); context.setPreviewUnavailable(""); context.onCapabilities?.(event.snapshot.capabilities); context.onProjectionChange(); return;
     case "reconnect": context.setConnection("reconnecting"); return;
     case "done": return;
     default: return assertNever(event);

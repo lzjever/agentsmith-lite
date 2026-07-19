@@ -760,6 +760,20 @@ describe("project resource pages", () => {
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
   });
 
+  it("labels sandbox release audit events", async () => {
+    const original = snapshotClient();
+    const events = [
+      { id:"audit_release_requested", projectId, actorId:null, action:"sandbox.release_requested", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", createdAt:policy.createdAt },
+      { id:"audit_released", projectId, actorId:null, action:"sandbox.released", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", createdAt:policy.updatedAt }
+    ] as ProjectAuditEvent[];
+    apiClient.audit = async () => ({ items:events, nextCursor:null });
+    try {
+      render(<AuditPage projectId={projectId} />);
+      assert.ok(await screen.findByText("Requested sandbox release"));
+      assert.ok(screen.getByText("Released sandbox"));
+    } finally { restoreClient(original); }
+  });
+
   it("keeps linkable audit filters in the URL and visibly labels the time range", async () => {
     const original = snapshotClient();
     apiClient.audit = async () => ({ items: [], nextCursor: null });

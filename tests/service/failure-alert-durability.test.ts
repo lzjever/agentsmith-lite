@@ -190,11 +190,6 @@ async function sandboxSetup(secret: string) {
     dataRoot: "/tmp/agentsmith-failure-alerts",
     port: new FailureLifecyclePort(resources),
     now: () => new Date(timestamp),
-    terminalFailureSync: { async syncTerminalFailureRun() { return { status: "synced" }; } },
-    taskLifecycle: {
-      async finalizeTaskForRunCleanup(taskId, reason) { await setup.services.tasks.finalizeTaskForRunCleanup(taskId, reason); },
-      async canCleanupTaskRuntime(taskId) { return setup.services.tasks.canCleanupTaskRuntime(taskId); }
-    },
     runtimeDirectoryCleaner: { async removeRuntimePath() {} }
   });
   return { ...setup, task, run, lifecycle };
@@ -218,8 +213,6 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     serviceKeySecretRef: { name: `asl-${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" },
     directories: { libraryHome: `/tmp/agentsmith-failure-alerts/${projectSubPath}/libraries/library-${taskId}/home`, botified: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/botified` },
     resourceLimits: { cpuRequest: "250m", memoryRequest: "512Mi", cpuLimit: "1", memoryLimit: "1Gi" },
-    expiresAt: new Date(Date.parse(timestamp)+86400000).toISOString(),
-    idleExpiresAt: new Date(Date.parse(timestamp)+86400000).toISOString(),
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: timestamp,

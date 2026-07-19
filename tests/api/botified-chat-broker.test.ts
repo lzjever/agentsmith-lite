@@ -135,12 +135,7 @@ describe("Botified Chat Completions broker", () => {
 
   it("rejects invalid and cross-task keys before provider forwarding", async () => {
     const { task: first } = await createTask("first");
-    const { task: second, cookie, csrf } = await createTask("second");
-    const cancelled = await fetch(`${baseUrl}/app/api/v1/tasks/${second.id}/cancel`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": "cancel-second" },
-      body: "{}"
-    });
+    const { task: second } = await createTask("second");
     const invalid = await fetch(`${baseUrl}/api/internal/tasks/${first.id}/runs/${first.runId}/v1/chat/completions`, {
       method: "POST",
       headers: { authorization: "Bearer not-a-task-key", "content-type": "application/json" },
@@ -152,14 +147,13 @@ describe("Botified Chat Completions broker", () => {
       body: JSON.stringify({ model: "ignored", messages: [] })
     });
 
-    assert.equal(cancelled.status, 200);
     assert.equal(invalid.status, 401);
     assert.equal(mismatched.status, 401);
     assert.equal(providerCalls.length, 0);
   });
 
-  it("rejects a wrong run, terminal task, invalid model, unsupported fields, and oversized broker bodies without calling the provider", async () => {
-    const { task, cookie, csrf } = await createTask("constraints");
+  it("rejects a wrong run, invalid model, unsupported fields, and oversized broker bodies without calling the provider", async () => {
+    const { task } = await createTask("constraints");
     const endpoint = `${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`;
     const headers = { authorization: `Bearer task-key:${task.id}:${task.runId}`, "content-type": "application/json" };
 
@@ -178,24 +172,11 @@ describe("Botified Chat Completions broker", () => {
     const oversized = await fetch(endpoint, {
       method: "POST", headers, body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "x".repeat(1_048_576) }] })
     });
-    const cancelled = await fetch(`${baseUrl}/app/api/v1/tasks/${task.id}/cancel`, {
-      method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": "cancel-constraints" }, body: "{}"
-    });
-    const terminalWrongRun = await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/not-${task.runId}/v1/chat/completions`, {
-      method: "POST", headers, body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "no" }] })
-    });
-    const terminal = await fetch(endpoint, {
-      method: "POST", headers, body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "no" }] })
-    });
-
     assert.equal(wrongRun.status, 401);
     assert.equal(malformedRoute.status, 400);
     assert.equal(wrongModel.status, 403);
     assert.equal(unsupported.status, 400);
     assert.equal(oversized.status, 413);
-    assert.equal(cancelled.status, 200);
-    assert.equal(terminalWrongRun.status, 401);
-    assert.equal(terminal.status, 409);
     assert.equal(providerCalls.length, 0);
     assert.doesNotMatch(await unsupported.text(), /sk-provider-key|sk-client-secret/);
   });
@@ -316,7 +297,11 @@ describe("Botified Chat Completions broker", () => {
       providerResponseFactory = brokerResponseFactory;
     }
     providerCalls.length = 0;
-    const task = await post(`/api/v1/projects/${project.id}/tasks`, { prompt: "hello", endpointId: endpoint.id }, cookie, csrf, `task-${name}`);
+    const task = await post(`/api/v1/projects/${project.id}/tasks`, {
+      prompt: "hello",
+      endpointId: endpoint.id,
+      fileLibrary: { mode: "create_new", name: `Task files ${name}` }
+    }, cookie, csrf, `task-${name}`);
     const activeTask = await waitForActiveTask(task.id, cookie);
     return {
       task: activeTask,
@@ -328,18 +313,18 @@ describe("Botified Chat Completions broker", () => {
 
   async function waitForActiveTask(taskId: string, cookie: string): Promise<any> {
     const deadline = Date.now() + 2_000;
-    let lastTask: { status?: unknown; startIntentStatus?: unknown; safeError?: unknown } | undefined;
+    let lastTask: { status?: unknown; safeError?: unknown } | undefined;
     while (Date.now() < deadline) {
       const response = await fetch(`${baseUrl}/app/api/v1/tasks/${taskId}`, { headers: { cookie } });
       assert.equal(response.status, 200);
       const task = await response.json();
       lastTask = task;
-      if (task.status === "running" && task.startIntentStatus === "dispatched") {
+      if (task.status === "running") {
         return task;
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify({ status: lastTask?.status, startIntentStatus: lastTask?.startIntentStatus, safeError: lastTask?.safeError })}`);
+    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify({ status: lastTask?.status, safeError: lastTask?.safeError })}`);
   }
 
   async function post(pathname: string, body: unknown, cookie: string, csrf: string, idempotencyKey: string): Promise<any> {
@@ -357,7 +342,11 @@ class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly receipts = new Map<string, BotifiedDeliveryReceipt>();
 
   async health() { return { status: "ok" as const }; }
-  async readState() { return { snapshot: {}, state: "running" }; }
+  async readState(_baseUrl: string, serviceKey: string) {
+    const sessionId = serviceKey.split(":")[1];
+    if (!sessionId) throw new Error("Test service key has no Task session");
+    return { sessionId, snapshot: { session_id: sessionId }, state: "running" };
+  }
   async postMessage(_baseUrl: string, _serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
     return { accepted: true, messageId: message, cursor: "cursor" };
   }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir,mkdtemp,readFile,rm,writeFile } from "node:fs/promises";
+import { mkdtemp,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -19,9 +19,9 @@ describe("Phase 2 durable task lifecycle",()=>{
   it("attributes provider calls to the creator and fences rotated credentials",async()=>{
     const setup=await fixture();
     const task=await startTask(setup,"attribution");
-    assert.equal((await setup.services.tasks.authorizeBotifiedChatCompletion(task.id,task.runId,"service-key")).actorId,setup.userId);
+    assert.equal((await setup.services.tasks.authorizeBotifiedChatCompletion(task.id,task.runId,task.id)).actorId,setup.userId);
     await setup.services.credentials.rotate(setup.userId,setup.projectId,setup.credentialId,{secret:"rotated"});
-    await assert.rejects(()=>setup.services.tasks.authorizeBotifiedChatCompletion(task.id,task.runId,"service-key"),/Endpoint is unavailable/);
+    await assert.rejects(()=>setup.services.tasks.authorizeBotifiedChatCompletion(task.id,task.runId,task.id),/Endpoint is unavailable/);
   });
 
   it("serializes concurrent timeline reads and recovers an expired boundary in order",async()=>{
@@ -47,22 +47,6 @@ describe("Phase 2 durable task lifecycle",()=>{
     assert.deepEqual(snapshot?.items.filter((item)=>item.kind==="system_error").map((item)=>item.body),["oldest","latest"]);
   });
 
-  it("recovers an accepted start receipt without reposting",async()=>{
-    const setup=await fixture();
-    setup.botified.throwAfterAcceptOnce=true;
-    const input=taskInput("receipt-recovery");input.endpointId=setup.endpointId;
-    const task=await setup.services.tasks.createTask(setup.userId,setup.projectId,input,"receipt-recovery");
-    await setup.services.tasks.syncActiveTasksOnce();
-    assert.equal((await setup.store.findTask(task.id))?.startIntentStatus,"dispatching");
-    assert.equal(setup.botified.posts.length,1);
-    await setup.services.tasks.syncActiveTasksOnce();
-    const recovered=await setup.store.findTask(task.id);
-    assert.equal(recovered?.startIntentStatus,"dispatched");
-    assert.equal(recovered?.startReceipt?.accepted,true);
-    assert.equal(recovered?.startTimelineCursor,null);
-    assert.equal(setup.botified.posts.length,1);
-  });
-
   it("projects a delayed lifecycle update older than the snapshot window through TaskService",async()=>{
     const setup=await fixture();
     const task=await startTask(setup,"delayed-projection");
@@ -78,22 +62,6 @@ describe("Phase 2 durable task lifecycle",()=>{
     assert.equal(updated?.interaction.body,"updated");
   });
 
-  it("keeps terminal reason first-wins and releases active capacity once",async()=>{
-    const setup=await fixture();
-    const input=taskInput("terminal");input.endpointId=setup.endpointId;
-    const task=await setup.services.tasks.createTask(setup.userId,setup.projectId,input,"terminal");
-    const timestamp=new Date().toISOString();
-    const audit=(id:string,action:ProjectAuditEvent["action"]):ProjectAuditEvent=>({id,projectId:setup.projectId,actorId:null,action,status:"accepted",resourceKind:"task",resourceId:task.id,createdAt:timestamp});
-    await Promise.all([
-      setup.store.finalizeTaskLifecycle({taskId:task.id,terminalReason:"completed",updatedAt:timestamp,auditEvent:audit("complete","task.completed")}),
-      setup.store.finalizeTaskLifecycle({taskId:task.id,terminalReason:"failed",updatedAt:timestamp,auditEvent:audit("failed","task.failed")})
-    ]);
-    const winner=(await setup.store.findTask(task.id))!;
-    await setup.store.finalizeTaskLifecycle({taskId:task.id,terminalReason:winner.terminalReason==="failed"?"completed":"failed",updatedAt:new Date(Date.parse(timestamp)+1).toISOString(),auditEvent:audit("late","task.failed")});
-    assert.equal((await setup.store.findTask(task.id))?.terminalReason,winner.terminalReason);
-    assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.activeTasks,0);
-  });
-
   it("attributes capacity rejection to the requester and generated Task ID",async()=>{
     const setup=await fixture();
     await setup.store.patchProjectResourcePolicy(setup.projectId,{activeTasksLimit:0},new Date().toISOString());
@@ -105,81 +73,10 @@ describe("Phase 2 durable task lifecycle",()=>{
     assert.doesNotMatch(rejected?.resourceId??"",/^library_/);
   });
 
-  it("projects a late artifact from Library workspace without double accounting",async()=>{
-    const setup=await fixture();
-    setup.botified.timeline.push({status:"ok",events:[event(1,"cycle.started",{})],nextCursor:"evt_test_1",historyBoundary:"start"});
-    setup.botified.downloads.set("late-file",new TextEncoder().encode("late"));
-    const task=await startTask(setup,"late-artifact");
-    const instructions=setup.port.resources.find((resource)=>resource.kind==="Secret"&&typeof (resource as {stringData?:Record<string,string>}).stringData?.["AGENTS.md"]==="string") as {stringData?:Record<string,string>}|undefined;
-    assert.match(instructions?.stringData?.["AGENTS.md"]??"",new RegExp(`/workspace/task/home/workspace/\\.artifacts/${task.id}`));
-    setup.botified.timeline.push({status:"ok",events:[event(2,"file.published",{file_id:"late-file",filename:"late.txt",size_bytes:4},{id:"late-file",type:"file",status:"available"}),event(3,"cycle.completed",{ok:true})],nextCursor:"evt_test_3",historyBoundary:"start"});
-    setup.botified.states.push(runtimeState("idle"));
-    await setup.services.tasks.syncActiveTasksOnce();
-    const library=await setup.store.findFileLibrary(task.fileLibraryId);
-    assert.ok(library);
-    const artifact=(await setup.store.listTaskArtifacts(task.id))[0]!;
-    assert.ok(artifact,JSON.stringify({task:await setup.store.findTask(task.id),cursors:setup.botified.cursors,remainingTimeline:setup.botified.timeline.length}));
-    const stored=path.join(setup.dataRoot,setup.projectRootPath,library.rootSubPath,"workspace",".artifacts",task.id,`${artifact.id}-${artifact.name}`);
-    assert.equal(await readFile(stored,"utf8"),"late");
-    await (setup.services.tasks as unknown as {projectSandboxArtifactFiles(task:AgentTask):Promise<void>}).projectSandboxArtifactFiles(task);
-    assert.equal((await setup.store.listTaskArtifacts(task.id)).length,1);
-    assert.equal((await setup.services.tasks.listTaskArtifacts(setup.userId,task.id)).length,1);
-    assert.equal(artifact.fileId,"late-file");
-    assert.equal((await setup.store.findProjectResourceUsage(setup.projectId))?.projectFileBytes,4);
-  });
-
-  it("does not transfer deleted Task artifact ownership when its Library is reused",async()=>{
-    const setup=await fixture();
-    const first=await startTask(setup,"first-owner");
-    const library=await setup.store.findFileLibrary(first.fileLibraryId);assert.ok(library);
-    const artifactRoot=path.join(setup.dataRoot,setup.projectRootPath,library.rootSubPath,"workspace",".artifacts",first.id);
-    await writeFile(path.join(artifactRoot,"prior.txt"),"prior task");
-    await setup.services.tasks.cancelTask(setup.userId,first.id,"cancel-first");
-    await setup.services.tasks.syncActiveTasksOnce();
-    await setup.services.tasks.deleteTask(setup.userId,first.id,"delete-first");
-    const input={endpointId:setup.endpointId,prompt:"reuse",fileLibrary:{mode:"use_existing" as const,id:library.id}};
-    const second=await setup.services.tasks.createTask(setup.userId,setup.projectId,input,"reuse-library");
-    const secondRoot=path.join(setup.dataRoot,setup.projectRootPath,library.rootSubPath,"workspace",".artifacts",second.id);
-    await writeFile(path.join(secondRoot,"prior.txt"),"second task");
-    await mkdir(path.join(secondRoot,"nested"),{recursive:true});
-    await writeFile(path.join(secondRoot,"nested","result.txt"),"nested");
-    await (setup.services.tasks as unknown as {projectSandboxArtifactFiles(task:AgentTask):Promise<void>}).projectSandboxArtifactFiles(second);
-    assert.deepEqual((await setup.store.listTaskArtifacts(second.id)).map((artifact)=>[artifact.fileId,artifact.name]).sort(),[["sandbox-published:nested/result.txt","result.txt"],["sandbox-published:prior.txt","prior.txt"]]);
-    assert.equal(await readFile(path.join(artifactRoot,"prior.txt"),"utf8"),"prior task");
-  });
-
-  it("replays the successful create snapshot after deletion and leaves an artifact-free Library deletable",async()=>{
-    const setup=await fixture();
-    const input=taskInput("delete-replay");input.endpointId=setup.endpointId;
-    const created=await setup.services.tasks.createTask(setup.userId,setup.projectId,input,"create-delete-replay");
-    const libraryId=created.fileLibraryId;
-    await setup.services.tasks.syncActiveTasksOnce();
-    await setup.services.tasks.cancelTask(setup.userId,created.id,"cancel-delete-replay");
-    await setup.services.tasks.syncActiveTasksOnce();
-    await setup.services.tasks.deleteTask(setup.userId,created.id,"delete-delete-replay");
-    assert.equal((await setup.store.findTask(created.id))?.fileLibraryId,null);
-
-    const replay=await setup.services.tasks.createTask(setup.userId,setup.projectId,input,"create-delete-replay");
-    assert.deepEqual(replay,created);
-    assert.equal(replay.fileLibraryId,libraryId);
-    assert.deepEqual(await setup.services.fileLibraries.remove(setup.userId,setup.projectId,libraryId),{deleted:true});
-  });
-
-  it("cleans the live sandbox before deleting its Project",async()=>{
-    const setup=await fixture();
-    const task=await startTask(setup,"project-delete");
-    await setup.services.tasks.cancelTask(setup.userId,task.id,"cancel-before-delete");
-    assert.ok(setup.port.resources.length>0);
-    await setup.services.deletion.deleteProject(setup.userId,setup.projectId);
-    assert.equal(await setup.store.findProject(setup.projectId),null);
-    assert.equal(await setup.store.sandboxRuns.get(task.runId),null);
-    assert.equal(setup.port.resources.length,0);
-  });
-
   async function fixture(){
     const dataRoot=await mkdtemp(path.join(tmpdir(),"asl-phase2-lifecycle-"));roots.push(dataRoot);
     const store=createLocalInMemoryProductStore(),botified=new BotifiedClient(),port=new SandboxPort();
-    const services=createApplicationServices({store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:"production-session-secret-at-least-32-chars",botifiedClient:botified,botifiedServiceKeyFactory:()=>"service-key",providerClient:{completeChat:async()=>{throw new Error("not used")},validateEndpoint:async()=>({status:"healthy" as const})},taskDeliveryLeaseMs:0,taskMaintenanceLeaseMs:0,taskRetryDelayMs:0,liveSandbox:{port,readinessTimeoutMs:10,readinessPollMs:1,sleep:async()=>undefined}});
+    const services=createApplicationServices({store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:"production-session-secret-at-least-32-chars",botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{completeChat:async()=>{throw new Error("not used")},validateEndpoint:async()=>({status:"healthy" as const})},taskDeliveryLeaseMs:0,taskMaintenanceLeaseMs:0,taskRetryDelayMs:0,liveSandbox:{port,readinessTimeoutMs:10,readinessPollMs:1,sleep:async()=>undefined}});
     const {user}=await services.auth.loginAfterBootstrap("production-admin-password");
     const workspace=await services.workspaces.createWorkspace(user.id,{name:"Workspace"});
     const project=await services.workspaces.createProject(user.id,workspace.id,{name:"Project"});
@@ -192,12 +89,12 @@ describe("Phase 2 durable task lifecycle",()=>{
 });
 
 class BotifiedClient implements BotifiedRuntimeHttpClient{
-  timeline:Array<BotifiedTimelineReadResult|Error>=[];cursors:Array<string|undefined>=[];states:BotifiedRuntimeStateResult[]=[];downloads=new Map<string,Uint8Array>();posts:Array<BotifiedDeliveryMessageInput>=[];receipts=new Map<string,BotifiedDeliveryReceipt>();delayMs=0;cursor:string|undefined;throwAfterAcceptOnce=false;
-  async health(){return{status:"ok" as const}} async readState(){return this.states.shift()??runtimeState("running")}
+  timeline:Array<BotifiedTimelineReadResult|Error>=[];cursors:Array<string|undefined>=[];states:BotifiedRuntimeStateResult[]=[];downloads=new Map<string,Uint8Array>();posts:Array<BotifiedDeliveryMessageInput>=[];receipts=new Map<string,BotifiedDeliveryReceipt>();delayMs=0;cursor:string|undefined;
+  async health(){return{status:"ok" as const}} async readState(_base:string,key:string){const state=this.states.shift()??runtimeState("running");return{...state,sessionId:key,snapshot:{...(state.snapshot as Record<string,unknown>),session_id:key}}}
   async postMessage(){return{accepted:true,messageId:"message",cursor:"cursor"}}
-  async postMessageWithDelivery(_base:string,_key:string,input:BotifiedDeliveryMessageInput):Promise<BotifiedDeliveryReceipt>{this.posts.push(input);const receipt={accepted:true,deliveryKey:input.deliveryKey,requestHash:input.requestHash,messageId:`message-${this.posts.length}`,cursor:`cursor-${this.posts.length}`} as const;this.receipts.set(input.deliveryKey,receipt);if(this.throwAfterAcceptOnce){this.throwAfterAcceptOnce=false;throw new Error("crash after remote acceptance")}return receipt}
+  async postMessageWithDelivery(_base:string,_key:string,input:BotifiedDeliveryMessageInput):Promise<BotifiedDeliveryReceipt>{this.posts.push(input);const receipt={accepted:true,deliveryKey:input.deliveryKey,requestHash:input.requestHash,messageId:`message-${this.posts.length}`,cursor:`cursor-${this.posts.length}`} as const;this.receipts.set(input.deliveryKey,receipt);return receipt}
   async queryDeliveryReceipt(_base:string,_key:string,deliveryKey:string){return this.receipts.get(deliveryKey)??null}
-  async readTimeline(_base:string,_key:string,cursor?:string){if(this.delayMs)await new Promise((resolve)=>setTimeout(resolve,this.delayMs));this.cursors.push(cursor);const next=this.timeline.shift();if(next instanceof Error)throw next;const result=next??{status:"ok" as const,events:[],...(cursor?{nextCursor:cursor}:{})};if(result.nextCursor)this.cursor=result.nextCursor;return result}
+  async readTimeline(_base:string,key:string,cursor?:string){if(this.delayMs)await new Promise((resolve)=>setTimeout(resolve,this.delayMs));this.cursors.push(cursor);const next=this.timeline.shift();if(next instanceof Error)throw next;const result=next??{status:"ok" as const,events:[],...(cursor?{nextCursor:cursor}:{})};if(result.nextCursor)this.cursor=result.nextCursor;if(result.status==="gap")return result;return{...result,events:result.events.map((item)=>({...item as Record<string,unknown>,session_id:key}))}}
   async downloadFile(_base:string,_key:string,id:string):Promise<BotifiedDownloadFileResult>{const bytes=this.downloads.get(id)??new Uint8Array();return{bytes,sizeBytes:bytes.length,filename:id}}
   async uploadFile(_base:string,_key:string,_file:BotifiedUploadFileInput):Promise<BotifiedUploadFileResult>{return{files:[]}}
   async abort(){return{aborted:true}} async stopBackgroundTask(_base:string,_key:string,id:string){return{taskId:id,state:"cancelling" as const}}

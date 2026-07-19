@@ -65,4 +65,43 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migration.sql,/\btask_follow_ups\b/i);
     assert.doesNotMatch(migration.sql,/\bagent_task_events\b/i);
   });
+
+  it("transitions Phase 2 Tasks directly to reusable sessions in migration 062",async()=>{
+    const migrations=await readPostgresMigrations();
+    const phase2=migrations.findIndex((item)=>item.id==="061_task_file_library_binding");
+    const phase3=migrations.findIndex((item)=>item.id==="062_reusable_task_sessions");
+    assert.equal(phase3,phase2+1);
+    const migration=migrations[phase3];
+    assert.ok(migration);
+    assert.match(migration.sql,/insert into task_messages/i);
+    assert.match(migration.sql,/select\s+task\.id,\s+task\.id,/i);
+    assert.match(migration.sql,/delivery_message_/i);
+    assert.match(migration.sql,/terminal_reason = null/i);
+    assert.match(migration.sql,/finalization_intent_status = null/i);
+    assert.match(migration.sql,/delete from task_idempotency_records where operation = 'cancel'/i);
+    assert.doesNotMatch(migration.sql,/archived_at\s*=/i);
+    assert.match(migration.sql,/collection = 'sandbox_run_state'/i);
+    assert.match(migration.sql,/coalesce\(run\.document->>'cleanupStatus', ''\) <> 'cleaned'/i);
+    assert.match(migration.sql,/coalesce\(run\.document->>'phase', ''\) <> 'cleaned'/i);
+    assert.doesNotMatch(migration.sql,/cleanupStatus' = 'active'/i);
+    assert.doesNotMatch(migration.sql,/delete from (agent_tasks|task_messages|task_interaction_changes|agent_task_artifacts)/i);
+  });
+
+  it("makes explicit release the sole Phase 4 sandbox cleanup contract in migration 063",async()=>{
+    const migrations=await readPostgresMigrations();
+    const phase3=migrations.findIndex((item)=>item.id==="062_reusable_task_sessions");
+    const phase4=migrations.findIndex((item)=>item.id==="063_explicit_task_sandbox_release");
+    assert.equal(phase4,phase3+1);
+    const migration=migrations[phase4];assert.ok(migration);
+    assert.match(migration.sql,/document - 'expiresAt' - 'idleExpiresAt'/i);
+    assert.match(migration.sql,/sandbox\.release_requested/);
+    assert.match(migration.sql,/sandbox\.released/);
+    assert.match(migration.sql,/run\.document->>'taskId' = task\.id/i);
+    assert.match(migration.sql,/run\.document->>'runId' = task\.run_id/i);
+    assert.match(migration.sql,/run\.document->>'projectId' = task\.project_id/i);
+    assert.match(migration.sql,/run\.document->>'workspaceId' = task\.workspace_id/i);
+    assert.match(migration.sql,/update projects project[\s\S]*lifecycle_status = 'active'/i);
+    assert.match(migration.sql,/update workspaces workspace[\s\S]*lifecycle_status = 'active'/i);
+    assert.doesNotMatch(migration.sql,/interval|idle_ttl|max_lifetime/i);
+  });
 });

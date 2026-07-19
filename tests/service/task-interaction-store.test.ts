@@ -108,7 +108,7 @@ describe("task interaction store", () => {
     assert.equal(oldest?.changeSeq,1);
   });
 
-  it("persists terminal lifecycle, interaction, artifact metadata, and source cursor together",async()=>{
+  it("persists active turn lifecycle, interaction, artifact metadata, and source cursor together",async()=>{
     const store = createLocalInMemoryProductStore();
     await store.createProject(project());
     await createTask(store);
@@ -116,20 +116,20 @@ describe("task interaction store", () => {
 
     await store.persistTaskInteractionMutation({
       taskId:"task_interactions",
-      changes:[change("product","terminal-result",1,interaction("result",1,3,"assistant_message"))],
-      artifactProjections:[{projectId:"project",artifact:{id:"terminal-artifact",taskId:"task_interactions",fileId:"botified-file",name:"result.txt",bytes:1,createdAt:timestamp(3)},auditEvent:{id:"terminal-artifact-audit",projectId:"project",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"terminal-artifact",createdAt:timestamp(3)},updatedAt:timestamp(3)}],
-      lifecycle:{kind:"terminal",terminalReason:"completed",updatedAt:timestamp(3),auditEvent:{id:"terminal-audit",projectId:"project",actorId:null,action:"task.completed",status:"accepted",resourceKind:"task",resourceId:"task_interactions",createdAt:timestamp(3)}},
-      sourceSync:{expectedSourceCursor:null,sourceCursor:"terminal-cursor",historyStatus:"complete",lastSyncedAt:timestamp(3)}
+      changes:[change("product","turn-result",1,interaction("result",1,3,"assistant_message"))],
+      artifactProjections:[{projectId:"project",artifact:{id:"turn-artifact",taskId:"task_interactions",fileId:"botified-file",name:"result.txt",bytes:1,createdAt:timestamp(3)},auditEvent:{id:"turn-artifact-audit",projectId:"project",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"turn-artifact",createdAt:timestamp(3)},updatedAt:timestamp(3)}],
+      lifecycle:{kind:"active",expectedStatus:"running",status:"queued",updatedAt:timestamp(3)},
+      sourceSync:{expectedSourceCursor:null,sourceCursor:"turn-cursor",historyStatus:"complete",lastSyncedAt:timestamp(3)}
     });
-    assert.equal((await store.findTask("task_interactions"))?.terminalReason,"completed");
+    assert.equal((await store.findTask("task_interactions"))?.status,"queued");
     assert.equal((await store.listTaskArtifacts("task_interactions"))[0]?.fileId,"botified-file");
-    assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"terminal-cursor");
-    assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"failed");
+    assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"turn-cursor");
+    assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"pending");
   });
 
   it("defines authoritative state events without a durable interaction cursor", () => {
     const events: TaskInteractionStreamEvent[] = [
-      { type:"state", queuedMessages:[], capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,cancelTask:true,openTerminal:true,editTask:true,archiveTask:false,deleteTask:false} },
+      { type:"state", queuedMessages:[], capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false} },
       { type:"run_state", runState:"running" },
       { type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:timestamp(3), message:null }
     ];

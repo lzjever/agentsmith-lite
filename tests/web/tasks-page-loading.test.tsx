@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type Task } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectCapabilities, type Task, type TaskListItem } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -46,12 +46,13 @@ describe("tasks page loading", () => {
     try {
       render(<TasksPageContent workspaceId="workspace_1" projectId="project_1" navigate={() => undefined} />);
       await waitFor(() => assert.equal(calls.length, 1));
-      assert.deepEqual(calls[0], { statuses: ["failed"], archived: "include", sort: "title", direction: "asc", search: "release", limit: 25 });
+      assert.deepEqual(calls[0], { archived: "include", sort: "title", direction: "asc", search: "release", limit: 25 });
+      assert.equal(window.location.search, "?search=release&archived=include&sort=title&direction=asc");
 
       window.history.replaceState(null, "", "/workspaces/workspace_1/projects/project_1/tasks?status=running");
       await act(async () => window.dispatchEvent(new window.PopStateEvent("popstate")));
-      await waitFor(() => assert.equal(calls.at(-1)?.statuses?.[0], "running"));
-      assert.deepEqual(calls.at(-1), { statuses: ["running"], archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 });
+      await waitFor(() => assert.ok(calls.length >= 2));
+      assert.deepEqual(calls.at(-1), { archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 });
     } finally {
       Object.assign(apiClient, original);
     }
@@ -126,8 +127,8 @@ describe("tasks page loading", () => {
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
     apiClient.tasks = async (projectId, query) => {
       calls.push({ projectId, ...(query.cursor ? { cursor: query.cursor } : {}) });
-      if (projectId === "project_2") return { items: [secondProjectTask], total: 1, nextCursor: null };
-      return { items: [task], total: 2, nextCursor: query.cursor ? null : "project_1_cursor" };
+      if (projectId === "project_2") return { items: [listed(secondProjectTask)], total: 1, nextCursor: null };
+      return { items: [listed(task)], total: 2, nextCursor: query.cursor ? null : "project_1_cursor" };
     };
     apiClient.endpoints = async () => [];
     apiClient.fileLibraries = async () => [];
@@ -243,7 +244,7 @@ describe("tasks page loading", () => {
     const eligible: Endpoint = { id: "endpoint_1", projectId: "project_1", name: "Task endpoint", protocol: "openai_chat_completions", baseUrl: "https://example.test/v1", model: "model", credentialId: "credential_1", capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: task.createdAt, updatedAt: task.updatedAt };
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     let attempts = 0;
-    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.tasks = async () => ({ items: [listed(task)], total: 1, nextCursor: null });
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
     apiClient.fileLibraries = async () => [];
@@ -268,7 +269,7 @@ describe("tasks page loading", () => {
     const manager: ProjectCapabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
     const readOnly: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canCancelTasks: false, canSendChat: false };
     let capabilityReads = 0;
-    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.tasks = async () => ({ items: [listed(task)], total: 1, nextCursor: null });
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? manager : readOnly;
     apiClient.fileLibraries = async () => [];
@@ -296,7 +297,7 @@ describe("tasks page loading", () => {
     let removed = false;
     apiClient.tasks = async () => {
       if (removed) throw new ApiError(403, "Project not found");
-      return { items: [task], total: 1, nextCursor: null };
+      return { items: [listed(task)], total: 1, nextCursor: null };
     };
     apiClient.endpoints = async () => [eligible];
     apiClient.projectCapabilities = async () => manager;
@@ -323,7 +324,7 @@ describe("tasks page loading", () => {
     let endpointReads = 0; let capabilityReads = 0;
     let resolveOldEndpoints!: (value: Endpoint[]) => void;
     let resolveOldCapabilities!: (value: ProjectCapabilities) => void;
-    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.tasks = async () => ({ items: [listed(task)], total: 1, nextCursor: null });
     apiClient.fileLibraries = async () => [];
     apiClient.endpoints = async () => ++endpointReads === 1 ? new Promise((resolve) => { resolveOldEndpoints = resolve; }) : [];
     apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? new Promise((resolve) => { resolveOldCapabilities = resolve; }) : readOnly;
@@ -346,7 +347,7 @@ describe("tasks page loading", () => {
 
   it("keeps the task list readable when create-form dependencies fail", async () => {
     const original = { tasks: apiClient.tasks, endpoints: apiClient.endpoints, projectCapabilities: apiClient.projectCapabilities, fileLibraries: apiClient.fileLibraries };
-    apiClient.tasks = async () => ({ items: [task], total: 1, nextCursor: null });
+    apiClient.tasks = async () => ({ items: [listed(task)], total: 1, nextCursor: null });
     apiClient.fileLibraries = async () => [];
     apiClient.endpoints = async () => { throw new Error("Endpoints unavailable"); };
     apiClient.projectCapabilities = async () => { throw new Error("Permissions unavailable"); };
@@ -376,6 +377,10 @@ const task: Task = {
   createdAt: "2026-07-14T00:00:00.000Z",
   updatedAt: "2026-07-14T00:01:00.000Z"
 };
+
+function listed(value: Task): TaskListItem {
+  return { task:value, lifecycle:{ state:"active" }, currentTurn:{ state:"ready" }, sandboxState:{ state:"active", runId:value.runId } };
+}
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });

@@ -4,7 +4,7 @@ import { Plus, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery, type TaskStatus } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
@@ -12,13 +12,12 @@ import { Button } from "../ui/button";
 import { toast } from "../ui/toast";
 import { TaskCreateDialog, type TaskCreateValue } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
-import { taskCompatibleEndpoints, taskEndpointGuidance, taskNeedsRefresh } from "./task-ui";
+import { taskCompatibleEndpoints, taskDetailNeedsRefresh, taskEndpointGuidance } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
 const initialQuery: TaskListQuery = { archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 };
-const taskStatuses: TaskStatus[] = ["queued", "starting", "running", "stopping", "completed", "failed", "expired", "cleaned", "cancelled"];
-const taskSorts = new Set(["updated_at:desc", "created_at:asc", "title:asc", "status:asc"]);
+const taskSorts = new Set(["updated_at:desc", "created_at:asc", "title:asc"]);
 type DependencyState = "loading" | "ready" | "error";
 
 export function TasksPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
@@ -150,13 +149,14 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   useEffect(() => { if (queryReady) void load(); }, [load, queryReady]);
   useEffect(() => { loadCreateDependencies(); }, [loadCreateDependencies]);
   useEffect(() => {
-    if (!page.items.some(taskNeedsRefresh)) return;
+    if (!page.items.some(taskDetailNeedsRefresh)) return;
     const timer = window.setInterval(() => void load(true), 5_000);
     return () => window.clearInterval(timer);
   }, [load, page.items]);
 
   function changeQuery(next: TaskListQuery) {
-    const normalized = { ...next, cursor: undefined, limit: next.limit ?? 25 };
+    const { cursor: _cursor, ...withoutCursor } = next;
+    const normalized = { ...withoutCursor, limit: next.limit ?? 25 };
     writeTaskQuery(normalized, "push");
     setQuery(normalized);
     setCursors([undefined]);
@@ -252,7 +252,6 @@ function isTaskLibraryDrift(error: unknown): boolean {
 
 function taskQueryFromLocation(): TaskListQuery {
   const params = new URLSearchParams(window.location.search);
-  const status = params.get("status");
   const archived = params.get("archived");
   const sort = params.get("sort");
   const direction = params.get("direction");
@@ -261,7 +260,6 @@ function taskQueryFromLocation(): TaskListQuery {
   const validSortPair = taskSorts.has(sortPair) ? sortPair : "updated_at:desc";
   const [validSort, validDirection] = validSortPair.split(":") as [NonNullable<TaskListQuery["sort"]>, NonNullable<TaskListQuery["direction"]>];
   return {
-    ...(status && taskStatuses.includes(status as TaskStatus) ? { statuses: [status as TaskStatus] } : {}),
     archived: archived === "include" || archived === "only" ? archived : "exclude",
     sort: validSort,
     direction: validDirection,
@@ -278,7 +276,6 @@ function writeTaskQuery(query: TaskListQuery, navigation: "push" | "replace") {
   const params = new URLSearchParams(window.location.search);
   for (const key of ["search", "status", "archived", "sort", "direction"]) params.delete(key);
   if (query.search) params.set("search", query.search);
-  if (query.statuses?.[0]) params.set("status", query.statuses[0]);
   if (query.archived && query.archived !== "exclude") params.set("archived", query.archived);
   if (query.sort !== "updated_at" || query.direction !== "desc") {
     params.set("sort", query.sort ?? "updated_at");

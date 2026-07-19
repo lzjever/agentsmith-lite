@@ -1,9 +1,9 @@
 "use client";
 
-import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
-export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
+export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
 
@@ -79,10 +79,9 @@ export interface EndpointInput {
   name: string; baseUrl: string; model: string; credentialId: string; capabilities: EndpointCapability[]; requestTimeoutSecs: number;
 }
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: string; lastRotatedAt: string | null; updatedAt: string; }
-export type TaskStatus = "queued" | "starting" | "running" | "stopping" | "completed" | "failed" | "expired" | "cleaned" | "cancelled";
 export type TaskExecutionMode = "dry-run" | "live";
 export type Task = AgentTask;
-export interface TaskDetail { task: Task; capabilities: TaskCapabilities; }
+export type TaskDetail = TaskDetailProjection;
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
 export type ChatRole = "system" | "user" | "assistant";
@@ -93,10 +92,9 @@ export interface ChatResponse {
   usage?: { requests?: number; tokens?: number; cost?: number; };
 }
 export type ProjectChatThread = ApiProjectChatThread;
-export type TaskListSort = "created_at" | "updated_at" | "title" | "status";
-export type TaskListArchivedFilter = "exclude" | "include" | "only";
-export interface TaskListQuery { search?: string | undefined; statuses?: TaskStatus[] | undefined; archived?: TaskListArchivedFilter | undefined; sort?: TaskListSort | undefined; direction?: "asc" | "desc" | undefined; cursor?: string | undefined; limit?: number | undefined; }
-export interface TaskListPage { items: Task[]; nextCursor: string | null; total: number; }
+export type TaskListQuery = ApiTaskListQuery;
+export type TaskListPage = ApiTaskListPage;
+export type TaskListItem = TaskListPage["items"][number];
 export interface ProjectChatMessage extends ChatMessage { id: string; threadId: string; sequence:number;version:number;deliveryStatus:"pending"|"response_pending"|"completed"|"failed"|"stopped";createdAt: string;updatedAt:string; }
 export interface ProjectChatSendResponse { message: ProjectChatMessage; endpointSnapshot: Pick<Endpoint, "id" | "baseUrl" | "model" | "protocol">; }
 export type ContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
@@ -321,7 +319,6 @@ export const apiClient = {
   tasks: (projectId: string, query: TaskListQuery = {}) => {
     const params = new URLSearchParams();
     if (query.search) params.set("search", query.search);
-    if (query.statuses?.length) params.set("status", query.statuses.join(","));
     if (query.archived) params.set("archived", query.archived);
     if (query.sort) params.set("sort", query.sort);
     if (query.direction) params.set("direction", query.direction);
@@ -374,12 +371,12 @@ export const apiClient = {
   updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
+  releaseTaskSandbox: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskSandboxReleaseReceipt>(`/tasks/${encodeURIComponent(taskId)}/sandbox/release`, "POST", idempotencyKey, {}),
   stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
   editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
   archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
-  cancelTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/cancel`, "POST", idempotencyKey, {}),
   artifactDownloadUrl: (taskId: string, artifactId: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
   async downloadTaskArtifact(taskId: string, artifactId: string, signal?: AbortSignal): Promise<Blob> {
     const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`, { credentials: "same-origin", ...(signal ? { signal } : {}) }));
@@ -455,8 +452,8 @@ function isTaskInteractionState(value: unknown): value is Pick<TaskInteractionSn
 function isTaskCapabilities(value: unknown): value is TaskCapabilities {
   return isRecord(value)
     && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
-    && typeof value.abortTurn === "boolean" && typeof value.cancelTask === "boolean"
-    && typeof value.openTerminal === "boolean" && typeof value.editTask === "boolean"
+    && typeof value.abortTurn === "boolean"
+    && typeof value.openTerminal === "boolean" && typeof value.releaseSandbox === "boolean" && typeof value.editTask === "boolean"
     && typeof value.archiveTask === "boolean" && typeof value.deleteTask === "boolean";
 }
 

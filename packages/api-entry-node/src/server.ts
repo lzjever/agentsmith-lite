@@ -46,8 +46,6 @@ interface CommonApiServerOptions {
   liveSandbox?: TaskLiveSandboxConfig;
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
-  liveSandboxMaxLifetimeMs?: number;
-  liveSandboxIdleTimeoutMs?: number;
   taskDeliveryLeaseMs?: number;
   taskMaintenanceLeaseMs?: number;
   taskRetryDelayMs?: number;
@@ -124,8 +122,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     providerClient,
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
-    ...(options.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: options.liveSandboxMaxLifetimeMs } : {}),
-    ...(options.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: options.liveSandboxIdleTimeoutMs } : {}),
     ...(options.taskDeliveryLeaseMs !== undefined ? { taskDeliveryLeaseMs: options.taskDeliveryLeaseMs } : {}),
     ...(options.taskMaintenanceLeaseMs !== undefined ? { taskMaintenanceLeaseMs: options.taskMaintenanceLeaseMs } : {}),
     ...(options.taskRetryDelayMs !== undefined ? { taskRetryDelayMs: options.taskRetryDelayMs } : {}),
@@ -216,7 +212,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             }finally{accessCheckRunning=false;}
           };
           accessTimer=setInterval(()=>void recheckAccess(),terminalAccessRecheckMs);
-          const recordActivity=()=>{void services.tasks.recordTaskTerminalActivity(terminalTaskId!);};
           upstream.on("open",()=>{
             for(const frame of pendingInput){
               if(upstream.readyState!==WebSocket.OPEN)break;
@@ -225,7 +220,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             clearPendingInput();
           });
           upstream.on("message",(data,isBinary)=>{
-            recordActivity();
             if(client.readyState!==WebSocket.OPEN)return;
             if(client.bufferedAmount+rawDataByteLength(data)>MAX_PENDING_TERMINAL_OUTPUT_BYTES){
               closeForBufferLimit("Terminal output buffer exceeded");
@@ -234,7 +228,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             client.send(data,{binary:isBinary});
           });
           client.on("message",(data,isBinary)=>{
-            recordActivity();
             const frameBytes=rawDataByteLength(data);
             if(upstream.readyState===WebSocket.OPEN){
               if(upstream.bufferedAmount+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){closeForBufferLimit("Terminal input buffer exceeded");return;}
@@ -718,7 +711,7 @@ async function routeApi(
     if (segments[4] === "tasks") {
       if (segments[5] === "summaries" && !segments[6] && method === "GET") { assertOnlySearchParams(url, []);return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId)); }
       if (!segments[5] && method === "GET") {
-        assertOnlySearchParams(url, ["search", "status", "archived", "sort", "direction", "cursor", "limit"]);
+        assertOnlySearchParams(url, ["search", "archived", "sort", "direction", "cursor", "limit"]);
         return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId, asTaskListQuery(url.searchParams)));
       }
       if (!segments[5] && method === "POST") {
@@ -749,6 +742,7 @@ async function routeApi(
       if(segments[5]&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));}
     }
     if (segments[4] === "archive" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "sandbox" && segments[5] === "release" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.releaseTaskSandbox(user.id,taskId,requireIdempotencyKey(req))); }
     if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
     if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
     if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
@@ -765,16 +759,6 @@ async function routeApi(
       try {
         assertOnlySearchParams(url, ["mediaType", "preview"]);
         return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, { ...(url.searchParams.get("mediaType") ? { mediaType: url.searchParams.get("mediaType")! } : {}), ...(optionalBooleanSearchParam(url,"preview") ? { previewOnly: true } : {}) }));
-      } catch (error) {
-        return handleTaskRouteError(res, error);
-      }
-    }
-    if (segments[4] === "cancel" && method === "POST") {
-      try {
-        assertOnlySearchParams(url, []);
-        const body = await readJson(req);
-        assertOnlyKeys(body, []);
-        return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId,requireIdempotencyKey(req)));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
@@ -1073,7 +1057,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|summary|archive|sandbox\/release|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1459,9 +1443,8 @@ function requireIdempotencyKey(req:IncomingMessage):string{const value=req.heade
 
 function asTaskListQuery(params:URLSearchParams):TaskListQuery{
   const query:TaskListQuery={};const search=params.get("search");if(search)query.search=search;
-  const status=params.get("status");if(status)query.statuses=status.split(",").filter(Boolean) as NonNullable<TaskListQuery["statuses"]>;
   const archived=params.get("archived");if(archived){if(!["exclude","include","only"].includes(archived))throw new ProductError("Task archived filter is invalid");query.archived=archived as NonNullable<TaskListQuery["archived"]>;}
-  const sort=params.get("sort");if(sort){if(!["created_at","updated_at","title","status"].includes(sort))throw new ProductError("Task sort is invalid");query.sort=sort as NonNullable<TaskListQuery["sort"]>;}
+  const sort=params.get("sort");if(sort){if(!["created_at","updated_at","title"].includes(sort))throw new ProductError("Task sort is invalid");query.sort=sort as NonNullable<TaskListQuery["sort"]>;}
   const direction=params.get("direction");if(direction){if(direction!=="asc"&&direction!=="desc")throw new ProductError("Task sort direction is invalid");query.direction=direction;}
   const cursor=params.get("cursor");if(cursor)query.cursor=cursor;const limit=params.get("limit");if(limit)query.limit=asPositiveQueryInteger(limit,"limit");return query;
 }

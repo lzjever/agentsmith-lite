@@ -22,7 +22,7 @@ import type {
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
-  Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskSummary
+  Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential
 } from "../../contracts/src/api.js";
 import { PROFILE_GREETING_PREFERENCES, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
@@ -49,14 +49,11 @@ import type {
   TaskMessageReceiptInput,
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
-  FinalizeTaskLifecycleInput,
-  FinalizeTaskLifecycleResult,
-  TaskStageClaimInput,
-  TaskStageCompleteInput,
-  TaskStageFailureInput,
+  StoredTaskSummary,
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
+  TaskSandboxReleaseMutationInput,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
@@ -231,7 +228,7 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapWorkspace(rows[0]) : null;
   }
   async updateWorkspaceName(workspaceId:string,name:string,updatedAt:string,expectedName:string):Promise<Workspace|null>{const rows=await this.queryRows<WorkspaceRow>("update workspaces set name=$2,updated_at=$3 where id=$1 and lifecycle_status='active' and name=$4 returning *",[workspaceId,name,updatedAt,expectedName]);return rows[0]?mapWorkspace(rows[0]):null}
-  async beginWorkspaceDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string):Promise<Workspace|null>{const rows=await this.queryRows<WorkspaceRow>("update workspaces set lifecycle_status='deleting',updated_at=$2 where id=$1 and ($3::text is null or owner_user_id=$3) returning *",[id,updatedAt,expectedOwnerUserId??null]);return rows[0]?mapWorkspace(rows[0]):null}
+  async beginWorkspaceDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){return transaction(this.pool,async(client)=>{const locked=await client.query<WorkspaceRow>("select * from workspaces where id=$1 for update",[id]);const workspace=locked.rows[0];if(!workspace||expectedOwnerUserId!==undefined&&workspace.owner_user_id!==expectedOwnerUserId)return{kind:"not_found_or_forbidden" as const};await client.query("select id from projects where workspace_id=$1 for update",[id]);const blocked=await client.query(`select 1 from agent_tasks task join projects project on project.id=task.project_id left join postgres_json_docs run on run.collection='sandbox_run_state' and run.id=task.run_id where project.workspace_id=$1 and task.deleted_at is null and task.execution_mode='live' and (task.active_reservation=true or run.document is null or (run.document->>'taskId') is distinct from task.id or (run.document->>'runId') is distinct from task.run_id or (run.document->>'projectId') is distinct from task.project_id or (run.document->>'workspaceId') is distinct from task.workspace_id or (coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned')) union all select 1 from postgres_json_docs run where run.collection='sandbox_run_state' and run.document->>'workspaceId'=$1 and coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned' limit 1`,[id]);if(blocked.rowCount){if(workspace.lifecycle_status==="deleting"){await client.query("update workspaces set lifecycle_status='active',updated_at=$2 where id=$1",[id,updatedAt]);await client.query(`update projects project set lifecycle_status='active',updated_at=$2 where project.workspace_id=$1 and project.lifecycle_status='deleting' and (exists (select 1 from agent_tasks task left join postgres_json_docs run on run.collection='sandbox_run_state' and run.id=task.run_id where task.project_id=project.id and task.deleted_at is null and task.execution_mode='live' and (task.active_reservation=true or run.document is null or (run.document->>'taskId') is distinct from task.id or (run.document->>'runId') is distinct from task.run_id or (run.document->>'projectId') is distinct from task.project_id or (run.document->>'workspaceId') is distinct from task.workspace_id or (coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned'))) or exists (select 1 from postgres_json_docs run where run.collection='sandbox_run_state' and run.document->>'projectId'=project.id and coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned'))`,[id,updatedAt]);}return{kind:"sandbox_not_released" as const};}if(workspace.lifecycle_status==="deleting")return{kind:"ready" as const,value:mapWorkspace(workspace)};const updated=await client.query<WorkspaceRow>("update workspaces set lifecycle_status='deleting',updated_at=$2 where id=$1 returning *",[id,updatedAt]);await client.query("update projects set lifecycle_status='deleting',updated_at=$2 where workspace_id=$1",[id,updatedAt]);return{kind:"ready" as const,value:mapWorkspace(updated.rows[0]!)}})}
   async setWorkspaceLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string):Promise<Workspace|null>{const rows=await this.queryRows<WorkspaceRow>("update workspaces set lifecycle_status=$2,updated_at=$3 where id=$1 and lifecycle_status <> 'deleting' returning *",[id,status,updatedAt]);return rows[0]?mapWorkspace(rows[0]):null}
   async transferWorkspaceOwner(workspaceId:string,fromUserId:string,toUserId:string,updatedAt:string):Promise<Workspace|null>{return transaction(this.pool,async(client)=>{if(fromUserId===toUserId)return null;const target=await client.query("select 1 from workspace_memberships where workspace_id=$1 and user_id=$2 for update",[workspaceId,toUserId]);if(!target.rowCount)return null;const workspace=await client.query<WorkspaceRow>("update workspaces set owner_user_id=$3,updated_at=$4 where id=$1 and owner_user_id=$2 and lifecycle_status='active' returning *",[workspaceId,fromUserId,toUserId,updatedAt]);if(!workspace.rows[0])return null;await client.query("update workspace_memberships set role='admin',updated_at=$3 where workspace_id=$1 and user_id=$2",[workspaceId,fromUserId,updatedAt]);await client.query("update workspace_memberships set role='owner',updated_at=$3 where workspace_id=$1 and user_id=$2",[workspaceId,toUserId,updatedAt]);return mapWorkspace(workspace.rows[0])})}
   async deleteWorkspaceAfterProjects(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const ready=await client.query("select 1 from workspaces where id=$1 and lifecycle_status='deleting' and not exists (select 1 from projects where workspace_id=$1) for update",[id]);if(ready.rowCount!==1)return false;await client.query("delete from project_context_entries where workspace_id=$1",[id]);return (await client.query("delete from workspaces where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
@@ -300,15 +297,13 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapProject(rows[0]) : null;
   }
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set name=$2,updated_at=$3 where id=$1 and lifecycle_status='active' and name=$4 returning *",[projectId,name,updatedAt,expectedName]);return rows[0]?mapProject(rows[0]):null}
-  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status='deleting',updated_at=$2 where id=$1 and ($3::text is null or owner_user_id=$3) returning *",[id,updatedAt,expectedOwnerUserId??null]);return rows[0]?mapProject(rows[0]):null}
+  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){return transaction(this.pool,async(client)=>{const locked=await client.query<ProjectRow>("select * from projects where id=$1 for update",[id]);const project=locked.rows[0];if(!project||expectedOwnerUserId!==undefined&&project.owner_user_id!==expectedOwnerUserId)return{kind:"not_found_or_forbidden" as const};const blocked=await client.query(`select 1 from agent_tasks task left join postgres_json_docs run on run.collection='sandbox_run_state' and run.id=task.run_id where task.project_id=$1 and task.deleted_at is null and task.execution_mode='live' and (task.active_reservation=true or run.document is null or (run.document->>'taskId') is distinct from task.id or (run.document->>'runId') is distinct from task.run_id or (run.document->>'projectId') is distinct from task.project_id or (run.document->>'workspaceId') is distinct from task.workspace_id or (coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned')) union all select 1 from postgres_json_docs run where run.collection='sandbox_run_state' and run.document->>'projectId'=$1 and coalesce(run.document->>'cleanupStatus','')<>'cleaned' and coalesce(run.document->>'phase','')<>'cleaned' limit 1`,[id]);if(blocked.rowCount){if(project.lifecycle_status==="deleting")await client.query("update projects set lifecycle_status='active',updated_at=$2 where id=$1",[id,updatedAt]);return{kind:"sandbox_not_released" as const};}if(project.lifecycle_status==="deleting")return{kind:"ready" as const,value:mapProject(project)};const updated=await client.query<ProjectRow>("update projects set lifecycle_status='deleting',updated_at=$2 where id=$1 returning *",[id,updatedAt]);return{kind:"ready" as const,value:mapProject(updated.rows[0]!)}})}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string):Promise<Project|null>{const rows=await this.queryRows<ProjectRow>("update projects set lifecycle_status=$2,updated_at=$3 where id=$1 and lifecycle_status <> 'deleting' returning *",[id,status,updatedAt]);return rows[0]?mapProject(rows[0]):null}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string):Promise<Project|null>{return transaction(this.pool,async(client)=>{if(fromUserId===toUserId)return null;const target=await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2 for update",[projectId,toUserId]);if(!target.rowCount)return null;const project=await client.query<ProjectRow>("update projects set owner_user_id=$3,updated_at=$4 where id=$1 and owner_user_id=$2 and lifecycle_status='active' returning *",[projectId,fromUserId,toUserId,updatedAt]);if(!project.rows[0])return null;await client.query("update project_memberships set role='admin',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,fromUserId,updatedAt]);await client.query("update project_memberships set role='owner',updated_at=$3 where project_id=$1 and user_id=$2",[projectId,toUserId,updatedAt]);return mapProject(project.rows[0])})}
   async deleteProjectDependenciesAndProject(id:string):Promise<boolean>{
     return transaction(this.pool,async(client)=>{
       const project=await client.query<ProjectRow>("select * from projects where id=$1 and lifecycle_status='deleting' for update",[id]);
       if(!project.rows[0])return false;
-      const active=await client.query("select 1 from agent_tasks where project_id=$1 and status in ('queued','starting','running','stopping') limit 1",[id]);
-      if(active.rowCount)return false;
       const taskIds=(await client.query<{id:string;run_id:string}>("select id,run_id from agent_tasks where project_id=$1",[id])).rows;
       for(const task of taskIds)await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)",[task.id,task.run_id]);
       await client.query("delete from task_messages where task_id in (select id from agent_tasks where project_id=$1)",[id]);
@@ -327,9 +322,10 @@ export class PostgresProductStore implements ProductStore {
       await client.query("delete from project_resource_policies where project_id=$1",[id]);
       await client.query("delete from model_endpoints where project_id=$1",[id]);
       await client.query("delete from project_credentials where project_id=$1",[id]);
-      return (await client.query("delete from projects where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1;
+      return true;
     });
   }
+  async deleteProjectAfterDependencies(id:string):Promise<boolean>{return (await this.pool.query("delete from projects where id=$1 and lifecycle_status='deleting' and not exists (select 1 from agent_tasks where project_id=$1)",[id])).rowCount===1}
   async createProjectContextEntry(v: ProjectContextEntry): Promise<ProjectContextEntry | null> { const rows=await this.queryRows<ContextRow>(`insert into project_context_entries (id,workspace_id,project_id,owner_user_id,scope,context_key,content,content_type,name,user_id,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$6,$4,$9,$10,$11) on conflict do nothing returning *`,[v.id,v.workspaceId,v.projectId,v.ownerUserId,v.scope,v.contextKey,v.content,v.contentType??"text",v.version,v.createdAt,v.updatedAt]); return rows[0]?mapContext(rows[0]):null; }
   async updateProjectContextEntry(v: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null> { try { const rows=await this.queryRows<ContextRow>(`update project_context_entries set context_key=$2,content=$3,content_type=$4,version=$5,updated_at=$6 where id=$1 and version=$7 and workspace_id=$8 and project_id is not distinct from $9 and scope=$10 and owner_user_id is not distinct from $11 returning *`,[v.id,v.contextKey,v.content,v.contentType??"text",v.version,v.updatedAt,expectedVersion,v.workspaceId,v.projectId,v.scope,v.ownerUserId]); return rows[0]?mapContext(rows[0]):null; } catch(error) { if(isUniqueConstraintError(error))return null;throw error; } }
   async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null): Promise<ProjectContextEntry[]> { const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 order by context_key',[workspaceId,projectId,scope,ownerUserId]);return rows.map(mapContext); }
@@ -735,6 +731,7 @@ export class PostgresProductStore implements ProductStore {
       const row = await insertTaskWithClient(client, input.task, input.reserveActive);
       if (input.runtimeState) await putJsonDocumentWithClient(client, "sandbox_runtime_state", input.task.id, input.runtimeState);
       if (input.sandboxRun) await putJsonDocumentWithClient(client, "sandbox_run_state", input.sandboxRun.runId, prepareSandboxRunDocument(input.sandboxRun));
+      if(input.initialMessage)await insertPersistedTaskMessageWithClient(client, input.initialMessage);
       return{kind:"created" as const,task:mapTask(row)};
     });}catch(error){
       if(isConstraintError(error,"file_libraries_project_name_unique")||isConstraintError(error,"file_libraries_pkey")||isConstraintError(error,"file_libraries_project_id_root_sub_path_key"))return{kind:"library_name_conflict" as const};
@@ -838,7 +835,7 @@ export class PostgresProductStore implements ProductStore {
   async listActiveTasks(): Promise<PersistedAgentTask[]> {
     const rows = await this.queryRows<AgentTaskRow>(
       `select * from agent_tasks
-       where status in ('queued', 'starting', 'running', 'stopping')
+       where deleted_at is null and active_reservation = true
        order by created_at, id`
     );
     return rows.map(mapTask);
@@ -859,14 +856,10 @@ export class PostgresProductStore implements ProductStore {
       values.push(`%${query.search}%`);
       where.push(`(title ilike $${values.length} or prompt ilike $${values.length})`);
     }
-    if (query.statuses.length > 0) {
-      values.push(query.statuses);
-      where.push(`status = any($${values.length}::text[])`);
-    }
     if (query.archived === "exclude") where.push("archived_at is null");
     if (query.archived === "only") where.push("archived_at is not null");
     const count = await this.queryRows<{ count: string }>(`select count(*)::text as count from agent_tasks where ${where.join(" and ")}`, values);
-    const sortColumn = query.sort === "created_at" ? "created_at" : query.sort === "updated_at" ? "updated_at" : query.sort === "status" ? "status" : "title";
+    const sortColumn = query.sort === "created_at" ? "created_at" : query.sort === "updated_at" ? "updated_at" : "title";
     const direction = query.direction === "asc" ? "asc" : "desc";
     values.push(query.limit, query.offset);
     const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where ${where.join(" and ")} order by ${sortColumn} ${direction}, id ${direction} limit $${values.length - 1} offset $${values.length}`, values);
@@ -884,7 +877,7 @@ export class PostgresProductStore implements ProductStore {
   }
 
   async archiveTask(taskId: string, archivedAt: string): Promise<PersistedAgentTask | null> {
-    const rows = await this.queryRows<AgentTaskRow>("update agent_tasks set archived_at=$2,updated_at=$2 where id=$1 and deleted_at is null and terminal_reason is not null returning *", [taskId, archivedAt]);
+    const rows = await this.queryRows<AgentTaskRow>("update agent_tasks set archived_at=$2,updated_at=$2 where id=$1 and deleted_at is null returning *", [taskId, archivedAt]);
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
@@ -892,13 +885,14 @@ export class PostgresProductStore implements ProductStore {
     return transaction(this.pool, async (client) => {
       const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [taskId]);
       const current = locked.rows[0];
-      if (!current || !current.terminal_reason) return null;
+      if (!current) return null;
+      if(current.active_reservation)await releaseActiveTaskWithClient(client,current.project_id,deletedAt);
       const releasedArtifactBytes = 0;
       await client.query("delete from task_interaction_changes where task_id=$1", [taskId]);
       await client.query("delete from task_messages where task_id=$1", [taskId]);
       await client.query("delete from agent_task_artifacts where task_id=$1", [taskId]);
       await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)", [taskId,current.run_id]);
-      const updated = await client.query<AgentTaskRow>("update agent_tasks set file_library_id=null,deleted_at=coalesce(deleted_at,$2),updated_at=$2 where id=$1 returning *", [taskId,deletedAt]);
+      const updated = await client.query<AgentTaskRow>("update agent_tasks set file_library_id=null,active_reservation=false,deleted_at=coalesce(deleted_at,$2),updated_at=$2 where id=$1 returning *", [taskId,deletedAt]);
       return { task: mapTask(updated.rows[0]!), releasedArtifactBytes };
     });
   }
@@ -933,32 +927,6 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
-    return transaction(this.pool, (client) => finalizeTaskLifecycleWithClient(client, input));
-  }
-
-  async listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]> {
-    const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where terminal_reason is not null and artifact_projection_status in ('draining','failed') and (artifact_projection_next_retry_at is null or artifact_projection_next_retry_at <= $1) and (artifact_projection_lease_expires_at is null or artifact_projection_lease_expires_at <= $1) order by terminalized_at,id limit $2`, [now,limit]);
-    return rows.map(mapTask);
-  }
-  async claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("artifact",input); }
-  async completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> { return this.completeTaskStage("artifact",input); }
-  async failTaskArtifactProjection(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("artifact",input); }
-  async listTasksForCleanup(now: string, limit: number): Promise<PersistedAgentTask[]> {
-    const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where terminal_reason is not null and artifact_projection_status='drained' and cleanup_status in ('pending','running','failed') and (cleanup_next_retry_at is null or cleanup_next_retry_at <= $1) and (cleanup_lease_expires_at is null or cleanup_lease_expires_at <= $1) order by terminalized_at,id limit $2`, [now,limit]);
-    return rows.map(mapTask);
-  }
-  async claimTaskCleanup(input: TaskStageClaimInput): Promise<PersistedAgentTask | null> { return this.claimTaskStage("cleanup",input); }
-  async completeTaskCleanup(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null> {
-    return transaction(this.pool, async (client) => {
-      const rows = await completeTaskStageWithClient(client,"cleanup",input);
-      if (!rows[0]) return null;
-      await client.query("delete from postgres_json_docs where (collection='sandbox_runtime_state' and id=$1) or (collection='sandbox_run_state' and id=$2)", [rows[0].id,rows[0].run_id]);
-      return mapTask(rows[0]);
-    });
-  }
-  async failTaskCleanup(input: TaskStageFailureInput): Promise<PersistedAgentTask | null> { return this.failTaskStage("cleanup",input); }
-
   async beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult> {
     return transaction(this.pool, async (client) => {
       await client.query(`insert into task_idempotency_records (actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,claim_token,lease_expires_at,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,'in_progress',$7,$8,$9,$9) on conflict do nothing`, [input.actorId,input.projectId,input.operation,input.key,input.requestHash,input.resourceId,input.claimToken,input.leaseExpiresAt,input.now]);
@@ -977,6 +945,22 @@ export class PostgresProductStore implements ProductStore {
     const result = await this.pool.query(`update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'`, [input.actorId,input.projectId,input.operation,input.key,input.requestHash,input.claimToken,input.responseStatus,JSON.stringify(input.responseBody),input.updatedAt]);
     return result.rowCount === 1;
   }
+  async requestTaskSandboxRelease(input:TaskSandboxReleaseMutationInput){return transaction(this.pool,async(client)=>{
+    const idem=input.idempotency;
+    const claim=await client.query("select 1 from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress' for update",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken]);
+    if(claim.rowCount!==1)return"conflict" as const;
+    const locked=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.runId]);
+    const current=locked.rows[0]?.document?sandboxRunFromDocument(asRecord(locked.rows[0].document)):null;
+    if(!current||current.taskId!==input.taskId||current.runId!==input.runId)return"conflict" as const;
+    const already=current.cleanupStatus==="cleanup_requested"||current.cleanupStatus==="deleting"||current.cleanupStatus==="cleaned"||current.phase==="cleaned";
+    if(!already){
+      if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.cleanupStatus!=="cleanup_requested")return"conflict" as const;
+      await client.query("update postgres_json_docs set document=$2::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1",[input.runId,JSON.stringify(prepareSandboxRunDocument(input.run))]);
+    }
+    const event=input.auditEvent;await client.query("insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (id) do nothing",[event.id,event.projectId,event.actorId,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]);
+    await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
+    return already?"already_requested" as const:"applied" as const;
+  })}
   async completeTaskIdempotencyForResource(resourceId:string,responseStatus:number,responseBody:unknown,updatedAt:string):Promise<number>{const result=await this.pool.query("update task_idempotency_records set status='completed',response_status=$2,response_body=$3::jsonb,updated_at=$4 where resource_id=$1 and status='in_progress'",[resourceId,responseStatus,JSON.stringify(responseBody),updatedAt]);return result.rowCount??0;}
 
   async persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult> {
@@ -991,12 +975,8 @@ export class PostgresProductStore implements ProductStore {
       }
       const { inserted } = await persistTaskInteractionChangesWithClient(client,input.taskId,input.changes);
       if (input.lifecycle?.kind === "active") {
-        const lifecycle = await client.query("update agent_tasks set status=$3,updated_at=$4 where id=$1 and status=$2 and terminal_reason is null", [input.taskId,input.lifecycle.expectedStatus,input.lifecycle.status,input.lifecycle.updatedAt]);
+        const lifecycle = await client.query("update agent_tasks set status=$3,updated_at=$4 where id=$1 and status=$2", [input.taskId,input.lifecycle.expectedStatus,input.lifecycle.status,input.lifecycle.updatedAt]);
         if (lifecycle.rowCount !== 1) throw new Error("Task interaction lifecycle conflict");
-      }
-      if (input.lifecycle?.kind === "terminal") {
-        const finalized = await finalizeTaskLifecycleWithClient(client, { taskId: input.taskId, ...input.lifecycle });
-        if (!finalized) throw new Error("Task interaction lifecycle conflict");
       }
       if (input.sourceSync) await client.query("update agent_tasks set interaction_source_cursor=$2,interaction_history_status=$3,interaction_last_synced_at=$4 where id=$1", [input.taskId,input.sourceSync.sourceCursor,input.sourceSync.historyStatus,input.sourceSync.lastSyncedAt]);
       const nextSeq=Number((await client.query<{maximum:string}>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1",[input.taskId])).rows[0]?.maximum??0);
@@ -1074,23 +1054,20 @@ export class PostgresProductStore implements ProductStore {
   }
 
   async createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage> { return transaction(this.pool, async (client) => mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message))); }
-  async createPendingTaskMessage(message:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[message.taskId]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message));await persistTaskInteractionChangesWithClient(client,message.taskId,interactionChange?[interactionChange]:[]);return created;});}
+  async createPendingTaskMessage(message:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[message.taskId]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message));await persistTaskInteractionChangesWithClient(client,message.taskId,interactionChange?[interactionChange]:[]);return created;});}
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null order by created_at,id",[taskId]); return rows.map(mapPersistedTaskMessage); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where id=$1",[id]);return rows[0]?mapPersistedTaskMessage(rows[0]):null; }
   async updatePendingTaskMessage(id:string,content:string,requestHash:string,updatedAt:string,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[id]);if(!located.rows[0])return null;await client.query("select id from agent_tasks where id=$1 for update",[located.rows[0].task_id]);const rows=await client.query<TaskMessageRow>("update task_messages set content=$2,request_hash=$3,updated_at=$4 where id=$1 and delivery_status='pending' and deleted_at is null returning *",[id,content,requestHash,updatedAt]);if(!rows.rows[0])return null;await persistTaskInteractionChangesWithClient(client,rows.rows[0].task_id,interactionChange?[interactionChange]:[]);return mapPersistedTaskMessage(rows.rows[0]);});}
   async deleteQueuedTaskMessage(id:string,deletedAt:string):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>("update task_messages set deleted_at=$2,updated_at=$2 where id=$1 and delivery_status in ('pending','failed') and deleted_at is null returning *",[id,deletedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
   async listTaskMessagesDue(now:string,limit:number):Promise<PersistedTaskMessage[]>{const rows=await this.queryRows<TaskMessageRow>(`select * from task_messages where deleted_at is null and ((delivery_status='pending' and (next_retry_at is null or next_retry_at <= $1)) or (delivery_status='dispatching' and lease_expires_at <= $1 and (next_retry_at is null or next_retry_at <= $1))) order by created_at,id limit $2`,[now,limit]);return rows.map(mapPersistedTaskMessage);}
-  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskMessageRow>(`update task_messages set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,attempt_count=attempt_count+1,safe_error=null,updated_at=$3 where id=$1 and delivery_status='pending' and claim_token is null and deleted_at is null and (next_retry_at is null or next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
-  async reclaimTaskMessage(input:TaskDeliveryReclaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].terminal_reason)return null;const rows=await client.query<TaskMessageRow>(`update task_messages set claim_token=$3,claimed_at=$4,lease_expires_at=$5,attempt_count=attempt_count+1,safe_error=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and lease_expires_at <= $4 and (next_retry_at is null or next_retry_at <= $4) and deleted_at is null returning *`,[input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
+  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,attempt_count=target.attempt_count+1,safe_error=null,updated_at=$3 where target.id=$1 and target.delivery_status='pending' and target.claim_token is null and target.deleted_at is null and (target.next_retry_at is null or target.next_retry_at <= $3) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id)) returning target.*`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
+  async reclaimTaskMessage(input:TaskDeliveryReclaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set claim_token=$3,claimed_at=$4,lease_expires_at=$5,attempt_count=target.attempt_count+1,safe_error=null,updated_at=$4 where target.id=$1 and target.delivery_status='dispatching' and target.claim_token=$2 and target.lease_expires_at <= $4 and (target.next_retry_at is null or target.next_retry_at <= $4) and target.deleted_at is null and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id)) returning target.*`,[input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
   async recordTaskMessageReceipt(input:TaskMessageReceiptInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set receipt=$3::jsonb,timeline_cursor=$4,delivery_status='accepted',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$5 where id=$1 and delivery_status='dispatching' and claim_token=$2 and delivery_key=$6 and request_hash=$7 and $8::boolean and deleted_at is null returning *`,[input.id,input.claimToken,JSON.stringify(input.receipt),input.timelineCursor,input.updatedAt,input.receipt.deliveryKey,input.receipt.requestHash,input.receipt.accepted]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
   async deferTaskMessage(input:TaskDeliveryDeferInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status=case when $3 then 'pending' else delivery_status end,claim_token=case when $3 then null else claim_token end,claimed_at=case when $3 then null else claimed_at end,lease_expires_at=case when $3 then null else lease_expires_at end,safe_error=$4,next_retry_at=$5,updated_at=$6 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.releaseClaim===true,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
   async failTaskMessage(input:TaskDeliveryFailureInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='failed',safe_error=$3,lease_expires_at=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.safeError,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
-  async findTaskSummary(taskId: string): Promise<TaskSummary | null> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.id=$1 group by t.id,t.updated_at`,[taskId]); return rows[0] ? mapTaskSummary(rows[0]) : null; }
-  async listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.project_id=$1 and t.deleted_at is null group by t.id,t.updated_at order by t.updated_at desc,t.id desc`,[projectId]); return rows.map(mapTaskSummary); }
+  async findTaskSummary(taskId: string): Promise<StoredTaskSummary | null> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.id=$1 group by t.id,t.updated_at`,[taskId]); return rows[0] ? mapTaskSummary(rows[0]) : null; }
+  async listTaskSummariesForProject(projectId: string): Promise<StoredTaskSummary[]> { const rows=await this.queryRows<TaskSummaryRow>(`select t.id as task_id,count(a.id)::integer as artifact_count,t.updated_at from agent_tasks t left join agent_task_artifacts a on a.task_id=t.id where t.project_id=$1 and t.deleted_at is null group by t.id,t.updated_at order by t.updated_at desc,t.id desc`,[projectId]); return rows.map(mapTaskSummary); }
 
-  private async claimTaskStage(stage:"artifact"|"cleanup",input:TaskStageClaimInput):Promise<PersistedAgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const allowed=stage==="artifact"?"('draining','failed')":"('pending','running','failed')";const extra=stage==="artifact"?"terminal_reason is not null":"terminal_reason is not null and artifact_projection_status='drained'";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status=${stage==="artifact"?"'draining'":"'running'"},${prefix}_claim_token=$2,${prefix}_lease_expires_at=$4,${prefix}_attempt_count=${prefix}_attempt_count+1,${stage==="artifact"?"artifact_projection_error":"cleanup_error"}=null,updated_at=$3 where id=$1 and ${extra} and ${prefix}_status in ${allowed} and (${prefix}_lease_expires_at is null or ${prefix}_lease_expires_at <= $3) and (${prefix}_next_retry_at is null or ${prefix}_next_retry_at <= $3) returning *`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows[0]?mapTask(rows[0]):null;}
-  private async completeTaskStage(stage:"artifact"|"cleanup",input:TaskStageCompleteInput):Promise<PersistedAgentTask|null>{return transaction(this.pool,async(client)=>{const rows=await completeTaskStageWithClient(client,stage,input);return rows[0]?mapTask(rows[0]):null;});}
-  private async failTaskStage(stage:"artifact"|"cleanup",input:TaskStageFailureInput):Promise<PersistedAgentTask|null>{const prefix=stage==="artifact"?"artifact_projection":"cleanup";const error=stage==="artifact"?"artifact_projection_error":"cleanup_error";const current=stage==="artifact"?"draining":"running";const rows=await this.queryRows<AgentTaskRow>(`update agent_tasks set ${prefix}_status='failed',${prefix}_claim_token=null,${prefix}_lease_expires_at=null,${prefix}_next_retry_at=$4,${error}=$3,updated_at=$5 where id=$1 and ${prefix}_status='${current}' and ${prefix}_claim_token=$2 returning *`,[input.id,input.claimToken,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapTask(rows[0]):null;}
 
   private async queryRows<T>(sql: string, values: unknown[] = []): Promise<T[]> {
     const result = await this.pool.query(sql, values);
@@ -1133,14 +1110,17 @@ class PostgresSandboxRunStoreImpl {
 
   async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
     const document = prepareSandboxRunDocument(run);
-    await this.pool.query(
-      `insert into postgres_json_docs (collection, id, document, updated_at)
+    return transaction(this.pool,async(client)=>{
+      const previous=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[run.runId]);
+      await client.query(`insert into postgres_json_docs (collection, id, document, updated_at)
        values ('sandbox_run_state', $1, $2::jsonb, now())
        on conflict (collection, id)
        do update set document = excluded.document, updated_at = now()`,
-      [run.runId, JSON.stringify(document)]
-    );
-    return sandboxRunFromDocument(document);
+      [run.runId, JSON.stringify(document)]);
+      const prior=previous.rows[0]?.document?sandboxRunFromDocument(asRecord(previous.rows[0].document)):null;
+      if(isConfirmedCleanedRun(run)&&(!prior||!isConfirmedCleanedRun(prior)))await releaseSandboxReservationWithClient(client,run);
+      return sandboxRunFromDocument(document);
+    });
   }
 
   async get(runId: string): Promise<PersistedSandboxRunState | null> {
@@ -1176,13 +1156,6 @@ class PostgresSandboxRunStoreImpl {
     const result = await this.pool.query(
       `update postgres_json_docs
        set document = document || jsonb_build_object(
-         'phase', case
-           when coalesce(document->>'phase', '') = 'expired'
-             or nullif(document->>'expiresAt', '')::timestamptz <= $3::timestamptz
-             or nullif(document->>'idleExpiresAt', '')::timestamptz <= $3::timestamptz
-           then 'expired'
-           else 'stopping'
-         end,
          'cleanupStatus', 'deleting',
          'fencingToken', $2 + 1,
          'updatedAt', $3
@@ -1190,14 +1163,7 @@ class PostgresSandboxRunStoreImpl {
        where collection = 'sandbox_run_state'
          and id = $1
          and (document->>'fencingToken')::bigint = $2
-         and coalesce(document->>'cleanupStatus', '') <> 'cleaned'
-         and coalesce(document->>'phase', '') <> 'cleaned'
-         and (
-           coalesce(document->>'cleanupStatus', '') in ('cleanup_requested', 'deleting')
-           or coalesce(document->>'phase', '') in ('stopping', 'expired')
-           or nullif(document->>'expiresAt', '')::timestamptz <= $3::timestamptz
-           or nullif(document->>'idleExpiresAt', '')::timestamptz <= $3::timestamptz
-         )
+         and coalesce(document->>'cleanupStatus', '') in ('cleanup_requested', 'deleting')
        returning document`,
       [input.runId, input.expectedFencingToken, input.claimedAt]
     );
@@ -1214,7 +1180,7 @@ class PostgresSandboxRunStoreImpl {
       throw new Error("Sandbox run fencing update runId mismatch");
     }
     const document = prepareSandboxRunDocument(run);
-    const result = await this.pool.query(
+    return transaction(this.pool,async(client)=>{const result = await client.query(
       `update postgres_json_docs
        set document = $3::jsonb, updated_at = now()
        where collection = 'sandbox_run_state'
@@ -1224,8 +1190,17 @@ class PostgresSandboxRunStoreImpl {
       [runId, expectedFencingToken, JSON.stringify(document)]
     );
     const saved = result.rows[0]?.document as unknown;
-    return saved ? sandboxRunFromDocument(asRecord(saved)) : null;
+    if(!saved)return null;const stored=sandboxRunFromDocument(asRecord(saved));
+    if(isConfirmedCleanedRun(stored))await releaseSandboxReservationWithClient(client,stored);
+    return stored;});
   }
+}
+
+function isConfirmedCleanedRun(run:PersistedSandboxRunState):boolean{return run.cleanupStatus==="cleaned"||run.phase==="cleaned";}
+
+async function releaseSandboxReservationWithClient(client:PoolClient,run:PersistedSandboxRunState):Promise<void>{
+  const locked=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and run_id=$2 for update",[run.taskId,run.runId]);const task=locked.rows[0];
+  if(!task?.active_reservation)return;await releaseActiveTaskWithClient(client,task.project_id,run.updatedAt);await client.query("update agent_tasks set active_reservation=false,updated_at=greatest(updated_at,$2::timestamptz) where id=$1",[task.id,run.updatedAt]);
 }
 
 class PostgresLeaseStoreImpl implements PostgresLeaseStore {
@@ -1370,21 +1345,6 @@ async function persistTaskInteractionChangesWithClient(client:PoolClient,taskId:
   return{inserted,nextSeq};
 }
 
-async function finalizeTaskLifecycleWithClient(client: PoolClient, input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null> {
-  const locked = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update", [input.taskId]);
-  const current = locked.rows[0];
-  if (!current) return null;
-  if (current.terminal_reason) return { task: mapTask(current), applied: false };
-  if (current.active_reservation) await releaseActiveTaskWithClient(client, current.project_id, input.updatedAt);
-  await client.query("update task_messages set delivery_status='failed',safe_error='Task became terminal before delivery',lease_expires_at=null,next_retry_at=null,updated_at=$2 where task_id=$1 and deleted_at is null and delivery_status in ('pending','dispatching')",[input.taskId,input.updatedAt]);
-  await persistTaskInteractionChangesWithClient(client,input.taskId,input.terminalInteractionChanges??[]);
-  const terminal = await client.query<AgentTaskRow>(`update agent_tasks set status=$2,terminal_reason=$3,terminalized_at=$4::timestamptz,active_reservation=false,start_intent_status=case when start_intent_status='pending' then 'failed' else start_intent_status end,start_safe_error=case when start_intent_status='pending' then 'Task ended before initial prompt delivery' else start_safe_error end,start_next_retry_at=case when start_intent_status='pending' then null else start_next_retry_at end,finalization_intent_status=null,finalization_intent_at=null,artifact_projection_status=case when execution_mode='live' then 'draining' else 'drained' end,artifact_projection_error=null,cleanup_status=case when execution_mode='live' then 'pending' else 'completed' end,cleanup_error=null,cleanup_completed_at=case when execution_mode='live' then null else $4::timestamptz end,updated_at=$4::timestamptz where id=$1 and terminal_reason is null returning *`, [input.taskId,statusForTerminalReason(input.terminalReason),input.terminalReason,input.updatedAt]);
-  const row = terminal.rows[0];
-  if (!row) return { task: mapTask(current), applied: false };
-  await insertAuditEventWithClient(client,input.auditEvent);
-  return { task: mapTask(row), applied: true };
-}
-
 async function persistTaskArtifactProjectionWithClient(client:PoolClient,input:PersistTaskArtifactProjectionInput):Promise<"created"|"existing"> {
   const existing=await client.query("select id from agent_task_artifacts where task_id=$1 and file_id=$2",[input.artifact.taskId,input.artifact.fileId]);
   if(existing.rowCount){await insertAuditEventWithClient(client,input.auditEvent);return "existing";}
@@ -1419,23 +1379,6 @@ async function insertPersistedTaskMessageWithClient(client: PoolClient, message:
     message.id,message.taskId,message.actorId??null,message.content,message.deliveryKey??null,message.requestHash??null,message.claimToken??null,message.receipt?JSON.stringify(message.receipt):null,message.timelineCursor??null,message.deliveryStatus??"pending",message.claimedAt??null,message.leaseExpiresAt??null,message.attemptCount??0,message.nextRetryAt??null,message.safeError??null,message.createdAt,message.updatedAt??message.createdAt,message.deletedAt??null
   ]);
   return inserted.rows[0]!;
-}
-
-async function completeTaskStageWithClient(client: PoolClient, stage: "artifact" | "cleanup", input: TaskStageCompleteInput): Promise<AgentTaskRow[]> {
-  const prefix=stage==="artifact"?"artifact_projection":"cleanup";
-  const current=stage==="artifact"?"draining":"running";
-  const completed=stage==="artifact"?"drained":"completed";
-  const completedAt=stage==="cleanup"?",cleanup_completed_at=$3":"";
-  const result=await client.query<AgentTaskRow>(`update agent_tasks set ${prefix}_status='${completed}',${prefix}_claim_token=null,${prefix}_lease_expires_at=null,${prefix}_next_retry_at=null,${stage==="artifact"?"artifact_projection_error":"cleanup_error"}=null${completedAt},updated_at=$3 where id=$1 and ${prefix}_status='${current}' and ${prefix}_claim_token=$2 returning *`,[input.id,input.claimToken,input.updatedAt]);
-  return result.rows;
-}
-
-function statusForTerminalReason(reason: import("../../contracts/src/api.js").TaskTerminalReason): AgentTask["status"] {
-  if(reason==="cancelled")return "cancelled";
-  if(reason==="failed")return "failed";
-  if(reason==="expired")return "expired";
-  if(reason==="cleaned_legacy")return "cleaned";
-  return "completed";
 }
 
 interface UserRow {
@@ -1785,7 +1728,7 @@ function parseTaskInteractionSourceRevision(value:string|number):number {
   if(!Number.isSafeInteger(revision)||revision<0)throw new Error("Stored task interaction source revision is invalid");
   return revision;
 }
-function mapTaskSummary(row: TaskSummaryRow): TaskSummary { return { taskId:row.task_id,artifactCount:Number(row.artifact_count),updatedAt:toIso(row.updated_at) }; }
+function mapTaskSummary(row: TaskSummaryRow): StoredTaskSummary { return { taskId:row.task_id,artifactCount:Number(row.artifact_count),updatedAt:toIso(row.updated_at) }; }
 
 function validatePostgresInteractionChange(taskId:string,change:PersistTaskInteractionMutationInput["changes"][number]):void {
   if(change.interaction.taskId!==taskId||change.interaction.id.length===0||change.sourceId.length===0)throw new Error("Task interaction identity mismatch");

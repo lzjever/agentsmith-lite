@@ -15,21 +15,21 @@ export type AssistantPreview = Extract<TaskInteractionStreamEvent, { type: "assi
 
 export { upsertTaskInteractions } from "./task-conversation-state";
 
-export function TaskInteractionList({ taskId, items, preview, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: AssistantPreview; onStopWork: (interactionId: string) => Promise<void> }) {
+export function TaskInteractionList({ taskId, items, preview, canStopWork, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: AssistantPreview; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
   if (items.length === 0 && !preview) return <div className="grid min-h-52 place-items-center border border-dashed border-border px-5 text-center"><div><Loader2 className="mx-auto size-5 animate-spin text-icon-default" /><p className="mt-2 text-sm text-secondary">Waiting for task messages.</p></div></div>;
-  return <TooltipProvider><ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol></TooltipProvider>;
+  return <TooltipProvider><ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} canStopWork={canStopWork} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol></TooltipProvider>;
 }
 
-function TaskInteractionItemView({ taskId, item, onStopWork }: { taskId: string; item: TaskInteractionItem; onStopWork: (interactionId: string) => Promise<void> }) {
+function TaskInteractionItemView({ taskId, item, canStopWork, onStopWork }: { taskId: string; item: TaskInteractionItem; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
   switch (item.kind) {
     case "user_message": return <UserMessage item={item} />;
     case "assistant_message": return <AssistantMessage item={item} />;
-    case "tool": return <WorkItem item={item} icon={<Wrench size={16} />} onStopWork={onStopWork} />;
-    case "background_task": return <WorkItem item={item} icon={<Loader2 size={16} />} onStopWork={onStopWork} />;
+    case "tool": return <WorkItem item={item} icon={<Wrench size={16} />} canStopWork={canStopWork} onStopWork={onStopWork} />;
+    case "background_task": return <WorkItem item={item} icon={<Loader2 size={16} />} canStopWork={canStopWork} onStopWork={onStopWork} />;
     case "task_question": return <NoticeItem item={item} label="Question" />;
     case "task_notice": return <NoticeItem item={item} label="Notice" />;
-    case "task_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} onStopWork={onStopWork} />;
-    case "subagent_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} onStopWork={onStopWork} />;
+    case "task_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} canStopWork={canStopWork} onStopWork={onStopWork} />;
+    case "subagent_result": return <WorkItem item={item} icon={<CheckCircle2 size={16} />} canStopWork={canStopWork} onStopWork={onStopWork} />;
     case "file": return <FileItem taskId={taskId} item={item} />;
     case "system_error": return <SystemError item={item} />;
     default: return assertNever(item);
@@ -57,12 +57,12 @@ function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind:
   return <li><article className="group border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={item.occurredAt} status={item.status} action={action} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
 }
 
-function WorkItem({ item, icon, onStopWork }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode; onStopWork: (interactionId: string) => Promise<void> }) {
+function WorkItem({ item, icon, canStopWork, onStopWork }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
   const [stopping, setStopping] = useState(false);
   const [stopRequestedRevision, setStopRequestedRevision] = useState<number>();
   const [stopError, setStopError] = useState("");
   const status = item.executionStatus;
-  const canStop = (item.kind === "tool" || item.kind === "background_task") && item.canStop;
+  const canStop = canStopWork && (item.kind === "tool" || item.kind === "background_task") && item.canStop;
   const stopRequested = stopRequestedRevision === item.revision;
   const summary = workSummary(item);
   const details = workDetails(item);

@@ -121,25 +121,6 @@ describe("project resource policy", () => {
     assert.equal(current.activeTasks, 1);
   });
 
-  it("finalizes an active task once and releases capacity once", async () => {
-    const store = createInMemoryProductStore();
-    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-finalization-intent", builtinAdminPassword: "admin-password" });
-    const { user } = await services.auth.loginAfterBootstrap("admin-password");
-    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    const task: PersistedAgentTask = { id: "task_intent", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_intent", title:"Task", prompt: "not audited", status: "running", runId: "run_intent", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
-    await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:"libraries/library_intent/home",createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
-    assert.equal((await store.createTaskAtomically({task,reserveActive:true})).kind,"created");
-    const timestamp = new Date().toISOString();
-    const [failed, completed] = await Promise.all([
-      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "failed", updatedAt: timestamp, auditEvent: { id: "audit_task_failed", projectId: project.id, actorId: null, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp } }),
-      store.finalizeTaskLifecycle({ taskId: task.id, terminalReason: "completed", updatedAt: timestamp, auditEvent: { id: "audit_task_completed", projectId: project.id, actorId: null, action: "task.completed", status: "accepted", resourceKind: "task", resourceId: task.id, createdAt: timestamp } })
-    ]);
-    assert.equal([failed, completed].filter((result) => result?.applied).length, 1);
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.equal(current.activeTasks, 0);
-  });
-
   it("atomically reserves provider requests and records token/cost overage alerts after the response", async () => {
     let calls = 0;
     const services = createApplicationServices({

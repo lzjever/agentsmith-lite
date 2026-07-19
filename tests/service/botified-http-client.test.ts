@@ -107,6 +107,7 @@ describe("Botified HTTP client", () => {
         timeline_cursor: "timeline:main:4",
         active_items: [{ id: "service", type: "service_status", status: "running" }]
       },
+      sessionId: "session_1",
       state: "running",
       timelineCursor: "timeline:main:4",
       activeItems: [{ id: "service", type: "service_status", status: "running" }]

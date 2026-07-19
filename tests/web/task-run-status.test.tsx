@@ -11,25 +11,27 @@ const { TaskRunStatus } = await import("../../src/components/tasks/TaskRunStatus
 afterEach(() => cleanup());
 
 describe("TaskRunStatus", () => {
-  it("uses completed and active run icons that match the server-owned state", () => {
-    const view = render(<TaskRunStatus runState="terminal" taskResult={{ status:"completed", terminalReason:"completed" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
-    assert.ok(screen.getByRole("img", { name:"Task complete" }));
+  it("renders the server-projected current turn without treating a completed turn as a completed Task", () => {
+    const view = render(<TaskRunStatus currentTurn={{ state:"ready" }} sandboxState={{ state:"active", runId:"run_1" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+    assert.ok(screen.getByRole("img", { name:"Task ready" }));
+    assert.ok(screen.getByText("Ready for a message"));
 
-    view.rerender(<TaskRunStatus runState="running" capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+    view.rerender(<TaskRunStatus currentTurn={{ state:"running" }} sandboxState={{ state:"active", runId:"run_1" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
     const active = screen.getByRole("img", { name:"Task in progress" });
     assert.match(active.getAttribute("class") ?? "", /animate-spin/);
   });
 
-  it("does not present a cancelled terminal task as successful", () => {
-    render(<TaskRunStatus runState="terminal" taskResult={{ status:"cancelled", terminalReason:"cancelled" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+  it("shows queued work and a released sandbox truthfully", () => {
+    const view = render(<TaskRunStatus currentTurn={{ state:"queued" }} sandboxState={{ state:"active", runId:"run_1" }} capabilities={capabilities} aborting={false} onAbort={async () => undefined} />);
+    assert.ok(screen.getByText("Message queued"));
 
-    assert.ok(screen.getByRole("img", { name:"Task cancelled" }));
-    assert.ok(screen.getByText("Task was cancelled"));
-    assert.equal(screen.queryByText("Task run is complete"), null);
+    view.rerender(<TaskRunStatus currentTurn={{ state:"ready" }} sandboxState={{ state:"released", runId:"run_1" }} capabilities={{ ...capabilities, sendMessage:false }} aborting={false} onAbort={async () => undefined} />);
+    assert.ok(screen.getByRole("img", { name:"Sandbox unavailable" }));
+    assert.ok(screen.getByText("Sandbox is unavailable"));
   });
 });
 
-const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, cancelTask:false, openTerminal:false, editTask:false, archiveTask:false, deleteTask:false };
+const capabilities: TaskCapabilities = { sendMessage:true, editQueuedMessage:false, abortTurn:false, openTerminal:false, releaseSandbox:false, editTask:false, archiveTask:false, deleteTask:false };
 
 function installDom(): void {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url:"http://localhost" });

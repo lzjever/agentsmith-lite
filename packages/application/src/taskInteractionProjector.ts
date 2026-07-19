@@ -1004,6 +1004,7 @@ function monotonicUserStatus(
   incoming: TaskUserMessageInteraction["status"]
 ): TaskUserMessageInteraction["status"] {
   if (!current) return incoming;
+  if(current==="accepted"&&incoming==="queued")return "queued";
   const rank: Record<TaskUserMessageInteraction["status"], number> = {
     pending: 0, dispatching: 1, retrying: 2, queued: 3, accepted: 4, rejected: 4, failed: 4
   };

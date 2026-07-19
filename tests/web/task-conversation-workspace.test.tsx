@@ -18,7 +18,7 @@ describe("TaskConversationWorkspace", () => {
     let unavailable = 0;
     apiClient.getTaskInteractions = async () => { attempts += 1; throw new ApiError(404, "Task not found"); };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
       await waitFor(() => assert.equal(unavailable, 1));
       await new Promise((resolve) => setTimeout(resolve, 1_100));
       assert.equal(attempts, 1);
@@ -36,7 +36,7 @@ describe("TaskConversationWorkspace", () => {
     };
     apiClient.sendTaskMessage = async () => { throw new ApiError(409, "Project is archived"); };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
       fireEvent.change(composer, { target: { value: "Continue" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
@@ -62,7 +62,7 @@ describe("TaskConversationWorkspace", () => {
       return { messageId: "message_2", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, capabilities };
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
       fireEvent.change(composer, { target: { value: "Continue after recovery" } });
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
@@ -89,7 +89,7 @@ describe("TaskConversationWorkspace", () => {
     };
     apiClient.updateTaskMessage = async () => { throw new ApiError(404, "Task message not found"); };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onUnavailable={() => { unavailable += 1; }} onArtifactPublished={() => undefined} />);
       fireEvent.click(await screen.findByRole("button", { name: "Edit queued message" }));
       fireEvent.change(screen.getByRole("textbox", { name: "Queued message" }), { target: { value: "Updated instruction" } });
       fireEvent.click(screen.getByRole("button", { name: "Save message" }));
@@ -118,7 +118,7 @@ describe("TaskConversationWorkspace", () => {
     };
     apiClient.deleteTaskMessage = async () => ({ messageId: queued.id, disposition: "accepted_by_active_run", duplicate: false, queuedMessage: null, interaction: null, capabilities: editableCapabilities });
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       fireEvent.click(await screen.findByRole("button", { name: "Delete queued message" }));
       fireEvent.click(screen.getByRole("button", { name: "Delete message" }));
 
@@ -141,7 +141,7 @@ describe("TaskConversationWorkspace", () => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       assert.ok(await screen.findByRole("alert"));
       assert.ok(screen.getByText("Snapshot service unavailable"));
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -152,10 +152,10 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
-  it("consumes independent server state, run state, and connection events", async () => {
+  it("consumes server-projected queued messages and refreshes the detail projection", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     const observedCapabilities: TaskCapabilities[] = [];
-    const observedRunStates: TaskInteractionSnapshot["runState"][] = [];
+    let projectionRefreshes = 0;
     const queuedMessages = [{ id:"message_1", content:"Queued by server", deliveryStatus:"pending" as const, editable:false, deletable:false, updatedAt:"2026-07-15T00:00:01.000Z" }];
     const disabledCapabilities: TaskCapabilities = { ...capabilities, sendMessage:false, openTerminal:false };
     apiClient.getTaskInteractions = async () => snapshot;
@@ -166,13 +166,12 @@ describe("TaskConversationWorkspace", () => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={(value) => observedCapabilities.push(value)} onRunState={(value) => observedRunStates.push(value)} onArtifactPublished={() => undefined} />);
-      assert.ok(await screen.findByText("Working"));
-      assert.ok(screen.getByText("Queued by server"));
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={(value) => observedCapabilities.push(value)} onProjectionChange={() => { projectionRefreshes += 1; }} onArtifactPublished={() => undefined} />);
+      assert.ok(await screen.findByText("Queued by server"));
       assert.ok(screen.getByText("Some earlier interaction history is no longer available."));
       assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).disabled, true);
       assert.deepEqual(observedCapabilities.at(-1), disabledCapabilities);
-      assert.equal(observedRunStates.at(-1), "running");
+      assert.ok(projectionRefreshes >= 2);
     } finally {
       Object.assign(apiClient, original);
     }
@@ -187,7 +186,7 @@ describe("TaskConversationWorkspace", () => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       assert.ok(await screen.findByText("Live assistant preview is unavailable. Final responses and conversation updates remain available."));
       assert.equal(screen.queryByText(/Conversation updates are temporarily disconnected/), null);
       assert.ok(screen.getByRole("button", { name:"Retry preview" }));
@@ -207,7 +206,7 @@ describe("TaskConversationWorkspace", () => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       assert.ok(await screen.findByText(/Conversation updates are temporarily disconnected\. Stream temporarily unavailable/));
       assert.ok(await screen.findByText("Conversation updates recovered.", undefined, { timeout:3_000 }));
       assert.equal(attempts, 2);
@@ -224,7 +223,7 @@ describe("TaskConversationWorkspace", () => {
     };
     apiClient.abortTaskTurn = async () => { throw new Error("Current turn could not be stopped."); };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} capabilities={{ ...capabilities, abortTurn:true }} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       fireEvent.click(await screen.findByRole("button", { name:"Stop current turn" }));
       assert.ok(await screen.findByRole("alert"));
       assert.ok(screen.getByText("Current turn could not be stopped."));
@@ -247,7 +246,7 @@ describe("TaskConversationWorkspace", () => {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
     };
     try {
-      render(<TaskConversationWorkspace taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      render(<TaskConversationWorkspace {...projectionProps} taskId="task_1" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
       fireEvent.click(await screen.findByRole("button", { name:"Load earlier messages" }));
       assert.ok(await screen.findByText("Earlier history is unavailable"));
       fireEvent.click(screen.getByRole("button", { name:"Load earlier messages" }));
@@ -261,7 +260,8 @@ describe("TaskConversationWorkspace", () => {
 
 });
 
-const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, cancelTask: true, openTerminal: true, editTask:true, archiveTask:false, deleteTask: false };
+const capabilities: TaskCapabilities = { sendMessage: true, editQueuedMessage: false, abortTurn: false, openTerminal: true, releaseSandbox:false, editTask:true, archiveTask:false, deleteTask: false };
+const projectionProps = { currentTurn:{ state:"running" as const }, sandboxState:{ state:"active" as const, runId:"run_1" }, capabilities:{ ...capabilities, editQueuedMessage:true }, onProjectionChange:() => undefined };
 const snapshot: TaskInteractionSnapshot = { items: [], nextPageCursor: null, hasMoreBefore: false, streamCursor: "cursor_1", historyStatus: "complete", queuedMessages: [], runState: "idle", runtimeReachability: "reachable", lastSyncedAt: "2026-07-15T00:00:00.000Z", capabilities };
 const interaction: TaskInteractionSnapshot["items"][number] = { id:"message_older", revision:1, taskId:"task_1", kind:"assistant_message", title:"Assistant", body:"Earlier message", contentMode:"full", occurredAt:"2026-07-14T00:00:00.000Z", updatedAt:"2026-07-14T00:00:00.000Z", status:"completed" };
 

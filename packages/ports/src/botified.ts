@@ -46,6 +46,7 @@ export interface BotifiedDeliveryReceipt {
 
 export interface BotifiedRuntimeStateResult {
   snapshot: unknown;
+  sessionId?: string;
   state?: string;
   timelineCursor?: string;
   activeItems?: unknown[];
@@ -204,9 +205,13 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     const result: BotifiedRuntimeStateResult = {
       snapshot: body
     };
+    const sessionId = stringField(record, "session_id");
     const state = stringField(record, "state");
     const timelineCursor = stringField(record, "timeline_cursor");
     const activeItems = arrayFieldOrUndefined(record, "active_items");
+    if (sessionId !== undefined) {
+      result.sessionId = sessionId;
+    }
     if (state !== undefined) {
       result.state = state;
     }

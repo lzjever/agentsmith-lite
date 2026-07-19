@@ -93,7 +93,7 @@ describe("profile and settings API", () => {
     store.deleteProjectDependenciesAndProject = async (id) => id === failingProjectId ? false : deleteProject(id);
     const failed = await call("DELETE", `/api/v1/projects/${failingProjectId}`, undefined, "project-delete-failure");
     assert.equal(failed.response.status, 409);
-    assert.deepEqual(failed.body, { error: "Project deletion is still pending" });
+    assert.deepEqual(failed.body, { error: "Project deletion preparation is still pending" });
     assert.equal((await store.findProject(failingProjectId))?.lifecycleStatus, "deleting");
   });
   it("rejects oversized JSON bodies before buffering them", async () => {

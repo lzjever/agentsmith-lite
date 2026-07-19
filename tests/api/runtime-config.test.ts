@@ -5,7 +5,6 @@ import os from "node:os";
 import { describe, it } from "node:test";
 import {
   DEFAULT_API_BIND_ADDRESS,
-  optionalLiveSandboxDurationMs,
   optionalRuntimeTickIntervalMs,
   parseApiBindAddress,
   parseAuthMode,
@@ -149,15 +148,6 @@ describe("runtime config", () => {
         /AGENTSMITH_LITE_RUNTIME_TICK_MS must be a positive integer/
       );
     }
-  });
-
-  it("parses optional live sandbox duration overrides", () => {
-    assert.equal(optionalLiveSandboxDurationMs(undefined, "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS"), undefined);
-    assert.equal(optionalLiveSandboxDurationMs(" 60000 ", "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS"), 60_000);
-    assert.throws(
-      () => optionalLiveSandboxDurationMs("0", "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS"),
-      /AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS must be a positive integer/
-    );
   });
 
   it("parses namespace sandbox limits with the product default and fail-closed invalid values", () => {

@@ -2,7 +2,6 @@ import path from "node:path";
 import { FetchBotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
 import { SandboxKubernetesPort } from "../../sandbox-controller/src/kubernetesPort.js";
 import {
-  optionalLiveSandboxDurationMs,
   optionalRuntimeTickIntervalMs,
   parseApiBindAddress,
   requireCredentialEncryptionConfig,
@@ -35,12 +34,6 @@ if (!modelCaConfigMap && modelCaConfigKey) {
 const runtimeTickIntervalMs = liveSandboxEnabled
   ? optionalRuntimeTickIntervalMs(process.env.AGENTSMITH_LITE_RUNTIME_TICK_MS)
   : undefined;
-const liveSandboxIdleTimeoutMs = liveSandboxEnabled
-  ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS, "AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS")
-  : undefined;
-const liveSandboxMaxLifetimeMs = liveSandboxEnabled
-  ? optionalLiveSandboxDurationMs(process.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS")
-  : undefined;
 const oidcClient = await createOpenIdConnectClient(authConfig.oidc);
 const privateProviderHosts = (process.env.AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
 
@@ -67,8 +60,6 @@ const server = await createApiServer({
       }
     : {}),
   ...(runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs } : {}),
-  ...(liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs } : {}),
-  ...(liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs } : {}),
   ...(liveSandboxEnabled
     ? {
         botifiedClient: new FetchBotifiedRuntimeHttpClient(),

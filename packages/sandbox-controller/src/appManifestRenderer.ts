@@ -29,8 +29,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   const webHealthPath = publicPathFor(publicBasePath, "/health");
   const appDataRoot = resolveAppDataRoot(input.env);
   const runtimeTickMs = input.env.AGENTSMITH_LITE_RUNTIME_TICK_MS?.trim();
-  const liveSandboxIdleTtlMs = input.env.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS?.trim();
-  const liveSandboxMaxLifetimeMs = input.env.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS?.trim();
   const privateProviderHosts = input.env.AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS?.trim();
   const modelCa = resolveModelCa(input);
   const labels = {
@@ -70,8 +68,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         AGENTSMITH_LITE_SANDBOX_MODE: input.env.AGENTSMITH_LITE_SANDBOX_MODE ?? "dry-run",
         AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT:
           input.env.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT ?? String(DEFAULT_SANDBOX_NAMESPACE_LIMIT),
-        ...(liveSandboxIdleTtlMs ? { AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS: liveSandboxIdleTtlMs } : {}),
-        ...(liveSandboxMaxLifetimeMs ? { AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS: liveSandboxMaxLifetimeMs } : {}),
         ...(runtimeTickMs ? { AGENTSMITH_LITE_RUNTIME_TICK_MS: runtimeTickMs } : {}),
         ...(privateProviderHosts ? { AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS: privateProviderHosts } : {}),
         BOTIFIED_RUNNER_IMAGE: runnerImage,

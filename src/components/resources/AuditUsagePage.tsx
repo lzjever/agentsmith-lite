@@ -142,7 +142,7 @@ const auditActionLabels: Record<(typeof PROJECT_AUDIT_ACTIONS)[number], string> 
   "chat.message.send": "Sent chat message", "chat.message.retry": "Retried chat message", "chat.message.stop": "Stopped chat message", "chat.message.edit": "Edited chat message", "chat.message.delete": "Deleted chat message", "chat.message.branch": "Branched conversation",
   "task.create": "Created task", "task.edit": "Edited task", "task.archive": "Archived task", "task.delete": "Deleted task",
   "task.message.create": "Sent task message", "task.message.edit": "Edited task message", "task.message.delete": "Deleted task message", "task.cancel": "Cancelled task", "task.completed": "Task completed", "task.failed": "Task failed", "task.expired": "Task expired", "task.cleaned": "Cleaned task resources",
-  "artifact.project": "Projected task artifact", "sandbox.failed": "Sandbox failed",
+  "artifact.project": "Projected task artifact", "sandbox.failed": "Sandbox failed", "sandbox.release_requested": "Requested sandbox release", "sandbox.released": "Released sandbox",
   "file.upload": "Uploaded file", "file.delete": "Deleted file", "file.quota": "Reached file quota",
   "alert.resolve": "Resolved alert", "alert.dismiss": "Dismissed alert", "alert.rule.create": "Created alert rule", "alert.rule.update": "Updated alert rule", "alert.rule.delete": "Deleted alert rule", "alert.acknowledge": "Acknowledged alert", "alert.silence": "Silenced alert"
 };

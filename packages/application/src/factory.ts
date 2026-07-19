@@ -47,8 +47,6 @@ export interface CreateApplicationServicesInput {
   requireBuiltinAdminPasswordForLiveSandbox?: boolean;
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
-  liveSandboxMaxLifetimeMs?: number;
-  liveSandboxIdleTimeoutMs?: number;
   taskDeliveryLeaseMs?: number;
   taskMaintenanceLeaseMs?: number;
   taskRetryDelayMs?: number;
@@ -96,25 +94,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
     dataRoot: input.dataRoot,
     namespace,
-    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {}),
-    terminalFailureSync: {
-      async syncTerminalFailureRun(runId) {
-        return tasks.syncTerminalFailureRun(runId);
-      }
-    },
-    artifactProjection: {
-      async projectPublishedArtifactsForRun(runId) {
-        return tasks.projectPublishedArtifactsForRun(runId);
-      }
-    },
-    taskLifecycle: {
-      async finalizeTaskForRunCleanup(taskId, reason) {
-        return tasks.finalizeTaskForRunCleanup(taskId, reason);
-      },
-      async canCleanupTaskRuntime(taskId) {
-        return tasks.canCleanupTaskRuntime(taskId);
-      }
-    }
+    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {})
   });
   const taskConfig = {
     dataRoot: input.dataRoot,
@@ -126,10 +106,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     ...(input.modelCa ? { modelCa: input.modelCa } : {}),
     sandboxLifecycle,
     ...(input.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: input.sandboxNamespaceLimit } : {}),
-    ...(input.liveSandboxMaxLifetimeMs !== undefined ? { liveSandboxMaxLifetimeMs: input.liveSandboxMaxLifetimeMs } : {}),
-    ...(input.liveSandboxIdleTimeoutMs !== undefined ? { liveSandboxIdleTimeoutMs: input.liveSandboxIdleTimeoutMs } : {}),
     ...(input.taskDeliveryLeaseMs !== undefined ? { deliveryLeaseMs: input.taskDeliveryLeaseMs } : {}),
-    ...(input.taskMaintenanceLeaseMs !== undefined ? { maintenanceLeaseMs: input.taskMaintenanceLeaseMs } : {}),
     ...(input.taskRetryDelayMs !== undefined ? { retryDelayMs: input.taskRetryDelayMs } : {}),
     contexts,
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
@@ -148,7 +125,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const runtime = new RuntimeService(tasks, sandboxLifecycle, policies, {
     ...(input.runtimeTickIntervalMs !== undefined ? { tickIntervalMs: input.runtimeTickIntervalMs } : {})
   });
-  const deletion = new DeletionService(input.store, tasks, input.dataRoot);
+  const deletion = new DeletionService(input.store, input.dataRoot);
 
   return {
     auth,

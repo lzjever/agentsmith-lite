@@ -32,8 +32,6 @@ import type {
   WorkspaceMembership,
   ManagedWorkspaceMembershipRole,
   WorkspaceMembershipView,
-  TaskSummary,
-  TaskTerminalReason,
   TaskListArchivedFilter,
   TaskListSort,
   SandboxRenderResult
@@ -134,17 +132,7 @@ export interface TaskInteractionActiveLifecycleMutation {
   updatedAt: string;
 }
 
-export interface TaskInteractionTerminalLifecycleMutation {
-  kind: "terminal";
-  terminalReason: TaskTerminalReason;
-  updatedAt: string;
-  auditEvent: ProjectAuditEvent;
-  terminalInteractionChanges?: TaskInteractionChangeInput[];
-}
-
-export type TaskInteractionLifecycleMutation =
-  | TaskInteractionActiveLifecycleMutation
-  | TaskInteractionTerminalLifecycleMutation;
+export type TaskInteractionLifecycleMutation = TaskInteractionActiveLifecycleMutation;
 
 export interface PersistTaskInteractionMutationInput {
   taskId: string;
@@ -253,8 +241,6 @@ export interface PersistedSandboxRunState {
     configMapKey: string;
     path: string;
   };
-  expiresAt?: string | null;
-  idleExpiresAt?: string | null;
   timelineCursor?: string | null;
   terminalFailure?: PersistedSandboxTerminalFailure | null;
   startupFailure?: PersistedSandboxStartupFailure | null;
@@ -289,6 +275,19 @@ export interface SandboxRunStore {
     run: PersistedSandboxRunState
   ): Promise<PersistedSandboxRunState | null>;
 }
+
+export type SandboxGuardedDeletionResult<T> = { kind: "ready"; value: T } | { kind: "sandbox_not_released" } | { kind: "not_found_or_forbidden" };
+
+export interface TaskSandboxReleaseMutationInput {
+  runId: string;
+  taskId: string;
+  expectedFencingToken: number;
+  run: PersistedSandboxRunState;
+  auditEvent: ProjectAuditEvent;
+  idempotency: CompleteTaskIdempotencyInput;
+}
+
+export type TaskSandboxReleaseMutationResult = "applied" | "already_requested" | "conflict";
 
 export interface LeaseRecord {
   name: string;
@@ -373,7 +372,7 @@ export interface ProductStore {
   listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]>;
   findWorkspace(id: string): Promise<Workspace | null>;
   updateWorkspaceName(workspaceId: string, name: string, updatedAt: string, expectedName: string): Promise<Workspace | null>;
-  beginWorkspaceDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<Workspace | null>;
+  beginWorkspaceDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<SandboxGuardedDeletionResult<Workspace>>;
   setWorkspaceLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Workspace | null>;
   transferWorkspaceOwner(workspaceId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Workspace | null>;
   deleteWorkspaceAfterProjects(id: string): Promise<boolean>;
@@ -391,10 +390,11 @@ export interface ProductStore {
   setProjectPin(userId: string, projectId: string, pinnedAt: string | null): Promise<boolean>;
   findProject(id: string): Promise<Project | null>;
   updateProjectName(projectId: string, name: string, updatedAt: string, expectedName: string): Promise<Project | null>;
-  beginProjectDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<Project | null>;
+  beginProjectDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<SandboxGuardedDeletionResult<Project>>;
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
   deleteProjectDependenciesAndProject(id: string): Promise<boolean>;
+  deleteProjectAfterDependencies(id: string): Promise<boolean>;
   createFileLibrary(value: FileLibrary): Promise<FileLibrary | null>;
   findFileLibrary(id: string): Promise<FileLibrary | null>;
   listFileLibrariesForProject(projectId: string): Promise<FileLibrary[]>;
@@ -499,17 +499,9 @@ export interface ProductStore {
   recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<PersistedAgentTask | null>;
   deferTaskStart(input: TaskDeliveryDeferInput): Promise<PersistedAgentTask | null>;
   failTaskStart(input: TaskDeliveryFailureInput): Promise<PersistedAgentTask | null>;
-  finalizeTaskLifecycle(input: FinalizeTaskLifecycleInput): Promise<FinalizeTaskLifecycleResult | null>;
-  listTasksForArtifactProjection(now: string, limit: number): Promise<PersistedAgentTask[]>;
-  claimTaskArtifactProjection(input: TaskStageClaimInput): Promise<PersistedAgentTask | null>;
-  completeTaskArtifactProjection(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null>;
-  failTaskArtifactProjection(input: TaskStageFailureInput): Promise<PersistedAgentTask | null>;
-  listTasksForCleanup(now: string, limit: number): Promise<PersistedAgentTask[]>;
-  claimTaskCleanup(input: TaskStageClaimInput): Promise<PersistedAgentTask | null>;
-  completeTaskCleanup(input: TaskStageCompleteInput): Promise<PersistedAgentTask | null>;
-  failTaskCleanup(input: TaskStageFailureInput): Promise<PersistedAgentTask | null>;
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
   completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean>;
+  requestTaskSandboxRelease(input: TaskSandboxReleaseMutationInput): Promise<TaskSandboxReleaseMutationResult>;
   completeTaskIdempotencyForResource(resourceId: string, responseStatus: number, responseBody: unknown, updatedAt: string): Promise<number>;
   persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult>;
   readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null>;
@@ -531,12 +523,13 @@ export interface ProductStore {
   recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null>;
   deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null>;
   failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
-  findTaskSummary(taskId: string): Promise<TaskSummary | null>;
-  listTaskSummariesForProject(projectId: string): Promise<TaskSummary[]>;
+  findTaskSummary(taskId: string): Promise<StoredTaskSummary | null>;
+  listTaskSummariesForProject(projectId: string): Promise<StoredTaskSummary[]>;
 }
 
 export interface AtomicTaskCreateInput {
   task: PersistedAgentTask;
+  initialMessage?: PersistedTaskMessage;
   newFileLibrary?: FileLibrary;
   reserveActive: boolean;
   runtimeState?: Record<string, unknown>;
@@ -559,7 +552,6 @@ export interface PersistTaskArtifactProjectionInput {
 
 export interface TaskStoreListQuery {
   search: string;
-  statuses: AgentTaskStatus[];
   archived: TaskListArchivedFilter;
   sort: TaskListSort;
   direction: "asc" | "desc";
@@ -609,38 +601,9 @@ export interface TaskDeliveryFailureInput {
   updatedAt: string;
 }
 
-export interface FinalizeTaskLifecycleInput {
-  taskId: string;
-  terminalReason: TaskTerminalReason;
-  updatedAt: string;
-  auditEvent: ProjectAuditEvent;
-  terminalInteractionChanges?: TaskInteractionChangeInput[];
-}
+export interface StoredTaskSummary { taskId: string; artifactCount: number; updatedAt: string; }
 
-export interface FinalizeTaskLifecycleResult {
-  task: PersistedAgentTask;
-  applied: boolean;
-}
-
-export interface TaskStageClaimInput {
-  id: string;
-  claimToken: string;
-  claimedAt: string;
-  leaseExpiresAt: string;
-}
-
-export interface TaskStageCompleteInput {
-  id: string;
-  claimToken: string;
-  updatedAt: string;
-}
-
-export interface TaskStageFailureInput extends TaskStageCompleteInput {
-  safeError: string;
-  nextRetryAt: string;
-}
-
-export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;

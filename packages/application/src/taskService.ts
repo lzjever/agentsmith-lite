@@ -22,10 +22,11 @@ import type {
   TaskQueuedMessage,
   TaskRunState,
   TaskRuntimeReachability,
+  TaskSandboxReleaseReceipt,
   TaskListPage,
   TaskListQuery,
   TaskSummary,
-  TaskTerminalReason
+  TaskStateProjection
 } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
@@ -37,7 +38,6 @@ import type { FileLibraryService } from "./fileLibraryService.js";
 import { BotifiedHttpError, type BotifiedDeliveryReceipt, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
 import type {
   AtomicTaskCreateInput,
-  FinalizeTaskLifecycleResult,
   PersistTaskArtifactProjectionInput,
   PersistedAgentTask,
   PersistedSandboxRunState,
@@ -71,13 +71,8 @@ import {
 } from "../../sandbox-controller/src/reconciler.js";
 import { EndpointService } from "./endpointService.js";
 import {
-  DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS,
-  DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS,
-  refreshSandboxRunActivity,
-  requestSandboxRunCleanup,
   type SandboxKubernetesInventoryPort,
-  type SandboxLifecycleService,
-  type SandboxTerminalFailureSyncResult
+  type SandboxLifecycleService
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { detectProjectFileMediaType,readRegularFileWithoutFollowingSymlink,withProjectFileLock } from "./fileService.js";
@@ -118,13 +113,10 @@ export interface TaskServiceConfig {
   botifiedBrokerBaseUrlForTask?: (input: BotifiedBrokerAddressInput) => string;
   liveSandbox?: TaskLiveSandboxConfig;
   sandboxNamespaceLimit?: number;
-  liveSandboxMaxLifetimeMs?: number;
-  liveSandboxIdleTimeoutMs?: number;
   credentials?: CredentialService;
   modelCa?: ModelCaReference;
   sandboxLifecycle?: SandboxLifecycleService;
   deliveryLeaseMs?: number;
-  maintenanceLeaseMs?: number;
   retryDelayMs?: number;
   contexts?: ContextService;
 }
@@ -156,7 +148,6 @@ interface BotifiedTaskRuntimeState {
 }
 
 type BotifiedOperation = "send message" | "read state" | "read timeline" | "download file" | "abort" | "stop background work";
-type LiveSandboxCleanupStatus = "none" | "pending" | "cleaned";
 
 export interface TaskInteractionChangePage {
   changes: Array<{ cursor: string; item: TaskInteractionItem }>;
@@ -204,9 +195,7 @@ const MAX_TASK_ARTIFACT_FILES = 128;
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
-const DEFAULT_MAINTENANCE_LEASE_MS = 60_000;
 const DEFAULT_TASK_RETRY_DELAY_MS = 5_000;
-const MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS = 3;
 const IDEMPOTENCY_LEASE_MS = 30_000;
 const INTERACTION_HISTORY_PAGE_LIMIT = 100;
 const INTERACTION_SYNC_PAGE_LIMIT = 200;
@@ -261,7 +250,6 @@ export class BotifiedTaskPortError extends ProductError {
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
   private readonly occupiedTerminalTaskIds = new Set<string>();
-  private readonly terminalActivityRefreshAfter = new Map<string,number>();
   private readonly abortingTaskIds = new Set<string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
 
@@ -326,7 +314,8 @@ export class TaskService {
         if(ownsDirectory)await this.compensateLibraryWorkspace(project.rootPath,library);
         throw error;
       }
-      await this.persistInitialPromptInteraction(persisted);
+      const initialMessage=(await this.store.listTaskMessages(persisted.id))[0];
+      if(initialMessage)await this.persistMessageInteraction(initialMessage);
       await this.policies.recordOperation(projectId, userId, "task.create", "accepted", persisted.id);
       return publicTask(persisted);
     });
@@ -384,8 +373,7 @@ export class TaskService {
     const live = this.config.liveSandbox !== undefined;
     const botifiedPort = this.config.botifiedPort ?? 3099;
     const resourceNames = sandboxResourceNamesForTask(input.id);
-    const startDeliveryKey = live ? deliveryKeyForStart(input.id, runId) : null;
-    const startRequestHash = live ? deliveryRequestHash(input.prompt) : null;
+    const initialMessageId = newId("message");
     const sandbox = live ? renderSandboxResources({
       namespace: this.config.namespace,
       workspaceId: input.project.workspaceId,
@@ -413,7 +401,7 @@ export class TaskService {
       fileLibraryId: input.library.id,
       title: input.title,
       prompt: input.prompt,
-      status: live ? "starting" : "completed",
+      status: live ? "starting" : "queued",
       runId,
       createdByUserId: input.createdByUserId,
       executionMode: live ? "live" : "dry-run",
@@ -421,34 +409,35 @@ export class TaskService {
       activeReservation: live,
       archivedAt: null,
       deletedAt: null,
-      terminalReason: live ? null : "not_executed",
-      terminalizedAt: live ? null : timestamp,
-      startDeliveryKey,
-      startRequestHash,
+      terminalReason: null,
+      terminalizedAt: null,
+      startDeliveryKey: null,
+      startRequestHash: null,
       startClaimToken: null,
       startReceipt: null,
       startTimelineCursor: null,
-      startIntentStatus: live ? "pending" : null,
+      startIntentStatus: null,
       startClaimedAt: null,
       startLeaseExpiresAt: null,
       startAttemptCount: 0,
       startNextRetryAt: null,
       startSafeError: null,
-      artifactProjectionStatus: live ? "pending" : "drained",
+      artifactProjectionStatus: "pending",
       artifactProjectionError: null,
-      cleanupStatus: live ? "pending" : "completed",
+      cleanupStatus: "pending",
       cleanupError: null,
-      cleanupCompletedAt: live ? null : timestamp,
+      cleanupCompletedAt: null,
       agentContext: input.agentContext,
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    if (!live) return { task, reserveActive: false };
+    const initialMessage:PersistedTaskMessage={id:initialMessageId,taskId:input.id,actorId:input.createdByUserId,content:input.prompt,deliveryKey:deliveryKeyForMessage(initialMessageId),requestHash:deliveryRequestHash(input.prompt),claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:live?"pending":"accepted",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null};
+    if (!live) return { task, initialMessage, reserveActive: false };
     const serviceKey = this.serviceKeyForTask(task);
     requireBotifiedServiceKey(serviceKey);
     const runtimeState:Record<string,unknown>={botifiedBaseUrl:this.botifiedBaseUrlForTask(input.id,botifiedPort)};
     const sandboxRun = this.buildLiveSandboxRun({ task, timestamp, botifiedPort, projectSubPath: input.project.rootPath, resourceNames, fileLibraryRootSubPath:input.library.rootSubPath });
-    return { task, reserveActive: true, runtimeState, sandboxRun };
+    return { task, initialMessage, reserveActive: true, runtimeState, sandboxRun };
   }
 
   private async runIdempotentTaskOperation<T>(
@@ -491,53 +480,21 @@ export class TaskService {
     const limit = Math.min(100, Math.max(1, Math.floor(query.limit ?? 25)));
     const listQuery = {
       search: (query.search ?? "").trim().slice(0, 200),
-      statuses: normalizeTaskStatuses(query.statuses),
       archived: query.archived ?? "exclude",
       sort: query.sort ?? "updated_at",
       direction: query.direction ?? "desc"
     };
     const offset = decodeTaskListCursor(query.cursor, listQuery);
     const page = await this.store.queryTasksForProject(projectId, { ...listQuery, offset, limit });
-    return { items: page.items.map(publicTask), total: page.total, nextCursor: offset + page.items.length < page.total ? encodeTaskListCursor(offset + page.items.length, listQuery) : null };
-  }
-
-  /** Internal deletion path: project data remains until every live sandbox is drained and cleaned. */
-  async stopTasksForProjectDeletion(projectId: string): Promise<void> {
-    for (const task of await this.store.listTasksForProject(projectId)) {
-      let current = task;
-      if (isActiveTaskStatus(current.status)) {
-        current = await this.finalizeTaskLifecycle(current.id, "cancelled", null);
-        await this.bestEffortAbortAndRequestCleanup(current);
-      }
-      if (current.executionMode !== "live") continue;
-
-      if (current.artifactProjectionStatus !== "drained") {
-        await this.drainTaskArtifacts(current);
-        current = await this.requireTaskDeletionStage(current.id, "artifact projection");
-      }
-      if (current.artifactProjectionStatus !== "drained") {
-        throw new ProductError("Task artifact projection is still pending", 409);
-      }
-
-      if (current.cleanupStatus !== "completed") {
-        await this.cleanupTaskRuntime(current);
-        current = await this.requireTaskDeletionStage(current.id, "sandbox cleanup");
-      }
-      if (current.cleanupStatus !== "completed") {
-        throw new ProductError("Task sandbox cleanup is still pending", 409);
-      }
-    }
-  }
-
-  private async requireTaskDeletionStage(taskId: string, stage: string): Promise<PersistedAgentTask> {
-    const task = await this.store.findTask(taskId);
-    if (!task) throw new ProductError(`Task disappeared during ${stage}`, 409);
-    return task;
+    return { items:await Promise.all(page.items.map(async(task)=>({task:publicTask(task),...await this.taskStateProjection(task)}))), total: page.total, nextCursor: offset + page.items.length < page.total ? encodeTaskListCursor(offset + page.items.length, listQuery) : null };
   }
 
   async listTaskSummaries(userId: string, projectId: string): Promise<TaskSummary[]> {
     await this.workspaces.requireProjectForUser(userId, projectId, "view");
-    return this.store.listTaskSummariesForProject(projectId);
+    return Promise.all((await this.store.listTaskSummariesForProject(projectId)).map(async(summary)=>{
+      const task=await this.store.findTask(summary.taskId);if(!task)throw new ProductError("Task not found",404);
+      return{...summary,...await this.taskStateProjection(task)};
+    }));
   }
 
   async getTask(userId: string, taskId: string): Promise<AgentTask> {
@@ -546,14 +503,45 @@ export class TaskService {
 
   async getTaskDetail(userId: string, taskId: string): Promise<TaskDetailProjection> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
-    return { task: publicTask(task), capabilities: await this.taskCapabilities(userId, task) };
+    const state=await this.taskStateProjection(task);
+    const runtime=await this.taskRuntimePresentation(task);
+    return {
+      task:publicTask(task),
+      ...state,
+      capabilities:await this.taskCapabilities(userId,task,runtime.runState,[],runtime.reachability)
+    };
+  }
+
+  async releaseTaskSandbox(userId:string,taskId:string,idempotencyKey?:string):Promise<TaskSandboxReleaseReceipt>{
+    const task=await this.requireTaskRecordForUser(userId,taskId,"write");
+    const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId}),claimToken=newId("idempotency_claim"),timestamp=nowIso();
+    const begun=await this.store.beginTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,resourceId:task.runId,claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)});
+    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+    if(begun.kind==="in_progress")throw new ProductError("Idempotent task operation is still in progress",409);
+    if(begun.kind==="replay"){if(begun.responseStatus>=400){const body=isUnknownRecord(begun.responseBody)?begun.responseBody:{};throw new ProductError(typeof body.error==="string"?body.error:"Task operation failed",begun.responseStatus,typeof body.code==="string"?body.code:undefined);}return structuredClone(begun.responseBody) as TaskSandboxReleaseReceipt;}
+    try{
+      const currentTask=await this.store.findTask(task.id);
+      if(!currentTask||currentTask.deletedAt)throw new ProductError("Task not found",404);
+      const run=await this.store.sandboxRuns.get(currentTask.runId);
+      if(!run||run.taskId!==currentTask.id||run.runId!==currentTask.runId){
+        throw new ProductError("Task sandbox ownership record is unavailable or mismatched",409,"task_sandbox_unknown");
+      }
+      const cleaned=run.cleanupStatus==="cleaned"||run.phase==="cleaned",updatedAt=nowIso();
+      const capabilities=await this.taskCapabilities(userId,currentTask);
+      const response:TaskSandboxReleaseReceipt={taskId:task.id,sandboxState:{state:cleaned?"released":"release_requested",runId:run.runId},capabilities:{...capabilities,sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,releaseSandbox:false,archiveTask:cleaned&&!currentTask.activeReservation&&capabilities.archiveTask,deleteTask:cleaned&&!currentTask.activeReservation&&capabilities.deleteTask}};
+      const nextRun=cleaned||run.cleanupStatus==="cleanup_requested"||run.cleanupStatus==="deleting"?run:{...run,phase:"stopping" as const,cleanupStatus:"cleanup_requested" as const,fencingToken:run.fencingToken+1,updatedAt};
+      const result=await this.store.requestTaskSandboxRelease({runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,run:nextRun,auditEvent:{id:`audit_sandbox_release_requested_${run.runId}`,projectId:task.projectId,actorId:userId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id},createdAt:updatedAt},idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt}});
+      if(result==="conflict")throw new ProductError("Task sandbox release changed concurrently; retry",409,"task_sandbox_release_conflict");
+      return response;
+    }catch(error){if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});throw error;}
   }
 
   async getTaskSummary(userId: string, taskId: string): Promise<TaskSummary> {
     await this.requireTaskForUser(userId, taskId, "view");
     const summary = await this.store.findTaskSummary(taskId);
     if (!summary) throw new ProductError("Task not found", 404);
-    return summary;
+    const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);
+    return {...summary,...await this.taskStateProjection(task)};
   }
 
   async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
@@ -563,7 +551,6 @@ export class TaskService {
     try{
       const serviceKey=this.serviceKeyForTask(task);
       const state=await this.readRuntimeState(task,serviceKey);
-      await this.recordTaskTerminalActivity(task.id);
       return{baseUrl:state.baseUrl,serviceKey};
     }catch(error){
       this.occupiedTerminalTaskIds.delete(task.id);
@@ -577,27 +564,10 @@ export class TaskService {
 
   closeTaskTerminal(taskId:string):void{
     this.occupiedTerminalTaskIds.delete(taskId);
-    this.terminalActivityRefreshAfter.delete(taskId);
-  }
-
-  async recordTaskTerminalActivity(taskId:string):Promise<void>{
-    if(!this.occupiedTerminalTaskIds.has(taskId))return;
-    const now=new Date();
-    if((this.terminalActivityRefreshAfter.get(taskId)??0)>now.getTime())return;
-    const idleTimeoutMs=this.liveSandboxIdleTimeoutMs();
-    this.terminalActivityRefreshAfter.set(taskId,now.getTime()+Math.max(100,Math.min(30_000,idleTimeoutMs/4)));
-    try{
-      const task=await this.store.findTask(taskId);
-      if(!task||task.executionMode!=="live"||task.terminalReason||!isActiveTaskStatus(task.status))return;
-      await refreshSandboxRunActivity(this.store,task.runId,{idleTimeoutMs,now});
-    }catch{
-      this.terminalActivityRefreshAfter.delete(taskId);
-    }
   }
 
   async sendTaskMessage(userId: string, taskId: string, content: string, idempotencyKey?: string): Promise<TaskMessageReceipt> {
     const task = await this.requireTaskRecordForUser(userId, taskId, "write");
-    if(isTerminalTask(task))throw new ProductError("Terminal Tasks cannot receive messages",409);
     const text = requireNonEmptyString(content, "task.message.content");
     return this.runIdempotentTaskOperation({
       actorId: userId,
@@ -610,15 +580,15 @@ export class TaskService {
       if (existing) return this.messageReceipt(userId, await this.dispatchTaskMessage(existing), false);
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
-      if(isTerminalTask(current))throw new ProductError("Terminal Tasks cannot receive messages",409);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to receive messages", 409);
+      if(!await this.activeSandboxRun(current))throw new ProductError("Task sandbox is released; cold start is not available",409,"task_sandbox_released");
       const timestamp = nowIso();
       const message: PersistedTaskMessage = {
         id,
         taskId: task.id,
         actorId: userId,
         content: text,
-        deliveryKey: deliveryKeyForMessage(id, task.runId),
+        deliveryKey: deliveryKeyForMessage(id),
         requestHash: deliveryRequestHash(text),
         claimToken: null,
         receipt: null,
@@ -684,15 +654,14 @@ export class TaskService {
 
   async archiveTask(userId:string,taskId:string,idempotencyKey?:string):Promise<AgentTask>{
     const task=await this.requireTaskRecordForUser(userId,taskId,"write");
-    return this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"archive",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current||current.deletedAt)throw new ProductError("Task not found",404);const archived=current.archivedAt?current:await this.store.archiveTask(task.id,nowIso());if(!archived)throw new ProductError("Only a terminal task can be archived",409);await this.policies.recordOperation(task.projectId,userId,"task.archive","accepted",task.id,"task",{taskId:task.id});return publicTask(archived);});
+    return this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"archive",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current||current.deletedAt)throw new ProductError("Task not found",404);if(current.activeReservation||!await this.sandboxReleaseConfirmed(current))throw new ProductError("Release the Task sandbox before archiving",409,"task_sandbox_active");const archived=current.archivedAt?current:await this.store.archiveTask(task.id,nowIso());if(!archived)throw new ProductError("Task could not be archived",409);await this.policies.recordOperation(task.projectId,userId,"task.archive","accepted",task.id,"task",{taskId:task.id});return publicTask(archived);});
   }
 
   async deleteTask(userId:string,taskId:string,idempotencyKey?:string):Promise<{deleted:true;taskId:string}>{
     const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);await this.workspaces.requireProjectForUser(userId,task.projectId,"write");
     return this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"delete",key:idempotencyKey,request:{taskId}},task.id,async()=>{
       const current=await this.store.findTask(task.id);if(!current)throw new ProductError("Task not found",404);
-      if(!current.terminalReason)throw new ProductError("Only a terminal task can be deleted",409);
-      if(current.executionMode==="live"&&current.cleanupStatus!=="completed")throw new ProductError("Task cleanup is still pending",409);
+      if(current.activeReservation||!await this.sandboxReleaseConfirmed(current))throw new ProductError("Release the Task sandbox before deleting",409,"task_sandbox_active");
       const project=await this.store.findProject(task.projectId);if(!project)throw new ProductError("Task project not found",409);
       if(!current.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
       const library=await this.store.findFileLibrary(current.fileLibraryId);
@@ -705,7 +674,7 @@ export class TaskService {
         await rm(taskRoot,{recursive:true,force:true});
         await this.removeEmptyDeletedTaskArtifactDirectory(projectRoot,library,task.id);
         const deleted=await this.store.deleteTaskData(task.id,nowIso());
-        if(!deleted)throw new ProductError("Only a terminal task can be deleted",409);
+        if(!deleted)throw new ProductError("Task could not be deleted",409);
       });
       await this.policies.refreshFileAlerts(task.projectId);
       await this.policies.recordOperation(task.projectId,userId,"task.delete","accepted",task.id,"task",{taskId:task.id});
@@ -727,103 +696,20 @@ export class TaskService {
       syncedTaskIds: [],
       failedTaskIds: []
     };
-    for(const intent of await this.store.listTaskStartIntentsDue(nowIso(),100)){try{await this.dispatchTaskStart(intent);result.syncedTaskIds.push(intent.id);}catch{result.failedTaskIds.push(intent.id);}}
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
     const activeTasks = await this.store.listActiveTasks();
     result.activeTaskCount=activeTasks.length;
     for (const task of activeTasks) {
-      if(task.startIntentStatus!=="dispatched")continue;
       try {
+        if(!await this.activeSandboxRun(task))continue;
         await this.syncTaskTimeline(task);
         result.syncedTaskIds.push(task.id);
       } catch {
         result.failedTaskIds.push(task.id);
       }
     }
-    for(const task of await this.store.listTasksForArtifactProjection(nowIso(),100)){try{await this.drainTaskArtifacts(task);}catch{result.failedTaskIds.push(task.id);}}
-    for(const task of await this.store.listTasksForCleanup(nowIso(),100)){try{await this.cleanupTaskRuntime(task);}catch{result.failedTaskIds.push(task.id);}}
     result.syncedTaskIds=[...new Set(result.syncedTaskIds)];result.failedTaskIds=[...new Set(result.failedTaskIds)];
     return result;
-  }
-
-  async cancelTask(userId: string, taskId: string, idempotencyKey?:string): Promise<AgentTask> {
-    const task=await this.requireTaskRecordForUser(userId,taskId,"write");
-    const result=await this.runIdempotentTaskOperation({actorId:userId,projectId:task.projectId,operation:"cancel",key:idempotencyKey,request:{taskId}},task.id,async()=>{const current=await this.store.findTask(task.id);if(!current||current.deletedAt)throw new ProductError("Task not found",404);if(current.terminalReason&&current.terminalReason!=="cancelled")throw new ProductError("Task has already finished",409);return publicTask(current.terminalReason==="cancelled"?current:await this.finalizeTaskLifecycle(task.id,"cancelled",userId));});
-    const persisted=await this.store.findTask(result.id);
-    if(persisted?.executionMode==="live"&&!isTerminalTask(task)&&persisted.terminalReason==="cancelled")await this.bestEffortAbortAndRequestCleanup(persisted);
-    return persisted ? publicTask(persisted) : result;
-  }
-
-  async finalizeTaskForRunCleanup(taskId:string,reason:Extract<TaskTerminalReason,"failed"|"expired"|"cancelled">):Promise<void>{
-    const task=await this.store.findTask(taskId);
-    if(!task||task.terminalReason)return;
-    await this.finalizeTaskLifecycle(taskId,isTerminalTaskStatus(task.status)?terminalReasonForStatus(task.status):reason,null);
-  }
-
-  async canCleanupTaskRuntime(taskId:string):Promise<boolean>{
-    const task=await this.store.findTask(taskId);
-    return !task||task.cleanupStatus==="running"||task.cleanupStatus==="completed";
-  }
-
-  private async dispatchTaskStart(candidate:PersistedAgentTask):Promise<PersistedAgentTask>{
-    let task=await this.store.findTask(candidate.id)??candidate;
-    if(task.startIntentStatus==="dispatched"||task.startIntentStatus==="failed"||task.terminalReason)return task;
-    const timestamp=nowIso();
-    const leaseExpiresAt=deadlineIso(timestamp,this.deliveryLeaseMs());
-    if(task.startIntentStatus==="dispatching"){
-      if(!task.startClaimToken||!task.startLeaseExpiresAt||task.startLeaseExpiresAt>timestamp)return task;
-      const reconciled=await this.reconcileStartDelivery(task);
-      if(reconciled)return reconciled;
-      const reclaimed=await this.store.reclaimTaskStart({id:task.id,expectedClaimToken:task.startClaimToken,claimToken:newId("delivery_claim"),claimedAt:timestamp,leaseExpiresAt});
-      if(!reclaimed)return await this.store.findTask(task.id)??task;
-      task=reclaimed;
-    }else{
-      const claimed=await this.store.claimTaskStart({id:task.id,claimToken:newId("delivery_claim"),claimedAt:timestamp,leaseExpiresAt});
-      if(!claimed)return await this.store.findTask(task.id)??task;
-      task=claimed;
-    }
-    await this.persistInitialPromptInteraction(task);
-    const claimToken=task.startClaimToken!;
-    const serviceKey=this.serviceKeyForTask(task);
-    const state=await this.readRuntimeState(task,serviceKey);
-    let postAttempted=false;
-    try{
-      const run=await this.store.sandboxRuns.get(task.runId);
-      if(!run||run.taskId!==task.id)throw new ProductError("Task sandbox runtime state not found",409);
-      if(run.phase==="starting"){
-        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
-        requireTaskEndpointCapabilities(endpoint);
-        await this.startLiveSandbox({endpoint,task,run,serviceKey});
-        await this.claimLiveRunForPrompt(run.runId);
-      }else if(run.phase!=="running")throw new ProductError("Sandbox run is no longer eligible to receive a prompt",409);
-      postAttempted=true;
-      const receipt=await this.postDelivery(state,serviceKey,task.prompt);
-      if(!receipt.accepted){const failed=await this.store.failTaskStart({id:task.id,claimToken,safeError:"Botified did not accept task prompt",updatedAt:nowIso()});if(failed)await this.persistInitialPromptInteraction(failed);return this.finalizeTaskLifecycle(task.id,"failed",null);}
-      const persisted=await this.store.recordTaskStartReceipt({id:task.id,claimToken,receipt,timelineCursor:null,updatedAt:nowIso()});
-      if(!persisted)throw new ProductError("Task start delivery claim changed before receipt persistence",409);
-      await this.persistInitialPromptInteraction(persisted);
-      return persisted;
-    }catch(error){
-      const safeError=safeTaskStageError(error);
-      const deferred=await this.store.deferTaskStart({id:task.id,claimToken,safeError,nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso(),releaseClaim:!postAttempted});
-      if(deferred)await this.persistInitialPromptInteraction(deferred);
-      if(postAttempted)await this.bestEffortPersistLiveStartupFailure(task.runId,"send message",error);
-      throw error;
-    }
-  }
-
-  private async reconcileStartDelivery(task:PersistedAgentTask):Promise<PersistedAgentTask|null>{
-    if(!task.startClaimToken||!task.startDeliveryKey||!task.startRequestHash)return task;
-    const serviceKey=this.serviceKeyForTask(task);const state=await this.readRuntimeState(task,serviceKey);
-    if(!this.botified.queryDeliveryReceipt)throw new ProductError("Botified delivery query API is required",502);
-    let receipt:BotifiedDeliveryReceipt|null;
-    try{receipt=await this.botified.queryDeliveryReceipt(state.baseUrl,serviceKey,task.startDeliveryKey);}catch(error){const deferred=await this.store.deferTaskStart({id:task.id,claimToken:task.startClaimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});if(deferred)await this.persistInitialPromptInteraction(deferred);return task;}
-    if(!receipt)return null;
-    if(receipt.requestHash!==task.startRequestHash)throw new ProductError("Botified start delivery receipt hash mismatch",409);
-    const persisted=await this.store.recordTaskStartReceipt({id:task.id,claimToken:task.startClaimToken,receipt,timelineCursor:null,updatedAt:nowIso()});
-    if(!persisted)return await this.store.findTask(task.id);
-    await this.persistInitialPromptInteraction(persisted);
-    return persisted;
   }
 
   private async dispatchTaskMessage(candidate: PersistedTaskMessage, completeIdempotency = false): Promise<PersistedTaskMessage> {
@@ -845,10 +731,9 @@ export class TaskService {
     }
     let source = await this.store.findTask(message.taskId);
     if (!source) throw new ProductError("Task not found", 404);
-    if (!isTerminalTask(source) && source.startIntentStatus !== "dispatched") return message;
     if ((message.deliveryStatus ?? "pending") === "pending") {
       const firstWaiting = (await this.store.listTaskMessages(source.id)).find((candidate) => ["pending", "dispatching"].includes(candidate.deliveryStatus ?? "pending"));
-      if (firstWaiting?.id !== message.id || !await this.runtimeCanStartTaskTurn(source)) return message;
+      if (firstWaiting?.id !== message.id) return message;
     }
     const timestamp = nowIso();
     if (message.deliveryStatus === "dispatching") {
@@ -860,7 +745,6 @@ export class TaskService {
         return reconciled;
       }
       source = await this.store.findTask(source.id) ?? source;
-      if (isTerminalTask(source)) return message;
       const reclaimed = await this.store.reclaimTaskMessage({ id:message.id, expectedClaimToken:message.claimToken, claimToken:newId("delivery_claim"), claimedAt:timestamp, leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs()) });
       if (!reclaimed) return await this.store.findTaskMessage(message.id) ?? message;
       message = reclaimed;
@@ -871,13 +755,23 @@ export class TaskService {
       message = claimed;
       await this.persistMessageInteraction(message);
       source = await this.store.findTask(source.id) ?? source;
-      if (isTerminalTask(source)){const failed=await this.store.failTaskMessage({id:message.id,claimToken:message.claimToken!,safeError:"Task became terminal before delivery",updatedAt:nowIso()});return failed??message;}
     }
     const claimToken = message.claimToken!;
-    const serviceKey = this.serviceKeyForTask(source);
-    const state = await this.readRuntimeState(source, serviceKey);
     try {
-      const receipt = await this.postDeliveryMessage(state.baseUrl, serviceKey, message.content, message.deliveryKey!, message.requestHash!);
+      const serviceKey = this.serviceKeyForTask(source);
+      const runtime = await this.readRuntimeState(source, serviceKey);
+      const run=await this.store.sandboxRuns.get(source.runId);
+      if(!run||run.taskId!==source.id)throw new ProductError("Task sandbox runtime state not found",409);
+      if(run.cleanupStatus!=="active")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
+      if(run.phase==="starting"){
+        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(source.projectId,source.endpointId);
+        requireTaskEndpointCapabilities(endpoint);
+        await this.startLiveSandbox({endpoint,task:source,run,serviceKey});
+        await this.claimLiveRunForPrompt(run.runId);
+        source=await this.store.updateTaskStatusIfStarting(source.id,"running",nowIso())??source;
+      }else if(run.phase!=="running")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
+      await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
+      const receipt = await this.postDeliveryMessage(runtime.baseUrl, serviceKey, message.content, message.deliveryKey!, message.requestHash!);
       if (!receipt.accepted) {
         const failed = await this.store.failTaskMessage({ id:message.id, claimToken, safeError:"Botified did not accept task message", updatedAt:nowIso() });
         if (failed) await this.persistMessageInteraction(failed);
@@ -887,6 +781,7 @@ export class TaskService {
       const receiptCursor = safeRuntimeCursor(receipt.cursor) ?? null;
       const accepted = await this.store.recordTaskMessageReceipt({ id:message.id, claimToken, receipt, timelineCursor:receiptCursor, updatedAt:nowIso() });
       if (!accepted) throw new ProductError("Task message delivery claim changed before receipt persistence", 409);
+      await this.store.updateTaskStatusIfNonterminal(source.id,"running",nowIso());
       await this.persistMessageInteraction(accepted);
       await this.bestEffortSyncTaskTimeline(source);
       if (completeIdempotency) await this.completeMessageIdempotency(accepted);
@@ -902,6 +797,7 @@ export class TaskService {
     if (!message.claimToken || !message.deliveryKey || !message.requestHash) return message;
     const serviceKey = this.serviceKeyForTask(source);
     const state = await this.readRuntimeState(source, serviceKey);
+    await this.readVerifiedBotifiedState(source,state.baseUrl,serviceKey);
     if (!this.botified.queryDeliveryReceipt) throw new ProductError("Botified delivery query API is required", 502);
     let receipt: BotifiedDeliveryReceipt | null;
     try {
@@ -912,119 +808,17 @@ export class TaskService {
       return message;
     }
     if (!receipt) return null;
-    if (receipt.requestHash !== message.requestHash) throw new ProductError("Botified task message delivery receipt hash mismatch", 409);
+    if (receipt.deliveryKey !== message.deliveryKey || receipt.requestHash !== message.requestHash) throw new ProductError("Botified task message delivery receipt identity mismatch", 409);
     const receiptCursor = safeRuntimeCursor(receipt.cursor) ?? null;
     return await this.store.recordTaskMessageReceipt({ id:message.id, claimToken:message.claimToken, receipt, timelineCursor:receiptCursor, updatedAt:nowIso() })
       ?? await this.store.findTaskMessage(message.id);
   }
 
-  private async finalizeTaskLifecycle(taskId:string,reason:TaskTerminalReason,actorId:string|null):Promise<PersistedAgentTask>{
-    const task=await this.store.findTask(taskId);if(!task)throw new ProductError("Task not found",404);if(task.terminalReason)return task;
-    const timestamp=nowIso(),terminalInteractionChanges=await this.prepareTerminalInteractionChanges(task,reason,timestamp);
-    const result=await this.store.finalizeTaskLifecycle({taskId,terminalReason:reason,updatedAt:timestamp,auditEvent:{id:newId("audit"),projectId:task.projectId,actorId,action:taskAuditActionForReason(reason),status:"accepted",resourceKind:"task",resourceId:task.id,detail:{endpointId:task.endpointId},createdAt:timestamp},terminalInteractionChanges});
-    if(!result)throw new ProductError("Task not found",404);
-    for(const message of await this.store.listTaskMessages(task.id))if(["accepted","failed"].includes(message.deliveryStatus??""))await this.completeMessageIdempotency(message);
-    if(result.task.terminalReason==="failed")await this.policies.evaluateTaskFailure(result.task.projectId,result.task.endpointId);
-    return result.task;
-  }
-
-  private async prepareTerminalInteractionChanges(task:PersistedAgentTask,reason:TaskTerminalReason,updatedAt:string):Promise<TaskInteractionChangeInput[]>{
-    if(!["failed","cancelled","expired"].includes(reason))return[];
-    const snapshot=await this.store.readTaskInteractionSnapshot(task.id,null,INTERACTION_LOOKUP_LIMIT);
-    if(!snapshot)return[];
-    const changes:TaskInteractionChangeInput[]=[];
-    for(const interaction of snapshot.items){
-      const terminal=terminalizeInteraction(interaction,reason,updatedAt);
-      if(!terminal)continue;
-      const latest=await this.store.findLatestTaskInteractionChange(task.id,interaction.id);
-      changes.push({sourceKind:"product",sourceId:`task-terminal:${interaction.id}`,sourceRevision:1,interaction:terminal,...(latest?.correlation?{correlation:latest.correlation}:{})});
-    }
-    return changes;
-  }
-
-  private async bestEffortAbortAndRequestCleanup(task:PersistedAgentTask):Promise<void>{
+  private async bestEffortAbort(task:PersistedAgentTask):Promise<void>{
     try{const serviceKey=this.serviceKeyForTask(task);const state=await this.readRuntimeState(task,serviceKey);await this.botified.abort(state.baseUrl,serviceKey);}catch{}
   }
 
-  private async drainTaskArtifacts(task:PersistedAgentTask):Promise<void>{
-    const timestamp=nowIso();const claimToken=newId("artifact_claim");const claimed=await this.store.claimTaskArtifactProjection({id:task.id,claimToken,claimedAt:timestamp,leaseExpiresAt:deadlineIso(timestamp,this.maintenanceLeaseMs())});if(!claimed)return;
-    try{
-      const unresolvedMessage=(await this.store.listTaskMessages(claimed.id)).some((message)=>message.deliveryStatus==="dispatching");
-      if(unresolvedMessage)throw new ProductError("Task message delivery reconciliation is pending",409);
-      try {
-        let delivered:PersistedAgentTask|null=claimed;
-        if(claimed.startIntentStatus==="dispatching"){
-          const reconciled=await this.reconcileStartDelivery(claimed);
-          if(reconciled===null)delivered=null;
-          else if(reconciled.startIntentStatus==="dispatched")delivered=reconciled;
-          else throw new ProductError("Task start delivery reconciliation is still uncertain",502);
-        }
-        if(delivered?.startIntentStatus==="dispatched")await this.syncTaskTimeline(delivered,{updateRunLifecycle:false,preserveTerminalStatus:true});
-      } catch (error) {
-        if ((claimed.artifactProjectionAttemptCount ?? 0) < MAX_TERMINAL_RUNTIME_SYNC_ATTEMPTS) throw error;
-        await this.failUnconfirmedTaskStart(claimed);
-        await this.markTaskInteractionHistoryGap(claimed.id);
-      }
-      await this.projectSandboxArtifactFiles(claimed);
-      if(claimed.terminalReason==="failed")await this.policies.evaluateTaskFailure(claimed.projectId,claimed.endpointId);
-      if(!await this.store.completeTaskArtifactProjection({id:task.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task artifact drain fence changed",409);
-    }catch(error){await this.store.failTaskArtifactProjection({id:task.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
-  }
-
-  private async failUnconfirmedTaskStart(task: PersistedAgentTask): Promise<void> {
-    if (task.startIntentStatus !== "dispatching" || !task.startClaimToken) return;
-    const failed = await this.store.failTaskStart({
-      id: task.id,
-      claimToken: task.startClaimToken,
-      safeError: "Initial prompt delivery could not be confirmed before runtime cleanup",
-      updatedAt: nowIso()
-    });
-    if (failed) await this.persistInitialPromptInteraction(failed);
-  }
-
-  private async markTaskInteractionHistoryGap(taskId: string): Promise<void> {
-    const snapshot = await this.store.readTaskInteractionSnapshot(taskId, null, 1);
-    if (!snapshot || snapshot.historyStatus === "gap") return;
-    await this.store.persistTaskInteractionMutation({
-      taskId,
-      changes: [],
-      sourceSync: {
-        expectedSourceCursor: snapshot.sourceCursor,
-        sourceCursor: snapshot.sourceCursor,
-        historyStatus: "gap",
-        lastSyncedAt: nowIso()
-      }
-    });
-  }
-
-  private async cleanupTaskRuntime(task:PersistedAgentTask):Promise<void>{
-    const timestamp=nowIso();const claimToken=newId("cleanup_claim");const claimed=await this.store.claimTaskCleanup({id:task.id,claimToken,claimedAt:timestamp,leaseExpiresAt:deadlineIso(timestamp,this.maintenanceLeaseMs())});if(!claimed)return;
-    try{
-      if(claimed.executionMode==="live"){
-        await requestSandboxRunCleanup(this.store,claimed.runId,{phase:cleanupPhaseForTaskStatus(claimed.status),cleanupStatus:"cleanup_requested"});
-        if(!this.config.sandboxLifecycle)throw new ProductError("Sandbox lifecycle service is not configured",500);
-        let cleanupComplete=false;
-        let cleanupError=false;
-        for(let attempt=0;attempt<30;attempt+=1){
-          const cleanup=await this.config.sandboxLifecycle.reapSandboxRunsOnce({runId:claimed.runId,apply:true});
-          cleanupError=cleanup.errors.length>0;
-          const run=await this.store.sandboxRuns.get(claimed.runId);
-          const resourcesRemain=Object.values(cleanup.observedResourceCounts).some((count)=>count>0);
-          cleanupComplete=!resourcesRemain&&(!run||run.cleanupStatus==="cleaned"||run.phase==="cleaned");
-          if(cleanupComplete)break;
-          await new Promise((resolve)=>setTimeout(resolve,500));
-        }
-        if(!cleanupComplete)throw new ProductError(cleanupError?"Sandbox cleanup failed":"Sandbox cleanup is still pending",409);
-        await this.removeTransientTaskRuntime(claimed);
-      }
-      if(!await this.store.completeTaskCleanup({id:claimed.id,claimToken,updatedAt:nowIso()}))throw new ProductError("Task cleanup fence changed",409);
-    }catch(error){await this.store.failTaskCleanup({id:claimed.id,claimToken,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});throw error;}
-  }
-
-  private async removeTransientTaskRuntime(task:PersistedAgentTask):Promise<void>{const project=await this.store.findProject(task.projectId);if(!project)return;const root=path.resolve(this.config.dataRoot,project.rootPath,"tasks",task.id);const dataRoot=path.resolve(this.config.dataRoot);assertPathInside(dataRoot,root,"Task runtime directory is outside the data root");for(const name of ["home","botified"])await rm(path.resolve(root,name),{recursive:true,force:true});}
-
   private deliveryLeaseMs():number{return resolveDurationMs(this.config.deliveryLeaseMs,DEFAULT_DELIVERY_LEASE_MS);}
-  private maintenanceLeaseMs():number{return resolveDurationMs(this.config.maintenanceLeaseMs,DEFAULT_MAINTENANCE_LEASE_MS);}
   private retryDelayMs():number{return resolveDurationMs(this.config.retryDelayMs,DEFAULT_TASK_RETRY_DELAY_MS);}
 
   async taskInteractions(userId: string, taskId: string, query: { cursor?: string; limit?: number } = {}): Promise<TaskInteractionSnapshot> {
@@ -1074,7 +868,7 @@ export class TaskService {
 
   async *streamTaskAssistantPreviews(userId: string, taskId: string, signal?: AbortSignal): AsyncIterable<TaskAssistantPreviewUpdate> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
-    if (task.executionMode !== "live" || task.terminalReason || !this.botified.streamLlmTextPreview) return;
+    if (task.executionMode !== "live" || !await this.activeSandboxRun(task) || !this.botified.streamLlmTextPreview) return;
     const serviceKey = this.serviceKeyForTask(task);
     const runtime = await this.readRuntimeState(task, serviceKey);
     const redaction = await this.interactionRedaction(task, serviceKey);
@@ -1115,19 +909,20 @@ export class TaskService {
     return this.runIdempotentTaskOperation({ actorId:userId, projectId:task.projectId, operation:taskOperation("abort-turn"), key:idempotencyKey, request:{taskId} }, task.id, async () => {
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
-      if (current.executionMode !== "live" || current.terminalReason) throw new ProductError("Task has no active turn to stop", 409);
+      if (current.executionMode !== "live" || !await this.activeSandboxRun(current)) throw new ProductError("Task has no active turn to stop", 409);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to stop a turn", 409);
       if (this.abortingTaskIds.has(current.id)) throw new ProductError("Task turn abort is already in progress", 409);
       this.abortingTaskIds.add(current.id);
       try {
         const serviceKey = this.serviceKeyForTask(current);
         const runtime = await this.readRuntimeState(current, serviceKey);
-        const state = await this.callBotified("read state", () => this.botified.readState(runtime.baseUrl, serviceKey));
+        const state = await this.readVerifiedBotifiedState(current,runtime.baseUrl,serviceKey);
         if (state.state !== "running") throw new ProductError("Task has no active turn to stop", 409);
         const turnId = activeTurnIdentity(state, current);
         const result = await this.callBotified("abort", () => this.botified.abort(runtime.baseUrl, serviceKey));
         if (!result.aborted) throw new ProductError("Botified did not stop the active turn", 409);
         await this.persistProductInteraction(turnAbortedProductSource(current, turnId, nowIso()), current);
+        await this.store.updateTaskStatusIfNonterminal(current.id,"queued",nowIso());
         return { aborted:true as const, runState:"idle" as const, capabilities:await this.taskCapabilities(userId,current,"idle") };
       } finally {
         this.abortingTaskIds.delete(current.id);
@@ -1140,7 +935,7 @@ export class TaskService {
     return this.runIdempotentTaskOperation({ actorId:userId, projectId:task.projectId, operation:taskOperation("work-stop"), key:idempotencyKey, request:{taskId,interactionId} }, interactionId, async () => {
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
-      if (current.executionMode !== "live" || current.terminalReason) throw new ProductError("Background work cannot be stopped for this task", 409);
+      if (current.executionMode !== "live" || !await this.activeSandboxRun(current)) throw new ProductError("Background work cannot be stopped for this task", 409);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Background work can no longer be stopped for this task", 409);
       const change = await this.store.findLatestTaskInteractionChange(task.id, interactionId);
       if (!change || change.interaction.kind !== "background_task") throw new ProductError("Background work interaction not found", 404);
@@ -1162,10 +957,7 @@ export class TaskService {
 
   async listTaskArtifacts(userId: string, taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}): Promise<AgentTaskArtifact[]> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
-    if(task.executionMode==="live"&&task.startIntentStatus==="dispatched"){
-      if(task.terminalReason&&(task.artifactProjectionStatus==="draining"||task.artifactProjectionStatus==="failed"))try{await this.drainTaskArtifacts(task);}catch{}
-      else if(!task.terminalReason)await this.bestEffortSyncTaskTimeline(task);
-    }
+    if(task.executionMode==="live"&&await this.activeSandboxRun(task))await this.bestEffortSyncTaskTimeline(task);
     return filterTaskArtifacts((await this.store.listTaskArtifacts(taskId)).map(publicArtifact), filter);
   }
 
@@ -1221,78 +1013,34 @@ export class TaskService {
 
   private async requireTaskTerminalAccess(userId:string,taskId:string):Promise<PersistedAgentTask>{
     const task=await this.requireTaskForUser(userId,taskId,"write");
-    if(task.executionMode!=="live"||!isActiveTaskStatus(task.status))throw new ProductError("Task terminal is available while the sandbox is running",409);
+    const run=await this.activeSandboxRun(task);
+    if(!run||run.phase!=="running")throw new ProductError("Task terminal is available while the sandbox is running",409);
     if(!await this.taskExecutionEligible(task))throw new ProductError("Task terminal is no longer available for this task",409);
+    const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
     return task;
   }
 
-  async syncTerminalFailureRun(runId: string): Promise<SandboxTerminalFailureSyncResult> {
-    const run = await this.store.sandboxRuns.get(runId);
-    if (!run?.terminalFailure) {
-      return { status: "synced" };
-    }
-    const task = await this.store.findTask(run.taskId);
-    if (!task || task.runId !== run.runId) {
-      return { status: "synced" };
-    }
-    try {
-      await this.syncTaskTimeline(task, {
-        updateRunLifecycle: false,
-        preserveTerminalStatus: true
-      });
-      return { status: "synced" };
-    } catch (error) {
-      if (error instanceof BotifiedTaskPortError) {
-        return { status: "unavailable", message: error.message };
-      }
-      throw error;
-    }
-  }
-
-  async projectPublishedArtifactsForRun(runId: string): Promise<void> {
-    const run = await this.store.sandboxRuns.get(runId);
-    if (!run) {
-      return;
-    }
-    const task = await this.store.findTask(run.taskId);
-    if (!task || task.runId !== run.runId) {
-      return;
-    }
-    if (task.artifactProjectionStatus === "drained" || task.cleanupStatus === "completed" || task.status === "cleaned" || task.status === "stopping") {
-      return;
-    }
-    await this.syncTaskTimeline(task, {
-      updateRunLifecycle: false,
-      preserveTerminalStatus: true
-    });
-  }
-
-  private async syncTaskTimeline(
-    task: PersistedAgentTask,
-    options: { updateRunLifecycle?: boolean; preserveTerminalStatus?: boolean } = {}
-  ): Promise<PersistedAgentTask> {
+  private async syncTaskTimeline(task: PersistedAgentTask): Promise<PersistedAgentTask> {
     const previous = this.taskTimelineSyncs.get(task.id) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
     this.taskTimelineSyncs.set(task.id, current);
     await previous;
     try {
-      return await this.syncTaskTimelineUnlocked(task, options);
+      return await this.syncTaskTimelineUnlocked(task);
     } finally {
       release();
       if (this.taskTimelineSyncs.get(task.id) === current) this.taskTimelineSyncs.delete(task.id);
     }
   }
 
-  private async syncTaskTimelineUnlocked(
-    task: PersistedAgentTask,
-    options: { updateRunLifecycle?: boolean; preserveTerminalStatus?: boolean } = {}
-  ): Promise<PersistedAgentTask> {
+  private async syncTaskTimelineUnlocked(task: PersistedAgentTask): Promise<PersistedAgentTask> {
     const serviceKey = this.serviceKeyForTask(task);
     const state = await this.readRuntimeState(task, serviceKey);
     const snapshot = await this.store.readTaskInteractionSnapshot(task.id, null, INTERACTION_LOOKUP_LIMIT);
     if (!snapshot) throw new ProductError("Task not found", 404);
-    const timeline = await this.readCanonicalTimeline(state.baseUrl, serviceKey, snapshot.sourceCursor, snapshot.historyStatus);
+    await this.readVerifiedBotifiedState(task,state.baseUrl,serviceKey);
+    const timeline = await this.readCanonicalTimeline(task.id, state.baseUrl, serviceKey, snapshot.sourceCursor, snapshot.historyStatus);
     const latest = new Map(snapshot.items.map((item) => [item.id, item]));
     const messages = await this.store.listTaskMessages(task.id);
     const redaction = await this.interactionRedaction(task, serviceKey);
@@ -1329,30 +1077,11 @@ export class TaskService {
         existingArtifacts.add(artifactFileId);
       }
     }
-    const completionCandidate = isInteractionLifecycleStatus(task.status)
-      && nextStatusForTimeline(task.status, timeline.events, true) === "completed";
-    let lifecycleMessages = messages;
-    let canComplete = false;
-    if (completionCandidate) {
-      const runtimeSnapshot = await this.callBotified("read state", () => this.botified.readState(state.baseUrl, serviceKey));
-      lifecycleMessages = await this.store.listTaskMessages(task.id);
-      canComplete = isBotifiedSessionQuiescent(runtimeSnapshot, timeline.nextCursor) && !lifecycleMessages.some(isPendingTaskMessage);
-    }
     const syncedAt = nowIso();
-    const projectedStatus = options.preserveTerminalStatus && isTerminalTaskStatus(task.status)
-      ? task.status
-      : nextStatusForTimeline(task.status, timeline.events, canComplete);
+    const projectedStatus = nextStatusForTimeline(task.status, timeline.events, true);
     let lifecycle: TaskInteractionLifecycleMutation | undefined;
     if (projectedStatus !== task.status && isInteractionLifecycleStatus(task.status) && isInteractionLifecycleStatus(projectedStatus)) {
       lifecycle = { kind:"active", expectedStatus:task.status, status:projectedStatus, updatedAt:syncedAt };
-    } else if (projectedStatus !== task.status && isTerminalTaskStatus(projectedStatus)) {
-      lifecycle = {
-        kind:"terminal",
-        terminalReason:terminalReasonForStatus(projectedStatus),
-        updatedAt:syncedAt,
-        auditEvent:{ id:newId("audit"), projectId:task.projectId, actorId:null, action:taskAuditActionForReason(terminalReasonForStatus(projectedStatus)), status:"accepted", resourceKind:"task", resourceId:task.id, detail:{endpointId:task.endpointId}, createdAt:syncedAt },
-        terminalInteractionChanges:await this.prepareTerminalInteractionChanges(task,terminalReasonForStatus(projectedStatus),syncedAt)
-      };
     }
     try {
       if(artifactProjections.length)await this.reconcileTaskLibraryBytes(task);
@@ -1373,36 +1102,29 @@ export class TaskService {
       if(newlyWrittenArtifactPaths.length)await this.reconcileTaskLibraryBytes(task).catch((reconcileError)=>console.error("Task artifact usage rollback reconciliation failed",reconcileError));
       throw error;
     }
-    if (lifecycle?.kind === "terminal") {
-      for (const message of await this.store.listTaskMessages(task.id)) if (isSettledMessage(message)) await this.completeMessageIdempotency(message);
-      if (lifecycle.terminalReason === "failed") await this.policies.evaluateTaskFailure(task.projectId, task.endpointId);
-    }
     await this.writeRuntimeState(task.id, { ...state, lastSyncedAt:syncedAt });
     const updated = await this.store.findTask(task.id) ?? task;
-    if (options.updateRunLifecycle !== false) {
-      await this.updateRunLifecycleAfterTimelineSync(updated, timeline.events.length > 0);
-    }
     return updated;
   }
 
-  private async readCanonicalTimeline(baseUrl: string, serviceKey: string, sourceCursor: string | null, historyStatus: TaskHistoryStatus): Promise<{ events: BotifiedTimelineEvent[]; nextCursor: string | null; historyStatus: TaskHistoryStatus }> {
-    if (sourceCursor === null || historyStatus === "gap") return this.recoverCanonicalTimeline(baseUrl, serviceKey, historyStatus);
+  private async readCanonicalTimeline(taskId:string,baseUrl: string, serviceKey: string, sourceCursor: string | null, historyStatus: TaskHistoryStatus): Promise<{ events: BotifiedTimelineEvent[]; nextCursor: string | null; historyStatus: TaskHistoryStatus }> {
+    if (sourceCursor === null || historyStatus === "gap") return this.recoverCanonicalTimeline(taskId,baseUrl, serviceKey, historyStatus);
     const events: BotifiedTimelineEvent[] = [];
     let cursor = sourceCursor;
     while (true) {
       const page = await this.callBotified("read timeline", () => this.botified.readTimeline(baseUrl, serviceKey, cursor, { direction:"forward", limit:INTERACTION_SYNC_PAGE_LIMIT }));
-      if (page.status === "gap") return this.recoverCanonicalTimeline(baseUrl, serviceKey, "gap");
-      events.push(...parseBotifiedTimelineEvents(page.events));
+      if (page.status === "gap") return this.recoverCanonicalTimeline(taskId,baseUrl, serviceKey, "gap");
+      events.push(...this.verifiedTimelineEvents(taskId,page.events));
       const next = safeRuntimeCursor(page.nextCursor) ?? cursor;
       if (!page.hasMoreAfter || next === cursor) return { events, nextCursor:next, historyStatus:"complete" };
       cursor = next;
     }
   }
 
-  private async recoverCanonicalTimeline(baseUrl: string, serviceKey: string, minimumStatus: TaskHistoryStatus): Promise<{ events: BotifiedTimelineEvent[]; nextCursor: string | null; historyStatus: TaskHistoryStatus }> {
+  private async recoverCanonicalTimeline(taskId:string,baseUrl: string, serviceKey: string, minimumStatus: TaskHistoryStatus): Promise<{ events: BotifiedTimelineEvent[]; nextCursor: string | null; historyStatus: TaskHistoryStatus }> {
     const tail = await this.callBotified("read timeline", () => this.botified.readTimeline(baseUrl, serviceKey, undefined, { direction:"history", limit:INTERACTION_SYNC_PAGE_LIMIT }));
     if (tail.status === "gap") throw new ProductError("Botified history recovery failed", 502);
-    const pages: BotifiedTimelineEvent[][] = [parseBotifiedTimelineEvents(tail.events)];
+    const pages: BotifiedTimelineEvent[][] = [this.verifiedTimelineEvents(taskId,tail.events)];
     let historyExpired = tail.historyBoundary === "expired";
     let page = tail;
     while (page.hasMoreBefore) {
@@ -1410,7 +1132,7 @@ export class TaskService {
       if (!start) return { events:pages.flat(), nextCursor:safeRuntimeCursor(tail.nextCursor)??null, historyStatus:"gap" };
       const previous = await this.callBotified("read timeline", () => this.botified.readTimeline(baseUrl, serviceKey, start, { direction:"backward", limit:INTERACTION_SYNC_PAGE_LIMIT }));
       if (previous.status === "gap") return { events:pages.flat(), nextCursor:safeRuntimeCursor(tail.nextCursor)??null, historyStatus:"gap" };
-      pages.unshift(parseBotifiedTimelineEvents(previous.events));
+      pages.unshift(this.verifiedTimelineEvents(taskId,previous.events));
       historyExpired ||= previous.historyBoundary === "expired";
       page = previous;
     }
@@ -1423,7 +1145,7 @@ export class TaskService {
       const pageStartCursor: string = cursor;
       const forward: BotifiedTimelineReadResult = await this.callBotified("read timeline", () => this.botified.readTimeline(baseUrl, serviceKey, pageStartCursor, { direction:"forward", limit:INTERACTION_SYNC_PAGE_LIMIT }));
       if (forward.status === "gap") return { events:recovered, nextCursor:pageStartCursor, historyStatus:"gap" };
-      recovered.push(...parseBotifiedTimelineEvents(forward.events));
+      recovered.push(...this.verifiedTimelineEvents(taskId,forward.events));
       const next: string = safeRuntimeCursor(forward.nextCursor) ?? pageStartCursor;
       if (!forward.hasMoreAfter || next === pageStartCursor) return { events:recovered, nextCursor:next, historyStatus };
       cursor = next;
@@ -1431,40 +1153,15 @@ export class TaskService {
     return { events:recovered, nextCursor:null, historyStatus };
   }
 
-  private async bestEffortSyncTaskTimeline(
-    task: PersistedAgentTask,
-    options: { updateRunLifecycle?: boolean; preserveTerminalStatus?: boolean } = {}
-  ): Promise<void> {
+  private async bestEffortSyncTaskTimeline(task: PersistedAgentTask): Promise<void> {
     try {
-      await this.syncTaskTimeline(task, options);
+      await this.syncTaskTimeline(task);
     } catch (error) {
       if (error instanceof BotifiedTaskPortError) {
         return;
       }
       throw error;
     }
-  }
-
-  private async liveSandboxCleanupStatus(task: PersistedAgentTask): Promise<LiveSandboxCleanupStatus> {
-    if (!this.config.liveSandbox) {
-      return "none";
-    }
-    const run = await this.store.sandboxRuns.get(task.runId);
-    if (!run || run.taskId !== task.id) {
-      return "none";
-    }
-    return run.cleanupStatus === "cleaned" || run.phase === "cleaned" ? "cleaned" : "pending";
-  }
-
-  private async cleanupTerminalLiveSandboxBeforeRead(task: PersistedAgentTask, liveCleanupStatus: LiveSandboxCleanupStatus): Promise<boolean> {
-    if (!isDurableTaskResultStatus(task.status) || liveCleanupStatus === "none") {
-      return false;
-    }
-    if (liveCleanupStatus === "pending") {
-      await this.bestEffortRequestRunCleanup(task.runId, cleanupPhaseForTaskStatus(task.status));
-      await this.bestEffortReapSandboxRun(task.runId);
-    }
-    return true;
   }
 
   private async readRuntimeState(task: PersistedAgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {
@@ -1491,7 +1188,7 @@ export class TaskService {
       throw new ProductError("Task runtime state not found", 409);
     }
     const baseUrl = this.botifiedBaseUrlForTask(task.id, run.botifiedPort, run.namespace);
-    const snapshot = await this.callBotified("read state", () => this.botified.readState(baseUrl, serviceKey));
+    const snapshot = await this.readVerifiedBotifiedState(task,baseUrl,serviceKey);
     const state = this.runtimeStateFromBotifiedSnapshot(baseUrl, snapshot);
     if(task.startDeliveryKey)state.startDeliveryKey=task.startDeliveryKey;
     if(task.startRequestHash)state.startRequestHash=task.startRequestHash;
@@ -1561,14 +1258,16 @@ export class TaskService {
     }
   }
 
-  private async postDelivery(state: BotifiedTaskRuntimeState, serviceKey: string, text: string): Promise<BotifiedDeliveryReceipt> {
-    if (!state.startDeliveryKey || !state.startRequestHash) {
-      throw new ProductError("Task delivery state is missing", 409);
-    }
-    if (!this.botified.postMessageWithDelivery) {
-      throw new ProductError("Botified delivery API is required", 502);
-    }
-    return this.postDeliveryMessage(state.baseUrl,serviceKey,text,state.startDeliveryKey,state.startRequestHash);
+  private async readVerifiedBotifiedState(task:PersistedAgentTask,baseUrl:string,serviceKey:string):Promise<BotifiedRuntimeStateResult>{
+    const state=await this.callBotified("read state",()=>this.botified.readState(baseUrl,serviceKey));
+    if(state.sessionId!==task.id)throw new ProductError("Botified session identity mismatch",409);
+    return state;
+  }
+
+  private verifiedTimelineEvents(taskId:string,values:readonly unknown[]):BotifiedTimelineEvent[]{
+    const events=parseBotifiedTimelineEvents(values);
+    if(events.some((event)=>event.session_id!==taskId))throw new ProductError("Botified timeline session identity mismatch",409);
+    return events;
   }
 
   private async postDeliveryMessage(baseUrl:string,serviceKey:string,text:string,deliveryKey:string,requestHash:string):Promise<BotifiedDeliveryReceipt>{
@@ -1702,9 +1401,12 @@ export class TaskService {
     if (!task || task.runId !== runId || !constantTimeEqual(serviceKey, this.serviceKeyForTask(task))) {
       throw new ProductError("Unauthorized Botified task key", 401);
     }
-    if (!isActiveBotifiedTask(task.status)) {
+    const run=await this.activeSandboxRun(task);
+    if (!run||run.runId!==runId||run.phase!=="running") {
       throw new ProductError("Botified task is not active", 409);
     }
+    const runtime=await this.readRuntimeState(task,serviceKey);
+    await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
     const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(task.projectId, task.endpointId);
     requireTaskEndpointCapabilities(endpoint);
     const credentials = this.config.credentials;
@@ -1758,8 +1460,6 @@ export class TaskService {
       fencingToken: 1,
       cleanupStatus: "active",
       createdAt: input.timestamp,
-      expiresAt: deadlineIso(input.timestamp, this.liveSandboxMaxLifetimeMs()),
-      idleExpiresAt: deadlineIso(input.timestamp, this.liveSandboxIdleTimeoutMs()),
       updatedAt: input.timestamp
     };
   }
@@ -1835,14 +1535,6 @@ export class TaskService {
     }
   }
 
-  private async bestEffortMarkTaskFailed(task: PersistedAgentTask): Promise<void> {
-    try {
-      await this.finalizeTaskLifecycle(task.id, "failed", null);
-    } catch {
-      // Startup cleanup and the original failure must not depend on the failed-state write.
-    }
-  }
-
   private async bestEffortPersistLiveStartupFailure(
     runId: string,
     operation: BotifiedOperation,
@@ -1876,8 +1568,7 @@ export class TaskService {
     if (
       !current ||
       current.phase !== "starting" ||
-      current.cleanupStatus !== "active" ||
-      sandboxRunDeadlineElapsed(current, new Date())
+      current.cleanupStatus !== "active"
     ) {
       throw new ProductError("Sandbox run is no longer eligible to receive a prompt", 409);
     }
@@ -1893,65 +1584,11 @@ export class TaskService {
     }
   }
 
-  private async requestLiveRunCleanupBeforeCancel(runId: string): Promise<void> {
-    const updated = await requestSandboxRunCleanup(this.store, runId, {
-      phase: "stopping",
-      cleanupStatus: "cleanup_requested"
-    });
-    if (!updated) {
-      throw new ProductError("Sandbox run cleanup intent could not be persisted", 409);
-    }
-  }
-
-  private async bestEffortRequestRunCleanup(runId: string, phase: PersistedSandboxRunState["phase"]): Promise<void> {
-    try {
-      await requestSandboxRunCleanup(this.store, runId, { phase, cleanupStatus: "cleanup_requested" });
-    } catch {
-      // Cleanup intent must not hide the task operation failure that triggered it.
-    }
-  }
-
-  private async bestEffortReapSandboxRun(runId: string): Promise<void> {
-    try {
-      await this.config.sandboxLifecycle?.reapSandboxRunsOnce({ runId, apply: true });
-    } catch {
-      // Runtime ticks retry cleanup after transient Kubernetes failures.
-    }
-  }
-
-  private async updateRunLifecycleAfterTimelineSync(task: PersistedAgentTask, hadEvents: boolean): Promise<void> {
-    if (!this.config.liveSandbox) {
-      return;
-    }
-    if (isTerminalTaskStatus(task.status)) {
-      return;
-    }
-    if (hadEvents && isActiveTaskStatus(task.status)) {
-      await refreshSandboxRunActivity(this.store, task.runId, {
-        idleTimeoutMs: this.liveSandboxIdleTimeoutMs()
-      });
-    }
-  }
-
   private async ensureTaskConversation(task: PersistedAgentTask): Promise<void> {
     if (!await this.taskExecutionEligible(task)) return;
-    await this.persistInitialPromptInteraction(task);
-    if (task.executionMode !== "live" || task.startIntentStatus !== "dispatched") return;
-    if (isTerminalTask(task)) {
-      if (task.terminalReason && (task.artifactProjectionStatus === "draining" || task.artifactProjectionStatus === "failed")) {
-        try { await this.drainTaskArtifacts(task); } catch {}
-      }
-      return;
-    }
-    await this.bestEffortSyncTaskTimeline(task, { preserveTerminalStatus:true });
-  }
-
-  private async persistInitialPromptInteraction(task: PersistedAgentTask): Promise<TaskInteractionItem | null> {
-    const interaction = await this.persistProductInteraction(initialPromptProductSource(task));
-    if (task.executionMode === "dry-run") {
-      await this.store.persistTaskInteractionMutation({ taskId:task.id, changes:[], sourceSync:{ sourceCursor:null, historyStatus:"complete", lastSyncedAt:task.updatedAt } });
-    }
-    return interaction;
+    for(const message of await this.store.listTaskMessages(task.id))await this.persistMessageInteraction(message);
+    if (task.executionMode !== "live") return;
+    if(await this.activeSandboxRun(task))await this.bestEffortSyncTaskTimeline(task);
   }
 
   private async persistMessageInteraction(message: PersistedTaskMessage): Promise<TaskInteractionItem | null> {
@@ -1997,12 +1634,6 @@ export class TaskService {
   private async previousProjectionState(task: PersistedAgentTask, event: BotifiedTimelineEvent, latest: Map<string, TaskInteractionItem>, messages: PersistedTaskMessage[], redaction: InteractionTextRedactionOptions, inBatchCorrelations: Map<string, TaskInteractionProjectionState>): Promise<TaskInteractionProjectionState | null> {
     if (["input.accepted", "input.queued", "input.rejected"].includes(event.type)) {
       const inputId = stringValue(event.data.input_id);
-      if (inputId && task.startReceipt?.messageId === inputId) {
-        const seeded = projectTaskInteraction(initialPromptProductSource(task), null, redaction).interaction;
-        const interaction = seeded ? latest.get(seeded.id) : undefined;
-        const persisted = !interaction && seeded ? await this.store.findLatestTaskInteractionChange(task.id,seeded.id) : null;
-        if (interaction||persisted) return { interaction:interaction??persisted!.interaction };
-      }
       const message = inputId ? messages.find((candidate) => candidate.receipt?.messageId === inputId) : undefined;
       if (message) {
         const seeded = projectTaskInteraction(messageProductSource(message), null, redaction).interaction;
@@ -2070,7 +1701,7 @@ export class TaskService {
     snapshot: { queuedMessages: PersistedTaskMessage[]; historyStatus: TaskHistoryStatus; lastSyncedAt: string | null }
   ): Promise<TaskInteractionState> {
     const runtime = await this.taskRuntimePresentation(task);
-    const capabilities = await this.taskCapabilities(userId, task, runtime.runState, snapshot.queuedMessages);
+    const capabilities = await this.taskCapabilities(userId, task, runtime.runState, snapshot.queuedMessages, runtime.reachability);
     return {
       queuedMessages: snapshot.queuedMessages.map((message) => {
         const presented = queuedMessage(message);
@@ -2084,42 +1715,44 @@ export class TaskService {
     };
   }
 
-  private async taskRuntimePresentation(task: PersistedAgentTask): Promise<{ runState: TaskRunState; reachability: TaskRuntimeReachability }> {
-    const terminal = Boolean(task.terminalReason) || isTerminalTaskStatus(task.status);
-    const finalizing = task.status === "stopping" || terminal && task.executionMode === "live"
-      && (task.artifactProjectionStatus !== "drained" || task.cleanupStatus !== "completed");
-    if (task.executionMode !== "live") return { runState:terminal ? "terminal" : "idle", reachability:"reachable" };
-    if (terminal && !finalizing) return { runState:"terminal", reachability:"unknown" };
-    const runState = this.abortingTaskIds.has(task.id) ? "aborting" : finalizing ? "finalizing" : null;
-    if (task.startIntentStatus !== "dispatched") return { runState:runState ?? "starting", reachability:"unknown" };
+  private async taskRuntimePresentation(task: PersistedAgentTask,knownRun?:PersistedSandboxRunState|null): Promise<{ runState: TaskRunState; reachability: TaskRuntimeReachability }> {
+    if (task.executionMode !== "live") return { runState:"idle", reachability:"reachable" };
+    const run=knownRun===undefined?await this.store.sandboxRuns.get(task.runId):knownRun;
+    if(!run||run.taskId!==task.id||run.phase==="cleaned"||run.cleanupStatus==="cleaned")return{runState:"idle",reachability:"unreachable"};
+    if(run.phase==="starting"||run.phase==="queued")return{runState:"starting",reachability:"unknown"};
+    if(run.phase!=="running"||run.cleanupStatus!=="active")return{runState:"idle",reachability:"unreachable"};
+    const runState = this.abortingTaskIds.has(task.id) ? "aborting" : null;
     try {
       const serviceKey = this.serviceKeyForTask(task);
       const runtime = await this.readRuntimeState(task, serviceKey);
-      const state = await this.botified.readState(runtime.baseUrl, serviceKey);
+      const state = await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
       return { runState:runState ?? (state.state === "running" ? "running" : "idle"), reachability:"reachable" };
     } catch {
       return { runState:runState ?? "reconnecting", reachability:"unreachable" };
     }
   }
 
-  private async taskCapabilities(userId: string, task: PersistedAgentTask, knownRunState?: TaskRunState, queued: PersistedTaskMessage[] = []): Promise<TaskCapabilities> {
-    const [projectAccess, executionEligible] = await Promise.all([
+  private async taskCapabilities(userId: string, task: PersistedAgentTask, knownRunState?: TaskRunState, queued: PersistedTaskMessage[] = [], knownReachability?:TaskRuntimeReachability): Promise<TaskCapabilities> {
+    const [projectAccess, executionEligible, run,ownedRun,releaseConfirmed] = await Promise.all([
       this.workspaces.projectAccessForUser(userId, task.projectId),
-      this.taskExecutionEligible(task)
+      this.taskExecutionEligible(task),
+      this.activeSandboxRun(task),this.ownedSandboxRun(task),this.sandboxReleaseConfirmed(task)
     ]);
     const canWrite = projectAccess.canWrite && projectAccess.writableLifecycle;
     const retained = !task.deletedAt && !task.archivedAt;
-    const canInteract = canWrite && retained && executionEligible && !isTerminalTask(task);
-    const runState = knownRunState ?? (await this.taskRuntimePresentation(task)).runState;
+    const runtime=knownRunState!==undefined&&knownReachability!==undefined?{runState:knownRunState,reachability:knownReachability}:await this.taskRuntimePresentation(task);
+    const runState = knownRunState ?? runtime.runState;
+    const sessionFenced=!run||run.phase!=="running"||runtime.reachability==="reachable";
+    const canInteract = canWrite && retained && executionEligible && Boolean(run) && sessionFenced;
     return {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
-      abortTurn: canInteract && task.executionMode === "live" && !task.terminalReason && runState === "running",
-      cancelTask: canWrite && retained && !task.terminalReason && isActiveTaskStatus(task.status),
-      openTerminal: canInteract && task.executionMode === "live" && !task.terminalReason && isActiveTaskStatus(task.status) && !this.occupiedTerminalTaskIds.has(task.id),
+      abortTurn: canInteract && task.executionMode === "live" && runState === "running",
+      openTerminal: canInteract && task.executionMode === "live" && run?.phase==="running" && runState === "running" && !this.occupiedTerminalTaskIds.has(task.id),
       editTask: canWrite && !task.deletedAt,
-      archiveTask: canWrite && !task.deletedAt && !task.archivedAt && Boolean(task.terminalReason),
-      deleteTask: canWrite && Boolean(task.terminalReason) && (task.executionMode !== "live" || task.cleanupStatus === "completed")
+      releaseSandbox: canWrite && !task.deletedAt && Boolean(ownedRun) && ownedRun?.cleanupStatus!=="cleanup_requested" && ownedRun?.cleanupStatus!=="deleting",
+      archiveTask: canWrite && !task.deletedAt && !task.archivedAt && !task.activeReservation && releaseConfirmed,
+      deleteTask: canWrite && !task.deletedAt && !task.activeReservation && releaseConfirmed
     };
   }
 
@@ -2133,16 +1766,41 @@ export class TaskService {
     }
   }
 
-  private async runtimeCanStartTaskTurn(task: PersistedAgentTask): Promise<boolean> {
-    if (isTerminalTask(task)) return false;
-    try {
-      const serviceKey = this.serviceKeyForTask(task);
-      const runtime = await this.readRuntimeState(task, serviceKey);
-      const state = await this.botified.readState(runtime.baseUrl, serviceKey);
-      return state.state === "idle" || state.state === "failed";
-    } catch {
-      return false;
+  private async activeSandboxRun(task:PersistedAgentTask):Promise<PersistedSandboxRunState|null>{
+    if(task.executionMode!=="live")return null;
+    const run=await this.store.sandboxRuns.get(task.runId);
+    return run&&run.taskId===task.id&&run.cleanupStatus==="active"&&["queued","starting","running"].includes(run.phase)?run:null;
+  }
+
+  private async ownedSandboxRun(task:PersistedAgentTask):Promise<PersistedSandboxRunState|null>{
+    if(task.executionMode!=="live")return null;const run=await this.store.sandboxRuns.get(task.runId);
+    return run&&run.taskId===task.id&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"?run:null;
+  }
+
+  private async sandboxReleaseConfirmed(task:PersistedAgentTask):Promise<boolean>{
+    if(task.executionMode!=="live")return true;const run=await this.store.sandboxRuns.get(task.runId);
+    return Boolean(run&&run.taskId===task.id&&run.runId===task.runId&&(run.cleanupStatus==="cleaned"||run.phase==="cleaned"));
+  }
+
+  private async taskStateProjection(task:PersistedAgentTask):Promise<TaskStateProjection>{
+    const run=await this.store.sandboxRuns.get(task.runId);const runtime=await this.taskRuntimePresentation(task,run);const queued=await this.hasQueuedTurnMessage(task.id);
+    return{
+      lifecycle:{state:task.archivedAt?"archived":"active"},
+      currentTurn:{state:runtime.runState==="aborting"?"aborting":runtime.runState==="running"?"running":runtime.runState==="starting"||runtime.runState==="reconnecting"?"starting":queued?"queued":"ready"},
+      sandboxState:{state:run&&run.taskId===task.id&&run.runId===task.runId?(run.cleanupStatus==="cleaned"||run.phase==="cleaned"?"released":run.cleanupStatus==="cleanup_requested"||run.cleanupStatus==="deleting"?"release_requested":run.terminalFailure||run.phase==="stopping"||run.phase==="expired"?"failed":run.phase==="starting"||run.phase==="queued"?"starting":"active"):(task.executionMode==="live"?"failed":"released"),runId:task.runId}
+    };
+  }
+
+  private async hasQueuedTurnMessage(taskId:string):Promise<boolean>{
+    for(const message of await this.store.listTaskMessages(taskId)){
+      if(message.deletedAt||message.deliveryStatus==="failed")continue;
+      if(message.deliveryStatus==="pending"||message.deliveryStatus==="dispatching")return true;
+      if(message.deliveryStatus==="accepted"){
+        const interaction=await this.latestMessageInteraction(message);
+        if(interaction?.kind==="user_message"&&interaction.status==="queued")return true;
+      }
     }
+    return false;
   }
 
   private encodeInteractionCursor(task: PersistedAgentTask, kind: "stream" | "history", changeSeq: number, anchor?: TaskInteractionPageAnchor): string {
@@ -2176,13 +1834,6 @@ export class TaskService {
     return { knownSecrets:new Set([serviceKey, ...(credential ? [credential.apiKey] : [])]) };
   }
 
-  private liveSandboxMaxLifetimeMs(): number {
-    return resolveDurationMs(this.config.liveSandboxMaxLifetimeMs, DEFAULT_SANDBOX_RUN_MAX_LIFETIME_MS);
-  }
-
-  private liveSandboxIdleTimeoutMs(): number {
-    return resolveDurationMs(this.config.liveSandboxIdleTimeoutMs, DEFAULT_SANDBOX_RUN_IDLE_TIMEOUT_MS);
-  }
 
   private liveSandboxNamespaceLimit(): number {
     return requirePositiveInteger(
@@ -2227,7 +1878,6 @@ function publicTask(task: PersistedAgentTask): AgentTask {
     ...(task.deletedAt !== undefined ? { deletedAt:task.deletedAt } : {}),
     ...(task.terminalReason !== undefined ? { terminalReason:task.terminalReason } : {}),
     ...(task.terminalizedAt !== undefined ? { terminalizedAt:task.terminalizedAt } : {}),
-    ...(task.startIntentStatus !== undefined ? { startIntentStatus:task.startIntentStatus } : {}),
     ...(task.startSafeError !== undefined ? { startSafeError:task.startSafeError } : {}),
     ...(task.artifactProjectionStatus !== undefined ? { artifactProjectionStatus:task.artifactProjectionStatus } : {}),
     ...(task.artifactProjectionError !== undefined ? { artifactProjectionError:task.artifactProjectionError } : {}),
@@ -2276,34 +1926,6 @@ function taskOperation(value: "message" | "message-edit" | "message-delete" | "a
 
 function isMessageReceiptOperation(operation: TaskIdempotencyOperation): boolean {
   return ["message", "message-edit", "message-delete"].includes(String(operation));
-}
-
-function startInteractionStatus(task: PersistedAgentTask): "pending" | "dispatching" | "retrying" | "accepted" | "failed" {
-  if (task.startIntentStatus === "failed") return "failed";
-  if (task.startIntentStatus === "dispatched" || task.executionMode === "dry-run") return "accepted";
-  if (task.terminalReason && task.startIntentStatus === "pending") return "failed";
-  if (task.startIntentStatus === "dispatching") return task.startSafeError ? "retrying" : "dispatching";
-  return "pending";
-}
-
-function startInteractionRank(task: PersistedAgentTask): number {
-  return { pending:1, dispatching:2, retrying:3, accepted:4, failed:5 }[startInteractionStatus(task)];
-}
-
-function initialPromptProductSource(task: PersistedAgentTask): ProductTaskInteractionSource {
-  return {
-    sourceKind: "product",
-    type: "task_created",
-    actorId: task.createdByUserId ?? null,
-    taskId: task.id,
-    sourceId: `task:${task.id}:prompt`,
-    sourceRevision: productSourceRevision(task.updatedAt, startInteractionRank(task)),
-    occurredAt: task.updatedAt,
-    position: productPosition(task.createdAt, `${task.id}:prompt`),
-    messageId: task.id,
-    content: task.prompt,
-    status: startInteractionStatus(task)
-  };
 }
 
 function productSourceRevision(timestamp: string, rank: number): number {
@@ -2467,20 +2089,11 @@ function stableTaskInteractionId(taskId: string, sourceId: string): string {
 }
 
 function defaultTaskCapabilities(task: PersistedAgentTask): TaskCapabilities {
-  const active = !task.terminalReason && isActiveTaskStatus(task.status);
-  return { sendMessage:!task.deletedAt&&!task.terminalReason, editQueuedMessage:false, abortTurn:false, cancelTask:active, openTerminal:active&&task.executionMode==="live", editTask:!task.deletedAt, archiveTask:!task.deletedAt&&!task.archivedAt&&Boolean(task.terminalReason), deleteTask:Boolean(task.terminalReason)&&(task.executionMode!=="live"||task.cleanupStatus==="completed") };
-}
-
-function normalizeTaskStatuses(statuses: AgentTaskStatus[] | undefined): AgentTaskStatus[] {
-  if (statuses === undefined) return [];
-  const allowed = new Set<AgentTaskStatus>(["queued","starting","running","stopping","completed","failed","expired","cancelled","cleaned"]);
-  if (!Array.isArray(statuses) || statuses.some((status) => !allowed.has(status))) throw new ProductError("Task status filter is invalid", 400);
-  return [...new Set(statuses)];
+  return { sendMessage:false, editQueuedMessage:false, abortTurn:false, openTerminal:false, releaseSandbox:false, editTask:!task.deletedAt, archiveTask:false, deleteTask:false };
 }
 
 type TaskListCursorScope = {
   search: string;
-  statuses: AgentTaskStatus[];
   archived: NonNullable<TaskListQuery["archived"]>;
   sort: NonNullable<TaskListQuery["sort"]>;
   direction: NonNullable<TaskListQuery["direction"]>;
@@ -2499,10 +2112,6 @@ function decodeTaskListCursor(cursor: string | undefined, query: TaskListCursorS
   const matchesQuery = isUnknownRecord(decoded.query) && canonicalJson(decoded.query) === canonicalJson(query);
   if (Buffer.from(text, "utf8").toString("base64url") !== cursor || !Number.isSafeInteger(decoded.offset) || (decoded.offset as number) < 0 || !matchesQuery) throw new ProductError("Task list cursor is invalid for this query", 400);
   return decoded.offset as number;
-}
-
-function isTerminalTask(task: PersistedAgentTask): boolean {
-  return Boolean(task.terminalReason) || ["completed","failed","expired","cancelled","cleaned"].includes(task.status);
 }
 
 function stableSandboxArtifactId(taskId: string, fileId: string): string {
@@ -2545,15 +2154,11 @@ function createBotifiedServiceKey(secret: string | undefined, input: BotifiedSer
   return `bsk_${hmac.digest("base64url")}`;
 }
 
-function deliveryKeyForStart(taskId: string, runId: string): string {
-  return "delivery_start_" + taskId + "_" + runId;
-}
-
 function messageAuditDetail(taskId: string, message: Pick<PersistedTaskMessage, "id" | "deliveryStatus">): import("../../contracts/src/api.js").ProjectAuditSafeDetail {
   return { taskId, messageId: message.id, ...(message.deliveryStatus === undefined ? {} : { deliveryStatus: message.deliveryStatus }) };
 }
 
-function deliveryKeyForMessage(messageId:string,runId:string):string{return `delivery_message_${messageId}_${runId}`;}
+function deliveryKeyForMessage(messageId:string):string{return `delivery_message_${messageId}`;}
 
 function deliveryRequestHash(prompt: string): string {
   return createHash("sha256").update(prompt, "utf8").digest("base64url");
@@ -2612,10 +2217,6 @@ function constantTimeEqual(value: string, expected: string): boolean {
   const actualBytes = Buffer.from(value);
   const expectedBytes = Buffer.from(expected);
   return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes);
-}
-
-function isActiveBotifiedTask(status: AgentTaskStatus): boolean {
-  return status === "starting" || status === "running";
 }
 
 async function waitForPodReady(
@@ -2689,18 +2290,18 @@ function isRecord(value: unknown): value is Record<string, string> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function nextStatusForTimeline(current: AgentTaskStatus, events: BotifiedTimelineEvent[], canComplete: boolean): AgentTaskStatus {
+function nextStatusForTimeline(current: AgentTaskStatus, events: BotifiedTimelineEvent[], _canComplete: boolean): AgentTaskStatus {
   if (current === "stopping") {
     return current;
   }
   let status = current;
   for (const event of events) {
-    if (event.type === "cycle.failed" && !isAbortedCycleEvent(event)) {
-      status = "failed";
+    if (event.type === "cycle.failed" || event.type === "cycle.aborted") {
+      status = "queued";
       continue;
     }
-    if (status !== "failed" && event.type === "cycle.completed") {
-      status = canComplete ? "completed" : "running";
+    if (event.type === "cycle.completed") {
+      status = "queued";
       continue;
     }
     if (status !== "failed" && (event.type === "cycle.started" || event.type === "input.accepted" || event.type === "input.queued")) {
@@ -2728,59 +2329,14 @@ function isBotifiedSessionQuiescent(state: BotifiedRuntimeStateResult, timelineC
   });
 }
 
-function terminalizeInteraction(interaction:TaskInteractionItem,reason:TaskTerminalReason,updatedAt:string):TaskInteractionItem|null{
-  const update={revision:interaction.revision+1,updatedAt};
-  switch(interaction.kind){
-    case "assistant_message":
-      return interaction.status==="generating"?{...interaction,...update,status:reason==="failed"?"failed":"aborted"}:null;
-    case "tool":
-      return interaction.executionStatus==="pending"||interaction.executionStatus==="running"
-        ?{...interaction,...update,executionStatus:reason==="failed"?"failed":"cancelled",canStop:false}
-        :null;
-    case "background_task":
-      return interaction.executionStatus==="queued"||interaction.executionStatus==="running"
-        ?{...interaction,...update,executionStatus:reason==="failed"?"failed":reason==="expired"?"timed_out":"cancelled",canStop:false}
-        :null;
-    case "task_question":
-      return interaction.status==="waiting"?{...interaction,...update,status:reason==="failed"?"rejected":"expired"}:null;
-    default:
-      return null;
-  }
-}
-
-function isTerminalTaskStatus(status: AgentTaskStatus): status is Extract<AgentTaskStatus, "completed" | "failed" | "expired" | "cancelled" | "cleaned"> {
-  return status === "completed" || status === "failed" || status === "expired" || status === "cancelled" || status === "cleaned";
-}
-
 function isInteractionLifecycleStatus(status: AgentTaskStatus): status is Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping"> {
   return status === "queued" || status === "starting" || status === "running" || status === "stopping";
-}
-
-function terminalReasonForStatus(status:Extract<AgentTaskStatus,"completed"|"failed"|"expired"|"cancelled"|"cleaned">):TaskTerminalReason{
-  return status==="completed"?"completed":status==="failed"?"failed":status==="expired"?"expired":status==="cancelled"?"cancelled":"cleaned_legacy";
-}
-
-function taskAuditActionForReason(reason:TaskTerminalReason):import("../../contracts/src/api.js").ProjectAuditAction{
-  return reason==="failed"?"task.failed":reason==="expired"?"task.expired":reason==="cancelled"?"task.cancel":reason==="cleaned_legacy"?"task.cleaned":"task.completed";
-}
-
-function isDurableTaskResultStatus(status: AgentTaskStatus): boolean {
-  return status === "completed" || status === "failed" || status === "expired" || status === "cancelled";
 }
 
 function isActiveTaskStatus(status: AgentTaskStatus): boolean {
   return status === "queued" || status === "starting" || status === "running" || status === "stopping";
 }
 
-function cleanupPhaseForTaskStatus(status: AgentTaskStatus): PersistedSandboxRunState["phase"] {
-  return status === "expired" ? "expired" : "stopping";
-}
-
-function sandboxRunDeadlineElapsed(run: PersistedSandboxRunState, now: Date): boolean {
-  return [run.expiresAt, run.idleExpiresAt].some((deadline) =>
-    typeof deadline === "string" && Date.parse(deadline) <= now.getTime()
-  );
-}
 
 function stringDocumentField(document: Record<string, unknown>, field: string): string {
   const value = document[field];

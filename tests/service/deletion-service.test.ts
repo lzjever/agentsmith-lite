@@ -10,6 +10,7 @@ import { FileLibraryService } from "../../packages/application/src/fileLibrarySe
 import { FileService } from "../../packages/application/src/fileService.js";
 import type { Project, Workspace } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
+import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 
 describe("deletion lifecycle", () => {
   it("waits for an in-flight library create before project cleanup", async () => {
@@ -26,14 +27,13 @@ describe("deletion lifecycle", () => {
       const release = new Promise<void>((resolve) => { releaseCreate = resolve; });
       files.ensureLibraryRoot = async (...args) => { createEntered(); await release; return originalEnsure(...args); };
       const libraries = new FileLibraryService(store, new AuthorizationService(store), files, (rootPath) => path.resolve(root, rootPath));
-      let cleanupStarted = false;
-      const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { cleanupStarted = true; } } as never, root);
+      const deletion = new DeletionService(store, root);
 
       const creating = libraries.create("owner", target.id, { name: "In flight" });
       await entered;
       const deleting = deletion.deleteProject("owner", target.id);
       await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(cleanupStarted, false);
+      assert.equal((await store.findProject(target.id))?.lifecycleStatus, "active");
       releaseCreate();
       await creating;
       await deleting;
@@ -41,41 +41,6 @@ describe("deletion lifecycle", () => {
       await assert.rejects(access(path.join(root, target.rootPath)));
     } finally {
       await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("excludes reconciliation through direct and workspace-driven project cleanup", async () => {
-    for (const mode of ["project", "workspace"] as const) {
-      const root = await mkdtemp(path.join(tmpdir(), `asl-delete-file-lifecycle-${mode}-`));
-      try {
-        const store = createLocalInMemoryProductStore();
-        const workspace = await store.createWorkspace(ws(`ws_${mode}`));
-        const target = await store.createProject(project(`proj_${mode}`, workspace.id));
-        await mkdir(path.join(root, target.rootPath, "files"), { recursive: true });
-        let stopEntered!: () => void;
-        const entered = new Promise<void>((resolve) => { stopEntered = resolve; });
-        let releaseStop!: () => void;
-        const release = new Promise<void>((resolve) => { releaseStop = resolve; });
-        const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { stopEntered(); await release; } } as never, root);
-        const files = new FileService();
-        const libraries = new FileLibraryService(store, new AuthorizationService(store), files, (rootPath) => path.resolve(root, rootPath));
-
-        const deleting = mode === "project"
-          ? deletion.deleteProject("owner", target.id)
-          : deletion.deleteWorkspace("owner", workspace.id);
-        await entered;
-        const reconciliation = libraries.reconcileProjectFileBytes("owner", target.id, async () => undefined);
-        let reconciliationSettled = false;
-        void reconciliation.finally(() => { reconciliationSettled = true; }).catch(() => undefined);
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        assert.equal(reconciliationSettled, false);
-        releaseStop();
-        await deleting;
-        await assert.rejects(reconciliation, /Project not found/);
-        await assert.rejects(access(path.join(root, target.rootPath)));
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
     }
   });
 
@@ -99,8 +64,7 @@ describe("deletion lifecycle", () => {
     await store.markProjectProviderSettlementDispatched("settlement_first","2026-01-01T00:00:00.000Z");
     await store.markProjectProviderSettlementDelivered("settlement_first","2026-01-01T00:00:00.000Z");
     await store.settleProjectProviderSettlement("settlement_first",{tokens:1,cost:0.01},"2026-01-01T00:00:00.000Z");
-    const tasks = { async stopTasksForProjectDeletion() {} } as never;
-    const deletion = new DeletionService(store, tasks, root);
+    const deletion = new DeletionService(store, root);
 
     await deletion.deleteProject("owner", first.id);
 
@@ -115,19 +79,93 @@ describe("deletion lifecycle", () => {
     await access(path.join(root, second.rootPath, "only-second.txt"));
   });
 
-  it("keeps deleting state after cleanup failure so retry is scoped to the same project", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-failure-"));
+  it("rejects owned sandbox uncertainty without changing the active writable project or its files", async () => {
+    for (const state of ["active", "failed", "cleanup_requested", "missing"] as const) {
+      const root = await mkdtemp(path.join(tmpdir(), `asl-delete-release-required-${state}-`));
+      try {
+        const store = createLocalInMemoryProductStore();
+        const workspace = await store.createWorkspace(ws(`ws_${state}`));
+        const target = await store.createProject(project(`proj_${state}`, workspace.id));
+        const task = liveTask(target, state === "cleanup_requested" ? "queued" : "failed");
+        await createLiveTask(store, task, state === "missing" ? null : sandboxRun(task, state));
+        await mkdir(path.join(root, target.rootPath), { recursive: true });
+        await writeFile(path.join(root, target.rootPath, "keep.txt"), "kept");
+
+        await assert.rejects(() => new DeletionService(store, root).deleteProject("owner", target.id), (error: unknown) => error instanceof ProductError && error.statusCode === 409 && error.code === "task_sandbox_active");
+
+        assert.equal((await store.findProject(target.id))?.lifecycleStatus, "active");
+        assert.equal((await store.updateProjectName(target.id, `${target.name} writable`, new Date().toISOString(), target.name))?.name, `${target.name} writable`);
+        await access(path.join(root, target.rootPath, "keep.txt"));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("deletes a reusable queued Task project after its exact sandbox run is confirmed cleaned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-cleaned-"));
     const store = createLocalInMemoryProductStore();
-    const workspace = await store.createWorkspace(ws("ws_1"));
-    const target = await store.createProject(project("proj_1", workspace.id));
-    let fail = true;
-    const tasks = { async stopTasksForProjectDeletion() { if (fail) throw new Error("sandbox unavailable"); } } as never;
-    const deletion = new DeletionService(store, tasks, root);
-    await assert.rejects(deletion.deleteProject("owner", target.id), /sandbox unavailable/);
-    assert.equal((await store.findProject(target.id))?.lifecycleStatus, "deleting");
-    fail = false;
-    await deletion.deleteProject("owner", target.id);
+    const workspace = await store.createWorkspace(ws("ws_cleaned"));
+    const target = await store.createProject(project("proj_cleaned", workspace.id));
+    const task = liveTask(target, "queued");
+    await createLiveTask(store, task, sandboxRun(task, "cleaned"), false);
+    await mkdir(path.join(root, target.rootPath), { recursive: true });
+    await writeFile(path.join(root, target.rootPath, "remove.txt"), "remove");
+
+    await new DeletionService(store, root).deleteProject("owner", target.id);
+
     assert.equal(await store.findProject(target.id), null);
+    await assert.rejects(access(path.join(root, target.rootPath)));
+  });
+
+  it("reactivates an already-deleting project when sandbox ownership reappears", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-retry-blocked-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_retry_blocked"));
+    const target = await store.createProject(project("proj_retry_blocked", workspace.id));
+    const task = liveTask(target, "queued");
+    await createLiveTask(store, task, sandboxRun(task, "cleaned"), false);
+    assert.equal((await store.beginProjectDeletion(target.id, "2026-07-19T01:00:00.000Z", "owner")).kind, "ready");
+    const cleaned = await store.sandboxRuns.get(task.runId);assert.ok(cleaned);
+    await store.sandboxRuns.updateWithFencing(cleaned.runId, cleaned.fencingToken, { ...cleaned, phase:"running", cleanupStatus:"active", fencingToken:cleaned.fencingToken+1, updatedAt:"2026-07-19T01:01:00.000Z" });
+    await mkdir(path.join(root, target.rootPath), { recursive:true });
+    await writeFile(path.join(root, target.rootPath, "keep.txt"), "keep");
+
+    await assert.rejects(() => new DeletionService(store, root).deleteProject("owner", target.id), (error:unknown) => error instanceof ProductError && error.statusCode===409 && error.code==="task_sandbox_active");
+
+    const reactivated = await store.findProject(target.id);assert.equal(reactivated?.lifecycleStatus, "active");
+    assert.equal((await store.updateProjectName(target.id, "Writable again", "2026-07-19T01:02:00.000Z", target.name))?.name, "Writable again");
+    await access(path.join(root, target.rootPath, "keep.txt"));
+    assert.ok(await store.findTask(task.id));
+  });
+
+  it("completes an already-deleting project retry when sandbox ownership remains cleaned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-retry-cleaned-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_retry_cleaned"));
+    const target = await store.createProject(project("proj_retry_cleaned", workspace.id));
+    const task = liveTask(target, "queued");
+    await createLiveTask(store, task, sandboxRun(task, "cleaned"), false);
+    assert.equal((await store.beginProjectDeletion(target.id, "2026-07-19T01:00:00.000Z", "owner")).kind, "ready");
+
+    await new DeletionService(store, root).deleteProject("owner", target.id);
+
+    assert.equal(await store.findProject(target.id), null);
+  });
+
+  it("does not remove project files when database dependency deletion rejects", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-db-reject-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_db_reject"));
+    const target = await store.createProject(project("proj_db_reject", workspace.id));
+    await mkdir(path.join(root, target.rootPath), { recursive: true });
+    await writeFile(path.join(root, target.rootPath, "keep.txt"), "keep");
+    store.deleteProjectDependenciesAndProject = async () => false;
+
+    await assert.rejects(() => new DeletionService(store, root).deleteProject("owner", target.id), (error: unknown) => error instanceof ProductError && error.statusCode === 409);
+
+    assert.equal((await store.findProject(target.id))?.lifecycleStatus, "deleting");
+    await access(path.join(root, target.rootPath, "keep.txt"));
   });
 
   it("does not start deletion after ownership changes", async () => {
@@ -141,13 +179,11 @@ describe("deletion lifecycle", () => {
       await store.transferProjectOwner(id, "owner", "successor", updatedAt);
       return beginProjectDeletion(id, updatedAt, expectedOwnerUserId);
     };
-    let stopped = false;
-    const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { stopped = true; } } as never, root);
+    const deletion = new DeletionService(store, root);
 
     await assert.rejects(() => deletion.deleteProject("owner", target.id), (error: unknown) => error instanceof ProductError && error.statusCode === 403);
     assert.equal((await store.findProject(target.id))?.lifecycleStatus, "active");
     assert.equal((await store.findProject(target.id))?.ownerUserId, "successor");
-    assert.equal(stopped, false);
   });
 
   it("deletes a workspace by running each project lifecycle before its own context", async () => {
@@ -158,16 +194,65 @@ describe("deletion lifecycle", () => {
     await store.createProject(project("proj_1", workspace.id));
     await store.createProject(project("proj_2", workspace.id));
     await store.createProjectContextEntry({ id: "context_1", workspaceId: workspace.id, projectId: null, ownerUserId: null, scope: "workspace_shared", contextKey: "note", content: "x", version:1,createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
-    const stopped: string[] = [];
-    const deletion = new DeletionService(store, { async stopTasksForProjectDeletion(id: string) { stopped.push(id); } } as never, root);
+    const deletion = new DeletionService(store, root);
 
     await deletion.deleteWorkspace("owner", workspace.id);
 
-    assert.deepEqual(stopped.sort(), ["proj_1", "proj_2"]);
     assert.equal(await store.findWorkspace(workspace.id), null);
     assert.equal(await store.findWorkspaceMembership(workspace.id,"owner"),null);
     assert.equal(await store.findWorkspaceMembership(workspace.id,"member"),null);
     assert.deepEqual(await store.listProjectContextEntries(workspace.id, null, "workspace_shared", null), []);
+  });
+
+  it("keeps a workspace and every project active when one Task still owns a sandbox", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-workspace-release-required-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_blocked"));
+    const blocked = await store.createProject(project("proj_blocked", workspace.id));
+    const clean = await store.createProject(project("proj_clean", workspace.id));
+    const task = liveTask(blocked, "failed");
+    await createLiveTask(store, task, sandboxRun(task, "failed"));
+
+    await assert.rejects(() => new DeletionService(store, root).deleteWorkspace("owner", workspace.id), (error: unknown) => error instanceof ProductError && error.statusCode === 409);
+
+    assert.equal((await store.findWorkspace(workspace.id))?.lifecycleStatus, "active");
+    assert.equal((await store.findProject(blocked.id))?.lifecycleStatus, "active");
+    assert.equal((await store.findProject(clean.id))?.lifecycleStatus, "active");
+  });
+
+  it("reactivates an already-deleting workspace and its uncertain project when sandbox ownership reappears", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-workspace-retry-blocked-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_retry_blocked"));
+    const blocked = await store.createProject(project("proj_retry_blocked", workspace.id));
+    const sibling = await store.createProject(project("proj_retry_sibling", workspace.id));
+    const task = liveTask(blocked, "queued");
+    await createLiveTask(store, task, sandboxRun(task, "cleaned"), false);
+    assert.equal((await store.beginWorkspaceDeletion(workspace.id, "2026-07-19T02:00:00.000Z", "owner")).kind, "ready");
+    const cleaned = await store.sandboxRuns.get(task.runId);assert.ok(cleaned);
+    await store.sandboxRuns.updateWithFencing(cleaned.runId, cleaned.fencingToken, { ...cleaned, phase:"running", cleanupStatus:"active", fencingToken:cleaned.fencingToken+1, updatedAt:"2026-07-19T02:01:00.000Z" });
+
+    await assert.rejects(() => new DeletionService(store, root).deleteWorkspace("owner", workspace.id), (error:unknown) => error instanceof ProductError && error.statusCode===409);
+
+    assert.equal((await store.findWorkspace(workspace.id))?.lifecycleStatus, "active");
+    assert.equal((await store.findProject(blocked.id))?.lifecycleStatus, "active");
+    assert.equal((await store.findProject(sibling.id))?.lifecycleStatus, "deleting");
+    assert.equal((await store.updateWorkspaceName(workspace.id, "Writable workspace", "2026-07-19T02:02:00.000Z", workspace.name))?.name, "Writable workspace");
+  });
+
+  it("completes an already-deleting workspace retry when every sandbox remains cleaned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-workspace-retry-cleaned-"));
+    const store = createLocalInMemoryProductStore();
+    const workspace = await store.createWorkspace(ws("ws_retry_cleaned"));
+    const target = await store.createProject(project("proj_retry_cleaned", workspace.id));
+    const task = liveTask(target, "queued");
+    await createLiveTask(store, task, sandboxRun(task, "cleaned"), false);
+    assert.equal((await store.beginWorkspaceDeletion(workspace.id, "2026-07-19T02:00:00.000Z", "owner")).kind, "ready");
+
+    await new DeletionService(store, root).deleteWorkspace("owner", workspace.id);
+
+    assert.equal(await store.findWorkspace(workspace.id), null);
+    assert.equal(await store.findProject(target.id), null);
   });
 
   it("transfers ownership only to an existing different member and demotes the former owner", async () => {
@@ -187,3 +272,44 @@ describe("deletion lifecycle", () => {
 function ws(id: string): Workspace { return { id, name: id, ownerUserId: "owner", lifecycleStatus: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }; }
 function project(id: string, workspaceId: string): Project { return { id, workspaceId, name: id, ownerUserId: "owner", rootPath: `workspaces/${workspaceId}/projects/${id}`, taskConcurrencyLimit: 1, lifecycleStatus: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }; }
 function projectForTransfer(id:string,workspaceId:string){return project(id,workspaceId)}
+
+function liveTask(target: Project, status: "queued" | "failed"): PersistedAgentTask {
+  return {
+    id: `task_${target.id}`, workspaceId: target.workspaceId, projectId: target.id, endpointId: `endpoint_${target.id}`,
+    fileLibraryId: `library_${target.id}`, title: "Durable Task", prompt: "work", status, runId: `run_${target.id}`,
+    executionMode: "live", sandbox: { namespace: "agentsmith", resources: [] }, activeReservation: true,
+    createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z"
+  };
+}
+
+function sandboxRun(task: PersistedAgentTask, state: "active" | "failed" | "cleanup_requested" | "cleaned"): PersistedSandboxRunState {
+  const cleaned = state === "cleaned";
+  return {
+    namespace: "agentsmith", workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id, runId: task.runId,
+    phase: cleaned ? "cleaned" : "running", image: "botified:test", pvcName: "files",
+    projectSubPath: `workspaces/${task.workspaceId}/projects/${task.projectId}`, fileLibraryRootSubPath: `libraries/${task.fileLibraryId}/home`, botifiedPort: 3099,
+    resourceNames: { pod: `pod-${task.id}`, service: `service-${task.id}`, configMap: `config-${task.id}`, secret: `secret-${task.id}` },
+    serviceKeySecretRef: { name: `secret-${task.id}`, key: "BOTIFIED_SERVICE_KEY" },
+    directories: { libraryHome: "/workspace/project/library", botified: "/workspace/project/botified" },
+    resourceLimits: { cpuRequest: "100m", memoryRequest: "128Mi", cpuLimit: "1", memoryLimit: "1Gi" },
+    fencingToken: 1, cleanupStatus: cleaned ? "cleaned" : state === "cleanup_requested" ? "cleanup_requested" : "active", createdAt: task.createdAt, updatedAt: task.updatedAt
+  };
+}
+
+async function createLiveTask(
+  store: ReturnType<typeof createLocalInMemoryProductStore>,
+  task: PersistedAgentTask,
+  run: PersistedSandboxRunState | null,
+  reserveActive = true
+): Promise<void> {
+  const created = await store.createTaskAtomically({
+    task: { ...task, activeReservation: reserveActive },
+    newFileLibrary: {
+      id: task.fileLibraryId!, workspaceId: task.workspaceId, projectId: task.projectId, name: `Library ${task.id}`,
+      rootSubPath: `libraries/${task.fileLibraryId}/home`, createdByUserId: "owner", createdAt: task.createdAt, updatedAt: task.updatedAt
+    },
+    reserveActive,
+    ...(run ? { sandboxRun: run } : {})
+  });
+  assert.equal(created.kind, "created");
+}

@@ -412,45 +412,46 @@ describe("task interaction projection", () => {
     assert.deepEqual(parseBotifiedTimelineEvent({ ...event, data: ["arbitrary"] })?.data, {});
   });
 
-  it("projects product message lifecycle sources with stable identity and monotonic revision", () => {
+  it("reconciles the migrated initial message with its Phase 2 interaction identity", () => {
     const created = projectProduct({
       sourceKind: "product",
       taskId: "task-1",
-      sourceId: "task-1",
+      sourceId: "task:task-1:prompt",
       sourceRevision: 1,
       occurredAt: "2026-07-13T10:00:00.000Z",
       position: 1,
       type: "task_created",
-      messageId: "initial-message",
+      messageId: "task-1",
       content: "Start work",
       status: "pending"
     });
     const delivered = projectProduct({
       sourceKind: "product",
       taskId: "task-1",
-      sourceId: "initial-message",
+      sourceId: "message:task-1",
       sourceRevision: 2,
       occurredAt: "2026-07-13T10:00:02.000Z",
       position: 2,
       type: "message_delivery",
-      messageId: "initial-message",
+      messageId: "task-1",
       status: "accepted"
     }, state(created));
     const stale = projectProduct({
       sourceKind: "product",
       taskId: "task-1",
-      sourceId: "initial-message",
+      sourceId: "message:task-1",
       sourceRevision: 3,
       occurredAt: "2026-07-13T10:00:03.000Z",
       position: 3,
       type: "message_delivery",
-      messageId: "initial-message",
+      messageId: "task-1",
       status: "dispatching"
     }, state(delivered));
 
     assert.equal(created.interaction?.kind, "user_message");
     assert.equal(delivered.interaction?.id, created.interaction?.id);
     assert.equal(delivered.interaction?.revision, 2);
+    assert.equal(delivered.interaction?.position,created.interaction?.position);
     assert.equal(delivered.interaction?.body, "Start work");
     assert.equal(field(stale, "status"), "accepted");
 

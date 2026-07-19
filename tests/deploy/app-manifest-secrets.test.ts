@@ -331,8 +331,6 @@ describe("app manifest rendering", () => {
         OIDC_BACKCHANNEL_BASE_URL: "http://keycloak.keycloak.svc.cluster.local/realms/agentsmith",
         OIDC_CLIENT_ID: "agentsmith-lite",
         AGENTSMITH_LITE_SANDBOX_MODE: "live",
-        AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS: "60000",
-        AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS: "120000",
         AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
         AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS: "deepseek.internal,10.0.0.8",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
@@ -398,8 +396,6 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
     assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
-    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_IDLE_TTL_MS, "60000");
-    assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MAX_LIFETIME_MS, "120000");
     assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
     assert.equal(configMapData?.AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS, "deepseek.internal,10.0.0.8");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
