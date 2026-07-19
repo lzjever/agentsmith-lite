@@ -9,6 +9,7 @@ import { ArrowRight, FolderKanban, Pin, PinOff, Search } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
+import { orderProjectsForDisplay } from "../../lib/project-order";
 import { DataTable } from "../ui/data-table";
 import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
@@ -30,16 +31,11 @@ export function ProjectsTable({
   const [page, setPage] = useState(1);
   const filtered = useMemo(
     () =>
-      projects
-        .filter((project) =>
+      orderProjectsForDisplay(
+        projects.filter((project) =>
           project.name.toLowerCase().includes(query.trim().toLowerCase()),
-        )
-        .sort(
-          (left, right) =>
-            Number(Boolean(right.pinnedAt)) -
-              Number(Boolean(left.pinnedAt)) ||
-            left.name.localeCompare(right.name),
         ),
+      ),
     [projects, query],
   );
   const pageSize = 20;

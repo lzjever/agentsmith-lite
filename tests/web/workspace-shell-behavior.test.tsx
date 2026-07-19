@@ -112,6 +112,18 @@ describe("workspace and shell interactions", () => {
     assert.equal(view.getByRole("button", { name: "Dark" }).getAttribute("aria-pressed"), "true");
   });
 
+  it("keeps pinned projects first in the project switcher", async () => {
+    const current = { ...workspace.projects[0]!, name: "Beta project", pinnedAt: null };
+    const pinned = { ...workspace.projects[1]!, name: "Zulu project", pinnedAt: "2026-07-12T00:00:00.000Z" };
+    const alpha = { ...workspace.projects[1]!, id: "proj_3", name: "Alpha project", pinnedAt: null };
+    const orderedWorkspace = { ...workspace, projects: [current, pinned, alpha] };
+    const view = render(<ProjectSwitcher workspace={orderedWorkspace} project={current} mobile onSelect={() => undefined} />);
+
+    fireEvent.pointerDown(view.getByRole("button", { name: "Beta project" }), { button: 0, ctrlKey: false });
+    const items = await view.findAllByRole("menuitem");
+    assert.deepEqual(items.map((item) => item.textContent?.replace("Current", "").trim()), ["Zulu project", "Alpha project", "Beta project"]);
+  });
+
   it("follows system theme changes until the user saves a preference", async () => {
     setSystemDark(true);
     const view = render(<ThemeToggle mobile />);

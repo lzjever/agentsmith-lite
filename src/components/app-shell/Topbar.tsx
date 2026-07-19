@@ -3,6 +3,7 @@
 import { ChevronDown, FolderKanban, Globe, List, Menu } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, Workspace } from "../../lib/api/client";
+import { orderProjectsForDisplay } from "../../lib/project-order";
 import { ThemeToggle } from "../theme/ThemeToggle";
 import { Button } from "../ui/button";
 import {
@@ -137,7 +138,7 @@ export function ProjectSwitcher({
         <ChevronDown size={14} className="ml-auto shrink-0 text-tertiary" />
       </DropdownMenu.Trigger>
       <DropdownContent align="start">
-        {workspace.projects.map((item) => (
+        {orderProjectsForDisplay(workspace.projects).map((item) => (
           <DropdownItem key={item.id} onSelect={() => onSelect(item.id)}>
             {item.name}
             {item.id === project.id ? (
