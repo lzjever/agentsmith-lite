@@ -1,0 +1,1 @@
+export const USER_NOTIFICATION_INBOX_LIMIT = 100;
