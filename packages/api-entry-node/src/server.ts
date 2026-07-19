@@ -448,10 +448,13 @@ async function routeApi(
 
   if (url.pathname === "/api/v1/context") {
     if (method === "GET") {
+      assertOnlySearchParams(url, ["workspaceId", "projectId", "scope"]);
       return sendJson(res, 200, await services.contexts.list(user.id, contextTargetFromQuery(url)));
     }
     if (method === "PUT") {
+      assertOnlySearchParams(url, []);
       const body = await readJson(req);
+      assertOnlyKeys(body, ["workspaceId", "projectId", "scope", "contextKey", "previousContextKey", "expectedVersion", "content", "contentType"]);
       return sendJson(res, 200, await services.contexts.upsert(user.id, {
         ...contextTargetFromBody(body),
         contextKey: asString(body.contextKey),
@@ -462,7 +465,9 @@ async function routeApi(
       }, requireIdempotencyKey(req)));
     }
     if (method === "DELETE") {
+      assertOnlySearchParams(url, []);
       const body = await readJson(req);
+      assertOnlyKeys(body, ["workspaceId", "projectId", "scope", "contextKey", "expectedVersion"]);
       return sendJson(res, 200, await services.contexts.delete(user.id, { ...contextTargetFromBody(body), contextKey: asString(body.contextKey), expectedVersion: asPositiveInteger(body.expectedVersion, "expectedVersion") }, requireIdempotencyKey(req)));
     }
   }

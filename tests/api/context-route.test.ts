@@ -50,6 +50,15 @@ describe("context API", () => {
     assert.deepEqual(deleted, { deleted: true });
   });
 
+  it("rejects removed context query and body fields", async () => {
+    const list = await request("GET", `/api/v1/context?workspaceId=${workspaceId}&projectId=${projectId}&scope=project_shared&key=legacy`);
+    assert.equal(list.response.status, 400);
+    const save = await request("PUT", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "project.strict", content: "brief", contentType: "text", taskId: "legacy" });
+    assert.equal(save.response.status, 400);
+    const remove = await request("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "missing", expectedVersion: 1, force: true });
+    assert.equal(remove.response.status, 400);
+  });
+
   async function requestJson(method: string, pathname: string, body?: unknown): Promise<any> { const result = await request(method, pathname, body); assert.equal(result.response.status, 200, JSON.stringify(result.body)); return result.body; }
   async function request(method: string, pathname: string, body?: unknown, session = cookie, token = csrf): Promise<{ response: Response; body: any }> {
     const response = await fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(session ? { cookie: session } : {}), ...(["POST", "PUT", "PATCH", "DELETE"].includes(method) && token ? { "x-csrf-token": token } : {}), ...((method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname))) || (["PUT", "DELETE"].includes(method) && pathname === "/api/v1/context") ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
