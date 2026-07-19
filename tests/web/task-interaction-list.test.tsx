@@ -48,6 +48,22 @@ describe("task interaction list", () => {
     await waitFor(() => assert.deepEqual(writes, ["Details"]));
   });
 
+  it("keeps markdown tables readable in a locally scrollable region", () => {
+    const assistant = {
+      ...itemFor("assistant_message", 1),
+      body: "| Task | Started | Completed | Output |\n| --- | --- | --- | --- |\n| Background command | 12:22:36 | 12:24:12 | wait completed |",
+    } as TaskInteractionItem;
+    render(<TaskInteractionList taskId="task_1" items={[assistant]} preview={null} basePath="/tasks" onStopWork={async () => undefined} />);
+
+    const table = screen.getByRole("table");
+    const region = table.closest('[role="region"]');
+    assert.ok(region);
+    assert.equal(region.getAttribute("aria-label"), "Scrollable table");
+    assert.equal(region.getAttribute("tabindex"), "0");
+    assert.match(region.className, /overflow-x-auto/);
+    assert.match(table.className, /min-w-max/);
+  });
+
   it("states system error retryability without offering an unsupported retry action", () => {
     const retryable = itemFor("system_error", 1);
     const terminal = { ...itemFor("system_error", 2), id: "error_terminal", retryable: false } as TaskInteractionItem;
