@@ -2,9 +2,9 @@
 
 import { AlertCircle, CheckCircle, Info, X, XCircle } from "lucide-react";
 import { useSyncExternalStore } from "react";
+import { appendToast, type ToastMessage, type ToastType } from "./toast-policy";
 
-export type ToastType = "success" | "error" | "warning" | "info";
-export type ToastMessage = { id: string; type: ToastType; message: string; duration: number };
+export type { ToastMessage, ToastType } from "./toast-policy";
 
 let messages: ToastMessage[] = [];
 const listeners = new Set<() => void>();
@@ -16,12 +16,18 @@ const serverSnapshot = () => [] as ToastMessage[];
 
 function add(type: ToastType, message: string, duration = 5_000) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  messages = [...messages, { id, type, message, duration }];
+  if (type === "success") {
+    for (const item of messages) {
+      if (item.type === "success") clearTimer(item.id);
+    }
+  }
+  messages = appendToast(messages, { id, type, message, duration });
   notify();
   timers.set(id, setTimeout(() => remove(id), duration));
 }
 
-export function remove(id: string) { const timer = timers.get(id); if (timer) clearTimeout(timer); timers.delete(id); messages = messages.filter((item) => item.id !== id); notify(); }
+function clearTimer(id: string) { const timer = timers.get(id); if (timer) clearTimeout(timer); timers.delete(id); }
+export function remove(id: string) { clearTimer(id); messages = messages.filter((item) => item.id !== id); notify(); }
 export const toast = { success: (message: string, duration?: number) => add("success", message, duration), error: (message: string, duration?: number) => add("error", message, duration), warning: (message: string, duration?: number) => add("warning", message, duration), info: (message: string, duration?: number) => add("info", message, duration) };
 
 export function ToastContainer() {
