@@ -438,10 +438,12 @@ async function routeApi(
   }
 
   if (method === "GET" && url.pathname === "/api/v1/workspaces") {
+    assertOnlySearchParams(url, []);
     return sendJson(res, 200, await services.workspaces.listWorkspaces(user.id));
   }
 
   if (method === "GET" && url.pathname === "/api/v1/projects") {
+    assertOnlySearchParams(url, []);
     const workspaces = await services.workspaces.listWorkspaces(user.id);
     return sendJson(res, 200, workspaces.flatMap((workspace) => workspace.projects));
   }
@@ -473,7 +475,9 @@ async function routeApi(
   }
 
   if (method === "POST" && url.pathname === "/api/v1/workspaces") {
+    assertOnlySearchParams(url, []);
     const body = await readJson(req);
+    assertOnlyKeys(body, ["name"]);
     const created = await services.workspaces.createWorkspace(user.id, { name: asString(body.name) }, requireIdempotencyKey(req));
     const workspace = (await services.workspaces.listWorkspaces(user.id)).find((candidate) => candidate.id === created.id);
     if (!workspace) {
@@ -483,14 +487,20 @@ async function routeApi(
   }
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments.length === 4 && method === "DELETE") {
+    assertOnlySearchParams(url, []);
+    const body = await readJson(req);
+    assertOnlyKeys(body, []);
     const workspaceId=segments[3];const result=await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.delete",requireIdempotencyKey(req),{workspaceId},workspaceId,async()=>{await services.deletion.deleteWorkspace(user.id,workspaceId);return{deleted:true as const}});
     return sendJson(res, 200, result);
   }
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "projects") {
     const workspaceId = segments[3];
-    if (method === "POST") {
+    if (!segments[5] && method === "POST") {
+      assertOnlySearchParams(url, []);
       const body = await readJson(req);
+      assertOnlyKeys(body, ["name", "taskConcurrencyLimit"]);
+      if (body.taskConcurrencyLimit !== undefined && typeof body.taskConcurrencyLimit !== "number") throw new ProductError("taskConcurrencyLimit must be a number");
       return sendJson(res, 200, await services.workspaces.createProject(user.id, workspaceId, {
         name: asString(body.name),
         ...(typeof body.taskConcurrencyLimit === "number" ? { taskConcurrencyLimit: body.taskConcurrencyLimit } : {})
