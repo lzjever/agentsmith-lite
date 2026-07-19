@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   DeleteProjectFileResponse,
@@ -26,8 +26,9 @@ interface DeletedProjectFile {
 }
 
 interface FileByteAccounting {
+  rootSubPaths?: string[];
   reconcile?(bytes: number): Promise<void>;
-  record(path: string, delta: number): Promise<void>;
+  record(path: string, delta: number, file: { bytes: number; mediaType: string }): Promise<void>;
 }
 
 const projectFileOperations = new Map<string, Promise<void>>();
@@ -76,32 +77,61 @@ export class FileService {
   async resolveProjectFilesPath(
     projectRoot: string,
     input: string,
-    options: { allowFilesRoot?: boolean } = {}
+    options: { allowFilesRoot?: boolean; rootSubPath?: string } = {}
   ): Promise<ResolvedProjectFilePath> {
-    const normalizedPath = this.normalizeProjectFilesPath(input, options);
+    const rootSubPath = options.rootSubPath === undefined || options.rootSubPath === "files"
+      ? "files"
+      : this.normalizeLibraryRootSubPath(options.rootSubPath);
+    const normalizedPath = rootSubPath === "files"
+      ? this.normalizeProjectFilesPath(input, options)
+      : this.normalizeLibraryFilePath(input, options.allowFilesRoot === true);
+    const storagePath = rootSubPath === "files"
+      ? normalizedPath
+      : normalizedPath ? path.posix.join(rootSubPath, normalizedPath) : rootSubPath;
     return {
       normalizedPath,
-      absolutePath: await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath)
+      absolutePath: await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, storagePath)
     };
   }
+
+  async ensureLibraryRoot(projectRoot:string,rootSubPath:string):Promise<void>{
+    this.normalizeLibraryRootSubPath(rootSubPath);
+    await this.ensureFilesRoot(projectRoot,rootSubPath);
+  }
+
+  async removeEmptyLibraryRoot(projectRoot:string,rootSubPath:string):Promise<void>{
+    await withProjectFileLock(projectRoot,async()=>{
+      const {absolutePath}=await this.resolveProjectFilesPath(projectRoot,"",{allowFilesRoot:true,rootSubPath:this.normalizeLibraryRootSubPath(rootSubPath)});
+      const entries=await readdir(absolutePath);
+      if(entries.length>0)throw new ProductError("File Library is not empty",409);
+      try{await rmdir(absolutePath)}catch(error){if(isNotEmpty(error))throw new ProductError("File Library is not empty",409);throw error}
+    });
+  }
+
+  uploadLibraryFile(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput){return this.uploadFileWithAccounting(projectRoot,input,{record:async()=>undefined},rootSubPath)}
+  uploadLibraryFileWithAccounting(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput,accounting:FileByteAccounting){return this.uploadFileWithAccounting(projectRoot,input,accounting,rootSubPath)}
+  listLibraryFiles(projectRoot:string,rootSubPath:string,input=""){return this.listFilesAtRoot(projectRoot,input,rootSubPath)}
+  downloadLibraryFile(projectRoot:string,rootSubPath:string,input:string){return this.downloadFile(projectRoot,input,rootSubPath)}
+  deleteLibraryFile(projectRoot:string,rootSubPath:string,input:string){return this.deleteFile(projectRoot,input,rootSubPath)}
+  deleteLibraryFileWithAccounting(projectRoot:string,rootSubPath:string,input:string,accounting:FileByteAccounting){return this.deleteFileWithAccounting(projectRoot,input,accounting,rootSubPath)}
 
   async uploadFile(projectRoot: string, input: UploadProjectFileInput): Promise<ProjectFileWriteResponse> {
     return this.uploadFileWithAccounting(projectRoot, input, { record: async () => undefined });
   }
 
-  async uploadFileWithAccounting(projectRoot: string, input: UploadProjectFileInput, accounting: FileByteAccounting): Promise<ProjectFileWriteResponse> {
+  async uploadFileWithAccounting(projectRoot: string, input: UploadProjectFileInput, accounting: FileByteAccounting, rootSubPath = "files"): Promise<ProjectFileWriteResponse> {
     if (input.bytes.byteLength > MAX_PROJECT_FILE_BYTES) {
       throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
     }
     return withProjectFileLock(projectRoot, async () => {
-      await this.reconcileFileBytesUnlocked(projectRoot, accounting);
-      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path);
+      await this.reconcileFileBytesUnlocked(projectRoot, accounting, rootSubPath);
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input.path,{rootSubPath});
       if (input.overwrite !== true && await regularFileExists(absolutePath)) {
         throw new ProductError("Project file already exists", 409);
       }
       const previous = input.overwrite === true ? await readOptionalRegularFile(absolutePath) : null;
       await mkdir(path.dirname(absolutePath), { recursive: true });
-      await this.paths.resolveSafeProjectPathNoSymlinks(projectRoot, normalizedPath);
+      await this.resolveProjectFilesPath(projectRoot, normalizedPath, { rootSubPath });
       const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.tmp`);
       try {
         await writeFile(temporaryPath, input.bytes, { flag: "wx" });
@@ -114,7 +144,7 @@ export class FileService {
         throw new ProductError("Written path is not a regular file");
       }
       try {
-        await accounting.record(normalizedPath, written.size - (previous?.byteLength ?? 0));
+        await accounting.record(normalizedPath,written.size-(previous?.byteLength??0),{bytes:written.size,mediaType:detectProjectFileMediaType(input.bytes,normalizedPath)});
       } catch (error) {
         await restoreOptionalRegularFile(absolutePath, previous);
         throw error;
@@ -129,23 +159,23 @@ export class FileService {
   }
 
   async listFiles(projectRoot: string, input = "files"): Promise<ProjectFileListResponse> {
-    return withProjectFileLock(projectRoot, () => this.listFilesUnlocked(projectRoot, input));
+    return this.listFilesAtRoot(projectRoot,input,"files");
   }
+
+  private async listFilesAtRoot(projectRoot:string,input:string,rootSubPath:string):Promise<ProjectFileListResponse>{return withProjectFileLock(projectRoot,()=>this.listFilesUnlocked(projectRoot,input,rootSubPath))}
 
   async listFilesWithAccounting(projectRoot: string, input: string, accounting: FileByteAccounting): Promise<ProjectFileListResponse> {
     return withProjectFileLock(projectRoot, async () => {
       await this.reconcileFileBytesUnlocked(projectRoot, accounting);
-      return this.listFilesUnlocked(projectRoot, input);
+      return this.listFilesUnlocked(projectRoot, input,"files");
     });
   }
 
-  async reconcileFileBytes(projectRoot: string, accounting: FileByteAccounting): Promise<void> {
-    await withProjectFileLock(projectRoot, () => this.reconcileFileBytesUnlocked(projectRoot, accounting));
-  }
+  async measureFileRootsBytes(projectRoot:string,rootSubPaths:string[]):Promise<number>{return withProjectFileLock(projectRoot,()=>this.measureFileRootsBytesUnlocked(projectRoot,rootSubPaths))}
 
-  private async listFilesUnlocked(projectRoot: string, input: string): Promise<ProjectFileListResponse> {
-      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
-      await this.ensureFilesRoot(projectRoot);
+  private async listFilesUnlocked(projectRoot: string, input: string,rootSubPath="files"): Promise<ProjectFileListResponse> {
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true,rootSubPath });
+      await this.ensureFilesRoot(projectRoot,rootSubPath);
 
       let directoryStat;
       try {
@@ -199,15 +229,24 @@ export class FileService {
       };
   }
 
-  private async reconcileFileBytesUnlocked(projectRoot: string, accounting: FileByteAccounting): Promise<void> {
+  private async reconcileFileBytesUnlocked(projectRoot: string, accounting: FileByteAccounting,rootSubPath="files"): Promise<void> {
     if (!accounting.reconcile) return;
-    await this.ensureFilesRoot(projectRoot);
-    const { absolutePath } = await this.resolveProjectFilesPath(projectRoot, "files", { allowFilesRoot: true });
-    await accounting.reconcile(await regularFileBytes(absolutePath));
+    await accounting.reconcile(await this.measureFileRootsBytesUnlocked(projectRoot,accounting.rootSubPaths??[rootSubPath]));
   }
 
-  async downloadFile(projectRoot: string, input: string): Promise<ProjectFileDownloadResponse> {
-    const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input);
+  private async measureFileRootsBytesUnlocked(projectRoot:string,rootSubPaths:string[]):Promise<number>{
+    let bytes=0;
+    for(const rootSubPath of new Set(rootSubPaths)){
+      await this.ensureFilesRoot(projectRoot,rootSubPath);
+      const {absolutePath}=await this.resolveProjectFilesPath(projectRoot,rootSubPath==="files"?"files":"",{allowFilesRoot:true,rootSubPath});
+      bytes+=await regularFileBytes(absolutePath);
+      if(!Number.isSafeInteger(bytes))throw new ProductError("Project file usage exceeds the supported size");
+    }
+    return bytes;
+  }
+
+  async downloadFile(projectRoot: string, input: string,rootSubPath="files"): Promise<ProjectFileDownloadResponse> {
+    const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input,{rootSubPath});
     try {
       const entryStat = await lstat(absolutePath);
       if (entryStat.isDirectory()) {
@@ -248,19 +287,19 @@ export class FileService {
     }
   }
 
-  async deleteFile(projectRoot: string, input: string): Promise<DeleteProjectFileResponse> {
-    return (await this.deleteFileWithSize(projectRoot, input)).response;
+  async deleteFile(projectRoot: string, input: string,rootSubPath="files"): Promise<DeleteProjectFileResponse> {
+    return (await this.deleteFileWithSize(projectRoot, input,rootSubPath)).response;
   }
 
-  async deleteFileWithSize(projectRoot: string, input: string): Promise<DeletedProjectFile> {
-    return this.deleteFileWithAccounting(projectRoot, input, { record: async () => undefined });
+  async deleteFileWithSize(projectRoot: string, input: string,rootSubPath="files"): Promise<DeletedProjectFile> {
+    return this.deleteFileWithAccounting(projectRoot, input, { record: async () => undefined },rootSubPath);
   }
 
-  async deleteFileWithAccounting(projectRoot: string, input: string, accounting: FileByteAccounting): Promise<DeletedProjectFile> {
+  async deleteFileWithAccounting(projectRoot: string, input: string, accounting: FileByteAccounting,rootSubPath="files"): Promise<DeletedProjectFile> {
     return withProjectFileLock(projectRoot, async () => {
-      await this.reconcileFileBytesUnlocked(projectRoot, accounting);
-      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true });
-      if (normalizedPath === "files") {
+      await this.reconcileFileBytesUnlocked(projectRoot, accounting,rootSubPath);
+      const { normalizedPath, absolutePath } = await this.resolveProjectFilesPath(projectRoot, input, { allowFilesRoot: true,rootSubPath });
+      if (normalizedPath === "files"||normalizedPath === "") {
         throw new ProductError("Cannot delete the files root");
       }
       let entryStat;
@@ -286,7 +325,7 @@ export class FileService {
         throw error;
       }
       try {
-        await accounting.record(normalizedPath, -entryStat.size);
+        await accounting.record(normalizedPath,-entryStat.size,{bytes:entryStat.size,mediaType});
       } catch (error) {
         await restoreOptionalRegularFile(absolutePath, previous);
         throw error;
@@ -295,8 +334,8 @@ export class FileService {
     });
   }
 
-  private async ensureFilesRoot(projectRoot: string): Promise<void> {
-    const { absolutePath } = await this.resolveProjectFilesPath(projectRoot, "files", { allowFilesRoot: true });
+  private async ensureFilesRoot(projectRoot: string,rootSubPath="files"): Promise<void> {
+    const { absolutePath } = await this.resolveProjectFilesPath(projectRoot, rootSubPath==="files"?"files":"", { allowFilesRoot: true,rootSubPath });
     try {
       const entryStat = await lstat(absolutePath);
       if (entryStat.isSymbolicLink()) {
@@ -308,10 +347,22 @@ export class FileService {
     } catch (error) {
       if (isNotFound(error)) {
         await mkdir(absolutePath, { recursive: true });
+        await this.resolveProjectFilesPath(projectRoot, rootSubPath==="files"?"files":"", { allowFilesRoot:true,rootSubPath });
         return;
       }
       throw error;
     }
+  }
+
+  private normalizeLibraryFilePath(input:string,allowRoot:boolean):string{
+    if(allowRoot&&input.trim()==="")return "";
+    return this.paths.normalizeRelativeProjectPath(input);
+  }
+
+  private normalizeLibraryRootSubPath(input:string):string{
+    const normalized=this.paths.normalizeRelativeProjectPath(input);
+    if(!/^libraries\/[^/]+\/home\/workspace$/.test(normalized))throw new ProductError("File Library root path is invalid");
+    return normalized;
   }
 }
 
@@ -384,6 +435,8 @@ function isUtf8Text(bytes: Uint8Array): boolean {
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
+
+function isNotEmpty(error:unknown):boolean{return typeof error==="object"&&error!==null&&"code" in error&&(error.code==="ENOTEMPTY"||error.code==="EEXIST")}
 
 async function readOptionalRegularFile(absolutePath: string): Promise<Buffer | null> {
   try {

@@ -216,11 +216,13 @@ export class ProjectPolicyService {
       ...(delta > 0 ? { limit: "project_file_bytes_limit" as const } : {}),
       updatedAt: nowIso()
     });
-    if (adjusted) { await evaluateProjectAlertRules(this.store, projectId, "project_file_bytes_limit"); if(delta<0)await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit");return;}
+    if (adjusted) {
+      await this.bestEffortFileProjection("file alert evaluation",async()=>{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");if(delta<0)await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")});
+      return;
+    }
     if (delta > 0) {
       await this.requirePolicy(projectId);
-      await this.openAlert(projectId, "project_file_bytes_limit");
-      await this.auditEvent(projectId, actorId, "file.quota", "rejected", null, "file_quota");
+      await this.bestEffortFileProjection("file quota projection",async()=>{await this.openAlert(projectId,"project_file_bytes_limit");await this.auditEvent(projectId,actorId,"file.quota","rejected",null,"file_quota")});
       throw new ProductError("Project file bytes limit reached", 409, "project_file_bytes_limit_reached");
     }
     throw new ProductError("Project policy usage not found", 409);
@@ -231,11 +233,15 @@ export class ProjectPolicyService {
     if (!Number.isSafeInteger(bytes)) throw new ProductError("Project file usage exceeds the supported size");
     const usage = await this.store.setProjectFileBytes(projectId, bytes, nowIso());
     if (!usage) throw new ProductError("Project policy usage not found", 409);
-    await evaluateProjectAlertRules(this.store, projectId, "project_file_bytes_limit");
-    await recoverProjectAlerts(this.store, projectId, "project_file_bytes_limit");
+    await this.bestEffortFileProjection("file reconciliation projection",async()=>{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")});
+  }
+  async recordFileMutation(projectId:string,actorId:string,action:Extract<ProjectAuditAction,"file.upload"|"file.delete">,resourceId:string,filePath:string,delta:number,bytes:number,mediaType:string):Promise<void>{
+    await this.recordFileBytes(projectId,actorId,filePath,delta);
+    await this.bestEffortFileProjection("file mutation audit",()=>this.recordOperation(projectId,actorId,action,"accepted",resourceId,"file",{filePath,bytes,mediaType}));
   }
   async refreshFileAlerts(projectId: string): Promise<void> { await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit"); }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
+  private async bestEffortFileProjection(label:string,action:()=>Promise<void>):Promise<void>{try{await action()}catch(error){console.error(`${label} failed`,error)}}
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
   private async recoverChangedPolicyAlerts(previous: ProjectResourcePolicy, updated: ProjectResourcePolicy): Promise<void> {
     const usage = await this.usage(updated.projectId);

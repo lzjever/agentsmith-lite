@@ -100,6 +100,36 @@ export interface Project {
   updatedAt: ISODateString;
 }
 
+export interface FileLibrary {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  name: string;
+  rootSubPath: string;
+  createdByUserId: string;
+  createdAt: ISODateString;
+  updatedAt: ISODateString;
+}
+
+export interface FileLibraryTaskLink {
+  id: string;
+  title: string | null;
+}
+
+export interface FileLibraryCapabilities {
+  canRename: boolean;
+  canDelete: boolean;
+  canWriteFiles: boolean;
+}
+
+export interface FileLibraryProjection extends FileLibrary {
+  boundTask: FileLibraryTaskLink | null;
+  capabilities: FileLibraryCapabilities;
+}
+
+export interface CreateFileLibraryInput { name: string; }
+export interface RenameFileLibraryInput { name: string; expectedUpdatedAt: ISODateString; }
+
 export interface ProjectResourcePolicy {
   projectId: string;
   activeTasksLimit: number;

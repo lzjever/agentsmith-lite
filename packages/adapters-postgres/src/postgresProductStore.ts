@@ -6,6 +6,7 @@ import type {
   ProjectChatThread,
   AuthSession,
   EndpointHealth,
+  FileLibrary,
   EndpointCapability,
   EndpointProtocol,
   ModelEndpoint,
@@ -347,6 +348,18 @@ export class PostgresProductStore implements ProductStore {
     );
     return rows.map(mapProject);
   }
+
+  async createFileLibrary(value:FileLibrary):Promise<FileLibrary|null>{
+    const rows=await this.queryRows<FileLibraryRow>(`insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing returning *`,[value.id,value.workspaceId,value.projectId,value.name,value.rootSubPath,value.createdByUserId,value.createdAt,value.updatedAt]);
+    return rows[0]?mapFileLibrary(rows[0]):null;
+  }
+  async findFileLibrary(id:string):Promise<FileLibrary|null>{const rows=await this.queryRows<FileLibraryRow>("select * from file_libraries where id=$1",[id]);return rows[0]?mapFileLibrary(rows[0]):null}
+  async listFileLibrariesForProject(projectId:string):Promise<FileLibrary[]>{return (await this.queryRows<FileLibraryRow>("select * from file_libraries where project_id=$1 order by created_at,id",[projectId])).map(mapFileLibrary)}
+  async renameFileLibrary(projectId:string,id:string,name:string,expectedUpdatedAt:string,updatedAt:string):Promise<FileLibrary|null>{
+    try{const rows=await this.queryRows<FileLibraryRow>("update file_libraries set name=$3,updated_at=$5 where project_id=$1 and id=$2 and updated_at=$4 returning *",[projectId,id,name,expectedUpdatedAt,updatedAt]);return rows[0]?mapFileLibrary(rows[0]):null}catch(error){if(isUniqueConstraintError(error))return null;throw error}
+  }
+  async deleteFileLibrary(projectId:string,id:string):Promise<boolean>{return (await this.pool.query("delete from file_libraries where project_id=$1 and id=$2",[projectId,id])).rowCount===1}
+  async findTaskBoundToFileLibrary(_fileLibraryId:string){return{kind:"unavailable" as const}}
 
   async findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null> {
     const rows = await this.queryRows<ProjectMembershipRow>(
@@ -1537,6 +1550,7 @@ interface ProjectRow {
   created_at: unknown;
   updated_at: unknown;
 }
+interface FileLibraryRow { id:string;workspace_id:string;project_id:string;name:string;root_sub_path:string;created_by_user_id:string;created_at:unknown;updated_at:unknown; }
 interface ContextRow { id:string; workspace_id:string; project_id:string|null; owner_user_id:string|null; scope:ProjectContextEntry["scope"]; context_key:string; content:string; content_type:import("../../contracts/src/api.js").ProjectContextContentType; version:number; created_at:unknown; updated_at:unknown; }
 
 interface ModelEndpointRow {
@@ -1715,6 +1729,7 @@ function mapProject(row: ProjectRow): Project {
     updatedAt: toIso(row.updated_at)
   };
 }
+function mapFileLibrary(row:FileLibraryRow):FileLibrary{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,name:row.name,rootSubPath:row.root_sub_path,createdByUserId:row.created_by_user_id,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 function mapContext(row: ContextRow): ProjectContextEntry { return { id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,ownerUserId:row.owner_user_id,scope:row.scope,contextKey:row.context_key,content:row.content,contentType:row.content_type,version:row.version,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at) }; }
 
 function mapEndpoint(row: ModelEndpointRow): ModelEndpoint {

@@ -5,6 +5,7 @@ import type {
   ProjectChatThread,
   AuthSession,
   EndpointHealth,
+  FileLibrary,
   ModelEndpoint,
   ManagedProjectMembershipRole,
   Project,
@@ -102,6 +103,7 @@ export class InMemoryProductStore implements ProductStore {
   private readonly sessions = new Map<string, AuthSession>();
   private readonly workspaces = new Map<string, Workspace>();
   private readonly projects = new Map<string, Project>();
+  private readonly fileLibraries = new Map<string, FileLibrary>();
   private readonly memberships = new Map<string, ProjectMembership>();
   private readonly projectPins = new Map<string, { projectId: string; userId: string; pinnedAt: string }>();
   private readonly workspaceMemberships = new Map<string, WorkspaceMembership>();
@@ -290,6 +292,21 @@ export class InMemoryProductStore implements ProductStore {
   async findProject(id: string): Promise<Project | null> {
     return clone(this.projects.get(id) ?? null);
   }
+  async createFileLibrary(value:FileLibrary){
+    const duplicate=[...this.fileLibraries.values()].some((item)=>item.projectId===value.projectId&&(item.name.trim().toLowerCase()===value.name.trim().toLowerCase()||item.rootSubPath===value.rootSubPath));
+    if(duplicate||this.fileLibraries.has(value.id))return null;
+    this.fileLibraries.set(value.id,clone(value));
+    return clone(value);
+  }
+  async findFileLibrary(id:string){return clone(this.fileLibraries.get(id)??null)}
+  async listFileLibrariesForProject(projectId:string){return [...this.fileLibraries.values()].filter((item)=>item.projectId===projectId).sort((left,right)=>left.createdAt.localeCompare(right.createdAt)||left.id.localeCompare(right.id)).map(clone)}
+  async renameFileLibrary(projectId:string,id:string,name:string,expectedUpdatedAt:string,updatedAt:string){
+    const current=this.fileLibraries.get(id);
+    if(!current||current.projectId!==projectId||current.updatedAt!==expectedUpdatedAt||[...this.fileLibraries.values()].some((item)=>item.id!==id&&item.projectId===projectId&&item.name.trim().toLowerCase()===name.trim().toLowerCase()))return null;
+    const updated={...current,name,updatedAt};this.fileLibraries.set(id,clone(updated));return clone(updated);
+  }
+  async deleteFileLibrary(projectId:string,id:string){const current=this.fileLibraries.get(id);return current?.projectId===projectId&&this.fileLibraries.delete(id)}
+  async findTaskBoundToFileLibrary(_fileLibraryId:string){return{kind:"unbound" as const}}
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string){const current=this.projects.get(projectId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
   async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return null;const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
@@ -313,6 +330,7 @@ export class InMemoryProductStore implements ProductStore {
     for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key);
     for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key);
     for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key);
+    for(const [key,value] of this.fileLibraries)if(value.projectId===id)this.fileLibraries.delete(key);
     for(const [notificationId,notification] of this.notifications)if(notification.projectId===id){
       this.notifications.delete(notificationId);
       for(const [dedupeKey,dedupedId] of this.notificationDedupe)if(dedupedId===notificationId)this.notificationDedupe.delete(dedupeKey);

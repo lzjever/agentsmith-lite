@@ -8,6 +8,8 @@ import type {
   AgentTaskStatus,
   AuthSession,
   EndpointHealth,
+  FileLibrary,
+  FileLibraryTaskLink,
   ModelEndpoint,
   ManagedProjectMembershipRole,
   ProjectMembership,
@@ -337,6 +339,10 @@ export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exi
 export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
 export type AppendProjectChatMessageResult = "accepted" | "history_changed" | "request_running";
 export type DeleteProjectChatThreadResult = ProjectChatThread | "request_running" | null;
+export type FileLibraryBindingLookup =
+  | { kind: "unbound" }
+  | { kind: "bound"; task: FileLibraryTaskLink }
+  | { kind: "unavailable" };
 
 export interface ProductStore {
   readonly observedExternalModelCalls: number;
@@ -391,6 +397,12 @@ export interface ProductStore {
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
   deleteProjectDependenciesAndProject(id: string): Promise<boolean>;
+  createFileLibrary(value: FileLibrary): Promise<FileLibrary | null>;
+  findFileLibrary(id: string): Promise<FileLibrary | null>;
+  listFileLibrariesForProject(projectId: string): Promise<FileLibrary[]>;
+  renameFileLibrary(projectId: string, id: string, name: string, expectedUpdatedAt: string, updatedAt: string): Promise<FileLibrary | null>;
+  deleteFileLibrary(projectId: string, id: string): Promise<boolean>;
+  findTaskBoundToFileLibrary(fileLibraryId: string): Promise<FileLibraryBindingLookup>;
   createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry | null>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
   listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
@@ -646,7 +658,7 @@ export interface TaskStageFailureInput extends TaskStageCompleteInput {
   nextRetryAt: string;
 }
 
-export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "retry" | "duplicate" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "cancel" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;

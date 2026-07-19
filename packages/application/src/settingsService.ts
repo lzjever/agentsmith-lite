@@ -83,7 +83,7 @@ export class SettingsService {
     if(operation==="project.unarchive"){await this.requireProjectOwner(actorId,scopeId);return}
     if(operation==="workspace.settings.update"||operation==="workspace.archive"||operation==="workspace.owner.transfer"){await this.authorization.requireWorkspaceMembership(actorId,scopeId,"admin");return}
     if(operation==="project.settings.update"||operation==="project.archive"||operation==="project.owner.transfer"){await this.authorization.requireProjectMembership(actorId,scopeId,"admin");return}
-    if(operation==="project.file.upload"||operation==="project.file.delete"){await this.authorization.requireProjectMembership(actorId,scopeId,"write");return}
+    if(operation==="project.file.upload"||operation==="project.file.delete"||operation.startsWith("project.file-library.")){await this.authorization.requireProjectMembership(actorId,scopeId,"write");return}
     throw new ProductError(`Unsupported settings operation: ${operation}`,500);
   }
   private requireWorkspaceState(value:Workspace|null){if(!value)throw new NotFoundError("Workspace not found");return value}

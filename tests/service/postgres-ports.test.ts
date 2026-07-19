@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
 
 describe("postgres adapter ports", () => {
@@ -34,5 +35,19 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migrationSql, /juicefs/i);
     assert.doesNotMatch(migrationSql, /redis/i);
     assert.doesNotMatch(migrationSql, /mongo/i);
+  });
+
+  it("defines only the Phase 1 file library persistence model in migration 060", async () => {
+    const migration = (await readPostgresMigrations()).find((item) => item.id === "060_file_libraries");
+    assert.ok(migration);
+    assert.match(migration.sql, /create table file_libraries/i);
+    assert.match(migration.sql, /unique.*project_id.*root_sub_path/is);
+    assert.match(migration.sql, /lower\(btrim\(name\)\)/i);
+    assert.doesNotMatch(migration.sql, /file_library_id.*agent_tasks|sandbox/i);
+  });
+
+  it("reports PostgreSQL task binding lookup as unavailable until Phase 2", async () => {
+    const store = Object.create(PostgresProductStore.prototype) as PostgresProductStore;
+    assert.deepEqual(await store.findTaskBoundToFileLibrary("library_one"), { kind: "unavailable" });
   });
 });

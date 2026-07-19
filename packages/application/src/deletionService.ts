@@ -4,6 +4,7 @@ import type { Project, Workspace } from "../../contracts/src/api.js";
 import { ForbiddenError, NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
+import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
 import { withProjectFileLock } from "./fileService.js";
 import { TaskService } from "./taskService.js";
 
@@ -11,11 +12,13 @@ export class DeletionService {
   constructor(private readonly store: ProductStore, private readonly tasks: TaskService, private readonly dataRoot: string) {}
 
   async deleteProject(userId: string, projectId: string): Promise<{ deleted: true }> {
-    const project = await this.requireProjectOwner(userId, projectId);
-    const deleting = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
-    if (!deleting) throw await this.projectDeletionConflict(userId, project.id);
-    await this.finishProject(deleting);
-    return { deleted: true };
+    return withFileLibraryLifecycleLock(projectId, async () => {
+      const project = await this.requireProjectOwner(userId, projectId);
+      const deleting = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
+      if (!deleting) throw await this.projectDeletionConflict(userId, project.id);
+      await this.finishProject(deleting);
+      return { deleted: true };
+    });
   }
 
   async deleteWorkspace(userId: string, workspaceId: string): Promise<void> {
@@ -25,8 +28,10 @@ export class DeletionService {
     const deleting = await this.store.beginWorkspaceDeletion(workspace.id, nowIso(), userId);
     if (!deleting) throw await this.workspaceDeletionConflict(userId, workspace.id);
     for (const project of await this.store.listProjectsForWorkspace(workspace.id)) {
-      const marked = await this.store.beginProjectDeletion(project.id, nowIso());
-      if (marked) await this.finishProject(marked);
+      await withFileLibraryLifecycleLock(project.id, async () => {
+        const marked = await this.store.beginProjectDeletion(project.id, nowIso());
+        if (marked) await this.finishProject(marked);
+      });
     }
     if (!(await this.store.deleteWorkspaceAfterProjects(workspace.id))) throw new ProductError("Workspace deletion is still pending", 409);
   }

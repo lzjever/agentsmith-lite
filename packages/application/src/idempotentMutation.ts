@@ -14,6 +14,7 @@ export async function runIdempotentMutation<T>(input: {
   request: unknown;
   resourceId: string;
   failureMessage: string;
+  completeServerErrors?: boolean;
   run: (resourceId: string) => Promise<T>;
 }): Promise<T> {
   const timestamp = nowIso();
@@ -56,7 +57,7 @@ export async function runIdempotentMutation<T>(input: {
     return response;
   } catch (error) {
     const productError = error instanceof ProductError ? error : new ProductError(input.failureMessage, 500);
-    await input.store.completeTaskIdempotency({
+    if (input.completeServerErrors !== false || productError.statusCode < 500) await input.store.completeTaskIdempotency({
       actorId: input.actorId,
       projectId: input.scopeId,
       operation: input.operation,

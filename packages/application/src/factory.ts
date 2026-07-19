@@ -7,6 +7,7 @@ import { AuthorizationService } from "./authorizationService.js";
 import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
+import { FileLibraryService } from "./fileLibraryService.js";
 import { MembershipService } from "./membershipService.js";
 import { RuntimeService } from "./runtimeService.js";
 import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "./sandboxLifecycleService.js";
@@ -61,6 +62,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const memberships = new MembershipService(input.store, authorization);
   const workspaceMemberships = new WorkspaceMembershipService(input.store, authorization);
   const files = new FileService();
+  const projectAbsoluteRoot=(projectRootPath:string)=>path.resolve(input.dataRoot,projectRootPath);
+  const fileLibraries=new FileLibraryService(input.store,authorization,files,projectAbsoluteRoot);
   const builtinAdminPassword = input.liveSandbox && input.requireBuiltinAdminPasswordForLiveSandbox !== false
     ? requireLiveSandboxBuiltinAdminPassword(input.builtinAdminPassword)
     : input.builtinAdminPassword;
@@ -162,6 +165,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     providerBroker,
     chat,
     files,
+    fileLibraries,
     policies,
     tasks,
     deletion,
@@ -169,7 +173,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     sandboxLifecycle,
     dataRoot: input.dataRoot,
     projectAbsoluteRoot(projectRootPath: string): string {
-      return path.resolve(input.dataRoot, projectRootPath);
+      return projectAbsoluteRoot(projectRootPath);
     },
     async dashboard(userId: string) {
       const workspaceList = await workspaces.listWorkspaces(userId);

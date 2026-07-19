@@ -1,14 +1,84 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, access } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, access, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { DeletionService } from "../../packages/application/src/deletionService.js";
+import { AuthorizationService } from "../../packages/application/src/authorizationService.js";
+import { FileLibraryService } from "../../packages/application/src/fileLibraryService.js";
+import { FileService } from "../../packages/application/src/fileService.js";
 import type { Project, Workspace } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 
 describe("deletion lifecycle", () => {
+  it("waits for an in-flight library create before project cleanup", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-delete-library-create-"));
+    try {
+      const store = createLocalInMemoryProductStore();
+      const workspace = await store.createWorkspace(ws("ws_create_race"));
+      const target = await store.createProject(project("proj_create_race", workspace.id));
+      const files = new FileService();
+      const originalEnsure = files.ensureLibraryRoot.bind(files);
+      let createEntered!: () => void;
+      const entered = new Promise<void>((resolve) => { createEntered = resolve; });
+      let releaseCreate!: () => void;
+      const release = new Promise<void>((resolve) => { releaseCreate = resolve; });
+      files.ensureLibraryRoot = async (...args) => { createEntered(); await release; return originalEnsure(...args); };
+      const libraries = new FileLibraryService(store, new AuthorizationService(store), files, (rootPath) => path.resolve(root, rootPath));
+      let cleanupStarted = false;
+      const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { cleanupStarted = true; } } as never, root);
+
+      const creating = libraries.create("owner", target.id, { name: "In flight" });
+      await entered;
+      const deleting = deletion.deleteProject("owner", target.id);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(cleanupStarted, false);
+      releaseCreate();
+      await creating;
+      await deleting;
+      assert.equal(await store.findProject(target.id), null);
+      await assert.rejects(access(path.join(root, target.rootPath)));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes reconciliation through direct and workspace-driven project cleanup", async () => {
+    for (const mode of ["project", "workspace"] as const) {
+      const root = await mkdtemp(path.join(tmpdir(), `asl-delete-file-lifecycle-${mode}-`));
+      try {
+        const store = createLocalInMemoryProductStore();
+        const workspace = await store.createWorkspace(ws(`ws_${mode}`));
+        const target = await store.createProject(project(`proj_${mode}`, workspace.id));
+        await mkdir(path.join(root, target.rootPath, "files"), { recursive: true });
+        let stopEntered!: () => void;
+        const entered = new Promise<void>((resolve) => { stopEntered = resolve; });
+        let releaseStop!: () => void;
+        const release = new Promise<void>((resolve) => { releaseStop = resolve; });
+        const deletion = new DeletionService(store, { async stopTasksForProjectDeletion() { stopEntered(); await release; } } as never, root);
+        const files = new FileService();
+        const libraries = new FileLibraryService(store, new AuthorizationService(store), files, (rootPath) => path.resolve(root, rootPath));
+
+        const deleting = mode === "project"
+          ? deletion.deleteProject("owner", target.id)
+          : deletion.deleteWorkspace("owner", workspace.id);
+        await entered;
+        const reconciliation = libraries.reconcileProjectFileBytes("owner", target.id, async () => undefined);
+        let reconciliationSettled = false;
+        void reconciliation.finally(() => { reconciliationSettled = true; }).catch(() => undefined);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(reconciliationSettled, false);
+        releaseStop();
+        await deleting;
+        await assert.rejects(reconciliation, /Project not found/);
+        await assert.rejects(access(path.join(root, target.rootPath)));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("marks first, removes only its checked root, and leaves other projects intact", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-delete-"));
     const store = createLocalInMemoryProductStore();

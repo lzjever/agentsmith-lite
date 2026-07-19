@@ -658,11 +658,7 @@ async function routeApi(
     }
     if (segments[4] === "usage" && !segments[5] && method === "GET") {
       assertOnlySearchParams(url, ["endpointId"]);
-      const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
-      await services.files.reconcileFileBytes(services.projectAbsoluteRoot(project.rootPath), {
-        reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
-        record: async () => undefined
-      });
+      await services.fileLibraries.reconcileProjectFileBytes(user.id,projectId,(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes));
       return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
     }
     if (segments[4] === "alerts") {
@@ -680,59 +676,65 @@ async function routeApi(
       if (segments[5] && !segments[6] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5], requireIdempotencyKey(req))); }
     }
     if (segments[4] === "audit" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["actorId","limit","cursor","from","to","action","status","resourceKind","resourceId"]);return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams))); }
+    if(segments[4]==="file-libraries"){
+      const libraryId=segments[5];
+      if(!libraryId&&method==="GET"){assertOnlySearchParams(url,[]);return sendJson(res,200,await services.fileLibraries.list(user.id,projectId))}
+      if(!libraryId&&method==="POST"){
+        assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,["name"]);const name=asString(body.name);
+        return sendJson(res,200,await services.fileLibraries.create(user.id,projectId,{name},key));
+      }
+      if(libraryId&&!segments[6]&&method==="PATCH"){
+        assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,["name","expectedUpdatedAt"]);const input={name:asString(body.name),expectedUpdatedAt:asString(body.expectedUpdatedAt)};
+        return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.file-library.update",key,{projectId,libraryId,...input},libraryId,()=>services.fileLibraries.rename(user.id,projectId,libraryId,input)));
+      }
+      if(libraryId&&!segments[6]&&method==="DELETE"){
+        assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,[]);
+        return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.file-library.delete",key,{projectId,libraryId},libraryId,()=>services.fileLibraries.remove(user.id,projectId,libraryId)));
+      }
+      if(libraryId&&segments[6]==="files"){
+        const action=segments[7];
+        if(!action&&method==="GET"){
+          assertOnlySearchParams(url,["path"]);const {library,projectRoot}=await services.fileLibraries.require(user.id,projectId,libraryId);
+          return sendJson(res,200,await services.files.listLibraryFiles(projectRoot,library.rootSubPath,url.searchParams.get("path")??""));
+        }
+        if(!action&&method==="PUT"){
+          assertOnlySearchParams(url,["path","overwrite"]);const key=requireIdempotencyKey(req);
+          const filePath=requiredSearchParam(url,"path"),overwrite=optionalBooleanSearchParam(url,"overwrite"),bytes=await readRawProjectFileBytes(req);
+          const saved=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.upload",key,{projectId,libraryId,filePath,overwrite,contentSha256:createHash("sha256").update(bytes).digest("base64url")},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,({library,projectRoot,rootSubPaths})=>services.files.uploadLibraryFileWithAccounting(projectRoot,library.rootSubPath,{path:filePath,bytes,overwrite},{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.upload",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})));
+          return sendJson(res,200,saved);
+        }
+        if(!action&&method==="DELETE"){
+          assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,["path"]);const filePath=asString(body.path);
+          const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",key,{projectId,libraryId,filePath},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,async({library,projectRoot,rootSubPaths})=>(await services.files.deleteLibraryFileWithAccounting(projectRoot,library.rootSubPath,filePath,{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})).response));
+          return sendJson(res,200,response);
+        }
+        if((action==="download"||action==="preview")&&!segments[8]&&method==="GET"){
+          assertOnlySearchParams(url,["path"]);const {library,projectRoot}=await services.fileLibraries.require(user.id,projectId,libraryId);
+          const download=await services.files.downloadLibraryFile(projectRoot,library.rootSubPath,requiredSearchParam(url,"path"));
+          return action==="preview"?sendProjectFilePreview(res,download):sendProjectFileDownload(res,download);
+        }
+      }
+    }
     if (segments[4] === "files") {
       if (!segments[5] && method === "GET") {
         assertOnlySearchParams(url, ["path"]);
-        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
-        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
-        return sendJson(res, 200, await services.files.listFilesWithAccounting(projectRoot, url.searchParams.get("path") ?? "files", {
-          reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
-          record: async () => undefined
-        }));
+        return sendJson(res,200,await services.fileLibraries.withProjectFileMutation(user.id,projectId,false,({projectRoot,rootSubPaths})=>services.files.listFilesWithAccounting(projectRoot,url.searchParams.get("path")??"files",{rootSubPaths,reconcile:(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes),record:async()=>undefined})));
       }
       if (!segments[5] && method === "PUT") {
         assertOnlySearchParams(url, ["path", "overwrite"]);
         const idempotencyKey = requireIdempotencyKey(req);
-        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
-        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const filePath = requiredSearchParam(url, "path");
         const overwrite = optionalBooleanSearchParam(url, "overwrite");
         const bytes = await readRawProjectFileBytes(req);
-        const written = await services.settings.runIdempotentMutation(user.id, projectId, "project.file.upload", idempotencyKey, { projectId, filePath, overwrite, contentSha256:createHash("sha256").update(bytes).digest("base64url") }, filePath, async()=>{
-          const saved = await services.files.uploadFileWithAccounting(projectRoot, {
-            path: filePath, bytes, overwrite
-          }, {
-            reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
-            record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
-          });
-          await services.policies.recordOperation(projectId, user.id, "file.upload", "accepted", saved.path, "file", {
-            filePath: saved.path,
-            bytes: saved.bytes,
-            mediaType: saved.mediaType
-          });
-          return saved;
-        });
+        const written=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.upload",idempotencyKey,{projectId,filePath,overwrite,contentSha256:createHash("sha256").update(bytes).digest("base64url")},filePath,()=>services.fileLibraries.withProjectFileMutation(user.id,projectId,true,({projectRoot,rootSubPaths})=>services.files.uploadFileWithAccounting(projectRoot,{path:filePath,bytes,overwrite},{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.upload",storedPath,storedPath,delta,file.bytes,file.mediaType)})));
         return sendJson(res, 200, written);
       }
       if (!segments[5] && method === "DELETE") {
         const idempotencyKey = requireIdempotencyKey(req);
-        const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
-        const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const body = await readJson(req);
         assertOnlyKeys(body, ["path"]);
         const filePath = asString(body.path);
-        const response = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,async()=>{
-          const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
-            reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
-            record: (path, delta) => services.policies.recordFileBytes(projectId, user.id, path, delta)
-          });
-          await services.policies.recordOperation(projectId, user.id, "file.delete", "accepted", filePath, "file", {
-            filePath,
-            bytes: deleted.bytes,
-            mediaType: deleted.mediaType
-          });
-          return deleted.response;
-        });
+        const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,()=>services.fileLibraries.withProjectFileMutation(user.id,projectId,true,async({projectRoot,rootSubPaths})=>(await services.files.deleteFileWithAccounting(projectRoot,filePath,{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",storedPath,storedPath,delta,file.bytes,file.mediaType)})).response));
         return sendJson(res, 200, response);
       }
       if (segments[5] === "download" && method === "GET") {
@@ -1103,6 +1105,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/files(?:\/download)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|cancel|detail|summary|inputs(?:\/download)?|retry|duplicate|archive|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
@@ -1400,6 +1403,14 @@ function sendProjectFileDownload(
     "content-disposition": contentDispositionFilename(download.filename),
     "x-content-type-options": "nosniff"
   });
+  res.end(bytes);
+}
+
+function sendProjectFilePreview(res:ServerResponse,download:Awaited<ReturnType<Services["files"]["downloadFile"]>>):void{
+  const safeTypes=new Set(["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp"]);
+  if(!safeTypes.has(download.mediaType))throw new ProductError("File type cannot be previewed",415);
+  const bytes=Buffer.from(download.bytes);
+  res.writeHead(200,{"content-type":download.mediaType,"content-length":String(bytes.byteLength),"content-disposition":"inline","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; sandbox"});
   res.end(bytes);
 }
 
