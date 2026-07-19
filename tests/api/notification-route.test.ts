@@ -21,12 +21,15 @@ describe("notification API", () => {
       await store.createUserNotification({ id: "notice_route", userId: identity.user.id, type: "project_alert", title: "Project alert: active tasks limit", body: "Alert project: active tasks limit.", projectId: project.id, resourceKind: "project", resourceId: project.id, linkPath: `/workspaces/${workspace.id}/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-12T00:00:00.000Z" }, "project-alert:alert_route:" + identity.user.id);
       await store.createUserNotification({ id: "notice_newer", userId: identity.user.id, type: "task", title: "Task finished", body: "A newer event.", projectId: project.id, resourceKind: "task", resourceId: "task", linkPath: `/workspaces/${workspace.id}/projects/${project.id}/tasks/task`, readAt: null, createdAt: "2026-07-13T00:00:00.000Z" });
 
+      assert.equal((await fetch(api.baseUrl + "/api/v1/notifications?includeDismissed=true", { headers: { cookie } })).status, 400);
       const listed = await fetch(api.baseUrl + "/api/v1/notifications", { headers: { cookie } });
       assert.equal(listed.status, 200);
       const items = await listed.json() as Array<{ id: string; body: string; projectId: string; resourceKind: string; resourceId: string }>;
       assert.deepEqual(items.map((value) => value.id), ["notice_newer", "notice_route"]);
       const item = items[1]!;
       assert.deepEqual([item.id, item.body, item.projectId, item.resourceKind, item.resourceId], ["notice_route", "Alert project: active tasks limit.", project.id, "project", project.id]);
+      assert.equal((await fetch(api.baseUrl + "/api/v1/notifications/notice_route/read/legacy", { method: "PATCH", headers: { cookie, "x-csrf-token": identity.csrfToken } })).status, 404);
+      assert.equal((await fetch(api.baseUrl + "/api/v1/notifications/notice_route/read", { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": identity.csrfToken }, body: JSON.stringify({ evidence: true }) })).status, 400);
       const read = await fetch(api.baseUrl + "/api/v1/notifications/notice_route/read", { method: "PATCH", headers: { cookie, "x-csrf-token": identity.csrfToken } });
       assert.equal(read.status, 200);
       assert.ok((await read.json() as { readAt: string | null }).readAt);

@@ -405,14 +405,14 @@ async function routeApi(
     });
   }
   if (url.pathname === "/api/v1/me/profile") {
-    if (method === "GET") return sendJson(res, 200, await services.profile.getProfile(user.id));
-    if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["displayName","timezone","bio","jobTitle","company","greetingPreference","interests","expectedUpdatedAt"]);return sendJson(res, 200, await services.profile.updateProfile(user.id, {...body,expectedUpdatedAt:body.expectedUpdatedAt}));}
+    if (method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.profile.getProfile(user.id)); }
+    if (method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["displayName","timezone","bio","jobTitle","company","greetingPreference","interests","expectedUpdatedAt"]);return sendJson(res, 200, await services.profile.updateProfile(user.id, {...body,expectedUpdatedAt:body.expectedUpdatedAt}));}
   }
-  if (url.pathname === "/api/v1/notifications" && method === "GET") return sendJson(res, 200, await services.notifications.list(user.id, url.searchParams.get("unread") === "true"));
-  if (url.pathname === "/api/v1/notifications/read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markAllRead(user.id));
+  if (url.pathname === "/api/v1/notifications" && method === "GET") { assertOnlySearchParams(url,["unread"]);return sendJson(res, 200, await services.notifications.list(user.id, optionalBooleanSearchParam(url,"unread"))); }
+  if (url.pathname === "/api/v1/notifications/read" && method === "PATCH") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res, 200, await services.notifications.markAllRead(user.id)); }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "notifications" && segments[3]) {
-    if (segments[4] === "read" && method === "PATCH") return sendJson(res, 200, await services.notifications.markRead(user.id, segments[3]));
-    if (method === "DELETE") return sendJson(res, 200, await services.notifications.dismiss(user.id, segments[3]));
+    if (segments[4] === "read" && !segments[5] && method === "PATCH") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res, 200, await services.notifications.markRead(user.id, segments[3])); }
+    if (!segments[4] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res, 200, await services.notifications.dismiss(user.id, segments[3])); }
   }
 
   if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
@@ -507,10 +507,10 @@ async function routeApi(
   }
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "settings") {
     const workspaceId = segments[3];
-    if (method === "GET") return sendJson(res, 200, await services.settings.workspace(user.id, workspaceId));
-    if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.settings.update",requireIdempotencyKey(req),body,workspaceId,()=>services.settings.updateWorkspace(user.id,workspaceId,{...body,expectedName:body.expectedName})));}
-    if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.archive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.archiveWorkspace(user.id,workspaceId)));
-    if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.unarchive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.unarchiveWorkspace(user.id,workspaceId)));
+    if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.settings.workspace(user.id, workspaceId)); }
+    if (!segments[5] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.settings.update",requireIdempotencyKey(req),body,workspaceId,()=>services.settings.updateWorkspace(user.id,workspaceId,{...body,expectedName:body.expectedName})));}
+    if (segments[5] === "archive" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.archive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.archiveWorkspace(user.id,workspaceId))); }
+    if (segments[5] === "unarchive" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.unarchive",requireIdempotencyKey(req),{workspaceId},workspaceId,()=>services.settings.unarchiveWorkspace(user.id,workspaceId))); }
   }
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "projects" && segments[3]) {
@@ -519,20 +519,23 @@ async function routeApi(
       const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),()=>services.deletion.deleteProject(user.id,projectId));
       return sendJson(res, 200, result);
     }
-    if (segments[4] === "pin" && method === "PUT") {
+    if (segments[4] === "pin" && !segments[5] && method === "PUT") {
+      assertOnlySearchParams(url,[]);
       const body=await readJson(req);assertOnlyKeys(body,["pinned"]);return sendJson(res,200,await services.workspaces.setProjectPinned(user.id,projectId,asBoolean(body.pinned,"pinned")));
     }
-    if (segments[4] === "capabilities" && method === "GET") {
+    if (segments[4] === "capabilities" && !segments[5] && method === "GET") {
+      assertOnlySearchParams(url,[]);
       return sendJson(res, 200, await services.workspaces.projectCapabilities(user.id, projectId));
     }
-    if (segments[4] === "overview" && method === "GET") {
+    if (segments[4] === "overview" && !segments[5] && method === "GET") {
+      assertOnlySearchParams(url,[]);
       return sendJson(res, 200, await services.workspaces.projectOverview(user.id, projectId));
     }
     if (segments[4] === "settings") {
-      if (method === "GET") return sendJson(res, 200, await services.settings.project(user.id, projectId));
-      if (method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,{...body,expectedName:body.expectedName});await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
-      if (segments[5] === "archive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.archive",requireIdempotencyKey(req),"project.archive",()=>services.settings.archiveProject(user.id,projectId)));
-      if (segments[5] === "unarchive" && method === "POST") return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId)));
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.settings.project(user.id, projectId)); }
+      if (!segments[5] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["name","expectedName"]);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.settings.update",requireIdempotencyKey(req),body,projectId,async()=>{const result=await services.settings.updateProject(user.id,projectId,{...body,expectedName:body.expectedName});await services.settings.auditProjectLifecycle(projectId,user.id,"project.settings.update");return result}));}
+      if (segments[5] === "archive" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.archive",requireIdempotencyKey(req),"project.archive",()=>services.settings.archiveProject(user.id,projectId))); }
+      if (segments[5] === "unarchive" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.settings.runIdempotentProjectLifecycleMutation(user.id,projectId,"project.unarchive",requireIdempotencyKey(req),"project.unarchive",()=>services.settings.unarchiveProject(user.id,projectId))); }
     }
     if (segments[4] === "members") {
       if (segments[5] === "transfer-owner" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["userId"]);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.owner.transfer",requireIdempotencyKey(req),{projectId,userId:target},projectId,async()=>{await services.memberships.transferOwner(user.id,projectId,target);await services.settings.auditProjectLifecycle(projectId,user.id,"project.owner.transfer");return{transferred:true as const}})); }

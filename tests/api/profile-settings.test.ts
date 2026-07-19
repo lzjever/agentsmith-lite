@@ -13,6 +13,7 @@ describe("profile and settings API", () => {
   before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password", store }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
   it("projects a public profile and applies idempotent settings and lifecycle mutations", async () => {
+    assert.equal((await call("GET", "/api/v1/me/profile?includeIdentity=true")).response.status, 400);
     const profile = await json("GET", "/api/v1/me/profile");
     assert.equal(profile.user.email, "admin@agentsmith-lite.local");
     assert.equal("oidcIssuer" in profile.user, false);
@@ -26,6 +27,11 @@ describe("profile and settings API", () => {
     assert.equal(identityMutation.response.status, 400);
     const currentIdentity = await json("GET", "/api/v1/me");
     assert.equal(currentIdentity.user.displayName, "Admin");
+    assert.equal((await call("GET", `/api/v1/workspaces/${workspaceId}/settings?includeGovernance=true`)).response.status, 400);
+    assert.equal((await call("GET", `/api/v1/workspaces/${workspaceId}/settings/archive`)).response.status, 404);
+    assert.equal((await call("GET", `/api/v1/projects/${projectId}/overview?includeGovernance=true`)).response.status, 400);
+    assert.equal((await call("GET", `/api/v1/projects/${projectId}/overview/legacy`)).response.status, 404);
+    assert.equal((await call("GET", `/api/v1/projects/${projectId}/settings/archive`)).response.status, 404);
 
     const workspace = await json("PATCH", `/api/v1/workspaces/${workspaceId}/settings`, { name: "New workspace", expectedName: "Old workspace" }, "workspace-settings");
     assert.equal(workspace.workspace.name, "New workspace");
@@ -44,6 +50,7 @@ describe("profile and settings API", () => {
     const missingKey = await call("POST", `/api/v1/projects/${projectId}/settings/archive`);
     assert.equal(missingKey.response.status, 400);
     assert.deepEqual(missingKey.body, { error: "Idempotency-Key header is required" });
+    assert.equal((await call("POST", `/api/v1/projects/${projectId}/settings/archive/legacy`, undefined, "legacy-project-archive")).response.status, 404);
     const archived = await json("POST", `/api/v1/projects/${projectId}/settings/archive`, undefined, "project-archive");
     const replayedArchive = await json("POST", `/api/v1/projects/${projectId}/settings/archive`, undefined, "project-archive");
     assert.deepEqual(replayedArchive, archived);
