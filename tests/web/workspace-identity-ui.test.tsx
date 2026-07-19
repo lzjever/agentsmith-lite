@@ -274,7 +274,7 @@ describe("workspace identity UX", () => {
     const keys:string[]=[];let attempts=0;
     apiClient.workspaces=async()=>[{...workspace,memberRole:"admin",capabilities:{canCreateProject:true,canManageMembers:true}}];
     apiClient.workspaceMembers=async()=>[owner,member];
-    apiClient.changeWorkspaceMember=(async(_workspaceId:string,_userId:string,_role:"admin",key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{...member,role:"admin"};}) as typeof apiClient.changeWorkspaceMember;
+    apiClient.changeWorkspaceMember=(async(_workspaceId:string,_userId:string,_role:"admin",expectedUpdatedAt:string,key:string)=>{assert.equal(expectedUpdatedAt,member.updatedAt);keys.push(key);if(++attempts===1)throw new Error("connection closed");return{...member,role:"admin"};}) as typeof apiClient.changeWorkspaceMember;
     try {
       render(<WorkspaceMembersPage workspaceId={workspace.id}/>);
       fireEvent.click(await screen.findByRole("combobox",{name:"Role for Role Retry"}));
@@ -285,6 +285,27 @@ describe("workspace identity UX", () => {
       assert.ok(keys[0]);assert.equal(keys[1],keys[0]);
       await waitFor(()=>assert.match(screen.getByRole("combobox",{name:"Role for Role Retry"}).textContent??"",/Admin/));
     } finally { Object.assign(apiClient,original); }
+  });
+
+  it("loads the latest workspace member after a stale role change", async () => {
+    const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers, changeWorkspaceMember: apiClient.changeWorkspaceMember };
+    const member: WorkspaceMember = { ...owner, userId: "member_stale", role: "member", displayName: "Stale Member", email: "stale@example.test" };
+    const latest: WorkspaceMember = { ...member, role: "viewer", updatedAt: "2026-07-11T00:01:00.000Z" };
+    let reads = 0;
+    let expected = "";
+    apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    apiClient.workspaceMembers = async () => { reads += 1; return reads === 1 ? [owner, member] : [owner, latest]; };
+    apiClient.changeWorkspaceMember = async (_workspaceId, _userId, _role, expectedUpdatedAt) => { expected = expectedUpdatedAt; throw new ApiError(409, "Workspace membership changed elsewhere. Reload and try again."); };
+    try {
+      render(<WorkspaceMembersPage workspaceId={workspace.id} />);
+      fireEvent.click(await screen.findByRole("combobox", { name: "Role for Stale Member" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+      const alert = await screen.findByRole("alert");
+      assert.equal(expected, member.updatedAt);
+      assert.match(alert.textContent ?? "", /changed elsewhere/);
+      assert.equal(within(alert).queryByRole("button", { name: "Retry" }), null);
+      await waitFor(() => assert.match(screen.getByRole("combobox", { name: "Role for Stale Member" }).textContent ?? "", /Viewer/));
+    } finally { Object.assign(apiClient, original); }
   });
 
   it("serializes workspace membership mutations", async () => {
@@ -486,7 +507,7 @@ describe("workspace identity UX", () => {
     const removed: string[] = [];
     apiClient.workspaces = async () => [{ ...workspace, memberRole: "admin", capabilities: { canCreateProject: true, canManageMembers: true } }];
     apiClient.workspaceMembers = async () => [owner, member];
-    apiClient.removeWorkspaceMember = async (_workspaceId, userId) => { removed.push(userId); return { deleted: true }; };
+    apiClient.removeWorkspaceMember = async (_workspaceId, userId, expectedUpdatedAt) => { assert.equal(expectedUpdatedAt, member.updatedAt); removed.push(userId); return { deleted: true }; };
     try {
       render(<WorkspaceMembersPage workspaceId={workspace.id} />);
       fireEvent.click(await screen.findByRole("button", { name: "Remove Member Person" }));

@@ -331,8 +331,8 @@ export class CredentialVersionConflictError extends Error {
 }
 export type ManagedProjectMembershipDeleteResult = "deleted" | "not_found" | "owner" | "conflict";
 export type ManagedProjectMembershipUpdateResult = ProjectMembership | "not_found" | "owner" | "conflict";
-export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner";
-export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner";
+export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_found" | "owner" | "conflict";
+export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner" | "conflict";
 export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
 export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
 export type AppendProjectChatMessageResult = "accepted" | "history_changed" | "request_running";
@@ -378,8 +378,8 @@ export interface ProductStore {
   upsertWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership>;
   createWorkspaceMembership(membership: WorkspaceMembership): Promise<CreateWorkspaceMembershipResult>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
-  updateManagedWorkspaceMembershipRole(workspaceId: string, userId: string, role: ManagedWorkspaceMembershipRole, updatedAt: string): Promise<ManagedWorkspaceMembershipUpdateResult>;
-  revokeWorkspaceMembership(workspaceId: string, userId: string): Promise<RevokeWorkspaceMembershipResult>;
+  updateManagedWorkspaceMembershipRole(workspaceId: string, userId: string, role: ManagedWorkspaceMembershipRole, updatedAt: string, expectedUpdatedAt: string): Promise<ManagedWorkspaceMembershipUpdateResult>;
+  revokeWorkspaceMembership(workspaceId: string, userId: string, expectedUpdatedAt: string): Promise<RevokeWorkspaceMembershipResult>;
 
   createProject(project: Project): Promise<Project>;
   listProjectsForWorkspace(workspaceId: string): Promise<Project[]>;

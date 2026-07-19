@@ -20,9 +20,9 @@ describe("workspace memberships", () => {
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:admin.user.email},"admin");
     const addedMember=await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"member");
     assert.deepEqual([addedMember.displayName,addedMember.email,addedMember.role],["Member display",member.user.email,"member"]);
-    const changedMember=await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"viewer");
+    const changedMember=await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"viewer",addedMember.updatedAt);
     assert.deepEqual([changedMember.displayName,changedMember.email,changedMember.role],["Member display",member.user.email,"viewer"]);
-    await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"member");
+    const restoredMember=await services.workspaceMemberships.change(owner.user.id,workspace.id,member.user.id,"member",changedMember.updatedAt);
     await assert.rejects(()=>services.workspaceMemberships.add(owner.user.id,workspace.id,{email:member.user.email},"viewer"),status(409));
     assert.equal((await store.findWorkspaceMembership(workspace.id,member.user.id))?.role,"member");
     await services.workspaceMemberships.add(owner.user.id,workspace.id,{email:viewer.user.email},"viewer");
@@ -41,21 +41,24 @@ describe("workspace memberships", () => {
     await assert.rejects(()=>services.workspaces.createProject(viewer.user.id,workspace.id,{name:"Viewer blocked"}),status(403));
     await services.contexts.upsert(viewer.user.id,{workspaceId:workspace.id,scope:"workspace_personal",contextKey:"viewer.note",content:"private",contentType:"text"});
     await assert.rejects(()=>services.contexts.upsert(viewer.user.id,{workspaceId:workspace.id,scope:"workspace_shared",contextKey:"viewer.shared",content:"blocked",contentType:"text"}),status(403));
-    await assert.rejects(()=>services.workspaceMemberships.change(admin.user.id,workspace.id,owner.user.id,"member"),status(409));
-    await assert.rejects(()=>services.workspaceMemberships.remove(admin.user.id,workspace.id,owner.user.id),status(409));
+    const ownerMembership=(await services.workspaceMemberships.list(owner.user.id,workspace.id)).find((entry)=>entry.userId===owner.user.id)!;
+    await assert.rejects(()=>services.workspaceMemberships.change(admin.user.id,workspace.id,owner.user.id,"member",ownerMembership.updatedAt),status(409));
+    await assert.rejects(()=>services.workspaceMemberships.remove(admin.user.id,workspace.id,owner.user.id,ownerMembership.updatedAt),status(409));
     assert.equal((await store.findWorkspaceMembership(workspace.id,owner.user.id))?.role,"owner");
     assert.equal((await store.findProjectMembership(firstProject.id,owner.user.id))?.role,"owner");
-    await assert.rejects(()=>services.workspaceMemberships.remove(owner.user.id,workspace.id,admin.user.id),status(409));
+    const adminMembership=(await services.workspaceMemberships.list(owner.user.id,workspace.id)).find((entry)=>entry.userId===admin.user.id)!;
+    await assert.rejects(()=>services.workspaceMemberships.remove(owner.user.id,workspace.id,admin.user.id,adminMembership.updatedAt),status(409));
     assert.equal((await store.findWorkspaceMembership(workspace.id,admin.user.id))?.role,"admin");
     assert.equal((await store.findProjectMembership(adminProject.id,admin.user.id))?.role,"owner");
 
     await services.workspaceMemberships.transferOwner(owner.user.id,workspace.id,viewer.user.id);
-    assert.equal(await store.updateManagedWorkspaceMembershipRole(workspace.id,viewer.user.id,"member",new Date().toISOString()),"owner");
+    const viewerOwnerMembership=(await store.findWorkspaceMembership(workspace.id,viewer.user.id))!;
+    assert.equal(await store.updateManagedWorkspaceMembershipRole(workspace.id,viewer.user.id,"member",new Date().toISOString(),viewerOwnerMembership.updatedAt),"owner");
     assert.equal((await store.findWorkspaceMembership(workspace.id,viewer.user.id))?.role,"owner");
 
     for(const project of [firstProject,secondProject])await store.createUserNotification({id:`notice_${project.id}`,userId:member.user.id,type:"project_alert",title:"Project alert",body:"Membership will be removed",projectId:project.id,resourceKind:"alert",resourceId:`alert_${project.id}`,linkPath:`/projects/${project.id}/alerts`,readAt:null,createdAt:"2026-07-11T00:00:00.000Z"});
     await store.createUserNotification({id:"notice_workspace_owner",userId:owner.user.id,type:"project_alert",title:"Owner alert",body:"Retain",projectId:firstProject.id,resourceKind:"alert",resourceId:"alert_owner",linkPath:`/projects/${firstProject.id}/alerts`,readAt:null,createdAt:"2026-07-11T00:00:00.000Z"});
-    await services.workspaceMemberships.remove(admin.user.id,workspace.id,member.user.id);
+    await services.workspaceMemberships.remove(admin.user.id,workspace.id,member.user.id,restoredMember.updatedAt);
     assert.equal(await store.findWorkspaceMembership(workspace.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(firstProject.id,member.user.id),null);
     assert.equal(await store.findProjectMembership(secondProject.id,member.user.id),null);
@@ -76,6 +79,33 @@ describe("workspace memberships", () => {
     assert.equal(results.filter(result=>result.status==="fulfilled").length,1);
     const rejected=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");assert.ok(rejected?.reason instanceof ProductError);assert.equal((rejected.reason as ProductError).statusCode,409);
   });
-  it("replays workspace membership creation, role changes, and removal",async()=>{const store=createInMemoryProductStore();const services=createApplicationServices({store,dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password"});const owner=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"replay-owner",email:"replay-owner@example.test",emailVerified:true});const member=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"replay-member",email:"replay-member@example.test",emailVerified:true});const workspace=await services.workspaces.createWorkspace(owner.user.id,{name:"Workspace"});const add=services.workspaceMemberships.add.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,identity:{email:string},role:"member",key:string)=>Promise<{userId:string}>;const first=await add(owner.user.id,workspace.id,{email:member.user.email},"member","workspace-member-key");const replayed=await add(owner.user.id,workspace.id,{email:member.user.email},"member","workspace-member-key");assert.equal(replayed.userId,first.userId);const change=services.workspaceMemberships.change.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,userId:string,role:"viewer",key:string)=>Promise<{role:string}>;const changed=await change(owner.user.id,workspace.id,member.user.id,"viewer","workspace-member-change-key");assert.deepEqual(await change(owner.user.id,workspace.id,member.user.id,"viewer","workspace-member-change-key"),changed);const remove=services.workspaceMemberships.remove.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,userId:string,key:string)=>Promise<void>;await remove(owner.user.id,workspace.id,member.user.id,"workspace-member-remove-key");await remove(owner.user.id,workspace.id,member.user.id,"workspace-member-remove-key");assert.equal((await store.listWorkspaceMemberships(workspace.id)).filter(item=>item.userId===member.user.id).length,0);});
+  it("rejects stale workspace membership changes and removals", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://issuer", subject: "version-owner", email: "version-owner@example.test", emailVerified: true });
+    const member = await services.auth.loginExternalPrincipal({ issuer: "https://issuer", subject: "version-member", email: "version-member@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const added = await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: member.user.email }, "member");
+    const memberships = services.workspaceMemberships as unknown as {
+      change(actor: string, workspaceId: string, userId: string, role: "viewer" | "admin", expectedUpdatedAt: string, key: string): Promise<{ updatedAt: string }>;
+      remove(actor: string, workspaceId: string, userId: string, expectedUpdatedAt: string, key: string): Promise<void>;
+    };
+
+    const changed = await memberships.change(owner.user.id, workspace.id, member.user.id, "viewer", added.updatedAt, "workspace-member-version-change");
+    await assert.rejects(
+      () => memberships.change(owner.user.id, workspace.id, member.user.id, "admin", added.updatedAt, "workspace-member-version-stale-change"),
+      changedElsewhere
+    );
+    await assert.rejects(
+      () => memberships.remove(owner.user.id, workspace.id, member.user.id, added.updatedAt, "workspace-member-version-stale-remove"),
+      changedElsewhere
+    );
+    assert.equal((await store.findWorkspaceMembership(workspace.id, member.user.id))?.role, "viewer");
+
+    await memberships.remove(owner.user.id, workspace.id, member.user.id, changed.updatedAt, "workspace-member-version-remove");
+    assert.equal(await store.findWorkspaceMembership(workspace.id, member.user.id), null);
+  });
+  it("replays workspace membership creation, role changes, and removal",async()=>{const store=createInMemoryProductStore();const services=createApplicationServices({store,dataRoot:"/agentsmith-lite",builtinAdminPassword:"admin-password"});const owner=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"replay-owner",email:"replay-owner@example.test",emailVerified:true});const member=await services.auth.loginExternalPrincipal({issuer:"https://issuer",subject:"replay-member",email:"replay-member@example.test",emailVerified:true});const workspace=await services.workspaces.createWorkspace(owner.user.id,{name:"Workspace"});const add=services.workspaceMemberships.add.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,identity:{email:string},role:"member",key:string)=>Promise<{userId:string;updatedAt:string}>;const first=await add(owner.user.id,workspace.id,{email:member.user.email},"member","workspace-member-key");const replayed=await add(owner.user.id,workspace.id,{email:member.user.email},"member","workspace-member-key");assert.equal(replayed.userId,first.userId);const change=services.workspaceMemberships.change.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,userId:string,role:"viewer",expectedUpdatedAt:string,key:string)=>Promise<{role:string;updatedAt:string}>;const changed=await change(owner.user.id,workspace.id,member.user.id,"viewer",first.updatedAt,"workspace-member-change-key");assert.deepEqual(await change(owner.user.id,workspace.id,member.user.id,"viewer",first.updatedAt,"workspace-member-change-key"),changed);const remove=services.workspaceMemberships.remove.bind(services.workspaceMemberships) as (actor:string,workspaceId:string,userId:string,expectedUpdatedAt:string,key:string)=>Promise<void>;await remove(owner.user.id,workspace.id,member.user.id,changed.updatedAt,"workspace-member-remove-key");await remove(owner.user.id,workspace.id,member.user.id,changed.updatedAt,"workspace-member-remove-key");assert.equal((await store.listWorkspaceMemberships(workspace.id)).filter(item=>item.userId===member.user.id).length,0);});
 });
 function status(code:number){return (error:unknown)=>error instanceof ProductError&&error.statusCode===code;}
+function changedElsewhere(error: unknown) { return error instanceof ProductError && error.statusCode === 409 && error.message === "Workspace membership changed elsewhere. Reload and try again."; }

@@ -88,10 +88,27 @@ describe("v1 project membership API", () => {
     });
     assert.equal(outsideWorkspace.response.status, 409);
 
-    await requestJson("POST", `/api/v1/workspaces/${workspaceId}/members`, {
+    const workspaceMember = await requestJson("POST", `/api/v1/workspaces/${workspaceId}/members`, {
       email: "MEMBER@example.test",
       role: "viewer"
     });
+    const updatedWorkspaceMember = await requestJson("PATCH", `/api/v1/workspaces/${workspaceId}/members`, {
+      userId: "user_member",
+      role: "member",
+      expectedUpdatedAt: workspaceMember.updatedAt
+    });
+    const staleWorkspaceUpdate = await request("PATCH", `/api/v1/workspaces/${workspaceId}/members`, {
+      userId: "user_member",
+      role: "admin",
+      expectedUpdatedAt: workspaceMember.updatedAt
+    });
+    assert.equal(staleWorkspaceUpdate.response.status, 409);
+    assert.deepEqual(staleWorkspaceUpdate.body, { error: "Workspace membership changed elsewhere. Reload and try again." });
+    const staleWorkspaceDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, {
+      userId: "user_member",
+      expectedUpdatedAt: workspaceMember.updatedAt
+    });
+    assert.equal(staleWorkspaceDelete.response.status, 409);
     const created = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
       userId: "user_member",
       role: "viewer"
@@ -202,10 +219,12 @@ describe("v1 project membership API", () => {
     assert.equal(ownerUpdate.response.status, 409);
     const ownerDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId, expectedUpdatedAt: ownerMembership.updatedAt });
     assert.equal(ownerDelete.response.status, 409);
-    const workspaceOwnerDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: ownerUserId });
+    const workspaceMembers = await requestJson("GET", `/api/v1/workspaces/${workspaceId}/members`);
+    const workspaceOwner = workspaceMembers.find((member: { userId: string }) => member.userId === ownerUserId);
+    const workspaceOwnerDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: ownerUserId, expectedUpdatedAt: workspaceOwner.updatedAt });
     assert.equal(workspaceOwnerDelete.response.status, 409);
 
-    await requestJson("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: "user_member" });
+    await requestJson("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: "user_member", expectedUpdatedAt: updatedWorkspaceMember.updatedAt });
     const revoked = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/endpoints`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });

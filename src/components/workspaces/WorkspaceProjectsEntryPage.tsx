@@ -69,7 +69,7 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
 }
 
 function ProjectsEmpty({ canCreateProject, onCreate }: { canCreateProject: boolean; onCreate: () => void }) {
-  return <PageState state="empty"><EmptyState icon={FolderKanban} title="No projects yet" description={canCreateProject ? "Create a project to add an endpoint, invite collaborators, and start work." : "No projects are available in this workspace."} {...(canCreateProject ? { action: { label: "New project", onClick: onCreate } } : {})} /></PageState>;
+  return <PageState state="empty"><EmptyState icon={FolderKanban} title="No projects yet" description={canCreateProject ? "Create a project to configure an endpoint, add members, and start work." : "No projects are available in this workspace."} {...(canCreateProject ? { action: { label: "New project", onClick: onCreate } } : {})} /></PageState>;
 }
 
 function WorkspaceProjectsError({ message, onRetry }: { message: string; onRetry: () => void }) {

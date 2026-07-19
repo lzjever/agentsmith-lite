@@ -68,16 +68,16 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual((await store.listUserNotifications("user_membership_owner")).map((item)=>item.id),["notification_project_membership_owner"]);
     assert.equal((await store.upsertProjectMembershipForWorkspaceMember(membership))?.role,"member");
 
-    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_owner"),"owner");
+    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_owner",timestamp),"owner");
     assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_owner"))?.role,"owner");
     assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_owner"))?.role,"owner");
     assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_owner","user_membership_target",timestamp));
-    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_target"),"owner");
+    assert.equal(await store.revokeWorkspaceMembership("ws_membership","user_membership_target",timestamp),"owner");
     assert.equal((await store.findWorkspaceMembership("ws_membership","user_membership_target"))?.role,"member");
     assert.equal((await store.findProjectMembership("proj_membership_one","user_membership_target"))?.role,"member");
     assert.ok(await store.transferProjectOwner("proj_membership_two","user_membership_target","user_membership_owner",timestamp));
     for(const projectId of ["proj_membership_one","proj_membership_two"])await store.createUserNotification({id:`notification_workspace_membership_${projectId}`,userId:"user_membership_target",type:"project_alert",title:"Workspace target",body:null,projectId,resourceKind:"alert",resourceId:`alert_${projectId}`,linkPath:"/target",readAt:null,createdAt:timestamp});
-    const revoked=await store.revokeWorkspaceMembership("ws_membership","user_membership_target");
+    const revoked=await store.revokeWorkspaceMembership("ws_membership","user_membership_target",timestamp);
     assert.ok(typeof revoked==="object");
     assert.deepEqual([...revoked.revokedProjectIds].sort(),["proj_membership_one","proj_membership_two"]);
     assert.equal(await store.findWorkspaceMembership("ws_membership","user_membership_target"),null);

@@ -54,6 +54,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     if (!mounted.current || request !== refreshRequest.current) return;
     setMembers(listed);
     setState("ready");
+    return listed;
   }, [refreshWorkspace, workspaceId]);
 
   const load = useCallback(async () => {
@@ -83,6 +84,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
   async function recoverMutation(reason: unknown, retry: () => void) {
     const accessDenied = isReadOnlyMutationError(reason);
+    let refreshed: WorkspaceMember[] | undefined;
     if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace not found") {
       setWorkspace(undefined);
       setMembers([]);
@@ -113,7 +115,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       return;
     }
     try {
-      await refresh();
+      refreshed = await refresh();
     } catch (refreshReason) {
       if (refreshReason instanceof ApiError && (refreshReason.status === 403 || (refreshReason.status === 404 && refreshReason.message === "Workspace not found"))) {
         setWorkspace(undefined);
@@ -128,12 +130,17 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
       // Preserve the original mutation error while the page remains usable.
     }
     if (!mounted.current) return;
+    if (refreshed) {
+      setSelected((current) => current ? refreshed!.find((member) => member.userId === current.userId) : undefined);
+      setMemberToRemove((current) => current ? refreshed!.find((member) => member.userId === current.userId) : undefined);
+    }
     if (accessDenied) {
       setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
       setOpen(false);
       setMemberToRemove(undefined);
     }
-    setMutationError({ message: errorMessage(reason), ...(!accessDenied && { retry }) });
+    const stale = reason instanceof ApiError && reason.status === 409 && reason.message === "Workspace membership changed elsewhere. Reload and try again.";
+    setMutationError({ message: errorMessage(reason), ...(!accessDenied && !stale && { retry }) });
   }
 
   async function add(event?: FormEvent<HTMLFormElement>) {
@@ -165,7 +172,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     setMutationError(undefined);
     const requestIdentity = `${member.userId}:${next}`;
     try {
-      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next, mutationKeys.key("workspace-member.change", requestIdentity));
+      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next, member.updatedAt, mutationKeys.key("workspace-member.change", requestIdentity));
       mutationKeys.complete("workspace-member.change", requestIdentity);
       if (!mounted.current) return;
       setMembers((current) => current.map((item) => item.userId === changed.userId ? changed : item));
@@ -187,7 +194,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     setBusyUserId(member.userId);
     setMutationError(undefined);
     try {
-      await apiClient.removeWorkspaceMember(workspaceId, member.userId, mutationKeys.key("workspace-member.remove", member.userId));
+      await apiClient.removeWorkspaceMember(workspaceId, member.userId, member.updatedAt, mutationKeys.key("workspace-member.remove", member.userId));
       mutationKeys.complete("workspace-member.remove", member.userId);
       if (!mounted.current) return;
       setMembers((current) => current.filter((item) => item.userId !== member.userId));
