@@ -31,9 +31,25 @@ describe("project alert history API", () => {
       const missingRuleKey = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf }, body: JSON.stringify({ alertType: "task_failure" }) });
       assert.equal(missingRuleKey.status, 400);
       assert.deepEqual(await missingRuleKey.json(), { error: "Idempotency-Key header is required" });
+      const removedRuleField = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ alertType: "task_failure", channels: ["email"] }) });
+      assert.equal(removedRuleField.status, 400);
       const rule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "task_failure" }, ownerCookie, ownerCsrf);
       const testedRule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules/${rule.id}/test`, {}, ownerCookie, ownerCsrf);
       assert.equal(testedRule.metric, rule.metric);
+      const removedTestBody = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}/test`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf }, body: JSON.stringify({ notify: true }) });
+      assert.equal(removedTestBody.status, 400);
+      const removedRuleUpdate = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}`, { method: "PATCH", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: rule.updatedAt, deliveryChannels: [] }) });
+      assert.equal(removedRuleUpdate.status, 400);
+      const updatedRule = await json(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/alert-rules/${rule.id}`, { name: "Updated task failure", expectedUpdatedAt: rule.updatedAt }, ownerCookie, ownerCsrf);
+      assert.equal(updatedRule.name, "Updated task failure");
+      const removedRuleDelete = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}`, { method: "DELETE", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ force: true }) });
+      assert.equal(removedRuleDelete.status, 400);
+      const removedAckBody = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts/${alert.id}/acknowledge`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ note: "legacy" }) });
+      assert.equal(removedAckBody.status, 400);
+      const removedSilenceField = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts/${alert.id}/silence`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ silencedUntil, channel: "email" }) });
+      assert.equal(removedSilenceField.status, 400);
+      assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts?channel=email`, { headers: { cookie: ownerCookie } })).status, 400);
+      assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit?includePayload=true`, { headers: { cookie: ownerCookie } })).status, 400);
 
       const denied = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: `asl_session=${viewerSession}` } });
       assert.equal(denied.status, 403);
@@ -61,6 +77,7 @@ describe("project alert history API", () => {
       const auditPage=await audit.json() as {items:Array<{action:string;status:string;resourceKind:string;resourceId:string}>;nextCursor:string|null};assert.deepEqual(auditPage.items.filter(event=>event.status==="accepted"&&["alert.dismiss","alert.resolve"].includes(event.action)).map(event=>[event.action,event.resourceId]).sort((left,right)=>left[0]!.localeCompare(right[0]!)),[["alert.dismiss",dismissable.id],["alert.resolve",alert.id]]);assert.equal(auditPage.nextCursor,null);
       const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: ownerCookie } });
       assert.equal((await history.json() as { items: Array<{ status: string }> }).items[0]?.status, "resolved");
+      assert.deepEqual(await json(api.baseUrl, "DELETE", `/api/v1/projects/${project.id}/alert-rules/${rule.id}`, {}, ownerCookie, ownerCsrf), { deleted: true });
     } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
   });
 });

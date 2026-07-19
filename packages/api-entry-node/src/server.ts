@@ -624,7 +624,8 @@ async function routeApi(
       if (method === "GET") return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId));
       if (method === "PATCH") return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req)));
     }
-    if (segments[4] === "usage" && method === "GET") {
+    if (segments[4] === "usage" && !segments[5] && method === "GET") {
+      assertOnlySearchParams(url, ["endpointId"]);
       const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
       await services.files.reconcileFileBytes(services.projectAbsoluteRoot(project.rootPath), {
         reconcile: (bytes) => services.policies.reconcileFileLibraryBytes(projectId, bytes),
@@ -633,20 +634,20 @@ async function routeApi(
       return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined));
     }
     if (segments[4] === "alerts") {
-      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.policies.alerts(user.id, projectId, asProjectAlertQuery(url.searchParams)));
-      if (segments[5] && !segments[6] && method === "GET") return sendJson(res,200,await services.policies.alert(user.id,projectId,segments[5]));
-      if (segments[5] && segments[6] === "acknowledge" && method === "POST") return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5],requireIdempotencyKey(req)));
-      if (segments[5] && segments[6] === "silence" && method === "POST") return sendJson(res,200,await services.alertRules.silence(user.id,projectId,segments[5],(await readJson(req)).silencedUntil,requireIdempotencyKey(req)));
-      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.policies.transitionAlert(user.id, projectId, segments[5], asProjectAlertTransition(await readJson(req)), requireIdempotencyKey(req)));
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,["limit","cursor","status"]);return sendJson(res, 200, await services.policies.alerts(user.id, projectId, asProjectAlertQuery(url.searchParams))); }
+      if (segments[5] && !segments[6] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res,200,await services.policies.alert(user.id,projectId,segments[5])); }
+      if (segments[5] && segments[6] === "acknowledge" && !segments[7] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.alertRules.acknowledge(user.id,projectId,segments[5],requireIdempotencyKey(req))); }
+      if (segments[5] && segments[6] === "silence" && !segments[7] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["silencedUntil"]);return sendJson(res,200,await services.alertRules.silence(user.id,projectId,segments[5],body.silencedUntil,requireIdempotencyKey(req))); }
+      if (segments[5] && !segments[6] && method === "PATCH") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.policies.transitionAlert(user.id, projectId, segments[5], asProjectAlertTransition(await readJson(req)), requireIdempotencyKey(req))); }
     }
     if (segments[4] === "alert-rules") {
-      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.alertRules.list(user.id, projectId));
-      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && segments[6] === "test" && method === "POST") return sendJson(res,200,await services.alertRules.test(user.id,projectId,segments[5]));
-      if (segments[5] && method === "PATCH") return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && method === "DELETE") return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5], requireIdempotencyKey(req)));
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.alertRules.list(user.id, projectId)); }
+      if (!segments[5] && method === "POST") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.alertRules.create(user.id, projectId, asAlertRuleCreateInput(await readJson(req)), requireIdempotencyKey(req))); }
+      if (segments[5] && segments[6] === "test" && !segments[7] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.alertRules.test(user.id,projectId,segments[5])); }
+      if (segments[5] && !segments[6] && method === "PATCH") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.alertRules.update(user.id, projectId, segments[5], asAlertRuleUpdateInput(await readJson(req)), requireIdempotencyKey(req))); }
+      if (segments[5] && !segments[6] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res, 200, await services.alertRules.remove(user.id, projectId, segments[5], requireIdempotencyKey(req))); }
     }
-    if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
+    if (segments[4] === "audit" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["actorId","limit","cursor","from","to","action","status","resourceKind","resourceId"]);return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams))); }
     if (segments[4] === "files") {
       if (!segments[5] && method === "GET") {
         assertOnlySearchParams(url, ["path"]);
@@ -1760,9 +1761,10 @@ function asPolicyInput(body: Record<string, unknown>): import("../../contracts/s
   return input;
 }
 
-function asAlertRuleCreateInput(body:Record<string,unknown>){if(!("alertType" in body))throw new ProductError("Alert rule body must contain alertType");return body}
+const alertRuleInputKeys=["name","alertType","metric","threshold","windowSeconds","scope","enabled"];
+function asAlertRuleCreateInput(body:Record<string,unknown>){assertOnlyKeys(body,alertRuleInputKeys);if(!("alertType" in body))throw new ProductError("Alert rule body must contain alertType");return body}
 
-function asAlertRuleUpdateInput(body:Record<string,unknown>){if(Object.keys(body).filter(key=>key!=="expectedUpdatedAt").length===0)throw new ProductError("Alert rule update cannot be empty");return{...body,expectedUpdatedAt:asRequiredIsoTimestamp(body.expectedUpdatedAt,"expectedUpdatedAt")}}
+function asAlertRuleUpdateInput(body:Record<string,unknown>){assertOnlyKeys(body,[...alertRuleInputKeys,"expectedUpdatedAt"]);if(Object.keys(body).filter(key=>key!=="expectedUpdatedAt").length===0)throw new ProductError("Alert rule update cannot be empty");return{...body,expectedUpdatedAt:asRequiredIsoTimestamp(body.expectedUpdatedAt,"expectedUpdatedAt")}}
 
 function asRequiredIsoTimestamp(value:unknown,field:string):string{if(typeof value!=="string"||!Number.isFinite(Date.parse(value)))throw new ProductError(`${field} must be an ISO timestamp`);return new Date(value).toISOString()}
 

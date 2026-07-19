@@ -48,6 +48,8 @@ test("usage overview returns project limits and server-filtered settled endpoint
     assert.deepEqual(filtered.daily.reduce((total: { requests: number; tokens: number; cost: number }, day: { requests: number; tokens: number; cost: number }) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), { requests: 1, tokens: 2, cost: 0.25 });
     const invalid = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?endpointId=other`, { headers: { cookie } });
     assert.equal(invalid.status, 404);
+    const removedFilter = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?groupBy=provider`, { headers: { cookie } });
+    assert.equal(removedFilter.status, 400);
     assert.doesNotMatch(JSON.stringify(all), /usage-secret|credentialId|ciphertext|nonce/);
   } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
 });
