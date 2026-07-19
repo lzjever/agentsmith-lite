@@ -414,6 +414,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
                 <span className="truncate text-xs text-secondary" title={actorName(event)}>{actorName(event)}</span>
                 <strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong>
                 <Badge
+                  className="justify-self-start"
                   variant={
                     event.status === "rejected" ? "destructive" : "secondary"
                   }
