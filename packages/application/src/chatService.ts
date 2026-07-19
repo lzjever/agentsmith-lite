@@ -17,6 +17,7 @@ export interface ProjectChatSendResult {
 }
 
 const THREAD_TITLE_MAX_LENGTH = 200;
+const GENERATED_THREAD_TITLE_MAX_LENGTH = 40;
 
 function requireChatEndpoint(endpoint: ModelEndpoint): void {
   if (!endpoint.capabilities.includes("text")) throw new ProductError("Chat endpoint must support the text capability", 409);
@@ -109,7 +110,7 @@ export class ChatService {
     try {
       const timestamp = nowIso();
       userMessage = { id: newId("chatmsg"), threadId: thread.id, sequence:(history.at(-1)?.sequence??0)+1,version:1,deliveryStatus:"pending",role: "user", content: text, createdAt: timestamp,updatedAt:timestamp };
-      const admission=await this.store.appendProjectChatMessageIfCurrent(thread.id,afterMessageId,userMessage,text.slice(0,40));
+      const admission=await this.store.appendProjectChatMessageIfCurrent(thread.id,afterMessageId,userMessage,generatedThreadTitle(text));
       if(admission==="request_running")throw new ProductError("A chat request is already running",409);
       if(admission==="history_changed")throw new ProductError("Chat history changed; reload and try again",409);
       await this.policies.recordOperation(projectId,userId,"chat.message.send","accepted",userMessage.id);
@@ -188,6 +189,18 @@ function normalizeThreadTitle(value: string | null): string | null {
   const title = value.trim();
   if (title.length > THREAD_TITLE_MAX_LENGTH) throw new ProductError(`chat.title must be at most ${THREAD_TITLE_MAX_LENGTH} characters`, 400);
   return title || null;
+}
+
+function generatedThreadTitle(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= GENERATED_THREAD_TITLE_MAX_LENGTH) return normalized;
+  const contentLimit = GENERATED_THREAD_TITLE_MAX_LENGTH - 3;
+  let prefix = normalized.slice(0, contentLimit).trimEnd();
+  if (!/\s/.test(normalized[contentLimit] ?? "")) {
+    const boundary = prefix.lastIndexOf(" ");
+    if (boundary > 0) prefix = prefix.slice(0, boundary);
+  }
+  return `${prefix}...`;
 }
 
 function branchThreadTitle(value: string | null | undefined): string {

@@ -129,11 +129,11 @@ describe("ChatService", () => {
     const manual = await services.chat.createThread(user.id, project.id, endpoint.id);
     await services.chat.updateThreadMetadata(user.id, project.id, manual.id, { title: "Release planning" });
 
-    await services.chat.sendMessage(user.id, project.id, generated.id, "  Summarize the migration risks and propose a careful rollout sequence  ");
+    await services.chat.sendMessage(user.id, project.id, generated.id, "  Summarize the migration risks\nand propose a careful rollout sequence  ");
     await services.chat.sendMessage(user.id, project.id, manual.id, "This message must not replace the title");
 
     const threads = await services.chat.listThreads(user.id, project.id);
-    assert.equal(threads.find((thread) => thread.id === generated.id)?.title, "Summarize the migration risks and propos");
+    assert.equal(threads.find((thread) => thread.id === generated.id)?.title, "Summarize the migration risks and...");
     assert.equal(threads.find((thread) => thread.id === manual.id)?.title, "Release planning");
   });
 
