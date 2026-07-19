@@ -37,6 +37,27 @@ describe("live sandbox runtime service", () => {
     await runtime.tickOnce();
     assert.equal(expired, 1);
   });
+
+  it("waits for the Botified service after the Pod becomes ready", async () => {
+    const botified = new FakeBotifiedClient([], [
+      new Error("service endpoint is not ready"),
+      new Error("service endpoint is not ready"),
+      { status: "ok" }
+    ]);
+    const livePort = new FakeLiveSandboxPort();
+    const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
+    const task = await services.tasks.createTask(userId, projectId, { prompt: "wait for service", endpointId });
+
+    await services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await store.findTask(task.id))?.status, "running");
+    assert.equal((await store.findTask(task.id))?.startIntentStatus, "dispatched");
+    assert.equal(botified.healthCalls.length, 3);
+    assert.equal(botified.postMessageCalls.length, 1);
+    assert.deepEqual(livePort.sleeps, [1000, 1000]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.startupFailure, undefined);
+  });
+
   it("recovers a restarted stopping task as cancelled before fenced cleanup", async () => {
     const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
     const livePort = new FakeLiveSandboxPort();
@@ -356,13 +377,20 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
 }
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
+  readonly healthCalls: string[] = [];
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
 
-  constructor(private readonly timelineReads: Array<BotifiedTimelineReadResult | Error>) {}
+  constructor(
+    private readonly timelineReads: Array<BotifiedTimelineReadResult | Error>,
+    private readonly healthReads: Array<{ status: "ok" } | Error> = [{ status: "ok" }]
+  ) {}
 
-  async health(): Promise<{ status: "ok" }> {
-    return { status: "ok" };
+  async health(baseUrl: string): Promise<{ status: "ok" }> {
+    this.healthCalls.push(baseUrl);
+    const next = this.healthReads.shift() ?? { status: "ok" as const };
+    if (next instanceof Error) throw next;
+    return next;
   }
 
   async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {

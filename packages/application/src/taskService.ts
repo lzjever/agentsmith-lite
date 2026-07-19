@@ -1924,6 +1924,7 @@ export class TaskService {
       throw new ProductError("Live sandbox pod manifest was not generated", 500);
     }
     await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
+    await waitForBotifiedServiceReady(live, this.botified, this.botifiedBaseUrlForTask(input.task.id, input.run.botifiedPort));
   }
 
   private async prepareLiveRuntimeDirectories(task: PersistedAgentTask, projectRootPath: string): Promise<void> {
@@ -2959,6 +2960,33 @@ async function waitForPodReady(
         elapsedMs += delayMs;
         break;
       }
+    }
+  }
+}
+
+async function waitForBotifiedServiceReady(
+  live: TaskLiveSandboxConfig,
+  botified: BotifiedRuntimeHttpClient,
+  baseUrl: string
+): Promise<void> {
+  const timeoutMs = Math.max(0, live.readinessTimeoutMs ?? 60_000);
+  const pollMs = Math.max(1, live.readinessPollMs ?? 1000);
+  const sleep = live.sleep ?? defaultSleep;
+  let elapsedMs = 0;
+
+  while (true) {
+    try {
+      await botified.health(baseUrl);
+      return;
+    } catch {
+      if (elapsedMs >= timeoutMs) {
+        throw new ProductError("Timed out waiting for Botified service readiness", 504);
+      }
+      const delayMs = Math.min(pollMs, timeoutMs - elapsedMs);
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
+      elapsedMs += delayMs;
     }
   }
 }
