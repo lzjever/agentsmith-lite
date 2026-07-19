@@ -36,7 +36,7 @@ export class ProjectPolicyService {
     let unassignedEndpointUsage: ProjectUsageEndpoint | undefined;
     for (const settlement of allSettlements) {
       if (settlement.endpointId === null) {
-        unassignedEndpointUsage ??= { endpointId: null, endpointName: "Unassigned or deleted endpoints", requests: 0, tokens: 0, cost: 0 };
+        unassignedEndpointUsage ??= { endpointId: null, endpointName: "Other provider activity", requests: 0, tokens: 0, cost: 0 };
         unassignedEndpointUsage.requests += 1; unassignedEndpointUsage.tokens += settlement.usage?.tokens ?? 0; unassignedEndpointUsage.cost += settlement.usage?.cost ?? 0;
         continue;
       }

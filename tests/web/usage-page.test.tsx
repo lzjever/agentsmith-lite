@@ -11,7 +11,7 @@ const { UsagePage } = await import("../../src/components/resources/AuditUsagePag
 afterEach(() => cleanup());
 
 const overview: ProjectUsageOverview = { projectId: "project_1", usage: { projectId: "project_1", activeTasks: 1, providerRequests: 4, providerTokens: 42, providerCost: 2.5, projectFileBytes: 1024, updatedAt: "2026-07-11T00:00:00.000Z" }, limits: [{ metric: "activeTasks", current: 1, limit: 2, remaining: 1, window: { kind: "current_gauge", resetAt: null } }, { metric: "providerRequests", current: 4, limit: 8, remaining: 4, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerTokens", current: 42, limit: 100, remaining: 58, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerCost", current: 2.5, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "projectFileBytes", current: 1024, limit: 2048, remaining: 1024, window: { kind: "current_gauge", resetAt: null } }], daily: Array.from({ length: 30 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, "0")}`, requests: index === 29 ? 4 : 0, tokens: index === 29 ? 42 : 0, cost: index === 29 ? 2.5 : 0 })), trendTotals: { requests: 4, tokens: 42, cost: 2.5 }, endpoints: [{ endpointId: "endpoint_1", endpointName: "Primary", requests: 4, tokens: 42, cost: 2.5 }, { endpointId: "endpoint_2", endpointName: "Secondary", requests: 1, tokens: 2, cost: 0.0068 }], selectedEndpointId: null };
-const overviewWithUnassigned = { ...overview, endpoints: [...overview.endpoints, { endpointId: null, endpointName: "Unassigned or deleted endpoints", requests: 3, tokens: 9, cost: 0 }] } satisfies ProjectUsageOverview;
+const overviewWithUnassigned = { ...overview, endpoints: [...overview.endpoints, { endpointId: null, endpointName: "Other provider activity", requests: 3, tokens: 9, cost: 0 }] } satisfies ProjectUsageOverview;
 
 describe("usage page", () => {
   it("renders server-computed limit cards and requests an endpoint-filtered trend", async () => {
@@ -32,9 +32,9 @@ describe("usage page", () => {
       assert.equal(screen.getAllByText(/^Project lifetime · started/).length, 3);
       assert.equal(screen.queryByText("Current usage is measured for the project lifetime. It does not reset."), null);
       assert.ok(screen.getByLabelText("30-day request trend"));
-      assert.ok(screen.getByText("Unassigned or deleted endpoints"));
+      assert.ok(screen.getByText("Other provider activity"));
       fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
-      assert.equal(screen.queryByRole("option", { name: "Unassigned or deleted endpoints" }), null);
+      assert.equal(screen.queryByRole("option", { name: "Other provider activity" }), null);
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await screen.findByText("No settled provider usage in this period.");
       await waitFor(() => assert.deepEqual(requested, [undefined, "endpoint_2"]));

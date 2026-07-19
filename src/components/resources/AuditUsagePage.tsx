@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { UsageView } from "./UsageView";
+import { auditResourceIdentity } from "./audit-resource-identity";
 
 export function UsagePage({ projectId }: { projectId: string }) {
   const [usage, setUsage] = useState<ProjectUsageOverview>();
@@ -409,7 +410,9 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
                   {auditResultLabel(event.status)}
                 </Badge>
                 <span className="break-all text-xs text-secondary">
-                  {auditResourceLabel(event.resourceKind)}: {event.resourceId ?? "-"}
+                  {event.resourceId
+                    ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}`
+                    : auditResourceIdentity(event.resourceKind, event.resourceId)}
                 </span>
               </button>
             ))}
@@ -513,7 +516,7 @@ function DetailDialog({
                 }
               />
               <DT label="Resource type" value={auditResourceLabel(event.resourceKind)} />
-              <DT label="Resource ID" value={event.resourceId ?? "-"} />
+              <DT label="Resource ID" value={auditResourceIdentity(event.resourceKind, event.resourceId)} />
               <DT label="Result" value={auditResultLabel(event.status)} />
               {Object.entries(event.detail ?? {}).map(([key, value]) => (
                 <DT

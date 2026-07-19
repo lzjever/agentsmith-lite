@@ -44,7 +44,7 @@ describe("project usage overview", () => {
     const afterDelete = await services.policies.getUsageOverview(user.id, project.id);
     assert.deepEqual(
       afterDelete.endpoints.map((value) => [value.endpointId, value.endpointName, value.requests, value.tokens, value.cost]),
-      [["endpoint_1", "Primary", 2, 10, 2], [null, "Unassigned or deleted endpoints", 1, 2, 0.25]],
+      [["endpoint_1", "Primary", 2, 10, 2], [null, "Other provider activity", 1, 2, 0.25]],
     );
   });
 
