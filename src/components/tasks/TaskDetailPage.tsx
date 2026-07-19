@@ -22,6 +22,7 @@ import { taskFinalizationPresentation, taskNeedsRefresh, taskResultLabel, type T
 
 type WorkspaceMode = "conversation" | "terminal" | "artifacts";
 type LoadState = "loading" | "ready" | "error";
+type TaskLoadState = LoadState | "missing" | "forbidden";
 
 export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly = false }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly?: boolean }) {
   return <TaskDetail key={`${workspaceId}:${projectId}:${taskId}:${artifactsOnly ? "artifacts" : "task"}`} workspaceId={workspaceId} projectId={projectId} taskId={taskId} artifactsOnly={artifactsOnly} />;
@@ -34,7 +35,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
   const [inputs, setInputs] = useState<TaskInput[]>([]);
   const [capabilities, setCapabilities] = useState<TaskCapabilities>();
-  const [taskState, setTaskState] = useState<LoadState>("loading");
+  const [taskState, setTaskState] = useState<TaskLoadState>("loading");
   const [artifactsState, setArtifactsState] = useState<LoadState>("loading");
   const [inputsState, setInputsState] = useState<LoadState>("loading");
   const [taskError, setTaskError] = useState("");
@@ -79,7 +80,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
         setTask(undefined);
         setCapabilities(undefined);
-        setTaskState("error");
+        setTaskState(reason.status === 404 ? "missing" : "forbidden");
       } else if (!quiet) {
         setTaskState("error");
       }
@@ -214,7 +215,9 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   }
 
   if (taskState === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;
-  if (taskState === "error") return <PageLayout><PageState><div className="text-center"><p className="text-error" role="alert">{taskError}</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link><Button onClick={() => void loadTask()}>Try again</Button></div></div></PageState></PageLayout>;
+  if (taskState === "missing") return <TaskLoadFailure title="Task not found" detail="This task does not exist or is no longer available." basePath={basePath} />;
+  if (taskState === "forbidden") return <TaskLoadFailure title="Task unavailable" detail="You no longer have permission to access this task." basePath={basePath} />;
+  if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void loadTask()} />;
   if (!task) return null;
 
   const finalization = taskFinalizationPresentation(task);
@@ -244,6 +247,10 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This removes the task from the product after its sandbox cleanup is complete." confirmText="Delete task" onConfirm={deleteTask} errorContext="Task could not be deleted" />
     <ConfirmationDialog open={cancelOpen} onOpenChange={setCancelOpen} title="Cancel task?" description="This ends the task and begins cleanup. Stop current turn only interrupts the active agent turn." confirmText="Cancel task" onConfirm={cancelTask} errorContext="Task could not be cancelled" />
   </PageLayout>;
+}
+
+function TaskLoadFailure({ title, detail, basePath, onRetry }: { title: string; detail: string; basePath: string; onRetry?: () => void }) {
+  return <PageLayout><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><h1 className="type-section-heading">{title}</h1><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <Button onClick={onRetry}>Try again</Button> : null}</div></div></PageState></PageLayout>;
 }
 
 function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMessage, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; emptyMessage?: string; onRetry: () => Promise<void> }) {

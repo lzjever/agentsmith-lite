@@ -39,8 +39,20 @@ describe("TaskDetailPage terminal occupancy", () => {
     apiClient.taskDetail = async () => { throw new ApiError(404, "Task not found"); };
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId="task_missing" />);
-      assert.equal((await screen.findByRole("alert")).textContent, "Task not found");
+      assert.ok(await screen.findByRole("heading", { name: "Task not found" }));
+      assert.match(screen.getByText("This task does not exist or is no longer available.").textContent ?? "", /no longer available/);
       assert.equal(screen.getByRole("link", { name: "All tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
+      assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
+    } finally { apiClient.taskDetail = original; }
+  });
+
+  it("keeps retry for a recoverable task load failure", async () => {
+    const original = apiClient.taskDetail;
+    apiClient.taskDetail = async () => { throw new ApiError(503, "Task service unavailable"); };
+    try {
+      render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId="task_unavailable" />);
+      assert.ok(await screen.findByRole("heading", { name: "Task unavailable" }));
+      assert.equal(screen.getByRole("alert").textContent, "Task service unavailable");
       assert.ok(screen.getByRole("button", { name: "Try again" }));
     } finally { apiClient.taskDetail = original; }
   });
@@ -61,7 +73,7 @@ describe("TaskDetailPage terminal occupancy", () => {
       await waitFor(() => assert.equal(reads, 2));
 
       assert.equal(screen.queryByRole("heading", { name: "Task detail" }), null);
-      assert.equal(screen.getByRole("alert").textContent, "Task not found");
+      assert.ok(screen.getByRole("heading", { name: "Task not found" }));
       assert.equal(screen.getByRole("link", { name: "All tasks" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks");
     } finally { Object.assign(apiClient, original); }
   });
@@ -242,7 +254,9 @@ describe("TaskDetailPage terminal occupancy", () => {
       await screen.findByRole("link", { name: "Download result.txt" });
       fireEvent.click(screen.getByRole("button", { name: "Refresh artifacts" }));
 
-      assert.equal((await screen.findByRole("alert")).textContent, "Project access denied");
+      assert.ok(await screen.findByRole("heading", { name: "Task unavailable" }));
+      assert.match(screen.getByText(/no longer have permission/i).textContent ?? "", /permission/i);
+      assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
       assert.equal(screen.queryByRole("link", { name: "Download result.txt" }), null);
       assert.equal(taskReads, 2);
     } finally {
@@ -259,7 +273,8 @@ describe("TaskDetailPage terminal occupancy", () => {
     apiClient.taskInputs = async () => [];
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} artifactsOnly />);
-      assert.match((await screen.findByRole("alert")).textContent ?? "", /does not belong to this project/i);
+      assert.ok(await screen.findByRole("heading", { name: "Task not found" }));
+      assert.equal(screen.queryByRole("button", { name: "Try again" }), null);
       assert.equal(artifactReads, 0);
       assert.equal(screen.queryByText(`Active · ${task.id}`), null);
     } finally {
