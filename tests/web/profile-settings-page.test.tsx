@@ -221,6 +221,28 @@ describe("profile and settings pages", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
+  it("explains the interests limit before sending an invalid profile update", async () => {
+    const original = { profile: apiClient.profile, updateProfile: apiClient.updateProfile };
+    let updates = 0;
+    apiClient.profile = async () => profile;
+    apiClient.updateProfile = async () => { updates += 1; return profile; };
+    try {
+      render(<AppRouterContext.Provider value={router()}><ProfilePage /></AppRouterContext.Provider>);
+      const interests = await screen.findByRole("textbox", { name: "Interests" });
+      fireEvent.change(interests, { target: { value: Array.from({ length: 21 }, (_, index) => `Interest ${index + 1}`).join(", ") } });
+
+      assert.equal(interests.getAttribute("aria-invalid"), "true");
+      assert.ok(screen.getByRole("alert").textContent?.includes("20 interests"));
+      const save = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement;
+      assert.equal(save.disabled, true);
+      fireEvent.submit(save.closest("form")!);
+      assert.equal(updates, 0);
+
+      fireEvent.change(interests, { target: { value: "x".repeat(61) } });
+      assert.ok(screen.getByRole("alert").textContent?.includes("60 characters"));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("shows archived project read-only state and keeps ownership transfer owner-scoped", async () => {
     const original={projectSettings:apiClient.projectSettings,currentIdentity:apiClient.currentIdentity,members:apiClient.members,unarchiveProject:apiClient.unarchiveProject};
     apiClient.projectSettings=async()=>({...settings,project:{...settings.project,ownerUserId:"user_1",lifecycleStatus:"archived"}});
