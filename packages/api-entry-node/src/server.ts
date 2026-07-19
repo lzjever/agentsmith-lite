@@ -320,6 +320,7 @@ async function routeApi(
   }
 
   if (method === "GET" && url.pathname === "/api/v1/bootstrap") {
+    assertOnlySearchParams(url, []);
     return sendJson(res, 200, { authMode: auth.authMode, hasAdmin: await services.auth.hasAnyUser() });
   }
 
@@ -348,6 +349,7 @@ async function routeApi(
     if (auth.authMode !== "oidc" || !auth.oidcClient) {
       throw new ProductError("Route not found", 404);
     }
+    assertOnlySearchParams(url, ["returnTo"]);
     const redirectUri = oidcRedirectUri(req, auth.publicBaseUrl, auth.appBasePath);
     const returnTo = oidcReturnTo(url.searchParams.get("returnTo"), auth.appBasePath);
     const authorization = await auth.oidcClient.createAuthorizationRequest({ redirectUri });
@@ -393,6 +395,7 @@ async function routeApi(
   }
 
   if (method === "GET" && url.pathname === "/api/v1/me") {
+    assertOnlySearchParams(url, []);
     const profile = await services.profile.getProfile(user.id);
     return sendJson(res, 200, {
       user: {
@@ -416,6 +419,9 @@ async function routeApi(
   }
 
   if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
+    assertOnlySearchParams(url, []);
+    const body = await readJson(req);
+    assertOnlyKeys(body, []);
     const logout = await services.auth.logout(sessionId);
     const redirectUrl = auth.authMode === "oidc" && auth.oidcClient
       ? auth.oidcClient.createEndSessionUrl({

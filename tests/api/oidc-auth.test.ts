@@ -41,6 +41,8 @@ describe("api OIDC auth", () => {
     const bootstrapResponse = await fetch(baseUrl + apiPath("/api/v1/bootstrap"));
     assert.equal(bootstrapResponse.status, 200);
     assert.equal((await bootstrapResponse.json()).authMode, "oidc");
+    assert.equal((await fetch(baseUrl + apiPath("/api/v1/bootstrap?includeProviders=true"))).status, 400);
+    assert.equal((await fetch(baseUrl + apiPath("/api/v1/auth/oidc/start?prompt=login"), { redirect: "manual" })).status, 400);
 
     const webRoute = await fetch(baseUrl + `${appBasePath}/`);
     assert.equal(webRoute.status, 404);
@@ -87,6 +89,7 @@ describe("api OIDC auth", () => {
     assert.match(login.user.id, /^user_oidc_/);
     assert.equal(login.user.email, "oidc.member@example.test");
     assert.match(login.csrfToken, /^csrf_/);
+    assert.equal((await fetch(baseUrl + apiPath("/api/v1/me?includePermissions=true"), { headers: { cookie: login.sessionCookie } })).status, 400);
 
     const missingCsrf = await fetch(baseUrl + apiPath("/api/v1/workspaces"), {
       method: "POST",
@@ -163,6 +166,12 @@ describe("api OIDC auth", () => {
     const replayedEndpoint = await fetch(baseUrl + apiPath(`/api/v1/projects/${project.id}/endpoints`), endpointRequest);
     assert.equal((await replayedEndpoint.json()).id, endpoint.id);
 
+    const removedLogoutBody = await fetch(baseUrl + apiPath("/api/v1/auth/logout"), {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login.sessionCookie, "x-csrf-token": login.csrfToken },
+      body: JSON.stringify({ allSessions: true })
+    });
+    assert.equal(removedLogoutBody.status, 400);
     const logout = await fetch(baseUrl + apiPath("/api/v1/auth/logout"), {
       method: "POST",
       headers: {
