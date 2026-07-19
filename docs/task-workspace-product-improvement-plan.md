@@ -147,23 +147,31 @@ Required invariants:
 - `Task.fileLibraryId` is the only binding truth. Library responses derive
   bound status and the optional visible Task link from Tasks; do not duplicate
   `boundTaskId` in the Library row.
-- A partial unique database constraint on non-deleted Tasks, not a Web filter,
-  prevents concurrent binding of one Library to two Tasks.
+- Every non-deleted Task has one immutable, non-null `fileLibraryId`, including
+  while archived. Enforce this with a restrictive File Library foreign key,
+  `CHECK ((deleted_at IS NULL AND file_library_id IS NOT NULL) OR (deleted_at IS
+  NOT NULL AND file_library_id IS NULL))`, and a partial unique constraint on
+  non-deleted Tasks; these database constraints, not a Web filter, prevent
+  missing, dangling, or concurrent bindings.
 - Project membership authorizes Library access. The Files API returns only
   Libraries the current user can access in the current Project.
 - Task creation with an existing Library requires both Task-create and
   File-write capability because the agent will modify that Library.
-- Archive keeps the binding. Task deletion releases it and keeps Library
-  contents. A bound or non-empty Library cannot be deleted.
+- Archive keeps the binding. Explicit Task deletion atomically sets
+  `deleted_at` and clears `fileLibraryId`, releasing the binding while keeping
+  Library contents. Only inaccessible deleted tombstones may persist null;
+  public Task projections never expose a null binding. A bound or non-empty
+  Library cannot be deleted.
 
 ### 4.2 Task
 
 The Task is a durable conversation/workspace, not a single agent cycle.
 
-Required Task fields include immutable `fileLibraryId`. Botified session ID is
-always derived from `taskId`; do not persist or return a duplicate `sessionId`
-field. A user-editable title is never an identity or uniqueness key. Runtime
-startup still verifies Botified reports the expected Task ID.
+Required Task fields include immutable, non-null `fileLibraryId` for every
+non-deleted Task. Botified session ID is always derived from `taskId`; do not
+persist or return a duplicate `sessionId` field. A user-editable title is never
+an identity or uniqueness key. Runtime startup still verifies Botified reports
+the expected Task ID.
 
 Task product lifecycle:
 
@@ -200,8 +208,9 @@ Rules:
 - `Stop current turn` aborts only current work and keeps the Sandbox allocated.
 - Message delivery keeps existing idempotency key, request hash, receipt query,
   and cursor reconciliation behavior.
-- Retry resubmits a failed/stopped message in the same Task only when exposed by
-  a server capability. Duplicate Task is not part of this plan.
+- Retry may only resubmit a failed/stopped message in the same Task when exposed
+  by a server capability. Retry, duplicate, or successor Task creation is not
+  part of this plan.
 
 ### 4.4 Sandbox Run
 
@@ -403,10 +412,11 @@ The Web never asks whether work is running. It displays one confirmation:
 
 Task deletion uses the same exact-Run resource deletion implementation when a
 Sandbox exists, then removes Task messages, interactions, artifact metadata,
-and Botified state and releases the Library binding. It does not delete Library
-files. Delete is an explicit user action and is not an automatic reclamation
-path. Its confirmation includes the same warning that agent, Terminal, and
-running programs will stop and unsaved work may be lost.
+and Botified state. The final persistence transaction atomically sets
+`deleted_at` and clears `fileLibraryId` to release the binding. It does not
+delete Library files. Delete is an explicit user action and is not an automatic
+reclamation path. Its confirmation includes the same warning that agent,
+Terminal, and running programs will stop and unsaved work may be lost.
 
 Archive is intentionally different: reject Archive while a Sandbox is active
 and direct the user to `Release sandbox` first. Archive keeps the Library
@@ -609,8 +619,8 @@ Extend the retained pages in place:
 ### 9.3 Add narrowly
 
 - File Library contracts, table/store methods, service methods, routes, and UI.
-- `fileLibraryId` as the sole Task binding truth and its partial uniqueness
-  constraint.
+- `fileLibraryId` as the sole Task binding truth, its File Library foreign key,
+  non-deleted/non-null check, and partial uniqueness constraint.
 - explicit Sandbox release command and current-Run capability.
 - durable Run termination boundary for Botified restart.
 - one Sandbox usage settlement row per Run and aggregate queries in existing
@@ -623,17 +633,29 @@ machine frameworks, background job platforms, or policy DSLs for this work.
 ## 10. Data Migration
 
 This product has no production cloud deployment or customer data. Use one
-direct local schema/data transition instead of carrying legacy runtime behavior:
+direct local transition instead of carrying legacy runtime behavior.
 
-1. Add File Library and Sandbox usage settlement tables and Task binding fields.
-2. For each existing Project, create one `Project files` Library and move the
-   current `files/` contents into its HOME workspace.
-3. Remove existing development Task, Sandbox Run, interaction, artifact, and
+The SQL schema/data transition:
+
+1. Add File Library and Sandbox usage settlement tables and the Task binding
+   field.
+2. Remove existing development Task, Sandbox Run, interaction, artifact, and
    Task idempotency data because their successor/snapshot/terminal semantics are
    incompatible with the new model.
-4. Delete obsolete columns and statuses after the application uses the final
-   contract. Do not keep dual reads, dual writes, backfill workers, or legacy
-   API fields.
+3. Add the restrictive File Library foreign key, exact deleted/null check, and
+   partial unique binding constraint, then delete obsolete columns and statuses
+   when the application switches to the final contract.
+
+Run the JuiceFS content transition once with the API scaled to zero. One
+upgrade-only Kubernetes Job using the application image mounts the database
+Secret and existing JuiceFS PVC, creates or locates the deterministic `Project
+files` Library row for each Project, and atomically renames the legacy `files/`
+directory to that Library root on the same volume. The Job is idempotent from
+source path, destination path, and Library row state, and fails fast if source
+and destination both contain data or their identities conflict.
+
+Do not keep dual reads, dual writes, a compatibility read, backfill worker,
+migration ledger, report, legacy API field, or permanent migration path.
 
 The migration preserves identity, Workspace, Project, membership, endpoint,
 credential, context, chat, policy, and Project file content. It may discard only
@@ -649,8 +671,9 @@ migration sequence and one final contract; do not stage adapters.
 - Add Library persistence, uniqueness, authorization, synchronous JuiceFS
   directory ownership, CRUD, and Library-scoped file APIs.
 - Copy and adapt the original Library selector and Files browser.
-- Move existing Project files into the generated default Library.
-- Delete fixed Project `files/` APIs and UI once all callers use Library IDs.
+- Prepare the app-stopped upgrade Job for the one-time Project files move.
+- Keep the fixed Project `files/` API/client until the coordinated Task UI
+  switchover in Phase 2; do not create another compatibility path.
 
 Focused checks: create/list/rename/delete authorization; bound/non-empty delete
 rejection; binary upload/download; traversal/symlink rejection; two Libraries
@@ -661,18 +684,24 @@ do not see each other's files; Files desktop/mobile selection behavior.
 - Add atomic `create_new` and `use_existing` Task creation.
 - Mount the selected Library HOME and separate Task Botified data path.
 - Replace `inputPaths` and snapshots with the Library workspace.
-- Adapt Task creation UI and Task detail Library link.
+- Coordinate the Task creation/detail UI switchover to Library IDs, then delete
+  the fixed Project `files/` API/client and all remaining callers.
+- Remove retry, duplicate, and successor Task creation plus their contracts,
+  stores, interactions, UI, capabilities, and obsolete tests. At this boundary,
+  terminal Tasks reject further messages until Phase 3 replaces terminal-turn
+  semantics.
 
 Focused checks: concurrent binding conflict; unauthorized Library rejection;
 new/existing Library creation; Task deletion releases but preserves Library;
-Archive retains binding; Sandbox reads and writes the selected Library only.
+Archive retains binding; terminal Tasks reject messages; Sandbox reads and
+writes the selected Library only.
 
 ### Phase 3: One Task, one Botified session, many turns
 
 - Separate Task, Turn, and Sandbox projections.
 - Keep `session=taskId` across Runs and validate Botified state identity.
-- Deliver every follow-up to the same Task/session.
-- Remove successor contracts, persistence, interactions, UI, and old tests.
+- Replace terminal-turn semantics so completed turns return the same Task to
+  ready, then deliver every follow-up to that Task/session.
 - Keep current-turn abort as a separate non-releasing operation.
 
 Focused checks: two Tasks never share conversation context; multiple turns stay
@@ -712,7 +741,8 @@ and never exposes secret or content fields.
 ### Phase 6: local single-node K8s product pass
 
 Use the existing local deployment and a real OpenAI-compatible DeepSeek
-endpoint. Serially exercise:
+endpoint. This phase is local only; do not create a cloud or non-local rollout
+path. Serially exercise:
 
 1. OIDC login and Project membership.
 2. Create two Libraries and upload distinct files.
