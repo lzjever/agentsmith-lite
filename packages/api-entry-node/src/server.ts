@@ -642,6 +642,7 @@ async function routeApi(
     if (segments[4] === "audit" && method === "GET") return sendJson(res, 200, await services.policies.audit(user.id, projectId, asAuditQuery(url.searchParams)));
     if (segments[4] === "files") {
       if (!segments[5] && method === "GET") {
+        assertOnlySearchParams(url, ["path"]);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         return sendJson(res, 200, await services.files.listFilesWithAccounting(projectRoot, url.searchParams.get("path") ?? "files", {
@@ -650,6 +651,7 @@ async function routeApi(
         }));
       }
       if (!segments[5] && method === "PUT") {
+        assertOnlySearchParams(url, ["path", "overwrite"]);
         const idempotencyKey = requireIdempotencyKey(req);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
@@ -677,6 +679,7 @@ async function routeApi(
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "write");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         const body = await readJson(req);
+        assertOnlyKeys(body, ["path"]);
         const filePath = asString(body.path);
         const response = await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",idempotencyKey,{projectId,filePath},filePath,async()=>{
           const deleted = await services.files.deleteFileWithAccounting(projectRoot, filePath, {
@@ -693,6 +696,7 @@ async function routeApi(
         return sendJson(res, 200, response);
       }
       if (segments[5] === "download" && method === "GET") {
+        assertOnlySearchParams(url, ["path"]);
         const project = await services.workspaces.requireProjectForUser(user.id, projectId, "view");
         const projectRoot = services.projectAbsoluteRoot(project.rootPath);
         return sendProjectFileDownload(res, await services.files.downloadFile(projectRoot, requiredSearchParam(url, "path")));
@@ -1502,6 +1506,11 @@ function requiredSearchParam(url: URL, name: string): string {
     throw new ProductError(`Missing ${name} query parameter`);
   }
   return value;
+}
+
+function assertOnlySearchParams(url: URL, allowed: string[]): void {
+  const unsupported = [...url.searchParams.keys()].find((name) => !allowed.includes(name));
+  if (unsupported) throw new ProductError(`Unsupported query parameter: ${unsupported}`, 400);
 }
 
 function optionalBooleanSearchParam(url: URL, name: string): boolean {
