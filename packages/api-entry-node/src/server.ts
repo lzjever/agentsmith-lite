@@ -703,11 +703,13 @@ async function routeApi(
       }
     }
     if (segments[4] === "tasks") {
-      if (segments[5] === "summaries" && method === "GET") return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId));
-      if (method === "GET") {
+      if (segments[5] === "summaries" && !segments[6] && method === "GET") { assertOnlySearchParams(url, []);return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId)); }
+      if (!segments[5] && method === "GET") {
+        assertOnlySearchParams(url, ["search", "status", "archived", "sort", "direction", "cursor", "limit"]);
         return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId, asTaskListQuery(url.searchParams)));
       }
-      if (method === "POST") {
+      if (!segments[5] && method === "POST") {
+        assertOnlySearchParams(url, []);
         const body = await readJson(req);
         assertOnlyKeys(body,["prompt","endpointId","title","inputPaths"]);
         return sendJson(res, 200, await services.tasks.createTask(user.id, projectId, {
@@ -722,27 +724,28 @@ async function routeApi(
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "tasks" && segments[3]) {
     const taskId = segments[3];
-    if (!segments[4] && method === "GET") return sendJson(res,200,await services.tasks.getTask(user.id,taskId));
-    if (segments[4] === "detail" && method === "GET") return sendJson(res,200,await services.tasks.getTaskDetail(user.id,taskId));
-    if (!segments[4] && method === "PATCH") {const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
-    if (!segments[4] && method === "DELETE") return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));
-    if (segments[4] === "summary" && method === "GET") return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId));
-    if (segments[4] === "inputs" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.listTaskInputs(user.id,taskId));
-    if (segments[4] === "inputs" && segments[5] === "download" && method === "GET") return sendTaskInputDownload(res,await services.tasks.downloadTaskInput(user.id,taskId,requiredSearchParam(url,"path")));
+    if (!segments[4] && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTask(user.id,taskId)); }
+    if (segments[4] === "detail" && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTaskDetail(user.id,taskId)); }
+    if (!segments[4] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
+    if (!segments[4] && method === "DELETE") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));}
+    if (segments[4] === "summary" && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId)); }
+    if (segments[4] === "inputs" && !segments[5] && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.listTaskInputs(user.id,taskId)); }
+    if (segments[4] === "inputs" && segments[5] === "download" && method === "GET") { assertOnlySearchParams(url, ["path"]); return sendTaskInputDownload(res,await services.tasks.downloadTaskInput(user.id,taskId,requiredSearchParam(url,"path"))); }
     if (segments[4] === "messages") {
-      if(!segments[5]&&method==="POST"){const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
-      if(segments[5]&&method==="PATCH"){const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
-      if(segments[5]&&method==="DELETE")return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));
+      if(!segments[5]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
+      if(segments[5]&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));}
     }
-    if (segments[4] === "retry" && method === "POST") return sendJson(res,200,await services.tasks.retryTask(user.id,taskId,requireIdempotencyKey(req)));
-    if (segments[4] === "duplicate" && method === "POST") return sendJson(res,200,await services.tasks.duplicateTask(user.id,taskId,requireIdempotencyKey(req)));
-    if (segments[4] === "archive" && method === "POST") return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req)));
-    if (segments[4] === "interactions" && !segments[5] && method === "GET") return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})}));
-    if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") return sendTaskInteractionStream(req,res,services,user.id,taskId,url);
-    if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
-    if (segments[4] === "work" && segments[5] && segments[6] === "stop" && method === "POST") { const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.stopTaskBackgroundWork(user.id,taskId,segments[5],requireIdempotencyKey(req))); }
+    if (segments[4] === "retry" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.retryTask(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "duplicate" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.duplicateTask(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "archive" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
+    if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
+    if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "work" && segments[5] && segments[6] === "stop" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.stopTaskBackgroundWork(user.id,taskId,segments[5],requireIdempotencyKey(req))); }
     if (segments[4] === "artifacts" && segments[5] && segments[6] === "download" && method === "GET") {
       try {
+        assertOnlySearchParams(url, []);
         return sendArtifactDownload(res, await services.tasks.downloadTaskArtifact(user.id, taskId, segments[5]));
       } catch (error) {
         return handleTaskRouteError(res, error);
@@ -750,13 +753,17 @@ async function routeApi(
     }
     if (segments[4] === "artifacts" && !segments[5] && method === "GET") {
       try {
-        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, { ...(url.searchParams.get("mediaType") ? { mediaType: url.searchParams.get("mediaType")! } : {}), ...(url.searchParams.get("preview") === "true" ? { previewOnly: true } : {}) }));
+        assertOnlySearchParams(url, ["mediaType", "preview"]);
+        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, { ...(url.searchParams.get("mediaType") ? { mediaType: url.searchParams.get("mediaType")! } : {}), ...(optionalBooleanSearchParam(url,"preview") ? { previewOnly: true } : {}) }));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
     }
     if (segments[4] === "cancel" && method === "POST") {
       try {
+        assertOnlySearchParams(url, []);
+        const body = await readJson(req);
+        assertOnlyKeys(body, []);
         return sendJson(res, 200, await services.tasks.cancelTask(user.id, taskId,requireIdempotencyKey(req)));
       } catch (error) {
         return handleTaskRouteError(res, error);

@@ -271,27 +271,6 @@ describe("task interactions API", () => {
     assert.equal(botified.postMessageCalls.length, 0);
   });
 
-  it("keeps dry-run not_executed first-wins when cancellation is requested", async () => {
-    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
-    api = await createApiServer({
-      port: 0,
-      dataRoot,
-      builtinAdminPassword: "admin-password",
-      botifiedClient: botified,
-      botifiedServiceKeyFactory: () => "api-service-key"
-    });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
-      prompt: "cancel me",
-      endpointId: auth.endpointId
-    });
-
-    const cancelled = await auth.requestJson("POST", `/api/v1/tasks/${task.id}/cancel`, {});
-    assert.equal(cancelled.status, "completed");
-    assert.equal(cancelled.terminalReason, "not_executed");
-    assert.equal(botified.abortCalls.length, 0);
-  });
-
   it("aborts only the active turn and still admits a later message", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([

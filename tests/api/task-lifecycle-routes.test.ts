@@ -121,6 +121,14 @@ describe("task lifecycle API routes", () => {
   it("searches, filters, sorts, paginates, edits, archives, retries, duplicates, and deletes", async () => {
     const alpha = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "alpha body", title: "Alpha" }, "create-alpha");
     const beta = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "beta body", title: "Beta" }, "create-beta");
+    assert.equal((await request("GET", `/api/v1/projects/${projectId}/tasks?runnerId=legacy`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/projects/${projectId}/tasks/legacy`)).status, 404);
+    assert.equal((await request("GET", `/api/v1/tasks/${alpha.id}/detail?includeEvents=true`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/tasks/${alpha.id}/interactions?raw=true`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/tasks/${alpha.id}/inputs/download?path=missing&version=1`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/tasks/${alpha.id}/artifacts?libraryId=legacy`)).status, 400);
+    assert.equal((await request("GET", `/api/v1/tasks/${alpha.id}/artifacts?preview=maybe`)).status, 400);
+    assert.equal((await request("POST", `/api/v1/tasks/${alpha.id}/retry`, { runnerId:"legacy" }, "legacy-retry")).status, 400);
     const edited = await json("PATCH", `/api/v1/tasks/${alpha.id}`, { title: "Alpha edited" }, "edit-alpha");
     assert.equal(edited.title, "Alpha edited");
     const alphaSecond = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "alpha second body", title: "Alpha second" }, "create-alpha-second");
