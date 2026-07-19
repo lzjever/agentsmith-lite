@@ -30,6 +30,10 @@ import {
 } from "../ui/select";
 import { UsageView } from "./UsageView";
 import { auditResourceIdentity } from "./audit-resource-identity";
+import {
+  auditTimeInputFromQuery,
+  auditTimeQueryFromInput,
+} from "./audit-time-filter";
 
 export function UsagePage({ projectId }: { projectId: string }) {
   const [usage, setUsage] = useState<ProjectUsageOverview>();
@@ -187,8 +191,8 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         status: status === "all" ? undefined : status,
         resourceKind: kind === "all" ? undefined : kind,
         resourceId: resourceId || undefined,
-        from: from ? new Date(from).toISOString() : undefined,
-        to: to ? new Date(to).toISOString() : undefined,
+        from: auditTimeQueryFromInput(from) ?? undefined,
+        to: auditTimeQueryFromInput(to) ?? undefined,
       });
       if (!active.current || revision !== requestRevision.current) return;
       setItems(page.items);
@@ -226,6 +230,8 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     setStatus(requestedStatus === "accepted" || requestedStatus === "rejected" ? requestedStatus : "all");
     setActorId(requestedActor || "all");
     setResourceId(query.get("resourceId") ?? "");
+    setFrom(auditTimeInputFromQuery(query.get("from")));
+    setTo(auditTimeInputFromQuery(query.get("to")));
     setMembers([]);
     void apiClient.members(projectId).then((listed) => { if (active.current) setMembers(listed); }).catch(() => undefined);
     setCursors([undefined]);
@@ -244,6 +250,17 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     query.delete("resourceId");
     replaceBrowserQuery(query);
     setResourceId("");
+    reset();
+  }
+
+  function changeTimeFilter(key: "from" | "to", value: string) {
+    const query = browserQuery();
+    const timestamp = auditTimeQueryFromInput(value);
+    if (timestamp) query.set(key, timestamp);
+    else query.delete(key);
+    replaceBrowserQuery(query);
+    if (key === "from") setFrom(value);
+    else setTo(value);
     reset();
   }
 
@@ -359,10 +376,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               aria-label="From timestamp"
               type="datetime-local"
               value={from}
-              onChange={(event) => {
-                setFrom(event.target.value);
-                reset();
-              }}
+              onChange={(event) => changeTimeFilter("from", event.target.value)}
             />
           </div>
           <div className="grid gap-1">
@@ -371,10 +385,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               aria-label="To timestamp"
               type="datetime-local"
               value={to}
-              onChange={(event) => {
-                setTo(event.target.value);
-                reset();
-              }}
+              onChange={(event) => changeTimeFilter("to", event.target.value)}
             />
           </div>
         </div>
