@@ -23,6 +23,8 @@ test("credential routes never return submitted secret material", async () => {
     const { csrfToken } = await login.json() as { csrfToken: string };
     const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
+    await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/credentials`, { name: "Legacy", baseUrl: "https://models.example.test/v1", secret: "secret", description: "removed" }, cookie, csrfToken);
+    assert.deepEqual(await get(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, cookie), []);
     const created = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-return-this" }, cookie, csrfToken);
     assert.doesNotMatch(JSON.stringify(created), /never-return-this|ciphertext|nonce|authTag|keyId/);
     const listed = await get(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, cookie);
@@ -31,14 +33,22 @@ test("credential routes never return submitted secret material", async () => {
     assert.equal(Object.hasOwn(created, "description"), false);
 
     const missingRotateKey=await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}/rotate`,{method:"POST",headers:{"content-type":"application/json",cookie,"x-csrf-token":csrfToken},body:JSON.stringify({secret:"rotated-secret"})});assert.equal(missingRotateKey.status,400);
+    await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/credentials/${created.id}/rotate`, { secret: "rotated-secret", type: "api_key" }, cookie, csrfToken);
+    assert.equal((await get(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, cookie))[0].version, 1);
     const rotated = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}/rotate`, { secret: "rotated-secret" }, cookie, csrfToken);
     assert.equal(rotated.version, 2);
     assert.doesNotMatch(JSON.stringify(rotated), /rotated-secret|ciphertext|nonce|authTag|keyId/);
 
-    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, { name: "Provider", protocol: "openai_chat_completions", baseUrl: created.baseUrl, model: "model", credentialId: created.id, capabilities: ["text"], requestTimeoutSecs: 30 }, cookie, csrfToken);
+    const endpointInput = { name: "Provider", protocol: "openai_chat_completions", baseUrl: created.baseUrl, model: "model", credentialId: created.id, capabilities: ["text"], requestTimeoutSecs: 30 };
+    await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/endpoints`, { ...endpointInput, pricing: { input: 1 } }, cookie, csrfToken);
+    assert.deepEqual(await get(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, cookie), []);
+    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, endpointInput, cookie, csrfToken);
+    await rejectsUnknownField(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, { ...endpointInput, expectedUpdatedAt: endpoint.updatedAt, catalogModelId: "removed" }, cookie, csrfToken);
+    await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/endpoints/models`, { baseUrl: created.baseUrl, credentialId: created.id, requestTimeoutSecs: 30, provider: "removed" }, cookie, csrfToken);
     const blocked = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}`, { method: "DELETE", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": "blocked-credential-delete" }, body: JSON.stringify({ expectedVersion: rotated.version }) });
     assert.equal(blocked.status, 409);
     await requestJson(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, "DELETE", undefined, cookie, csrfToken);
+    await rejectsUnknownField(api.baseUrl, "DELETE", `/api/v1/projects/${project.id}/credentials/${created.id}`, { expectedVersion: rotated.version, force: true }, cookie, csrfToken);
     const staleDelete = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}`, { method: "DELETE", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": "stale-credential-delete" }, body: JSON.stringify({ expectedVersion: created.version }) });
     assert.equal(staleDelete.status, 409);
     assert.deepEqual(await requestJson(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}`, "DELETE", { expectedVersion: rotated.version }, cookie, csrfToken), { deleted: true });
@@ -50,3 +60,4 @@ async function json(base: string, pathname: string, body: unknown, cookie: strin
 function isResourceCreation(pathname:string):boolean{return pathname==="/api/v1/workspaces"||/^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+\/rotate$/.test(pathname)}
 async function get(base: string, pathname: string, cookie: string): Promise<any> { const response = await fetch(base + pathname, { headers: { cookie } }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
 async function requestJson(base: string, pathname: string, method: "DELETE", body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(base + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(/\/(endpoints|credentials)\/[^/]+$/.test(pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
+async function rejectsUnknownField(base: string, method: "POST" | "PATCH" | "DELETE", pathname: string, body: unknown, cookie: string, csrf: string): Promise<void> { const response = await fetch(base + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(body) }); assert.equal(response.status, 400); }

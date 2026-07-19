@@ -565,7 +565,7 @@ async function routeApi(
       if (!segments[5] && method === "GET") return sendJson(res, 200, await services.credentials.list(user.id, projectId));
       if (!segments[5] && method === "POST") return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req)));
       if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && method === "DELETE") { const body=await readJson(req);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
+      if (segments[5] && method === "DELETE") { const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
     }
     if (segments[4] === "endpoints") {
       if (segments[5] === "models" && method === "POST") {
@@ -1656,6 +1656,13 @@ function asMessages(value: unknown): ChatMessage[] {
 }
 
 function asEndpointInput(body: Record<string, unknown>): CreateEndpointInput {
+  assertOnlyKeys(body, endpointInputKeys);
+  return parseEndpointInput(body);
+}
+
+const endpointInputKeys = ["name", "protocol", "baseUrl", "model", "credentialId", "capabilities", "requestTimeoutSecs"];
+
+function parseEndpointInput(body: Record<string, unknown>): CreateEndpointInput {
   const protocol = asString(body.protocol);
   if (protocol !== "openai_chat_completions") {
     throw new ProductError("Only openai_chat_completions endpoints are supported");
@@ -1678,15 +1685,18 @@ function asEndpointInput(body: Record<string, unknown>): CreateEndpointInput {
 }
 
 function asCredentialCreateInput(body: Record<string, unknown>): import("../../contracts/src/api.js").CreateProjectCredentialInput {
+  assertOnlyKeys(body, ["name", "baseUrl", "secret"]);
   return { name: asString(body.name), baseUrl: asString(body.baseUrl), secret: asString(body.secret) };
 }
 
 function asCredentialRotateInput(body: Record<string, unknown>): import("../../contracts/src/api.js").RotateProjectCredentialInput {
+  assertOnlyKeys(body, ["secret"]);
   return { secret: asString(body.secret) };
 }
 
 function asEndpointUpdateInput(body: Record<string, unknown>): UpdateEndpointInput {
-  const input = asEndpointInput({
+  assertOnlyKeys(body, [...endpointInputKeys, "expectedUpdatedAt"]);
+  const input = parseEndpointInput({
     ...body,
     credentialId: body.credentialId ?? ""
   });
@@ -1699,6 +1709,7 @@ function asEndpointUpdateInput(body: Record<string, unknown>): UpdateEndpointInp
 }
 
 function asEndpointModelDiscoveryInput(body: Record<string, unknown>): DiscoverEndpointModelsInput {
+  assertOnlyKeys(body, ["endpointId", "baseUrl", "credentialId", "requestTimeoutSecs"]);
   if (typeof body.requestTimeoutSecs !== "number") throw new ProductError("Endpoint requestTimeoutSecs is required");
   return {
     ...(body.endpointId === undefined ? {} : { endpointId: asString(body.endpointId) }),
