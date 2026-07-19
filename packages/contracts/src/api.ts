@@ -630,11 +630,13 @@ export interface TaskMessageReceipt {
 }
 
 export type TaskInteractionConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
+export type TaskAssistantPreviewStatus = "available" | "unavailable";
 export type TaskInteractionStreamEvent =
   | { type: "interaction"; cursor: string; item: TaskInteractionItem }
   | { type: "state"; queuedMessages: TaskQueuedMessage[]; capabilities: TaskCapabilities }
   | { type: "run_state"; runState: TaskRunState }
   | { type: "connection"; connectionState: TaskInteractionConnectionState; runtimeReachability: TaskRuntimeReachability; historyStatus: TaskHistoryStatus; lastSyncedAt: ISODateString | null; message: string | null }
+  | { type: "preview_status"; previewStatus: TaskAssistantPreviewStatus; message: string | null }
   | { type: "assistant_preview"; interactionId: string; body: string; occurredAt: ISODateString }
   | { type: "assistant_preview_clear"; interactionId: string }
   | { type: "reset"; snapshot: TaskInteractionSnapshot }

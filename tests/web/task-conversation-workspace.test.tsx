@@ -178,6 +178,24 @@ describe("TaskConversationWorkspace", () => {
     }
   });
 
+  it("presents preview degradation without claiming conversation updates disconnected", async () => {
+    const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
+    apiClient.getTaskInteractions = async () => snapshot;
+    apiClient.streamTaskInteractions = async (_taskId, _cursor, signal, onEvent) => {
+      onEvent({ type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:"2026-07-15T00:00:02.000Z", message:null });
+      onEvent({ type:"preview_status", previewStatus:"unavailable", message:"Live assistant preview is unavailable. Final responses and conversation updates remain available." });
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once:true }));
+    };
+    try {
+      render(<TaskConversationWorkspace taskId="task_1" basePath="/tasks" onCapabilities={() => undefined} onArtifactPublished={() => undefined} />);
+      assert.ok(await screen.findByText("Live assistant preview is unavailable. Final responses and conversation updates remain available."));
+      assert.equal(screen.queryByText(/Conversation updates are temporarily disconnected/), null);
+      assert.ok(screen.getByRole("button", { name:"Retry preview" }));
+    } finally {
+      Object.assign(apiClient, original);
+    }
+  });
+
   it("shows recovery when a reconnect receives a connected event", async () => {
     const original = { getTaskInteractions: apiClient.getTaskInteractions, streamTaskInteractions: apiClient.streamTaskInteractions };
     let attempts = 0;

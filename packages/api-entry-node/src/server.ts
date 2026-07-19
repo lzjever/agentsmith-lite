@@ -1275,6 +1275,7 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
   let lastState="";
   let lastRunState="";
   let lastConnection="";
+  let lastPreviewStatus="";
   const state=(value:typeof page.state,force=false)=>{
     const payload={queuedMessages:value.queuedMessages,capabilities:value.capabilities};
     const serialized=JSON.stringify(payload);
@@ -1296,6 +1297,13 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
     lastConnection=serialized;
     event("connection",payload);
   };
+  const previewStatus=(status:"available"|"unavailable",message:string|null=null,force=false)=>{
+    const payload={previewStatus:status,message};
+    const serialized=JSON.stringify(payload);
+    if(!force&&serialized===lastPreviewStatus)return;
+    lastPreviewStatus=serialized;
+    event("preview_status",payload);
+  };
   const transientState=(value:typeof page.state,connectionState:"connected"|"disconnected"|"recovered",message:string|null=null,force=false)=>{
     state(value,force);
     runState(value,force);
@@ -1305,7 +1313,6 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
   const previewIterator=services.tasks.streamTaskAssistantPreviews(userId,taskId,previewController.signal)[Symbol.asyncIterator]();
   const nextPreview=()=>previewIterator.next().catch(()=>null);
   let previewNext:ReturnType<typeof nextPreview>|null=nextPreview();
-  let previewUnavailable=false;
   transientState(page.state,"connected",page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null,true);
   const deadline=Date.now()+30_000;
   let heartbeatAt=Date.now()+5_000;
@@ -1314,7 +1321,7 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
       for(const change of page.changes){event("interaction",change.item,change.cursor);cursor=change.cursor;}
       if(page.done){event("done",{});res.end();return;}
       cursor=page.streamCursor;
-      transientState(page.state,previewUnavailable?"disconnected":"connected",previewUnavailable?"Live assistant preview is unavailable.":page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null);
+      transientState(page.state,"connected",page.state.historyStatus==="gap"?"Some earlier task history is no longer available.":null);
       if(Date.now()>=heartbeatAt){
         res.write(": heartbeat\n\n");
         heartbeatAt=Date.now()+5_000;
@@ -1324,12 +1331,12 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
         : (await sleep(500),null);
       if(preview){
         if(preview.result===null){
-          previewUnavailable=true;
-          connection(page.state,"disconnected","Live assistant preview is unavailable.",true);
+          previewStatus("unavailable","Live assistant preview is unavailable. Final responses and conversation updates remain available.",true);
           previewNext=null;
         }
         else if(preview.result.done)previewNext=null;
         else if(preview.result){
+          previewStatus("available");
           const update=preview.result.value;
           if(update.type==="upsert")event("assistant_preview",{interactionId:update.interactionId,body:update.body,occurredAt:update.occurredAt});
           else event("assistant_preview_clear",{interactionId:update.interactionId});

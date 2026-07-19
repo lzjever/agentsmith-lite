@@ -445,6 +445,7 @@ function parseTaskInteractionStreamEvent(event: string, cursor: string | undefin
     lastSyncedAt: value.lastSyncedAt,
     message: value.message
   };
+  if (event === "preview_status" && isRecord(value) && isPreviewStatus(value.previewStatus) && isNullableString(value.message)) return { type:"preview_status", previewStatus:value.previewStatus, message:value.message };
   if (event === "assistant_preview" && isRecord(value) && typeof value.interactionId === "string" && typeof value.body === "string" && typeof value.occurredAt === "string") return { type: "assistant_preview", interactionId: value.interactionId, body: value.body, occurredAt: value.occurredAt };
   if (event === "assistant_preview_clear" && isRecord(value) && typeof value.interactionId === "string") return { type: "assistant_preview_clear", interactionId: value.interactionId };
   if (event === "reset" && isTaskInteractionSnapshot(value)) return { type: "reset", snapshot: value };
@@ -512,6 +513,7 @@ function isTaskRunState(value: unknown): value is TaskInteractionSnapshot["runSt
 function isRuntimeReachability(value: unknown): value is TaskInteractionSnapshot["runtimeReachability"] { return isStringUnion(value, ["unknown", "reachable", "unreachable"]); }
 function isHistoryStatus(value: unknown): value is TaskInteractionSnapshot["historyStatus"] { return isStringUnion(value, ["complete", "gap"]); }
 function isConnectionState(value: unknown): value is Extract<TaskInteractionStreamEvent, { type: "connection" }>["connectionState"] { return isStringUnion(value, ["connecting", "reconnecting", "connected", "disconnected", "recovered"]); }
+function isPreviewStatus(value: unknown): value is Extract<TaskInteractionStreamEvent, { type: "preview_status" }>["previewStatus"] { return isStringUnion(value, ["available", "unavailable"]); }
 function isDeliveryStatus(value: unknown): value is "pending" | "delivered" | "failed" { return isStringUnion(value, ["pending", "delivered", "failed"]); }
 function isNullableDeliveryStatus(value: unknown): value is "pending" | "delivered" | "failed" | null { return value === null || isDeliveryStatus(value); }
 function isNullableString(value: unknown): value is string | null { return value === null || typeof value === "string"; }

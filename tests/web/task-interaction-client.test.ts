@@ -78,6 +78,18 @@ describe("task interaction API client", () => {
     assert.deepEqual(events, [{ type:"state", ...state }, { type:"run_state", ...runState }, { type:"connection", ...connection }]);
   });
 
+  it("parses preview availability independently from the interaction connection", async () => {
+    const encoder = new TextEncoder();
+    const previewStatus = { previewStatus:"unavailable", message:"Live assistant preview is unavailable. Final responses and conversation updates remain available." };
+    globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(encoder.encode(`event: preview_status\ndata: ${JSON.stringify(previewStatus)}\n\n`));
+      controller.close();
+    } }));
+    const events: unknown[] = [];
+    await apiClient.streamTaskInteractions("task_1", undefined, new AbortController().signal, (event) => events.push(event));
+    assert.deepEqual(events, [{ type:"preview_status", ...previewStatus }]);
+  });
+
   it("parses an explicit assistant preview clear event", async () => {
     const encoder = new TextEncoder();
     globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) {

@@ -31,6 +31,10 @@ export function TaskConnectionNotice({ connection, historyStatus, runtimeReachab
   return <div className={`flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3 text-sm ${connection === "disconnected" || historyStatus === "gap" || runtimeReachability === "unreachable" ? "border-warning/30 bg-warning/10 text-foreground" : "border-border bg-surface-low text-secondary"}`} role={connection === "disconnected" || historyStatus === "gap" ? "alert" : "status"}><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{detail}</span>{connection === "disconnected" || runtimeReachability === "unreachable" ? <Button variant="quiet" size="sm" onClick={onRetry}>Retry</Button> : null}</div>;
 }
 
+export function TaskPreviewNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border bg-surface-low px-4 py-3 text-sm text-secondary" role="status"><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{message}</span><Button variant="quiet" size="sm" onClick={onRetry}>Retry preview</Button></div>;
+}
+
 function runStatePresentation(runState: TaskInteractionSnapshot["runState"], taskResult: TaskRunResult | undefined) {
   if (runState !== "terminal") {
     return {

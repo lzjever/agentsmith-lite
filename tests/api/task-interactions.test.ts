@@ -527,7 +527,7 @@ describe("task interactions API", () => {
     assert.doesNotMatch(stream,/event: state\ndata: [^\n]*(?:runState|runtimeReachability|historyStatus|lastSyncedAt|connectionState)/);
   });
 
-  it("reports an unavailable preview source as a typed connection state without exposing its error", async () => {
+  it("reports an unavailable preview source without marking interaction updates disconnected", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
     botified.previewFailure = new Error("Botified service key api-service-key failed");
@@ -551,7 +551,9 @@ describe("task interactions API", () => {
     }
     await reader.cancel();
 
-    assert.match(stream, /event: connection\ndata: \{"connectionState":"disconnected","runtimeReachability":"reachable","historyStatus":"complete","lastSyncedAt":"[^"]+","message":"Live assistant preview is unavailable\."/);
+    assert.match(stream, /event: connection\ndata: \{"connectionState":"connected","runtimeReachability":"reachable","historyStatus":"complete","lastSyncedAt":"[^"]+","message":null\}/);
+    assert.match(stream, /event: preview_status\ndata: \{"previewStatus":"unavailable","message":"Live assistant preview is unavailable\. Final responses and conversation updates remain available\."\}/);
+    assert.doesNotMatch(stream, /"connectionState":"disconnected"/);
     assert.doesNotMatch(stream, /api-service-key|Botified service key/);
   });
 
