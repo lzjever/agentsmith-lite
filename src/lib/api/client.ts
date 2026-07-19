@@ -1,10 +1,11 @@
 "use client";
 
-import type { ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
+export type FileLibrary = FileLibraryProjection;
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string, public readonly code?: string) {
@@ -313,6 +314,27 @@ export const apiClient = {
     const payload = await request<{items:unknown[];nextCursor:string|null}>(`/projects/${encodeURIComponent(projectId)}/audit${params.size?`?${params}`:""}`);
     if (!Array.isArray(payload.items) || payload.items.some((event) => !isProjectAuditEvent(event))) throw new ApiError(502, "Audit response contains an unknown action.");
     return payload as {items:ProjectAuditEvent[];nextCursor:string|null};
+  },
+  fileLibraries: (projectId: string) => request<FileLibraryProjection[]>(`/projects/${encodeURIComponent(projectId)}/file-libraries`),
+  createFileLibrary: (projectId: string, name: string, idempotencyKey: string) => jsonIdempotent<FileLibraryProjection>(`/projects/${encodeURIComponent(projectId)}/file-libraries`, "POST", idempotencyKey, { name }),
+  renameFileLibrary: (projectId: string, libraryId: string, input: RenameFileLibraryInput, idempotencyKey: string) => jsonIdempotent<FileLibraryProjection>(`/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}`, "PATCH", idempotencyKey, input),
+  deleteFileLibrary: (projectId: string, libraryId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}`, "DELETE", idempotencyKey, {}),
+  libraryFiles: (projectId: string, libraryId: string, path = "") => request<{ entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files?path=${encodeURIComponent(path)}`),
+  async uploadLibraryFile(projectId: string, libraryId: string, path: string, file: File, options: { overwrite?: boolean; idempotencyKey?: string } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {
+    if (!csrfToken) await apiClient.currentIdentity();
+    const params = new URLSearchParams({ path, ...(options.overwrite ? { overwrite: "true" } : {}) });
+    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files?${params}`, {
+      method: "PUT", credentials: "same-origin", headers: { "x-csrf-token": csrfToken || "", "content-type": file.type || "application/octet-stream", "idempotency-key": options.idempotencyKey ?? newIdempotencyKey("library-file-upload") }, body: file
+    }));
+    if (!response.ok) throw await apiResponseError(response);
+    return response.json() as Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }>;
+  },
+  deleteLibraryFile: (projectId: string, libraryId: string, path: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files`, "DELETE", idempotencyKey, { path }),
+  libraryFileDownloadUrl: (projectId: string, libraryId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files/download?path=${encodeURIComponent(path)}`,
+  async previewLibraryFile(projectId: string, libraryId: string, path: string, signal?: AbortSignal): Promise<Blob> {
+    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files/preview?path=${encodeURIComponent(path)}`, { credentials: "same-origin", ...(signal ? { signal } : {}) }));
+    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+    return response.blob();
   },
   files: (projectId: string, path = "files") => request<{ entries: ProjectFile[] }>(`/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}`),
   async uploadFile(projectId: string, path: string, file: File, options: { overwrite?: boolean; idempotencyKey?: string } = {}): Promise<{ path: string; bytes: number; mediaType: string; updatedAt: string }> {

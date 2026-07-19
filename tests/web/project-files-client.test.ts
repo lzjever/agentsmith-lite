@@ -2,35 +2,81 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apiClient } from "../../src/lib/api/client.js";
 
-describe("project files API client", () => {
-  it("uses the project API for list, binary upload, download, and delete", async () => {
+describe("file libraries API client", () => {
+  it("uses the project File Library CRUD contract", async () => {
     const originalFetch = globalThis.fetch;
-    const requests: Array<{ url: string; method: string; contentType: string | null; csrf: string | null; idempotencyKey: string | null; body: BodyInit | null | undefined }> = [];
+    const requests: Request[] = [];
     globalThis.fetch = async (input, init) => {
-      const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      const request = new Request(new URL(rawUrl, "http://localhost"), init);
-      requests.push({ url: request.url, method: request.method, contentType: request.headers.get("content-type"), csrf: request.headers.get("x-csrf-token"), idempotencyKey: request.headers.get("idempotency-key"), body: init?.body });
-      if (request.url.endsWith("/me")) {
-        return Response.json({ user: { id: "user_1", email: "person@example.test" }, csrfToken: "csrf_1" });
-      }
-      if (request.method === "GET") {
-        return Response.json({ entries: [] });
-      }
-      return Response.json(request.method === "PUT" ? { path: "files/reports/brief.bin", bytes: 3 } : { deleted: true });
+      const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url, "http://localhost"), init);
+      requests.push(request);
+      if (request.url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "person@example.test" }, csrfToken: "csrf_1" });
+      if (request.method === "DELETE") return Response.json({ deleted: true });
+      return Response.json(request.method === "GET" ? [] : library("library_1", request.method === "PATCH" ? "Renamed" : "Design files"));
     };
 
     try {
       await apiClient.currentIdentity();
-      await apiClient.files("project_1", "files/reports");
-      await apiClient.uploadFile("project_1", "files/reports/brief.bin", new Blob([Uint8Array.from([0, 255, 7])], { type: "application/octet-stream" }) as File, { idempotencyKey: "file-upload-key" });
-      await apiClient.deleteFile("project_1", "files/reports/brief.bin", "file-delete-key");
+      await apiClient.fileLibraries("project_1");
+      await apiClient.createFileLibrary("project_1", "Design files", "create-key");
+      await apiClient.renameFileLibrary("project_1", "library_1", { name: "Renamed", expectedUpdatedAt: "2026-07-19T00:00:00.000Z" }, "rename-key");
+      await apiClient.deleteFileLibrary("project_1", "library_1", "delete-key");
 
-      assert.equal(requests[1]?.url, "http://localhost/api/v1/projects/project_1/files?path=files%2Freports");
-      assert.deepEqual(requests[2] && { method: requests[2].method, contentType: requests[2].contentType, csrf: requests[2].csrf, idempotencyKey: requests[2].idempotencyKey }, { method: "PUT", contentType: "application/octet-stream", csrf: "csrf_1", idempotencyKey: "file-upload-key" });
-      assert.deepEqual(requests[3] && { method: requests[3].method, contentType: requests[3].contentType, csrf: requests[3].csrf, idempotencyKey: requests[3].idempotencyKey }, { method: "DELETE", contentType: "application/json", csrf: "csrf_1", idempotencyKey: "file-delete-key" });
-      assert.equal(apiClient.fileDownloadUrl("project_1", "files/reports/brief.bin"), "/api/v1/projects/project_1/files/download?path=files%2Freports%2Fbrief.bin");
+      assert.deepEqual(requests.slice(1).map((request) => [request.method, request.url, request.headers.get("idempotency-key")]), [
+        ["GET", "http://localhost/api/v1/projects/project_1/file-libraries", null],
+        ["POST", "http://localhost/api/v1/projects/project_1/file-libraries", "create-key"],
+        ["PATCH", "http://localhost/api/v1/projects/project_1/file-libraries/library_1", "rename-key"],
+        ["DELETE", "http://localhost/api/v1/projects/project_1/file-libraries/library_1", "delete-key"]
+      ]);
+      assert.deepEqual(await requests[2]!.json(), { name: "Design files" });
+      assert.deepEqual(await requests[3]!.json(), { name: "Renamed", expectedUpdatedAt: "2026-07-19T00:00:00.000Z" });
+      assert.deepEqual(await requests[4]!.json(), {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses library-scoped list, upload, preview, download, and delete URLs", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Request[] = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url, "http://localhost"), init);
+      requests.push(request);
+      if (request.url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "person@example.test" }, csrfToken: "csrf_1" });
+      if (request.method === "GET" && !request.url.includes("/preview")) return Response.json({ entries: [] });
+      if (request.method === "GET") return new Response("preview", { headers: { "content-type": "text/plain" } });
+      return Response.json(request.method === "PUT" ? { path: "reports/brief.txt", bytes: 3, mediaType: "text/plain", updatedAt: "x" } : { deleted: true });
+    };
+
+    try {
+      await apiClient.currentIdentity();
+      await apiClient.libraryFiles("project_1", "library_1", "reports");
+      await apiClient.uploadLibraryFile("project_1", "library_1", "reports/brief.txt", new File(["abc"], "brief.txt", { type: "text/plain" }), { idempotencyKey: "upload-key" });
+      await apiClient.previewLibraryFile("project_1", "library_1", "reports/brief.txt");
+      await apiClient.deleteLibraryFile("project_1", "library_1", "reports/brief.txt", "delete-file-key");
+
+      assert.equal(requests[1]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files?path=reports");
+      assert.deepEqual([requests[2]!.method, requests[2]!.headers.get("content-type"), requests[2]!.headers.get("idempotency-key")], ["PUT", "text/plain", "upload-key"]);
+      assert.equal(requests[2]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files?path=reports%2Fbrief.txt");
+      assert.equal(requests[3]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files/preview?path=reports%2Fbrief.txt");
+      assert.deepEqual(await requests[4]!.json(), { path: "reports/brief.txt" });
+      assert.equal(apiClient.libraryFileDownloadUrl("project_1", "library_1", "reports/brief.txt"), "/api/v1/projects/project_1/file-libraries/library_1/files/download?path=reports%2Fbrief.txt");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 });
+
+function library(id: string, name: string) {
+  return {
+    id,
+    workspaceId: "workspace_1",
+    projectId: "project_1",
+    name,
+    rootSubPath: `file-libraries/${id}`,
+    createdByUserId: "user_1",
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+    boundTask: null,
+    capabilities: { canRename: true, canDelete: true, canWriteFiles: true }
+  };
+}

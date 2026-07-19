@@ -2,620 +2,272 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { ApiError, apiClient, type ProjectCapabilities, type ProjectFile } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type FileLibrary, type ProjectCapabilities, type ProjectFile } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
-const { DeleteFileDialog, ProjectFilesPage, invalidateFilePreview } = await import("../../src/components/files/ProjectFilesPage.js");
+const { ProjectFilesPage } = await import("../../src/components/files/ProjectFilesPage.js");
 
-const file: ProjectFile = { name: "brief.txt", path: "files/brief.txt", type: "file", size: 12, updatedAt: "2026-07-11T00:00:00.000Z" };
-const writable: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
-const readOnly: ProjectCapabilities = { ...writable, canWriteFiles: false };
+const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+const first = library("library_1", "Research");
+const second = library("library_2", "Design assets");
+const file: ProjectFile = { name: "brief.txt", path: "brief.txt", type: "file", size: 12, mediaType: "text/plain", updatedAt: "2026-07-19T00:00:00.000Z" };
 
 afterEach(() => {
   cleanup();
-  window.history.replaceState(null, "", "/");
+  window.history.replaceState(null, "", "/files");
 });
 
-describe("project files browser", () => {
-  it("opens a nested directory from the URL without first loading the root", async () => {
+describe("File Libraries page", () => {
+  it("lists accessible libraries, selects the URL library, and browses its directory", async () => {
     const original = snapshotClient();
-    const paths: string[] = [];
-    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: [] }; };
-    apiClient.projectCapabilities = async () => readOnly;
-    window.history.replaceState(null, "", "/files?path=files%2Freports");
+    const reads: Array<[string, string]> = [];
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async (_projectId, libraryId, path) => { reads.push([libraryId, path]); return { entries: [file] }; };
+    window.history.replaceState(null, "", "/files?libraryId=library_2&path=reports");
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("heading", { name: "This folder is empty" });
-      assert.deepEqual(paths, ["files/reports"]);
-      assert.ok(screen.getByRole("button", { name: "reports" }));
+      await screen.findByRole("button", { name: "brief.txt" });
+      assert.equal(screen.getByRole("button", { name: "Select library Design assets" }).getAttribute("aria-current"), "true");
+      assert.equal(screen.getByRole("button", { name: "Select library Research" }).getAttribute("aria-current"), null);
+      assert.deepEqual(reads, [["library_2", "reports"]]);
+      assert.ok(screen.getByRole("navigation", { name: "Library path" }));
     } finally { restoreClient(original); }
   });
 
-  it("keeps directory navigation in the URL and restores it on browser navigation", async () => {
+  it("switches libraries, resets the directory, and clears a stale file selection", async () => {
     const original = snapshotClient();
-    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
-    const paths: string[] = [];
-    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: path === "files" ? [folder] : [] }; };
-    apiClient.projectCapabilities = async () => readOnly;
-    window.history.replaceState(null, "", "/files");
+    const reads: Array<[string, string]> = [];
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async (_projectId, libraryId, path) => { reads.push([libraryId, path]); return { entries: libraryId === first.id ? [file] : [] }; };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      const historyLength = window.history.length;
-      fireEvent.click(await screen.findByRole("button", { name: "reports" }));
-      await screen.findByRole("heading", { name: "This folder is empty" });
-      assert.equal(window.location.search, "?path=files%2Freports");
-      assert.equal(window.history.length, historyLength + 1);
-
-      const wentBack = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
-      window.history.back();
-      await act(async () => wentBack);
-      await screen.findByRole("button", { name: "reports" });
-      assert.equal(paths.at(-1), "files");
-    } finally { restoreClient(original); }
-  });
-
-  it("normalizes an unsafe file URL to the project files root", async () => {
-    const original = snapshotClient();
-    const paths: string[] = [];
-    apiClient.files = async (_projectId, path) => { paths.push(path); return { entries: [] }; };
-    apiClient.projectCapabilities = async () => readOnly;
-    window.history.replaceState(null, "", "/files?path=..%2Fsecrets");
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
+      assert.equal(screen.getAllByRole("heading", { name: "brief.txt" }).length, 2);
+      fireEvent.click(screen.getByRole("button", { name: "Select library Design assets" }));
       await screen.findByRole("heading", { name: "No files yet" });
-      assert.deepEqual(paths, ["files"]);
-      assert.equal(window.location.search, "");
+      assert.equal(window.location.search, "?libraryId=library_2");
+      assert.deepEqual(reads.at(-1), ["library_2", ""]);
+      assert.ok(screen.getByText("Select a file to view its details."));
     } finally { restoreClient(original); }
   });
 
-  it("exposes one named upload action instead of a second focusable file input", async () => {
+  it("shows the empty-library state and allows creation only from the server capability", async () => {
     const original = snapshotClient();
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [] });
+    apiClient.fileLibraries = async () => [];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.createFileLibrary = async (_projectId, name) => library("library_3", name);
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("button", { name: "Upload" });
-      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-      assert.equal(input.hidden, true);
+      await screen.findByRole("heading", { name: "No File Libraries" });
+      fireEvent.click(screen.getAllByRole("button", { name: "Create library" })[0]!);
+      fireEvent.change(screen.getByLabelText("Library name"), { target: { value: "Task notes" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await screen.findByRole("button", { name: "Select library Task notes" });
+      assert.equal(window.location.search, "?libraryId=library_3");
     } finally { restoreClient(original); }
   });
 
-  it("commits a successful upload without depending on another listing read", async () => {
+  it("keeps a duplicate-name conflict in the create dialog", async () => {
     const original = snapshotClient();
-    let lists = 0;
-    const uploaded: string[] = [];
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => { lists++; return { entries: [] }; };
-    apiClient.uploadFile = async (_projectId, path) => {
-      uploaded.push(path);
-      return { path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
-    };
+    apiClient.fileLibraries = async () => [first];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    apiClient.createFileLibrary = async () => { throw new ApiError(409, "File Library name already exists"); };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("heading", { name: "No files yet" });
-      const input = document.querySelector('input[type="file"]')!;
-      fireEvent.change(input, { target: { files: [new File(["a"], "brief.txt")] } });
-      await waitFor(() => assert.deepEqual(uploaded, ["files/brief.txt"]));
-      assert.ok(screen.getByText("brief.txt"));
-      assert.equal(lists, 1);
-    } finally { restoreClient(original); }
-  });
-
-  it("locks file deletion while an upload is pending", async () => {
-    const original = snapshotClient();
-    let uploadStarted = false;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.uploadFile = async () => {
-      uploadStarted = true;
-      return new Promise(() => undefined);
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target:{ files:[new File(["a"], "new.txt")] } });
-      await waitFor(() => assert.equal(uploadStarted, true));
-      for (const button of screen.getAllByRole("button", { name:"Delete" })) assert.equal(button.hasAttribute("disabled"), true);
-    } finally { restoreClient(original); }
-  });
-
-  it("does not insert an upload response into a different folder", async () => {
-    const original = snapshotClient();
-    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [folder] : [] });
-    apiClient.uploadFile = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return { path: file.path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("reports");
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "brief.txt")] } });
-      fireEvent.click(screen.getByRole("button", { name: "reports" }));
-      await screen.findByRole("heading", { name: "This folder is empty" });
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-      assert.equal(screen.queryByText("brief.txt"), null);
-      assert.ok(screen.getByRole("heading", { name: "This folder is empty" }));
-    } finally { restoreClient(original); }
-  });
-
-  it("shows a failed upload inline with refresh", async () => {
-    const original = snapshotClient();
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [] });
-    apiClient.uploadFile = async () => { throw new Error("brief.txt was rejected"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("heading", { name: "No files yet" });
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "brief.txt")] } });
+      fireEvent.click((await screen.findAllByRole("button", { name: "Create library" }))[0]!);
+      fireEvent.change(screen.getByLabelText("Library name"), { target: { value: "Research" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const alert = await screen.findByRole("alert");
-      assert.match(alert.textContent ?? "", /brief\.txt was rejected/);
-      assert.ok(screen.getByRole("button", { name: "Retry upload" }));
-      assert.ok(screen.getAllByRole("button", { name: "Refresh files" }).length > 1);
+      assert.match(alert.textContent ?? "", /name already exists/i);
+      assert.ok(screen.getByRole("dialog", { name: "Create File Library" }));
     } finally { restoreClient(original); }
   });
 
-  it("fails closed when the project is archived during a file upload", async () => {
+  it("uploads, safely previews, downloads, and deletes within the selected library", async () => {
     const original = snapshotClient();
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.uploadFile = async () => { throw new ApiError(409, "Project is archived"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
-      await screen.findByText("File write access changed. Files are now read-only.");
-      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
-      assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
-      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
-      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
-      assert.ok(screen.getAllByRole("link", { name: "Download" }).length > 0);
-    } finally { restoreClient(original); }
-  });
-
-  it("keeps files readable when an upload discovers write access was removed", async () => {
-    const original = snapshotClient();
-    let capabilityReads = 0;
-    apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? writable : readOnly;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.uploadFile = async () => { throw new ApiError(403, "File upload is not allowed"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
-
-      await screen.findByText("File write access changed. Files are now read-only.");
-      assert.ok(screen.getByRole("button", { name: "brief.txt" }));
-      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
-      assert.equal(capabilityReads, 2);
-    } finally { restoreClient(original); }
-  });
-
-  it("clears files when an upload discovers project access was removed", async () => {
-    const original = snapshotClient();
-    let removed = false;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => {
-      if (removed) throw new ApiError(403, "Project not found");
-      return { entries: [file] };
-    };
-    apiClient.uploadFile = async () => { removed = true; throw new ApiError(403, "Project not found"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "denied.txt")] } });
-
-      await screen.findByRole("heading", { name: "Files unavailable" });
-      assert.equal(screen.queryByRole("button", { name: "brief.txt" }), null);
-      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
-    } finally { restoreClient(original); }
-  });
-
-  it("retries the same failed file", async () => {
-    const original = snapshotClient();
-    let attempts = 0;
-    const uploaded: string[] = [];
-    const keys: Array<string | undefined> = [];
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [] });
-    apiClient.uploadFile = async (_projectId, path, _file, options) => {
-      attempts++;
-      uploaded.push(path);
-      keys.push(options?.idempotencyKey);
-      if (attempts === 1) throw new Error("network unavailable");
-      return { path, bytes: 1, mediaType: "text/plain", updatedAt: file.updatedAt };
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("heading", { name: "No files yet" });
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "brief.txt")] } });
-      await screen.findByRole("button", { name: "Retry upload" });
-      fireEvent.click(screen.getByRole("button", { name: "Retry upload" }));
-      await waitFor(() => assert.deepEqual(uploaded, ["files/brief.txt", "files/brief.txt"]));
-      assert.ok(keys[0]);
-      assert.equal(keys[1], keys[0]);
-      await waitFor(() => assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null));
-    } finally { restoreClient(original); }
-  });
-
-  it("requires explicit confirmation before replacing an existing file", async () => {
-    const original = snapshotClient();
-    const attempts: boolean[] = [];
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.uploadFile = async (_projectId, _path, _file, options) => {
-      attempts.push(options?.overwrite === true);
-      if (!options?.overwrite) throw new ApiError(409, "Project file already exists");
-      return { path: file.path, bytes: file.size ?? 0, mediaType: "text/plain", updatedAt: file.updatedAt };
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["replacement"], "brief.txt")] } });
-      const dialog = await screen.findByRole("alertdialog", { name: "Replace brief.txt?" });
-      assert.match(dialog.textContent ?? "", /permanently replace/i);
-      fireEvent.click(screen.getByRole("button", { name: "Replace file" }));
-      await waitFor(() => assert.deepEqual(attempts, [false, true]));
-      await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Replace brief.txt?" }), null));
-    } finally { restoreClient(original); }
-  });
-
-  it("shows quota conflicts as upload errors instead of replacement prompts", async () => {
-    const original = snapshotClient();
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [] });
-    apiClient.uploadFile = async () => {
-      throw new ApiError(409, "Project file bytes limit reached", "project_file_bytes_limit_reached");
-    };
-    try {
-      render(<ProjectFilesPage workspaceId="workspace_1" projectId="project_1" />);
-      await screen.findByRole("heading", { name: "No files yet" });
-      fireEvent.change(document.querySelector('input[type="file"]')!, {
-        target: { files: [new File(["a"], "quota-denied.txt")] },
-      });
-      const alert = await screen.findByRole("alert");
-      assert.match(alert.textContent ?? "", /file storage limit reached/i);
-      assert.equal(screen.getByRole("link", { name: "Open resource policy" }).getAttribute("href"), "/workspaces/workspace_1/projects/project_1/policy");
-      assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
-      assert.equal(screen.queryByRole("alertdialog", { name: "Replace quota-denied.txt?" }), null);
-    } finally { restoreClient(original); }
-  });
-
-  it("commits a successful delete without depending on another listing read", async () => {
-    const original = snapshotClient();
-    let lists = 0;
-    let deletes = 0;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => { lists++; return { entries: [file] }; };
-    apiClient.deleteFile = async () => { deletes++; return { deleted: true }; };
+    const calls: Array<[string, string]> = [];
+    apiClient.fileLibraries = async () => [first];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [file] });
+    apiClient.uploadLibraryFile = async (_projectId, libraryId, path) => { calls.push([`upload:${libraryId}`, path]); return { path, bytes: 3, mediaType: "text/plain", updatedAt: file.updatedAt }; };
+    apiClient.previewLibraryFile = async (_projectId, libraryId, path) => { calls.push([`preview:${libraryId}`, path]); return { size: 7, type: "text/plain", text: async () => "preview" } as Blob; };
+    apiClient.deleteLibraryFile = async (_projectId, libraryId, path) => { calls.push([`delete:${libraryId}`, path]); return { deleted: true }; };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
       fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
-      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
-      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
-      assert.ok(confirm);
-      await act(async () => { fireEvent.click(confirm); await Promise.resolve(); });
-      assert.equal(deletes, 1);
-      assert.equal(lists, 1);
-      assert.equal(screen.queryByText("brief.txt"), null);
-    } finally { restoreClient(original); }
-  });
+      assert.equal(screen.getAllByRole("link", { name: "Download" })[0]!.getAttribute("href"), "/api/v1/projects/project_1/file-libraries/library_1/files/download?path=brief.txt");
 
-  it("removes a file that disappeared before deletion completed", async () => {
-    const original = snapshotClient();
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.deleteFile = async () => { throw new ApiError(404, "File not found"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
-      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
-      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
-      assert.ok(confirm);
-      await act(async () => { fireEvent.click(confirm); await new Promise((resolve) => setTimeout(resolve, 0)); });
-      assert.equal(screen.queryByRole("alertdialog", { name: "Delete file?" }), null);
-      assert.equal(screen.queryByText("brief.txt"), null);
-    } finally { restoreClient(original); }
-  });
-
-  it("reuses a file deletion key after an unknown network result", async () => {
-    const original = snapshotClient();
-    const keys: string[] = [];
-    let attempts = 0;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.deleteFile = (async (_projectId:string,_path:string,key:string)=>{keys.push(key);if(++attempts===1)throw new Error("connection closed");return{deleted:true as const};}) as typeof apiClient.deleteFile;
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
-      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
-      const confirm = () => Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete")!;
-      fireEvent.click(confirm());
-      await screen.findByText(/connection closed/);
-      fireEvent.click(confirm());
-      await waitFor(() => assert.equal(attempts, 2));
-      assert.ok(keys[0]);assert.equal(keys[1],keys[0]);
-      await waitFor(() => assert.equal(screen.queryByText("brief.txt"), null));
-    } finally { restoreClient(original); }
-  });
-
-  it("does not apply a completed delete after switching projects", async () => {
-    const original = snapshotClient();
-    const secondFile: ProjectFile = { ...file, name: "second.txt", path: "files/second.txt" };
-    let finishDelete: (() => void) | undefined;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async (requestedProjectId) => ({ entries: requestedProjectId === "project_1" ? [file] : [secondFile] });
-    apiClient.deleteFile = async () => new Promise((resolve) => { finishDelete = () => resolve({ deleted: true }); });
-    try {
-      const view = render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
-      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
-      const confirm = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete");
-      assert.ok(confirm);
-      fireEvent.click(confirm);
-      await waitFor(() => assert.ok(finishDelete));
-
-      view.rerender(<ProjectFilesPage projectId="project_2" />);
-      await screen.findByText("second.txt");
-      await act(async () => finishDelete!());
-      assert.ok(screen.getByText("second.txt"));
-      assert.equal(screen.queryByText("brief.txt"), null);
-    } finally { restoreClient(original); }
-  });
-
-  it("uses retry and a nested-folder empty state", async () => {
-    const original = snapshotClient();
-    let attempts = 0;
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async (_projectId, path) => { attempts++; if (attempts === 1) throw new Error("network unavailable"); return { entries: path === "files" ? [{ name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt }] : [] }; };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByRole("heading", { name: "Files unavailable" });
-      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-      await screen.findByText("reports");
-      fireEvent.click(screen.getByRole("button", { name: "reports" }));
-      await screen.findByRole("heading", { name: "This folder is empty" });
-    } finally { restoreClient(original); }
-  });
-
-  it("ignores a stale folder response after the user returns to the root", async () => {
-    const original = snapshotClient();
-    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
-    const stale: ProjectFile = { ...file, name: "stale.txt", path: "files/reports/stale.txt" };
-    let rootReads = 0;
-    let folderStarted = false;
-    let resolveFolder!: (value: { entries: ProjectFile[] }) => void;
-    const folderResponse = new Promise<{ entries: ProjectFile[] }>((resolve) => { resolveFolder = resolve; });
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.files = async (_projectId, path) => {
-      if (path === folder.path) {
-        folderStarted = true;
-        return folderResponse;
-      }
-      rootReads += 1;
-      return { entries: rootReads === 1 ? [folder] : [file] };
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "reports" }));
-      await waitFor(() => assert.equal(folderStarted, true));
-      fireEvent.click(screen.getByRole("button", { name: "files" }));
-      await screen.findByText("brief.txt");
-      await act(async () => { resolveFolder({ entries: [stale] }); });
-      assert.ok(screen.getByText("brief.txt"));
-      assert.equal(screen.queryByText("stale.txt"), null);
-    } finally { restoreClient(original); }
-  });
-
-  it("keeps read-only actions hidden and presents mobile details", async () => {
-    const original = snapshotClient();
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.projectCapabilities = async () => writable;
-    try {
-      const view = render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
-      await waitFor(() => assert.equal(screen.getByRole("button", { name: "File details" }).getAttribute("aria-expanded"), "true"));
-      fireEvent.click(screen.getByRole("button", { name: "File details" }));
-      assert.equal(screen.getByRole("button", { name: "File details" }).getAttribute("aria-expanded"), "false");
-      view.unmount();
-      apiClient.projectCapabilities = async () => readOnly;
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
-      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
-      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
-      assert.ok(screen.getAllByRole("link", { name: "Download" }).length > 0);
-    } finally { restoreClient(original); }
-  });
-
-  it("keeps files readable but fails closed to read-only when capabilities are unavailable", async () => {
-    const original = snapshotClient();
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      assert.match(screen.getByRole("alert").textContent ?? "", /read-only until refreshed/i);
-      assert.equal(screen.queryByRole("button", { name: "Upload" }), null);
-      fireEvent.click(screen.getByRole("button", { name: "brief.txt" }));
-      assert.equal(screen.queryByRole("button", { name: "Delete" }), null);
-      assert.ok(screen.getAllByRole("link", { name: "Download" }).length > 0);
-    } finally { restoreClient(original); }
-  });
-
-  it("focuses and closes the delete confirmation", async () => {
-    render(<DeleteDialogHarness />);
-    const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
-    await waitFor(() => assert.equal(document.activeElement, screen.getByRole("button", { name: "Cancel" })));
-    fireEvent.keyDown(dialog, { key: "Escape" });
-    await waitFor(() => assert.equal(screen.queryByRole("alertdialog", { name: "Delete file?" }), null));
-  });
-
-  it("filters locally and opens a bounded text preview", async () => {
-    const original=snapshotClient(); const originalFetch=globalThis.fetch;
-    apiClient.files=async()=>({entries:[file,{...file,name:"image.png",path:"files/image.png"}]});apiClient.projectCapabilities=async()=>writable;
-    globalThis.fetch=async()=>new Response("preview",{headers:{"content-type":"text/plain"}});
-    try{render(<ProjectFilesPage projectId="project_1"/>);await screen.findByText("brief.txt");const filter=screen.getByRole("textbox",{name:"Filter files"});assert.match(filter.className,/border-border-input/);fireEvent.change(filter,{target:{value:"image"}});assert.equal(screen.queryByText("brief.txt"),null);assert.ok(screen.getByText("image.png"));fireEvent.click(screen.getByRole("button",{name:"Clear file filter"}));fireEvent.click(screen.getByRole("button",{name:"brief.txt"}));fireEvent.click(screen.getAllByRole("button",{name:"Preview"})[0]!);await screen.findByText("preview");fireEvent.click(screen.getByRole("button",{name:"Close preview"}));}finally{restoreClient(original);globalThis.fetch=originalFetch;}
-  });
-
-  it("keeps a failed preview recoverable in the file workspace", async () => {
-    const original = snapshotClient();
-    let downloads = 0;
-    apiClient.files = async () => ({ entries: [{ ...file, mediaType:"text/plain" }] });
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.downloadProjectFile = async () => {
-      downloads += 1;
-      if (downloads === 1) throw new ApiError(503, "File preview is temporarily unavailable");
-      return new Blob(["recovered preview"], { type:"text/plain" });
-    };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name:"Preview" })[0]!);
-
-      assert.match((await screen.findByRole("alert")).textContent ?? "", /temporarily unavailable/i);
-      fireEvent.click(screen.getByRole("button", { name:"Try preview again" }));
-
-      assert.ok(await screen.findByText("recovered preview"));
-      assert.equal(screen.queryByRole("alert"), null);
-      assert.equal(downloads, 2);
-    } finally { restoreClient(original); }
-  });
-
-  it("removes a file that disappeared before preview", async () => {
-    const original = snapshotClient();
-    apiClient.files = async () => ({ entries: [{ ...file, mediaType:"text/plain" }] });
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.downloadProjectFile = async () => { throw new ApiError(404, "File not found"); };
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name:"brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name:"Preview" })[0]!);
-      await waitFor(() => assert.equal(screen.queryByText("brief.txt"), null));
-      assert.ok(screen.getByRole("heading", { name:"No files yet" }));
-    } finally { restoreClient(original); }
-  });
-
-  it("invalidates only the preview bound to a replaced or deleted path", () => {
-    const preview = { kind: "text" as const, value: "old", name: file.name, path: file.path };
-    assert.equal(invalidateFilePreview(preview, file.path), null);
-    assert.equal(invalidateFilePreview(preview, "files/other.txt"), preview);
-  });
-
-  it("closes the selected file preview when navigating into a folder", async () => {
-    const original = snapshotClient();
-    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
-    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [file, folder] : [] });
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.downloadProjectFile = async () => new Blob(["preview"], { type: "text/plain" });
-    try {
-      render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
       fireEvent.click(screen.getAllByRole("button", { name: "Preview" })[0]!);
       await screen.findByText("preview");
-      fireEvent.click(screen.getByRole("button", { name: "reports" }));
-      await screen.findByRole("heading", { name: "This folder is empty" });
-      assert.equal(screen.queryByText("preview"), null);
+
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["new"], "notes.txt", { type: "text/plain" })] } });
+      await waitFor(() => assert.ok(calls.some(([operation, path]) => operation === "upload:library_1" && path === "notes.txt")));
+
+      fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+      const dialog = await screen.findByRole("alertdialog", { name: "Delete file?" });
+      fireEvent.click(Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Delete")!);
+      await waitFor(() => assert.ok(calls.some(([operation, path]) => operation === "delete:library_1" && path === "brief.txt")));
+      assert.ok(calls.some(([operation, path]) => operation === "preview:library_1" && path === "brief.txt"));
     } finally { restoreClient(original); }
   });
 
-  it("ignores a preview download that finishes after folder navigation", async () => {
+  it("does not offer a stale upload retry or replacement after switching libraries", async () => {
     const original = snapshotClient();
-    const folder: ProjectFile = { name: "reports", path: "files/reports", type: "directory", updatedAt: file.updatedAt };
-    apiClient.files = async (_projectId, path) => ({ entries: path === "files" ? [file, folder] : [] });
-    apiClient.projectCapabilities = async () => writable;
-    apiClient.downloadProjectFile = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return new Blob(["stale preview"], { type: "text/plain" });
+    let rejectUpload: ((error: unknown) => void) | undefined;
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    apiClient.uploadLibraryFile = async () => new Promise((_, reject) => { rejectUpload = reject; });
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      await screen.findByRole("heading", { name: "No files yet" });
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["new"], "notes.txt", { type: "text/plain" })] } });
+      await waitFor(() => assert.ok(rejectUpload));
+      fireEvent.click(screen.getByRole("button", { name: "Select library Design assets" }));
+      rejectUpload!(new ApiError(409, "Project file already exists"));
+      await act(async () => { await Promise.resolve(); });
+      assert.equal(screen.queryByRole("alertdialog", { name: "Replace notes.txt?" }), null);
+      assert.equal(screen.queryByRole("button", { name: "Retry upload" }), null);
+      assert.equal(window.location.search, "?libraryId=library_2");
+    } finally { restoreClient(original); }
+  });
+
+  it("retries an upload against its originating library", async () => {
+    const original = snapshotClient();
+    const uploadLibraries: string[] = [];
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    apiClient.uploadLibraryFile = async (_projectId, libraryId, path) => {
+      uploadLibraries.push(libraryId);
+      if (uploadLibraries.length === 1) throw new Error("network unavailable");
+      return { path, bytes: 3, mediaType: "text/plain", updatedAt: file.updatedAt };
     };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      fireEvent.click(await screen.findByRole("button", { name: "brief.txt" }));
-      fireEvent.click(screen.getAllByRole("button", { name: "Preview" })[0]!);
-      fireEvent.click(screen.getByRole("button", { name: "reports" }));
-      await screen.findByRole("heading", { name: "This folder is empty" });
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-      assert.equal(screen.queryByText("stale preview"), null);
-      assert.ok(screen.getByRole("heading", { name: "This folder is empty" }));
+      await screen.findByRole("heading", { name: "No files yet" });
+      fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(["new"], "notes.txt", { type: "text/plain" })] } });
+      fireEvent.click(await screen.findByRole("button", { name: "Retry upload" }));
+      await waitFor(() => assert.deepEqual(uploadLibraries, [first.id, first.id]));
     } finally { restoreClient(original); }
   });
 
-  it("shows a distinct no-match state and clears the filter", async () => {
+  it("ignores a stale file-list error immediately after a location change", async () => {
     const original = snapshotClient();
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.projectCapabilities = async () => writable;
+    let rejectFirst: ((error: unknown) => void) | undefined;
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async (_projectId, libraryId) => libraryId === first.id
+      ? new Promise((_, reject) => { rejectFirst = reject; })
+      : { entries: [] };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      fireEvent.change(screen.getByRole("textbox", { name: "Filter files" }), { target: { value: "missing" } });
-      await screen.findByRole("heading", { name: "No matching files" });
-      assert.equal(screen.queryByRole("heading", { name: "No files yet" }), null);
-      fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
-      assert.ok(screen.getByText("brief.txt"));
+      await waitFor(() => assert.ok(rejectFirst));
+      window.history.replaceState(null, "", "/files?libraryId=library_2");
+      window.dispatchEvent(new Event("popstate"));
+      rejectFirst!(new Error("stale Research failure"));
+      await screen.findByRole("heading", { name: "No files yet" });
+      assert.equal(screen.queryByText("stale Research failure"), null);
+      assert.equal(screen.getByRole("button", { name: "Select library Design assets" }).getAttribute("aria-current"), "true");
     } finally { restoreClient(original); }
   });
 
-  it("shows and announces the single-file drop target state", async () => {
+  it("renames a library using its projected capability and concurrency token", async () => {
     const original = snapshotClient();
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.projectCapabilities = async () => writable;
+    const inputs: Array<{ name: string; expectedUpdatedAt: string }> = [];
+    apiClient.fileLibraries = async () => [first];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    apiClient.renameFileLibrary = async (_projectId, _libraryId, input) => { inputs.push(input); return { ...first, name: input.name, updatedAt: "later" }; };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      const target = document.querySelector<HTMLElement>("[aria-label='Project files']");
-      assert.ok(target);
-      fireEvent.dragEnter(target, { dataTransfer: { files: [new File(["hello"], "drop.txt")] } });
-      assert.match(target.className, /ring-2/);
-      assert.equal(screen.getByText("Drop a file to upload").getAttribute("aria-live"), "polite");
-      fireEvent.drop(target, { dataTransfer: { files: [] } });
-      assert.doesNotMatch(target.className, /ring-2/);
+      fireEvent.click(await screen.findByRole("button", { name: "Rename Research" }));
+      fireEvent.change(screen.getByLabelText("Library name"), { target: { value: "References" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await screen.findByRole("button", { name: "Select library References" });
+      assert.deepEqual(inputs, [{ name: "References", expectedUpdatedAt: first.updatedAt }]);
     } finally { restoreClient(original); }
   });
 
-  it("keeps a dropped file from navigating away when files are read-only", async () => {
+  it("links an authorized bound Task without nesting it in the library selector", async () => {
     const original = snapshotClient();
-    let uploads = 0;
-    apiClient.files = async () => ({ entries: [file] });
-    apiClient.projectCapabilities = async () => readOnly;
-    apiClient.uploadFile = async () => { uploads += 1; throw new Error("unexpected upload"); };
+    const bound = { ...first, boundTask: { id: "task_1", title: "Quarterly report" }, capabilities: { ...first.capabilities, canDelete: false } };
+    apiClient.fileLibraries = async () => [bound];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    try {
+      render(<ProjectFilesPage workspaceId="workspace_1" projectId="project_1" />);
+      const link = await screen.findByRole("link", { name: "Bound to Quarterly report" });
+      assert.equal(link.getAttribute("href"), "/workspaces/workspace_1/projects/project_1/tasks/task_1");
+      assert.equal(screen.getByRole("button", { name: "Select library Research" }).querySelector("a"), null);
+      const button = screen.getByRole("button", { name: "Delete Research" });
+      assert.equal(button.hasAttribute("disabled"), true);
+      assert.match(button.getAttribute("title") ?? "", /bound to a Task/i);
+    } finally { restoreClient(original); }
+  });
+
+  it("surfaces a nonempty-library 409 in the delete confirmation", async () => {
+    const original = snapshotClient();
+    apiClient.fileLibraries = async () => [first];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [file] });
+    apiClient.deleteFileLibrary = async () => { throw new ApiError(409, "File Library is not empty"); };
     try {
       render(<ProjectFilesPage projectId="project_1" />);
-      await screen.findByText("brief.txt");
-      const target = document.querySelector<HTMLElement>("[aria-label='Project files']");
-      assert.ok(target);
-      const transfer = { files: [new File(["hello"], "drop.txt")] };
-      const dragOver = new window.Event("dragover", { bubbles: true, cancelable: true });
-      Object.defineProperty(dragOver, "dataTransfer", { value: transfer });
-      fireEvent(target, dragOver);
-      const drop = new window.Event("drop", { bubbles: true, cancelable: true });
-      Object.defineProperty(drop, "dataTransfer", { value: transfer });
-      fireEvent(target, drop);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete Research" }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete library" }));
+      const alert = await screen.findByRole("alert");
+      assert.match(alert.textContent ?? "", /not empty/i);
+      assert.ok(screen.getByRole("alertdialog", { name: "Delete File Library?" }));
+    } finally { restoreClient(original); }
+  });
 
-      assert.equal(dragOver.defaultPrevented, true);
-      assert.equal(drop.defaultPrevented, true);
-      assert.equal(uploads, 0);
+  it("selects the next library and clears the URL path after deletion", async () => {
+    const original = snapshotClient();
+    apiClient.fileLibraries = async () => [first, second];
+    apiClient.projectCapabilities = async () => capabilities;
+    apiClient.libraryFiles = async () => ({ entries: [] });
+    apiClient.deleteFileLibrary = async () => ({ deleted: true });
+    window.history.replaceState(null, "", "/files?libraryId=library_1&path=reports");
+    try {
+      render(<ProjectFilesPage projectId="project_1" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Delete Research" }));
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete library" })); await Promise.resolve(); });
+      await waitFor(() => assert.equal(screen.queryByRole("button", { name: /Research/ }), null));
+      assert.equal(screen.getByRole("button", { name: "Select library Design assets" }).getAttribute("aria-current"), "true");
+      assert.equal(window.location.search, "?libraryId=library_2");
     } finally { restoreClient(original); }
   });
 });
 
-function DeleteDialogHarness() {
-  const [open, setOpen] = React.useState(true);
-  return <DeleteFileDialog entry={open ? file : undefined} deleting={false} onCancel={() => setOpen(false)} onConfirm={() => undefined} />;
+function library(id: string, name: string): FileLibrary {
+  return { id, workspaceId: "workspace_1", projectId: "project_1", name, rootSubPath: `file-libraries/${id}`, createdByUserId: "user_1", createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z", boundTask: null, capabilities: { canRename: true, canDelete: true, canWriteFiles: true } };
 }
 
-function snapshotClient() { return { files: apiClient.files, projectCapabilities: apiClient.projectCapabilities, uploadFile: apiClient.uploadFile, downloadProjectFile: apiClient.downloadProjectFile, deleteFile: apiClient.deleteFile }; }
-function restoreClient(original: ReturnType<typeof snapshotClient>) { apiClient.files = original.files; apiClient.projectCapabilities = original.projectCapabilities; apiClient.uploadFile = original.uploadFile; apiClient.downloadProjectFile = original.downloadProjectFile; apiClient.deleteFile = original.deleteFile; }
+function snapshotClient() {
+  return {
+    fileLibraries: apiClient.fileLibraries,
+    projectCapabilities: apiClient.projectCapabilities,
+    libraryFiles: apiClient.libraryFiles,
+    createFileLibrary: apiClient.createFileLibrary,
+    renameFileLibrary: apiClient.renameFileLibrary,
+    deleteFileLibrary: apiClient.deleteFileLibrary,
+    uploadLibraryFile: apiClient.uploadLibraryFile,
+    previewLibraryFile: apiClient.previewLibraryFile,
+    deleteLibraryFile: apiClient.deleteLibraryFile
+  };
+}
+
+function restoreClient(original: ReturnType<typeof snapshotClient>) { Object.assign(apiClient, original); }
+
 function installDom() {
-  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/files" });
+  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLInputElement: dom.window.HTMLInputElement, HTMLFormElement: dom.window.HTMLFormElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, File: dom.window.File, Blob: dom.window.Blob, URL: dom.window.URL, getComputedStyle: dom.window.getComputedStyle, MutationObserver: dom.window.MutationObserver, requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(callback, 0), cancelAnimationFrame: (id: number) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
-  if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
+  Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} });
 }
