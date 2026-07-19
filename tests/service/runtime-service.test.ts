@@ -59,7 +59,7 @@ describe("live sandbox runtime service", () => {
   });
 
   it("recovers a restarted stopping task as cancelled before fenced cleanup", async () => {
-    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "c0" }]);
+    const botified = new FakeBotifiedClient([{ status: "ok", events: [], nextCursor: "evt_s1_0" }]);
     const livePort = new FakeLiveSandboxPort();
     const { services, store, userId, projectId, endpointId } = await setupRuntimeServices(botified, livePort);
     const task = await services.tasks.createTask(userId, projectId, { prompt: "cancel after restart", endpointId });
@@ -83,16 +83,17 @@ describe("live sandbox runtime service", () => {
   });
   it("keeps a pending terminal failure nonterminal so a later sync can complete and persist its artifact", async () => {
     const botified = new FakeBotifiedClient([
-      { status: "ok", events: [], nextCursor: "c0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
+      new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "file.published", payload: { file_id: "recovered-file", filename: "recovered.txt", size_bytes: 0 } },
-          { cursor: "c2", seq: 2, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+          timelineEvent(1, "s1", "file.published", { file_id: "recovered-file", filename: "recovered.txt", size_bytes: 0 }),
+          timelineEvent(2, "s1", "cycle.completed", { ok: true })
         ],
-        nextCursor: "c2"
+        nextCursor: "evt_s1_2"
       }
     ]);
     const livePort = new FakeLiveSandboxPort();
@@ -116,7 +117,7 @@ describe("live sandbox runtime service", () => {
 
   it("keeps a failed Pod when the final artifact tail remains unavailable", async () => {
     const botified = new FakeBotifiedClient([
-      { status: "ok", events: [], nextCursor: "c0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
       new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
       new Error("Botified transport unavailable"),
@@ -163,13 +164,14 @@ describe("live sandbox runtime service", () => {
 
   it("syncs active task timelines and reaps terminal sandboxes in one tick", async () => {
     const botified = new FakeBotifiedClient([
-      { status: "ok", events: [], nextCursor: "c0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
       {
         status: "ok",
         events: [
-          { cursor: "c1", seq: 1, session_id: "s1", type: "cycle.completed", payload: { ok: true } }
+          timelineEvent(1, "s1", "cycle.completed", { ok: true })
         ],
-        nextCursor: "c1"
+        nextCursor: "evt_s1_1"
       }
     ]);
     const livePort = new FakeLiveSandboxPort();
@@ -190,7 +192,7 @@ describe("live sandbox runtime service", () => {
     assert.equal((await store.findTask(task.id))?.status, "completed");
     assert.equal((await store.findTask(task.id))?.cleanupStatus, "completed");
     assert.equal(await store.sandboxRuns.get(task.runId), null);
-    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), ["post-cursor", "c0", "c1"]);
+    assert.deepEqual(botified.readTimelineCalls.map((call) => call.cursor), [undefined, "evt_s1_0", "evt_s1_0", "evt_s1_1"]);
     assert.deepEqual(livePort.deletedRefs.map((ref) => ref.kind), [
       "Pod",
       "Service",
@@ -203,15 +205,17 @@ describe("live sandbox runtime service", () => {
 
   it("keeps syncing later active tasks and still reaps when one timeline read fails", async () => {
     const botified = new FakeBotifiedClient([
-      { status: "ok", events: [], nextCursor: "task1-c0" },
-      { status: "ok", events: [], nextCursor: "task2-c0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
+      { status: "ok", events: [], nextCursor: "evt_s2_0" },
+      { status: "ok", events: [], nextCursor: "evt_s1_0" },
+      { status: "ok", events: [], nextCursor: "evt_s2_0" },
       new Error("first task timeline unavailable"),
       {
         status: "ok",
         events: [
-          { cursor: "task2-c1", seq: 1, session_id: "s2", type: "cycle.completed", payload: { ok: true } }
+          timelineEvent(1, "s2", "cycle.completed", { ok: true })
         ],
-        nextCursor: "task2-c1"
+        nextCursor: "evt_s2_1"
       }
     ]);
     const livePort = new FakeLiveSandboxPort();
@@ -331,6 +335,20 @@ describe("live sandbox runtime service", () => {
   });
 });
 
+function timelineEvent(seq: number, sessionId: string, type: string, data: Record<string, unknown>) {
+  return {
+    version: "botified.timeline.v1",
+    seq,
+    cursor: `evt_${sessionId}_${seq}`,
+    time: "2026-07-18T00:00:00.000Z",
+    session_id: sessionId,
+    type,
+    trace: { cycle_id: `cycle_${sessionId}` },
+    item: null,
+    data
+  };
+}
+
 function emptyReapResult(input: SandboxReapInput) {
   return { namespace: "agentsmith", runCounts: { total: 0, active: 0, cleanupRequested: 0, deleting: 0, cleaned: 0, starting: 0, running: 0, stopping: 0, expired: 0 }, activeTaskCount: 0, observedResourceCounts: {}, cleanupPlan: { targets: [], recentFailures: [] }, recentCleanupFailures: [], actionSummary: [], errors: [], dryRun: input.apply !== true, storedRunIds: [] };
 }
@@ -380,6 +398,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly healthCalls: string[] = [];
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
+  private readonly timelineCursors = new Map<string, string | undefined>();
 
   constructor(
     private readonly timelineReads: Array<BotifiedTimelineReadResult | Error>,
@@ -407,8 +426,18 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     return null;
   }
 
-  async readState() {
-    return { snapshot: {}, state: "running" };
+  async readState(baseUrl: string, _serviceKey: string) {
+    const timelineCursor = this.timelineCursors.get(baseUrl);
+    return {
+      snapshot: {
+        queue_length: 0,
+        tasks: { running: 0, cancelling: 0, pending_callbacks: 0, pending_asks: 0 },
+        active_items: []
+      },
+      state: "idle" as const,
+      ...(timelineCursor ? { timelineCursor } : {}),
+      activeItems: [] as unknown[]
+    };
   }
 
   async readTimeline(baseUrl: string, serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
@@ -418,12 +447,14 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       throw next;
     }
     if (next) {
+      this.timelineCursors.set(baseUrl, next.nextCursor);
       return next;
     }
     const result: BotifiedTimelineReadResult = { status: "ok", events: [] };
     if (cursor !== undefined) {
       result.nextCursor = cursor;
     }
+    this.timelineCursors.set(baseUrl, result.nextCursor);
     return result;
   }
 
