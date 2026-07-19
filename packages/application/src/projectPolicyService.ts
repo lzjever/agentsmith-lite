@@ -336,7 +336,16 @@ function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind
 }
 function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdateProjectResourcePolicyInput {
   if (input.activeTasksLimit === null) throw new ProductError("Project active tasks limit cannot be unlimited");
-  if(input.endpointWindows){const seen=new Set<string>();for(const window of input.endpointWindows){const key=`${window.endpointId}:${window.metric}`;if(seen.has(key))throw new ProductError("Endpoint policy windows must be unique");seen.add(key);if(!window.endpointId||!["providerRequests","providerTokens","providerCost"].includes(window.metric)||!Number.isFinite(window.limit)||window.limit<0||!Number.isInteger(window.windowSeconds)||window.windowSeconds<60||window.windowSeconds>2592000)throw new ProductError("Endpoint policy window is invalid")}}
+  if (input.endpointWindows) {
+    const seen = new Set<string>();
+    for (const window of input.endpointWindows) {
+      const key = `${window.endpointId}:${window.metric}`;
+      if (seen.has(key)) throw new ProductError("Endpoint policy windows must be unique");
+      seen.add(key);
+      if (!window.endpointId || !["providerRequests", "providerTokens", "providerCost"].includes(window.metric) || !Number.isFinite(window.limit) || window.limit < 0 || !Number.isInteger(window.windowSeconds) || window.windowSeconds < 60 || window.windowSeconds > 2592000) throw new ProductError("Endpoint policy window is invalid");
+      if (window.metric !== "providerCost" && !Number.isInteger(window.limit)) throw new ProductError("Endpoint policy count limits must be integers");
+    }
+  }
   for (const [key, value] of Object.entries(input)) {
     if(key==="endpointWindows")continue;
     if (value === null) continue;

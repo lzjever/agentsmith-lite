@@ -297,6 +297,34 @@ describe("project resource policy", () => {
     await services.policies.reserveProvider(project.id,teammate.user.id,endpoint.id);
   });
 
+  it("requires integer endpoint request and token limits", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({
+      store,
+      dataRoot: "/tmp/agentsmith-endpoint-window-integers",
+      builtinAdminPassword: "admin-password",
+    });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+    await store.createEndpoint(endpoint);
+
+    for (const metric of ["providerRequests", "providerTokens"] as const) {
+      await assert.rejects(
+        () => services.policies.updatePolicy(user.id, project.id, {
+          endpointWindows: [{ endpointId: endpoint.id, metric, limit: 1.5, windowSeconds: 3600 }],
+        }),
+        /count limits must be integers/i,
+      );
+    }
+
+    const policy = await services.policies.updatePolicy(user.id, project.id, {
+      endpointWindows: [{ endpointId: endpoint.id, metric: "providerCost", limit: 1.5, windowSeconds: 3600 }],
+    });
+    assert.equal(policy.endpointWindows?.[0]?.limit, 1.5);
+  });
+
   it("reports the endpoint rolling metric that rejected a provider reservation", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-endpoint-window-rejection", builtinAdminPassword: "admin-password" });

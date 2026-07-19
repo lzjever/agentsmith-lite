@@ -19,7 +19,8 @@ describe("PATCH project policy", () => {
       const csrf = (await login.json() as { csrfToken: string }).csrfToken;
       const workspace = await requestJson(api.baseUrl, "POST", "/api/v1/workspaces", { name: "Policy" }, cookie, csrf);
       const project = await requestJson(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Patch" }, cookie, csrf);
-      await requestJson(api.baseUrl, "PATCH", "/api/v1/me/profile", { displayName: "Policy Owner" }, cookie, csrf);
+      const currentProfile = await (await fetch(`${api.baseUrl}/api/v1/me/profile`, { headers: { cookie } })).json() as { preferences: { updatedAt: string } };
+      await requestJson(api.baseUrl, "PATCH", "/api/v1/me/profile", { displayName: "Policy Owner", expectedUpdatedAt: currentProfile.preferences.updatedAt }, cookie, csrf);
       const currentPolicy = await (await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { headers: { cookie } })).json() as { updatedAt: string };
 
       const policy = await requestJson(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/policy`, {
@@ -34,6 +35,9 @@ describe("PATCH project policy", () => {
       assert.equal(policy.providerTokensLimit, null);
       const invalidActiveLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, activeTasksLimit: null }) });
       assert.equal(invalidActiveLimit.status, 400);
+      const fractionalRequestWindow = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, endpointWindows: [{ endpointId: "missing", metric: "providerRequests", limit: 1.5, windowSeconds: 3600 }] }) });
+      assert.equal(fractionalRequestWindow.status, 400);
+      assert.match((await fractionalRequestWindow.json() as { error: string }).error, /count limits must be integers/i);
       const auditResponse = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit`, { headers: { cookie } });
       assert.equal(auditResponse.status, 200);
       const audit = await auditResponse.json() as {items:Array<{ actorDisplayName: string | null; actorEmail: string | null; actorId: string | null }>};
