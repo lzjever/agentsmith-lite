@@ -4,15 +4,15 @@
 
 ## 产品边界
 
-AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、固定文件库、task、artifact 和 chat。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
+AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、多个 Project-scoped File Library、task、artifact 和 chat。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
 
 - Keycloak/OIDC 是唯一生产身份路径。服务端建立 session，并持久化本地 OIDC identity、English-only local profile、workspace/project 归属和 membership；不发放或接受 personal API key。
 - Web 保留原项目的 Next App Router、页面组织、样式体系和可复用 UI 组件；Next 不是 Lite 要删除的依赖。最终 Web 运行时只替换被明确排除的旧后端、BFF、mock 和业务实现，不重做用户可见的产品结构。
 - Lite 当前只提供英文产品界面。迁移原 Web 时彻底排除 `next-intl`、翻译 catalog、locale layout、URL locale 前缀和语言切换；页面只有一份英文实现，不为假设中的未来多语言预留抽象。
 - Web UI 仅是产品 API 客户端。授权、endpoint 调用、文件路径安全、task 生命周期、artifact 投影和 sandbox 清理均由服务端拥有。页面不得承载 agent、Kubernetes、数据库、Botified 或 provider 业务逻辑。AgentSmith 服务端只通过 Botified 服务接口与其交互。
-- 每个 project 使用 substrate 提供的 JuiceFS PVC，文件库固定为 project 根目录的 `files/` 子树。只提供 list、二进制 upload、download、delete。
-- 每个活动 task 使用受限 Botified sandbox Pod 和不可变输入 snapshot/manifest；artifact 与可清理运行目录隔离。Botified 与 bash 执行器保持进程和凭据隔离，只共享项目 PVC 中受控的 task 路径。cancel、TTL、reap 以 task/run、app-owned labels 和资源 UID 幂等围栏，只清理应用资源。
-- 资源 policy 限制活动任务、请求、token、cost 和文件字节数；usage、alerts、light audit 是按项目授权读取的最小产品能力。audit 只记录必要操作和生命周期元数据，不保存 prompt、文件内容、密钥或 session token。
+- 每个 project 在 substrate 提供的 JuiceFS PVC 上拥有多个独立 File Library。每个 Task 必须独占绑定一个 Library；Task 创建时可新建 Library 或选择当前用户有权使用且未绑定的 Library。Files 页面列出当前 Project 中用户可访问的 Libraries，并提供所选 Library 的 list、二进制 upload、preview、download 和 delete。
+- 一个 Task 是一个持久 Botified session 和连续对话，不是一轮 agent 回复。Task 可经历多个 Sandbox Run；Sandbox 释放后保留 Task、session、Library、已落盘文件和 artifact。健康 Sandbox 不做 idle TTL、后台进程探测或自动回收，只在用户明确确认 release、删除 Task/Project 或完成已持久化的失败清理意图时删除精确匹配的 app-owned 资源。
+- 资源 policy 限制活动 Sandbox、请求、token、cost 和 Library 文件字节数；usage、alerts、light audit 是按项目授权读取的最小产品能力。Sandbox usage 按 Run 记录启动用户、Pod Ready 到资源删除的运行时长和请求资源；audit 只记录必要操作和生命周期元数据，不保存 prompt、文件内容、密钥或 session token。
 - provider credential 只有一条实现路径：服务端保存的 project-scoped、typed、endpoint-bound credential。它只返回名称、类型、fingerprint、状态和轮换元数据；明文只在 create/rotate 请求中接收，绝不返回、渲染、审计或交给 Botified。
 - 明确不迁移 user-scoped Third-party Accounts 或 generic external secret bundles；不提供任意 external domain、任意 secret field 或未绑定 endpoint 的用户凭据入口。
 
@@ -82,26 +82,26 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 **定向验证：** 在本地单节点 K8s 用 authorized project user 创建/轮换 provider credential、绑定 endpoint，并使用管理员本地环境提供的真实 DeepSeek OpenAI-compatible 配置完成一次浏览器 chat；用 task-scoped Botified credential 完成同一 endpoint 的真实 task 调用；确认未授权请求、credential 明文和 provider-key 暴露均被拒绝。mock/fake provider 只用于窄单元测试，不能代替该真实后端确认。
 
-### 阶段 3：固定文件库、Task 与 Sandbox 生命周期
+### 阶段 3：File Library、持久 Task 与 Sandbox Run
 
 **交付：**
 
-- 从原 Files 页面恢复固定 JuiceFS `files/` 库的 list、二进制 upload、download、delete 体验；服务端执行项目授权和路径规范化。移除多文件库、savepoint、template、version、restore 与挂载入口，而不是另做新 Files 控制台。
-- task/run 创建、输入 snapshot、Botified sandbox、typed interaction 投影、artifact list/download、artifact text/metadata preview、cancel、TTL/reap，以及 app-owned labels/UID 围栏。
-- 完成、失败、取消或过期后的任务保留在 list/detail；detail 提供 status、run、Conversation、只读 sandbox summary、artifact preview/download 和服务端决定的 retry 或 successor action。
+- 从原 Files 页面恢复多 Library 选择器和 Library-scoped list、二进制 upload、preview、download、delete 体验；服务端执行项目授权、独占绑定和路径规范化。仍移除 savepoint、template、version、restore 与挂载入口。
+- Task 创建原子执行 `create_new` 或 `use_existing` Library 绑定；一个 Task ID 固定对应一个 Botified session，并在同一 Conversation 中处理所有后续消息。
+- Sandbox Run 按需启动，由用户明确确认后无条件 release。release 终止 agent、Terminal、工具和全部进程，但保留 Task、Botified 已完成会话历史、Library 和 artifact；下一条消息或 Terminal open 创建新 Run 并恢复同一 Task。
+- 最终实现、删除范围、API、存储布局和阶段顺序以 `docs/task-workspace-product-improvement-plan.md` 为准。
 
-**定向验证：** 在本地单节点 K8s 上传项目文件、由 sandbox 从 snapshot 读取并写出 artifact、查看授权 preview、通过 API 下载；完成后从 task detail 发起服务端决定的 retry 或 successor，并确认取消和 TTL/reap 后只回收对应 app-owned 资源。
+**定向验证：** 在本地单节点 K8s 创建两个 Library，分别绑定 Task 并验证文件和上下文隔离；在同一 Task 完成多轮对话，主动 release 正在工作的 Sandbox，确认只终止该 Run，并在下一次消息中恢复同一 session、Library 和已落盘文件。
 
 ### 阶段 4：Task Detail 与 Chat
 
 **交付：**
 
 - 从原 Task List、Task Detail、Conversation 和 Artifacts 页面恢复状态、typed interactions、task summary、artifact preview/download 和只读 sandbox 信息，全部来自经授权产品 API。
-- Task Conversation 的最终产品和架构边界以 `docs/task-interaction-product-improvement-plan.md`
+- Task Workspace 的最终产品和架构边界以 `docs/task-workspace-product-improvement-plan.md`
   为准：Botified NDJSON 只存在于服务端 transport；AgentSmith Server 生成唯一 typed Interaction
   read model、message disposition、run state 和 capabilities；Web 不解析 timeline、不合并 lifecycle、
-  不推断 action。Conversation 不提供 transcript、公开 raw events、独立 follow-up UI、Codex parser、
-  adapter 或双 contract。
+  不推断 action。Conversation 提供服务端持久化的 typed conversation history，但不公开 Botified raw transcript、NDJSON、transport events，也不提供独立 follow-up UI、Codex parser、adapter 或双 contract。
 - 从原项目 chat 页面恢复 thread create、rename、delete、search、message stream、stop、Markdown render 和 composer 体验，继续调用阶段 2 的直接 Chat Completions broker；不引入浏览器直连 provider、Anthropic/universal proxy 或额外模型路径。
 
 **定向验证：** 在本地单节点 K8s 查看运行任务的 Conversation updates、artifacts、summary 和 preview，下载授权 artifact，并完成 thread rename/delete/search、stream/stop 和 Markdown chat；viewer/member 权限按 API 返回的边界生效。
@@ -111,7 +111,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 **交付：**
 
 - 从原 Resource Policy、Usage、Alerts 和 Audit 页面恢复项目级服务端资源 policy、最小 usage、alert-rule CRUD、notifications 和 light audit API/UI。删除全局 dashboard、治理 explainability、报告和控制面入口。
-- usage 按实际可验证用量写入；alert rule 覆盖 task、endpoint、配额状态并由服务端评估；notifications、audit 仅保留必要项目操作和生命周期元数据。
+- usage 按实际可验证用量写入，包括每个 Sandbox Run 的运行时长、启动次数、CPU request-time 和 memory request-time；alert rule 覆盖 Sandbox、endpoint、配额状态并由服务端评估；notifications、audit 仅保留必要项目操作和生命周期元数据。
 
 **定向验证：** 在本地单节点 K8s 创建、编辑、enable/disable 和删除一条项目 alert rule，触发一条资源限制，检查对应 usage/notification/audit 的项目授权读取和敏感数据不落库。
 
@@ -121,4 +121,4 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 禁止默认 gate、evidence/report/rehearsal 产物、宽泛测试包装和云验收。也不实现 LLMUP、Codex runner core、JVS、WebDAV、AFSCP、ASBCP、本地或远程文件挂载、operator/全局控制面、全局资源 CLI，或浏览器直连 Kubernetes、数据库、Botified、provider。Next、原工作台信息架构和原 UI 组件体系不属于排除范围。
 
-最终完成判断只看本地单节点 K8s 中的真实产品行为：OIDC 登录、保留页面、真实 DeepSeek chat/task、JuiceFS 文件和 artifact、sandbox 生命周期、成员授权、policy/usage/alerts/audit。开发中发现缺陷立即在实现处修正；不为完成判断生成测试报告、证据目录、诊断文档或额外验收框架。
+最终完成判断只看本地单节点 K8s 中的真实产品行为：OIDC 登录、保留页面、真实 DeepSeek chat/task、多 File Library 和独占 Task 绑定、JuiceFS 文件和 artifact、显式 Sandbox release/恢复、Sandbox usage、成员授权、policy/alerts/audit。开发中发现缺陷立即在实现处修正；不为完成判断生成测试报告、证据目录、诊断文档或额外验收框架。

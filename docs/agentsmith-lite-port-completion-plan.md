@@ -45,9 +45,13 @@ BFF, compatibility layer, or second data model.
   second avatar record.
 - Use one encrypted typed project credential path and one OpenAI-compatible
   broker. Browser and Botified never receive provider plaintext.
-- Keep the fixed JuiceFS-backed project `files/` tree and app-owned Botified
-  task sandbox. Browser sandbox UI is read-only; cancel/TTL/reap only clean
-  app-owned fenced resources.
+- Keep Project-scoped File Libraries on JuiceFS. Every Task exclusively binds
+  one Library and one durable Botified session while Sandbox Runs remain
+  replaceable compute. A healthy Sandbox is released only after explicit user
+  confirmation; resource deletion remains fenced to the exact app-owned Run.
+- `docs/task-workspace-product-improvement-plan.md` is authoritative for Files,
+  Task conversation, Library binding, Sandbox release, usage, and Audit when
+  this broader port plan contains older assumptions.
 
 ### Botified Delivery Contract
 
@@ -62,8 +66,8 @@ BFF, compatibility layer, or second data model.
   return the original receipt; same key with a different hash returns 409.
 - Before reclaiming a start or follow-up delivery claim, AgentSmith queries
   Botified by key. A receipt makes the local delivery accepted; explicit absence
-  permits resend or terminal-successor resolution; unreachable lookup remains
-  retryable and, for terminal follow-up, stays `terminal_pending`. AgentSmith
+  permits a resend in the same Task/session; unreachable lookup remains
+  retryable. AgentSmith
   never guesses remote acceptance. This avoids first-prompt double delivery
   after a crash before the local receipt commit.
 - This is a runtime contract with the vendored compatible Botified fork, not a
@@ -79,13 +83,13 @@ BFF, compatibility layer, or second data model.
 | Settings/context | Lifecycle/settings; workspace shared/personal and project shared/personal context conflict/retry | REQUIRED_PORT | Server-authoritative APIs. |
 | Credentials | Typed lifecycle and safe description | REQUIRED_PORT | Encrypted project credential path. |
 | Endpoints | OpenAI-compatible validation, health/last check/failure category | REQUIRED_PORT | One endpoint/broker implementation. |
-| Files | List, binary upload/download/delete, safe preview, directory browsing | MERGED_SINGLE_PATH | One fixed `files/` tree. |
-| Tasks | List/query/title/edit/archive/delete; lifecycle and run recovery | REQUIRED_PORT | One durable task/run lifecycle. |
-| Tasks | Immutable selected-file snapshot input | MERGED_SINGLE_PATH | Selected paths from the fixed tree are snapshotted at task creation. |
-| Task detail | Transcript, queued follow-up, traces, connection, artifacts, follow-up | REQUIRED_PORT | Persistent turns/events and lifecycle projections. |
+| Files | Library CRUD/selection plus list, binary upload/download/delete, safe preview, directory browsing | REQUIRED_PORT | Multiple authorized Project Libraries on JuiceFS. |
+| Tasks | List/query/title/edit/archive/delete; Library binding and Run recovery | REQUIRED_PORT | One durable Task/session with many turns and sequential Runs. |
+| Tasks | Persistent workspace | MERGED_SINGLE_PATH | Exactly one exclusively bound File Library; no selected-file snapshot path. |
+| Task detail | Conversation, queued follow-up, connection, artifacts, Terminal, explicit Sandbox release | REQUIRED_PORT | Follow-ups stay in one Task/session; release preserves durable state. |
 | Task terminal | Interactive shell in the task workspace | MERGED_SINGLE_PATH | One browser terminal through AgentSmith API to the task's bash-executor sidecar. |
 | Chat | Star, edit/delete/branch, provider recovery | REQUIRED_PORT | Persistent threads/messages, one broker. |
-| Policy/usage | Endpoint windows and current-user usage | REQUIRED_PORT | Server accounting/enforcement projections. |
+| Policy/usage | Endpoint windows, current-user usage, and Sandbox resource-time | REQUIRED_PORT | Provider plus per-Run Sandbox settlements. |
 | Alerts/notifications | Rules, instance context, acknowledge/silence/recovery | REQUIRED_PORT | In-product evaluated state. |
 | Audit | Exact safe audit list/detail and pagination | REQUIRED_PORT | Allowlisted project audit projection. |
 
@@ -103,9 +107,9 @@ artifact. Each row delivers the listed surface, final API, states, and tests.
 | Context | workspace/project/my-context | `components/context/ContextManager.tsx`; workspace `context/page.tsx`; project `context/page.tsx`, `my-context/page.tsx` | edit, rename, retry conflict | context | normal, loading, empty, conflict, error, forbidden |
 | Credentials | Project Credentials | `credentials/_components/CredentialsContent.tsx`, `credentials-table.tsx`, `components/credentials/CreateCredentialDialog.tsx`, `RotateCredentialDialog.tsx` | create, rotate, delete | credentials/endpoints | normal, loading, empty, dialog, error, forbidden |
 | Endpoints | Project Endpoints | `components/endpoints/EndpointStatusBadge.tsx`, dialogs, toolbar, content | save, validate, health check | endpoint/broker/credential | normal, loading, empty, checking, error, forbidden |
-| Files | Project Files | `components/files/FilesPage.tsx`, `files-page/FilesBrowserPane.tsx`, `FileObjectDetailsPanel.tsx` | browse, upload, preview, download, delete | files | normal, loading, empty, preview error, forbidden |
-| Task lifecycle | Tasks list/create/detail header | `agent-tasks/TaskList.tsx`, `TaskCreateDialog.tsx`, `TaskPage.tsx`, `task-page/TaskPageStates.tsx` | idempotent create/edit/archive/delete/retry/cancel and start delivery | tasks/runs/policy/Botified delivery receipt | normal, loading, empty, dialog, stopping/failed, forbidden |
-| Task detail | Conversation/artifacts/follow-up | `agent-tasks/TaskPageContent.tsx`, `ConversationPanel.tsx`, `ArtifactsPanel.tsx` | stream, queue, reconciled follow-up, preview | task turns/events/artifacts/Botified receipt | normal, connecting, reconnecting, terminal_pending, draining, error, forbidden |
+| Files | Project File Libraries | `components/files/FilesPage.tsx`, `files-page/FilesLibrariesPane.tsx`, `FilesBrowserPane.tsx`, `FileObjectDetailsPanel.tsx` | select/create/rename/delete Library; browse/upload/preview/download/delete file | file-libraries/files | normal, loading, empty, bound, conflict, preview error, forbidden |
+| Task lifecycle | Tasks list/create/detail header | `agent-tasks/TaskList.tsx`, `TaskCreateDialog.tsx`, `TaskPage.tsx`, `task-page/TaskPageStates.tsx` | atomic Library bind, idempotent create/edit/archive/delete and start delivery | tasks/libraries/runs/policy/Botified receipt | normal, loading, empty, dialog, ready/running/failed, forbidden |
+| Task detail | Conversation/artifacts/Terminal/Sandbox | `agent-tasks/TaskPageContent.tsx`, `ConversationPanel.tsx`, `ArtifactsPanel.tsx` | same-session stream/queue/abort, explicit release and cold resume | task turns/events/artifacts/Botified/Run | normal, starting, running, ready, releasing, released, error, forbidden |
 | Chat | Project Chat | `components/chat/ThreadsPane.tsx`, `ChatMainPane.tsx`, `MessageItem.tsx` | star, edit/delete/branch, Stop | chat threads/messages/broker | normal, loading, empty, streaming, provider error, forbidden |
 | Policy/usage | Project policy and usage | `resource-policy/ResourcePolicyTable.tsx`, `ResourcePolicyStatusBadge.tsx`, `audit-usage/UsagePage.tsx`, `UsageView.tsx` | set windows, inspect usage | policy/usage/settlements | normal, loading, empty, error, forbidden |
 | Alerts/notifications | Alerts and notification center | `alerts/AlertCenterPage.tsx`, `AlertRulesList.tsx`, `AlertRuleFormDialog.tsx`, `AlertNotificationsPanel.tsx`, `notifications/NotificationCenter.tsx` | rule test, ack, silence | alerts/notifications | normal, loading, empty, dialog, recovery, forbidden |
@@ -119,10 +123,10 @@ dependencies rather than leaving placeholders.
 | Excluded capability | Reason / retained boundary |
 |---|---|
 | LLMUP, Codex runner core, JVS, WebDAV, local/remote mounts, AFSCP, ASBCP | Outside Lite runtime. |
-| Multi-library selection, library picker, versions, templates, savepoints, restore, mount flows | Fixed `files/` tree only. |
+| Library versions, templates, savepoints, restore, recovery UI, and mount flows | Lite keeps independent Libraries and ordinary file operations only. |
 | Folder create/rename/move, multiselect/bulk file operations, file server pagination/search/sort | Approved files scope is list/upload/download/delete, safe preview, directory browsing. |
-| Generic chat attachment | Task inputs use fixed-tree snapshots and a server-created URL note; chat has no attachment channel. |
-| Artifact picker as generic task/chat attachment | No generic attachment channel; task uses fixed-tree snapshot only. |
+| Generic chat attachment | Project Chat has no attachment channel; Task work uses its bound Library. |
+| Artifact picker as generic task/chat attachment | Artifacts remain Task outputs, not a generic attachment channel. |
 | Agent Runner management, selection, binding, badges, tests, terminal replay, and runner debug controls | Botified is selected server-side. The task workspace retains one interactive browser shell without exposing runner controls. |
 | Codex notices and SSE/debug transport UI | Runtime transport/debug controls are not product UI. |
 | Groups, join policies/requests, invitations, project-creator governance | Membership uses existing local OIDC identities. |
@@ -264,147 +268,33 @@ import/export. Audit endpoint mutations and checks with safe metadata.
 failure categories, authorization, and rendered recovery. Use a real provider
 only when crossing the provider boundary.
 
-### 8. Fixed Project Files
+### 8. File Libraries and Task Workspace
 
-**Reference CP source:** `components/files/FilesPage.tsx`,
-`files-page/FilesPageContent.tsx`, `files-page/FilesBrowserPane.tsx`, and
-`FileObjectDetailsPanel.tsx`; adapt only browsing, list, binary transfer, safe
-preview, and delete controls.
+The complete product, API, storage, migration, UI-copy, deletion, and focused
+verification instructions for Files, Task lifecycle, Conversation, Terminal,
+Artifacts, and Sandbox are centralized in
+`docs/task-workspace-product-improvement-plan.md`. Implement that plan as the
+single source of truth instead of retaining older fixed-tree or terminal-Task
+semantics here.
 
-**Owns:** fixed-file contracts/auth/store/migrations only if needed/APIs/client/
-routes/UI/tests.
+In summary:
 
-**Implementation:** retain directory browsing plus list, binary upload, download,
-delete, and safe preview under normalized `files/`. Keep authorization and
-traversal defense server-side. Do not add folders, rename/move, multiselect/bulk,
-server pagination/search/sort, library pickers, URL import, versions, templates,
-savepoints, restore, or mounts. Audit upload/delete metadata only.
+- Project Files becomes a Library selector plus the selected Library browser.
+- Task creation atomically creates or exclusively binds one Library.
+- Task ID is the stable Botified session ID across all turns and Sandbox Runs.
+- A turn completion returns the same Task to ready; follow-ups never create a
+  successor Task.
+- A healthy Sandbox has no idle TTL or automatic release. An authorized user
+  confirms one unconditional `Release sandbox` action.
+- Release deletes only exact app-owned Run resources and preserves Task,
+  completed Botified history, Library files, and artifacts.
+- Sandbox usage settles once per Run and appears in existing Usage and light
+  Audit surfaces.
 
-**Minimum verification:** traversal/project-boundary, binary upload/download/
-delete, preview authorization, and directory navigation tests.
-
-### 9. Task Lifecycle and List
-
-**Reference CP source:** `components/agent-tasks/TaskList.tsx`,
-`task-list/TaskListContent.tsx`, `task-list/TaskListHeader.tsx`,
-`TaskCreateDialog.tsx`, `TaskPage.tsx`, `TaskHeader.tsx`, and
-`task-page/TaskPageStates.tsx`.
-
-**Owns:** task/list/lifecycle contracts/auth/store/migrations/APIs/client/routes/
-dialogs/tests.
-
-**State model:**
-
-- `AgentTask.status` remains the single lifecycle-status field. Add immutable
-  `terminalReason`: `completed`, `failed`, `cancelled`, `expired`,
-  `not_executed`, or `cleaned_legacy`. The first successfully persisted
-  terminal intent wins; later competing terminal intents are no-ops and cannot
-  overwrite either status or reason. `cleaned_legacy` exists only to backfill
-  historical cleaned rows and is displayed/mapped distinctly in API, UI, and
-  audit; it is never a replacement for `cancelled`.
-- A start intent records `pending`, `dispatching`, `dispatched`, or
-  `failed`, plus `claim_token`, `claimed_at`, `lease_expires_at`,
-  `attempt_count`, and `next_retry_at`. Dispatch atomically claims only an
-  unclaimed, retry-due, or expired-lease intent. Only an expired claim may be
-  atomically reclaimed.
-- Each start intent has stable non-secret `delivery_key` and canonical
-  `request_hash`, with persisted Botified receipt/timeline cursor and claim
-  token. Before a lease reclaim or resend, reconcile by delivery key: accepted
-  receipt transitions to dispatched, explicit absence permits a new post, and
-  an unreachable query remains retryable without a resend.
-
-**Implementation:**
-
-- Retain server list search/filter/sort/pagination, title cards, create/edit/
-  archive/delete, capability-specific failures, and retry states.
-- Create reservation, start intent, and runtime metadata in one store
-  transaction.
-- Post the start prompt to the compatible vendored Botified fork with its
-  delivery key/hash. The fork's idempotent post/query contract is mandatory;
-  local crash after remote acceptance is recovered by receipt reconciliation,
-  never by emitting a second first prompt.
-- Scope idempotency as `(actor_id, project_id, operation, key)`, persist the
-  canonical request hash and result, and require `Idempotency-Key` for create,
-  retry, duplicate, follow-up, cancel, archive, and delete. A matching replay
-  returns the original response; a different hash returns 409.
-- Creation selects immutable authorized paths from project-wide fixed `files/`.
-  Local upload and HTTP(S) URL notes first enter that same tree, then follow the
-  same snapshot path. Snapshots remain listable and downloadable with task
-  history after sandbox cleanup. No library/artifact/generic attachment picker
-  returns.
-- Dry-run reaches synchronous terminal `not_executed`, never consumes active
-  reservation, and states that no sandbox/events/artifacts are expected.
-- `finalizeTaskLifecycle` is a DB transaction only: first-terminal-wins
-  terminal intent/status/reason, active-reservation release, runtime metadata,
-  allowlisted audit, and alert evaluation. It does not call Botified, K8s, file
-  storage, or artifact readers inside the transaction.
-- Botified tail read, K8s/files cleanup, and artifact projection are separate
-  durable, fenced, retryable stages. Persist each completion only after the
-  external work succeeds.
-- Tick provider expiry, each task sync, and each run reap as independent bounded
-  operations. One failing projection, cleanup, or provider call cannot starve
-  another item.
-
-**Minimum verification:** list query, dialog error, idempotency scope/replay/
-hash-mismatch, reservation+intent atomicity, claim lease/reclaim, start crash
-after remote acceptance before local receipt commit, start receipt reconciliation,
-dry-run reservation behavior, terminal-reason mapping, and maintenance isolation.
-
-### 10. Task Conversation, Artifacts, and Follow-Up
-
-**Reference CP source:** `components/agent-tasks/TaskPageContent.tsx`,
-`ConversationPanel.tsx`, `ConversationInput.tsx`, `MessageList.tsx`,
-`MessageItem.tsx`, `task-page/useTaskTraceState.ts`, `ArtifactsPanel.tsx`,
-`ArtifactCard.tsx`, `ArtifactImageViewer.tsx`, and `ArtifactImageGrid.tsx`.
-
-**Owns:** task turns/traces/artifact/follow-up contracts/auth/store/migrations/
-APIs/client/detail and artifact routes/UI/tests.
-
-**Implementation:**
-
-- Retain persistent transcript, streamed task output, ordinary lifecycle/
-  progress/tool/artifact traces, and connecting/reconnecting/disconnected/
-  recovered state. Exclude raw debug and governance explainability only.
-- Retain one PTY-backed browser shell into the active task workspace. It is
-  authorized by AgentSmith, proxied through the Botified service API, shares the
-  task PVC with the agent, and exposes no Kubernetes or runner credentials.
-- Active follow-up legal states are `pending`, `dispatching`,
-  `terminal_pending`, `accepted`, `successor_created`, and `failed`.
-  Pending may be edited/deleted; it transitions to dispatching only through a
-  lease-bearing delivery claim. Each has stable delivery key/request hash,
-  claim token, and persisted receipt/cursor. A non-terminal dispatch resolves
-  to accepted or failed. Accepted and successor_created are mutually exclusive
-  terminal outcomes for the follow-up.
-- A terminal transition atomically changes pending to successor_created and
-  creates/links the successor task. If the follow-up is dispatching, it must
-  instead atomically become terminal_pending while retaining its claim token; it
-  must not create a successor yet.
-- The dispatcher posts and writes back only with that claim token and Botified's
-  persisted delivery receipt. In one linearized transaction it resolves terminal_pending to
-  accepted when the original run accepted the message, or successor_created
-  when there is no acceptance and the source is terminal; it can never produce
-  both. Before reclaim, query Botified by delivery key: only expired lease plus
-  explicit absent receipt may be reclaimed, and then a terminal source follows
-  the successor path. Query failure or transient uncertainty remains
-  terminal_pending with a safe retryable error.
-- The same idempotency key returns the same follow-up result, including an
-  accepted original-run message or the linked successor identifier.
-- Persist the terminal outcome and release the active reservation first. Set
-  `artifactProjectionStatus=draining` to block cleanup while authorized tail
-  projection runs. Once drained, start fenced cleanup and persist cleanup
-  completion only after external work succeeds. Timeout or unreachable external
-  work records a safe error and remains retryable; it is never silently deleted.
-- Retain type filter/count/refresh, safe text/image/generic artifact view,
-  metadata, image navigation/grid, download, and preview error/retry. Sandbox
-  summary is read-only.
-- Audit lifecycle/follow-up/artifact actions and evaluate matching alerts here.
-
-**Minimum verification:** transcript stream/connection, queued edit/delete,
-delivery-fence replay, dispatching-to-terminal_pending race, claim-token
-receipt handling, crash after remote acceptance before local receipt commit,
-terminal successor linkage, tail-drain late artifact, preview authorization,
-stopping/failed UX, and cancel terminal reason. Use real K8s only for sandbox/
-reap boundaries.
+**Reference CP source:** original Files Library pane/browser and Agent Task
+create/list/detail/Conversation/Terminal/Artifacts components named in the
+authoritative plan. Copy those files and remove i18n, templates, savepoints,
+restore, mounts, runner management, and governance dependencies.
 
 ### 11. Project Chat
 
@@ -439,12 +329,15 @@ and `UsageView.tsx`. Omit explainability/governance panels.
 
 **Implementation:** retain project policy and endpoint-specific request/token/cost
 rate and spend windows, remaining/reset semantics, and current-user usage with
-project totals. Account from existing provider settlements and task records only;
-do not create a second statistics source. Enforce before broker/task work. Audit
-policy changes and denials safely.
+project totals. Account provider activity from existing settlements and Sandbox
+resource-time from one idempotent settlement per Run, as defined by the Task
+Workspace plan. Extend the existing Usage surface instead of creating a second
+dashboard. Enforce before broker/Task work. Audit policy changes and denials
+safely.
 
 **Minimum verification:** window/reset arithmetic, endpoint enforcement,
-settlement accounting, current-user authorization, and rendered window labels.
+provider and Sandbox settlement accounting, current-user/admin authorization,
+and rendered window labels.
 
 ### 13. Alerts and In-Product Notifications
 
@@ -483,42 +376,30 @@ detail allowlist, and rendered list/detail/error/empty states.
 
 ## Migration and Dependency Order
 
-1. Start new immutable PostgreSQL work at `029`; do not recreate or backfill
-   `016`. Review numeric inventory before each migration.
-2. `029_task_terminal_and_delivery_identity` depends on `010`, `011`, and
-   `024`: add immutable `terminalReason`, first-terminal-wins constraints/
-   checks, backfill historical cleaned rows to `cleaned_legacy`, and persist
-   AgentSmith delivery identity fields/indexes for stable key, request hash,
-   claim token, and task/follow-up ownership. Expose no ambiguous legacy
-   `cleaned` runtime terminal reason.
-3. `030_task_start_followup_and_delivery_receipts` depends on `029`: add
-   active reservations, start-intent claim/lease/retry fields, runtime metadata,
-   idempotency records, follow-up delivery-fence state, and durable receipt/
-   timeline-cursor reconciliation structure. It does not own artifact
-   projection completion.
-4. `031_task_artifact_projection_stages` depends on `030`: add durable
-   artifact tail-drain, external cleanup stage/completion, and safe retry-error
-   fields that keep `artifactProjectionStatus=draining` fenced until drained.
-5. `032_task_policy_alert_projections` depends on `025`, `028`, `029`,
-   and `031`: add only task terminal/alert projection fields needed by durable
-   policy and notification evaluation; it does not duplicate provider usage.
-6. Input snapshots depend on fixed-file authorization and land before task
-   creation controls. Do not introduce a generic attachment schema.
-7. Endpoint policy/usage records precede alert evaluation fields. Audit readers
-   depend on prior per-slice producers, not the reverse.
-8. Each migration has fresh-install and upgrade/store coverage. Do not batch
-   unrelated domains or create a migration solely for UI workaround.
+Continue the repository's immutable PostgreSQL migration sequence. The Task
+Workspace plan owns the next File Library, Task binding, Sandbox Run settlement,
+and removal migration. Because Lite has no production customer deployment, use
+one direct local transition: preserve Project file content in a generated
+Library, discard incompatible development Task runtime data, and remove old
+snapshot/successor/TTL columns and statuses without dual reads or writes.
+
+Endpoint policy/usage records precede alert evaluation fields. Audit readers
+depend on prior per-slice producers, not the reverse. Every migration gets only
+the focused fresh-install/store behavior needed for its data invariants; do not
+create a migration for a UI workaround or a legacy compatibility layer.
 
 ## Constraints, Risks, and Completion
 
-- Fixed `files/`, one broker, one task lifecycle, and one artifact projection
-  are MERGED_SINGLE_PATH only while retained outcomes remain.
-- The approved files boundary overrides earlier proposals for folders, bulk
-  operations, file pagination/search/sort, URL import, or generic attachments.
+- Multiple Project File Libraries, one Library per Task, one Botified session
+  per Task, one broker, and one artifact projection are the retained paths.
+- The approved Files boundary includes Library selection/CRUD and ordinary file
+  operations, but excludes versions, templates, savepoints, restore, mounts,
+  bulk operations, URL import, and generic attachments.
 - Endpoint checks share broker timeout, settlement, policy, and sanitized-error
   rules. Plaintext credentials never reach logs, audit, Botified, or responses.
-- Archive/delete and terminal finalization preserve artifact retention, alerts,
-  audit, and reservations. UI never invents a terminal status.
+- Archive preserves the Task/Library binding. Delete explicitly releases exact
+  Run resources, removes Task session state, and releases but does not delete
+  the Library. Turn completion never terminalizes the Task.
 - Contract/API errors support recovery UI without leaking provider, K8s, identity,
   credential, or file-content data.
 

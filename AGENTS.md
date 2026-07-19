@@ -8,7 +8,7 @@ This repo owns product code only:
 - Keycloak/OIDC client, session, CSRF, and API permission checks;
 - Web UI as a thin product API client;
 - OpenAI-compatible endpoint management and calls;
-- project files, task events, artifacts, cancel, TTL, and reap;
+- File Libraries, durable Task sessions, artifacts, explicit Sandbox release, usage, and light audit;
 - compatible vendored Botified fork, AgentSmith-owned loopback Bash executor, runner image, and runtime config;
 - sandbox manifest rendering/reconciliation;
 - app image, app offline bundle, and deploy helpers.
@@ -34,7 +34,7 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 - Run the API and Next development servers directly for normal frontend, API, and business-logic work. Prefer in-place changes, hot reload, and focused checks.
 - Agent teams may work in parallel, but agents must not spawn subagents or start concurrent test/build tasks. Tests default to small, single-process runs scheduled serially by the coordinator. Do not run Postgres, image builds, containers, or heavy K8s tasks in parallel.
 - Do not rebuild images or redeploy the full K8s application by default after ordinary source changes.
-- Validate against local K8s only when a change crosses the K8s runtime boundary, such as pods, PVCs, RBAC, JuiceFS, sandbox containers, TTL, or resource cleanup.
+- Validate against local K8s only when a change crosses the K8s runtime boundary, such as pods, PVCs, RBAC, JuiceFS, sandbox containers, or explicit resource release.
 - Build images, import them into k3s, and perform a complete deployment only for relevant deployment changes, explicit stage acceptance, handoff, or release.
 - Playwright may target the development servers or an existing deployment when explicitly selected for the current change. It must not become a default gate.
 - Fail fast and fix in place. Do not use repeated packaging and redeployment as a substitute for focused business-logic testing.
@@ -55,6 +55,8 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 - The product is English-only. Do not add i18n libraries, translation catalogs, locale-aware routing, locale URL prefixes, or speculative localization abstractions.
 - Web UI only calls product APIs and must not carry agent business logic.
 - AgentSmith server interacts with Botified exclusively through Botified service APIs.
+- One Task maps to one durable Botified session and one exclusively bound File Library. Agent turns and Sandbox Runs are replaceable activity within that Task.
+- A healthy Sandbox is released only after an authorized user explicitly confirms release. Do not add idle TTL, process-aware reclamation, maximum lifetime, or automatic release policy.
 - No LLMUP, Codex runner core, JVS, WebDAV, file mount/sync daemon, AFSCP, or ASBCP.
 
 ## Substrate Boundary
