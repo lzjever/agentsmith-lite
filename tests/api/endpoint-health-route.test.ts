@@ -26,15 +26,19 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
     const credential = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-return-this" }, cookie, csrfToken);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/endpoints?includeCatalog=true`, { headers: { cookie } })).status, 400);
+    const endpointInput = { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model-a", credentialId: credential.id, capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30 };
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/endpoints/legacy`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(endpointInput) })).status, 404);
     const discoveryWithoutKey = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints/models`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken }, body: JSON.stringify({ baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }) });
     assert.equal(discoveryWithoutKey.status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/endpoints/models/legacy`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }) })).status, 404);
 
     const discovery = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/models`, { baseUrl: credential.baseUrl, credentialId: credential.id, requestTimeoutSecs: 30 }, cookie, csrfToken);
     assert.deepEqual(discovery.models, ["model-a", "model-b"]);
     assert.equal(discovery.health.status, "healthy");
     assert.doesNotMatch(JSON.stringify(discovery), /never-return-this|credentialId/);
 
-    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model-a", credentialId: credential.id, capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30 }, cookie, csrfToken);
+    const endpoint = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, endpointInput, cookie, csrfToken);
     assert.equal(endpoint.health.status, "healthy");
     assert.equal(endpoint.credentialId, credential.id);
     assert.doesNotMatch(JSON.stringify(endpoint), /never-return-this|ciphertext|authTag|nonce|keyId/);
@@ -51,6 +55,7 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     available = false;
     const missingHealthKey = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken } });
     assert.equal(missingHealthKey.status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health/legacy`, { method: "POST", headers: { cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() } })).status, 404);
     const unavailable = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, undefined, cookie, csrfToken);
     assert.deepEqual(unavailable.health.status, "unavailable");
     assert.equal(unavailable.health.errorCategory, "auth");

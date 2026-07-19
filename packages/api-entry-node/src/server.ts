@@ -574,31 +574,37 @@ async function routeApi(
       }
     }
     if (segments[4] === "credentials") {
-      if (!segments[5] && method === "GET") return sendJson(res, 200, await services.credentials.list(user.id, projectId));
-      if (!segments[5] && method === "POST") return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && segments[6] === "rotate" && method === "POST") return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req)));
-      if (segments[5] && method === "DELETE") { const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.list(user.id, projectId)); }
+      if (!segments[5] && method === "POST") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req))); }
+      if (segments[5] && segments[6] === "rotate" && !segments[7] && method === "POST") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req))); }
+      if (segments[5] && !segments[6] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
     }
     if (segments[4] === "endpoints") {
-      if (segments[5] === "models" && method === "POST") {
+      if (segments[5] === "models" && !segments[6] && method === "POST") {
+        assertOnlySearchParams(url,[]);
         return sendJson(res, 200, await services.endpoints.discoverModels(user.id, projectId, asEndpointModelDiscoveryInput(await readJson(req)), requireIdempotencyKey(req)));
       }
-      if (segments[5] && segments[6] === "health" && method === "POST") {
+      if (segments[5] && segments[6] === "health" && !segments[7] && method === "POST") {
+        assertOnlySearchParams(url,[]);
         return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req))));
       }
       if (!segments[5] && method === "GET") {
+        assertOnlySearchParams(url,[]);
         const endpoints = await services.endpoints.listEndpoints(user.id, projectId);
         return sendJson(res, 200, endpoints.map(toPublicEndpoint));
       }
-      if (method === "POST") {
+      if (!segments[5] && method === "POST") {
+        assertOnlySearchParams(url,[]);
         const endpoint = await services.endpoints.createEndpoint(user.id, projectId, asEndpointInput(await readJson(req)), requireIdempotencyKey(req));
         return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
-      if (segments[5] && method === "PATCH") {
+      if (segments[5] && !segments[6] && method === "PATCH") {
+        assertOnlySearchParams(url,[]);
         const endpoint = await services.endpoints.updateEndpoint(user.id, projectId, segments[5], asEndpointUpdateInput(await readJson(req)), requireIdempotencyKey(req));
         return sendJson(res, 200, toPublicEndpoint(endpoint));
       }
-      if (segments[5] && method === "DELETE") {
+      if (segments[5] && !segments[6] && method === "DELETE") {
+        assertOnlySearchParams(url,[]);
         await services.endpoints.deleteEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req));
         return sendJson(res, 200, { deleted: true });
       }

@@ -23,6 +23,8 @@ test("credential routes never return submitted secret material", async () => {
     const { csrfToken } = await login.json() as { csrfToken: string };
     const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials?includeSecrets=true`, { headers: { cookie } })).status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/legacy`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ name: "Legacy", baseUrl: "https://models.example.test/v1", secret: "secret" }) })).status, 404);
     await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/credentials`, { name: "Legacy", baseUrl: "https://models.example.test/v1", secret: "secret", description: "removed" }, cookie, csrfToken);
     assert.deepEqual(await get(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, cookie), []);
     const created = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-return-this" }, cookie, csrfToken);
@@ -33,6 +35,7 @@ test("credential routes never return submitted secret material", async () => {
     assert.equal(Object.hasOwn(created, "description"), false);
 
     const missingRotateKey=await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}/rotate`,{method:"POST",headers:{"content-type":"application/json",cookie,"x-csrf-token":csrfToken},body:JSON.stringify({secret:"rotated-secret"})});assert.equal(missingRotateKey.status,400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/${created.id}/rotate/legacy`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ secret: "rotated-secret" }) })).status, 404);
     await rejectsUnknownField(api.baseUrl, "POST", `/api/v1/projects/${project.id}/credentials/${created.id}/rotate`, { secret: "rotated-secret", type: "api_key" }, cookie, csrfToken);
     assert.equal((await get(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, cookie))[0].version, 1);
     const rotated = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials/${created.id}/rotate`, { secret: "rotated-secret" }, cookie, csrfToken);
