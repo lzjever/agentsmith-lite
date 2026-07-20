@@ -37,14 +37,14 @@ test("shared page state preserves success and labels non-success states", () => 
   assert.equal(screen.getByTestId("page-state__empty").textContent, "Nothing here");
 });
 
-test("reference-derived controls preserve hierarchy and accessible binary state", () => {
+test("shared controls preserve hierarchy and accessible binary state", () => {
   function Example() {
     const [enabled, setEnabled] = React.useState(false);
     return <><Button>Default</Button><Button variant="primary">Primary</Button><Label htmlFor="checked"><Checkbox id="checked" defaultChecked />Checked</Label><Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" /></>;
   }
   render(<Example />);
-  assert.match(screen.getByRole("button", { name: "Default" }).className, /bg-transparent/);
-  assert.match(screen.getByRole("button", { name: "Primary" }).className, /bg-foreground/);
+  assert.match(screen.getByRole("button", { name: "Default" }).className, /bg-surface/);
+  assert.match(screen.getByRole("button", { name: "Primary" }).className, /bg-accent/);
   assert.equal(screen.getByRole("checkbox", { name: "Checked" }).getAttribute("checked") !== null, true);
   const toggle = screen.getByRole("switch", { name: "Enabled" });
   assert.equal(toggle.getAttribute("aria-checked"), "false");

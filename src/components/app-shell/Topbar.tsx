@@ -32,7 +32,7 @@ export function Topbar({
 }) {
   const router = useRouter();
   return (
-    <header className="sticky top-0 z-30 flex h-11 max-w-full items-center gap-2 overflow-hidden border-b border-border/12 bg-background/94 px-2 sm:px-4 md:gap-3 md:px-5">
+    <header className="sticky top-0 z-30 flex h-[3.25rem] max-w-full items-center gap-2 overflow-hidden border-b border-border bg-surface/95 px-2 shadow-ambient backdrop-blur-sm sm:px-4 md:gap-3 md:px-5">
       <div className="flex shrink-0 items-center gap-1 sm:gap-2 [&_a>span:last-child]:hidden sm:[&_a>span:last-child]:inline">
         <Button
           variant="quiet"
@@ -45,7 +45,7 @@ export function Topbar({
         </Button>
         <Logo />
       </div>
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden before:mx-1 before:h-5 before:w-px before:bg-border md:gap-2">
         {workspace ? (
           <WorkspaceSwitcher
             workspaces={workspaces}
@@ -88,7 +88,7 @@ function WorkspaceSwitcher({
 }) {
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger className="inline-flex h-8 min-w-0 max-w-full items-center gap-2 rounded-sm border border-transparent bg-transparent px-1.5 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:bg-surface-low/20 hover:text-foreground md:max-w-64">
+      <DropdownMenu.Trigger className="inline-flex h-9 min-w-0 max-w-full items-center gap-2 rounded-md border border-transparent bg-transparent px-2 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:border-border hover:bg-surface-low hover:text-foreground md:max-w-64">
         <Globe size={15} className="shrink-0 text-icon-default" />
         <span className="min-w-0 truncate text-[13px] text-foreground">
           {workspace.name}
@@ -127,8 +127,8 @@ export function ProjectSwitcher({
       <DropdownMenu.Trigger
         className={
           mobile
-            ? "flex w-full min-w-0 items-center gap-2 rounded-sm border border-border/25 bg-transparent px-3 py-2 text-left text-secondary hover:bg-surface-low/30 hover:text-foreground"
-            : "hidden h-8 min-w-0 max-w-64 items-center gap-2 rounded-sm border border-transparent bg-transparent px-1.5 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:bg-surface-low/20 hover:text-foreground md:inline-flex"
+            ? "flex w-full min-w-0 items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-left text-secondary hover:bg-surface-low hover:text-foreground"
+            : "hidden h-9 min-w-0 max-w-64 items-center gap-2 rounded-md border border-transparent bg-transparent px-2 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:border-border hover:bg-surface-low hover:text-foreground md:inline-flex"
         }
       >
         <FolderKanban size={15} className="shrink-0 text-icon-default" />

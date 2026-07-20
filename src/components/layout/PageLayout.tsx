@@ -13,8 +13,8 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
   const immersive = density === "immersive";
   const chrome = immersive
     ? "gap-[var(--layout-gap-immersive)] px-[var(--layout-padding-immersive)] py-[var(--layout-padding-immersive)]"
-    : "gap-[var(--layout-gap)] px-[var(--layout-padding)] py-5 md:px-6 md:py-6";
-  const width = contentWidth === "full" ? "w-full" : contentWidth === "narrow" ? "mx-auto w-full max-w-5xl" : "mx-auto w-full max-w-[1680px]";
+    : "gap-[var(--layout-gap)] px-[var(--layout-padding)] py-5 md:px-8 md:py-7";
+  const width = contentWidth === "full" ? "w-full" : contentWidth === "narrow" ? "mx-auto w-full max-w-5xl" : "mx-auto w-full max-w-[1480px]";
 
   return <div data-testid="page-layout" className="flex h-full min-h-0 flex-col">
     <div className={`flex min-h-0 flex-1 flex-col ${chrome}`}>
