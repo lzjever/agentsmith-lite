@@ -1184,7 +1184,7 @@ class PostgresSandboxRunStoreImpl {
        set document = document || jsonb_build_object(
          'cleanupStatus', 'deleting',
          'fencingToken', $2 + 1,
-         'updatedAt', $3
+         'updatedAt', $3::text
        ), updated_at = now()
        where collection = 'sandbox_run_state'
          and id = $1

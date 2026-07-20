@@ -1034,6 +1034,27 @@ postgresDescribe("postgres product store", () => {
       updatedAt: "2026-07-04T00:00:01.000Z"
     });
     assert.equal(updated?.phase, "running");
+    const cleanupRequested = sandboxRun({
+      runId: "run_pg_cleanup_claim",
+      taskId: "task_pg_cleanup_claim",
+      cleanupStatus: "cleanup_requested",
+      releaseReason: "requested",
+      updatedAt: "2026-07-04T00:01:00.000Z"
+    });
+    await store.sandboxRuns.put(cleanupRequested);
+    const cleanupClaim = await store.sandboxRuns.claimForCleanup({
+      runId: cleanupRequested.runId,
+      expectedFencingToken: cleanupRequested.fencingToken,
+      claimedAt: "2026-07-04T00:02:00.000Z"
+    });
+    assert.equal(cleanupClaim?.cleanupStatus, "deleting");
+    assert.equal(cleanupClaim?.fencingToken, cleanupRequested.fencingToken + 1);
+    assert.equal(cleanupClaim?.updatedAt, "2026-07-04T00:02:00.000Z");
+    assert.equal(await store.sandboxRuns.claimForCleanup({
+      runId: cleanupRequested.runId,
+      expectedFencingToken: cleanupRequested.fencingToken,
+      claimedAt: "2026-07-04T00:03:00.000Z"
+    }), null);
     const settlementTask:TaskFixture={id:"task_pg_settlement",workspaceId:"ws_pg_settlement",projectId:"proj_pg_settlement",endpointId:"endpoint_pg_settlement",fileLibraryId:"library_task_pg_settlement",createdByUserId:"user_pg_settlement",prompt:"settle",status:"starting",runId:"run_pg_settlement",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:true,createdAt:"2026-07-04T00:09:00.000Z",updatedAt:"2026-07-04T00:09:00.000Z"};
     await store.createUser({id:settlementTask.createdByUserId!,email:"settlement@example.test",emailVerified:true,passwordHash:"hash",createdAt:settlementTask.createdAt,updatedAt:settlementTask.updatedAt});
     await store.createWorkspace({id:settlementTask.workspaceId,name:"Settlement",ownerUserId:settlementTask.createdByUserId!,createdAt:settlementTask.createdAt,updatedAt:settlementTask.updatedAt});
