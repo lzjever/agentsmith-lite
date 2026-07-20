@@ -41,6 +41,8 @@ import type {
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
+  AtomicTaskSandboxRestartInput,
+  AtomicTaskSandboxRestartResult,
   TaskStoreListQuery,
   TaskStoreListPage,
   TaskDeliveryClaimInput,
@@ -768,6 +770,31 @@ export class PostgresProductStore implements ProductStore {
     }
   }
 
+  async restartTaskSandboxAtomically(input:AtomicTaskSandboxRestartInput):Promise<AtomicTaskSandboxRestartResult>{return transaction(this.pool,async(client)=>{
+    const locked=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.task.id]);
+    const row=locked.rows[0];
+    if(!row||row.deleted_at||row.archived_at||row.execution_mode!=="live")return{kind:"conflict" as const};
+    if(row.run_id!==input.expectedReleasedRunId){
+      const document=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1",[row.run_id]);
+      const active=document.rows[0]?.document?sandboxRunFromDocument(asRecord(document.rows[0].document)):null;
+      return row.active_reservation&&active?.taskId===row.id&&active.cleanupStatus==="active"&&["queued","starting","running"].includes(active.phase)
+        ?{kind:"existing_active" as const,task:mapTask(row)}:{kind:"conflict" as const};
+    }
+    if(row.active_reservation)return{kind:"conflict" as const};
+    const previous=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.expectedReleasedRunId]);
+    const released=previous.rows[0]?.document?sandboxRunFromDocument(asRecord(previous.rows[0].document)):null;
+    if(!released||released.taskId!==row.id||released.runId!==row.run_id||released.cleanupStatus!=="cleaned")return{kind:"conflict" as const};
+    if(!sandboxRestartRowIdentityMatches(row,input))return{kind:"conflict" as const};
+    if(!await reserveActiveTaskWithClient(client,row.project_id,input.interruptedAt))return{kind:"capacity_rejected" as const};
+    const task=input.task;
+    const updated=await client.query<AgentTaskRow>(`update agent_tasks set run_id=$2,status='starting',active_reservation=true,sandbox=$3::jsonb,start_delivery_key=null,start_request_hash=null,start_claim_token=null,start_receipt=null,start_timeline_cursor=null,start_intent_status=null,start_claimed_at=null,start_lease_expires_at=null,start_attempt_count=0,start_next_retry_at=null,start_safe_error=null,finalization_intent_status=null,finalization_intent_at=null,updated_at=$4 where id=$1 and run_id=$5 and active_reservation=false returning *`,[task.id,task.runId,JSON.stringify(task.sandbox),input.interruptedAt,input.expectedReleasedRunId]);
+    if(!updated.rows[0])throw new Error("Task sandbox restart lost its task lock");
+    await putJsonDocumentWithClient(client,"sandbox_runtime_state",task.id,input.runtimeState);
+    await putJsonDocumentWithClient(client,"sandbox_run_state",input.sandboxRun.runId,prepareSandboxRunDocument(input.sandboxRun));
+    await client.query(`update task_messages set delivery_status='failed',claim_token=null,claimed_at=null,lease_expires_at=null,next_retry_at=null,safe_error='Sandbox was released before this message was delivered',updated_at=$2 where task_id=$1 and deleted_at is null and coalesce(delivery_status,'pending') in ('pending','dispatching')`,[task.id,input.interruptedAt]);
+    return{kind:"restarted" as const,task:mapTask(updated.rows[0])};
+  })}
+
   async updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
     await this.pool.query(
       `update agent_tasks
@@ -1331,6 +1358,11 @@ async function reserveActiveTaskWithClient(client: PoolClient, projectId: string
     [projectId,updatedAt]
   );
   return reserved.rowCount === 1;
+}
+
+function sandboxRestartRowIdentityMatches(current:AgentTaskRow,input:AtomicTaskSandboxRestartInput):boolean{
+  const task=input.task,run=input.sandboxRun;
+  return task.id===current.id&&task.workspaceId===current.workspace_id&&task.projectId===current.project_id&&task.endpointId===current.endpoint_id&&task.fileLibraryId===current.file_library_id&&task.executionMode==="live"&&task.runId!==input.expectedReleasedRunId&&run.runId===task.runId&&run.taskId===current.id&&run.workspaceId===current.workspace_id&&run.projectId===current.project_id&&run.fileLibraryId===current.file_library_id&&run.phase==="starting"&&run.cleanupStatus==="active";
 }
 
 async function releaseActiveTaskWithClient(client: PoolClient, projectId: string, updatedAt: string): Promise<void> {

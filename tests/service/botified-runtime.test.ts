@@ -77,10 +77,11 @@ describe("botified runtime integration", () => {
     assert.equal(config.service.service_key_env, "BOTIFIED_SERVICE_KEY");
     assert.equal(config.service.max_queue_messages > 0, true);
     assert.equal(config.service.max_queue_bytes > 0, true);
-    assert.deepEqual(Object.keys(config.runtime).sort(), ["cwd", "data_dir", "session"].sort());
+    assert.deepEqual(Object.keys(config.runtime).sort(), ["cwd", "data_dir", "resume_unfinished", "session"].sort());
     assert.equal(config.runtime.cwd, "/workspace/task/home/workspace");
     assert.equal(config.runtime.data_dir, "/runner/botified-data");
     assert.equal(config.runtime.session, "t1");
+    assert.equal(config.runtime.resume_unfinished, true);
     assert.equal(config.files.root_dir,".artifacts/t1");
     assert.equal(pathIsInside(config.runtime.cwd, "/workspace/task/home"), true);
     assert.equal(pathIsInside(config.runtime.data_dir, "/runner"), true);
@@ -96,6 +97,24 @@ describe("botified runtime integration", () => {
     assert.equal(config.subagents.enabled, false);
     assert.equal(config.profiling.enabled, false);
     assert.equal(config.llm_text_preview.enabled, true);
+  });
+
+  it("disables unfinished-work replay only for a replacement sandbox run", () => {
+    const config = generateBotifiedConfig({
+      endpoint: {
+        id: "e1", projectId: "p1", name: "model", protocol: "openai_chat_completions",
+        baseUrl: "https://models.example.com/v1", model: "gpt-compatible", credentialId: "cred_test",
+        capabilities: ["text", "tool_calls"], requestTimeoutSecs: 30,
+        createdAt: "2026-07-04T00:00:00.000Z", updatedAt: "2026-07-04T00:00:00.000Z"
+      },
+      task: {
+        taskId: "t1", taskHomePath: "/runner/task-home", botifiedDataPath: "/runner/botified-data",
+        serviceKeyEnv: "BOTIFIED_SERVICE_KEY", providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+        providerBaseUrl: "http://broker/v1", resumeUnfinished: false
+      }
+    });
+
+    assert.equal(config.runtime.resume_unfinished, false);
   });
 
   it("configures BashTool to use only the loopback executor sidecar", () => {

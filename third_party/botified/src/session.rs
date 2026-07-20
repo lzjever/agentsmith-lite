@@ -90,6 +90,23 @@ impl OpenedSession {
     pub fn recorder(&self) -> Arc<FileSessionRecorder> {
         self.recorder.clone()
     }
+
+    pub fn discard_unfinished_sync(&mut self) -> Result<(), SessionError> {
+        for message in &self.pending_messages {
+            self.recorder.record_pending_input_removed_sync(
+                &message.id,
+                message.source,
+                message.metadata.clone(),
+                "resume_unfinished_disabled",
+            )?;
+        }
+        if self.restart_boundary.is_some() {
+            self.recorder.record_restart_boundary_cleared_sync()?;
+        }
+        self.pending_messages.clear();
+        self.restart_boundary = None;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +309,15 @@ impl FileSessionRecorder {
                 source,
                 metadata,
                 reason: reason.to_owned(),
+            },
+            SessionAppendDurability::SyncData,
+        )
+    }
+
+    pub fn record_restart_boundary_cleared_sync(&self) -> Result<(), SessionError> {
+        self.append_entry(
+            SessionLine::RestartBoundaryCleared {
+                reason: "resume_unfinished_disabled".to_owned(),
             },
             SessionAppendDurability::SyncData,
         )
@@ -1160,6 +1186,10 @@ fn apply_session_line(
             remove_pending_message(&mut replay.pending_messages, &message_id);
             Ok(())
         }
+        SessionLine::RestartBoundaryCleared { reason: _ } => {
+            replay.restart_boundary = None;
+            Ok(())
+        }
         SessionLine::Compaction {
             active_user_message_id,
             summary,
@@ -1446,6 +1476,9 @@ enum SessionLine {
         source: InputSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<QueuedInputMetadata>,
+        reason: String,
+    },
+    RestartBoundaryCleared {
         reason: String,
     },
     Compaction {
@@ -1750,7 +1783,7 @@ mod durable_ack_boundary_tests {
     }
 
     #[test]
-    fn user_batch_pending_removal_and_message_cursor_use_durable_append_boundary() {
+    fn user_batch_tombstones_and_message_cursor_use_durable_append_boundary() {
         let user_batch_spy = SpySessionFile::default();
         recorder_with_spy(user_batch_spy.clone())
             .record_user_batch_with_ids_sync(
@@ -1777,6 +1810,15 @@ mod durable_ack_boundary_tests {
             .expect("pending removal tombstone should sync before success");
         assert_eq!(
             tombstone_spy.operations(),
+            vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
+        );
+
+        let restart_boundary_spy = SpySessionFile::default();
+        recorder_with_spy(restart_boundary_spy.clone())
+            .record_restart_boundary_cleared_sync()
+            .expect("restart boundary tombstone should sync before success");
+        assert_eq!(
+            restart_boundary_spy.operations(),
             vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
         );
 
@@ -1822,6 +1864,7 @@ mod durable_ack_boundary_tests {
             "accepted_input",
             "user_batch",
             "pending_input_removed",
+            "restart_boundary_cleared",
             "message_cursor",
         ] {
             let spy = SpySessionFile::with_sync_data_failure();
@@ -1845,6 +1888,9 @@ mod durable_ack_boundary_tests {
                     None,
                     "stale_task_request",
                 ),
+                "restart_boundary_cleared" => {
+                    recorder.record_restart_boundary_cleared_sync()
+                }
                 "message_cursor" => recorder.record_message_cursor_sync(&DurableMessageCursor {
                     message_id: "msg_1".to_owned(),
                     replay_start_seq: 2,
@@ -2024,6 +2070,66 @@ mod durable_ack_boundary_tests {
                 .expect("rolled back session should reopen");
         assert!(reopened.pending_messages().is_empty());
         assert!(reopened.initial_messages().is_empty());
+    }
+
+    #[test]
+    fn discard_unfinished_is_durable_and_preserves_completed_context() {
+        let home = temp_home("discard-unfinished");
+        let opened = open_or_create_session_in_home_with_cwd(
+            "discard-unfinished",
+            &home,
+            "/repo",
+        )
+        .expect("session should open");
+        let recorder = opened.recorder();
+        recorder
+            .record_compaction_with_active_user_message_id_sync(
+                &text_content("completed summary"),
+                &[Message::assistant_text("completed answer")],
+                Some("msg_interrupted"),
+            )
+            .expect("restart boundary should persist");
+        recorder
+            .record_accepted_input_sync(&AcceptedInputEntry {
+                message_id: "msg_queued".to_owned(),
+                content: text_content("queued input"),
+                cursor_seq: 1,
+                source: InputSource::User,
+                metadata: None,
+                urgency: InputUrgency::Normal,
+            })
+            .expect("queued input should persist");
+        drop(recorder);
+        drop(opened);
+
+        let mut replayed = open_or_create_session_in_home_with_cwd(
+            "discard-unfinished",
+            &home,
+            "/repo",
+        )
+        .expect("unfinished session should reopen");
+        let completed_context = replayed.initial_messages().to_vec();
+        assert_eq!(replayed.pending_messages().len(), 1);
+        assert!(replayed.restart_boundary().is_some());
+
+        replayed
+            .discard_unfinished_sync()
+            .expect("unfinished replay should be durably discarded");
+        assert!(replayed.pending_messages().is_empty());
+        assert!(replayed.restart_boundary().is_none());
+        assert_eq!(replayed.initial_messages(), completed_context);
+        drop(replayed);
+
+        let reopened = open_or_create_session_in_home_with_cwd(
+            "discard-unfinished",
+            &home,
+            "/repo",
+        )
+        .expect("discarded session should reopen idle");
+        assert!(reopened.pending_messages().is_empty());
+        assert!(reopened.restart_boundary().is_none());
+        assert_eq!(reopened.initial_messages(), completed_context);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

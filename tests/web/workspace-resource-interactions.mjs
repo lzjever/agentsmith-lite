@@ -12,7 +12,7 @@ let workspaceMode = "normal";
 let policyMode = "readonly";
 let alertsMode = "empty";
 let signedOut = false;
-let capabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
+let capabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canSendChat: true };
 const server = spawn(process.execPath, ["./node_modules/next/dist/bin/next", "dev", "--port", String(port)], { cwd: process.cwd(), env: { ...process.env, APP_PUBLIC_BASE_URL: baseUrl }, stdio: ["ignore", "pipe", "pipe"], detached: true });
 let output = "";
 server.stdout.on("data", (chunk) => { output += chunk; });

@@ -253,6 +253,7 @@ export interface PersistedSandboxRunState {
   startupFailure?: PersistedSandboxStartupFailure | null;
   fencingToken: number;
   cleanupStatus: PersistedSandboxCleanupStatus;
+  resumeUnfinished?: boolean;
   cleanupAttempts?: number;
   lastCleanupAt?: string | null;
   lastCleanupError?: {
@@ -529,6 +530,7 @@ export interface ProductStore {
   deleteProjectChatMessageAndFollowing(threadId: string, messageId: string, expectedVersion: number): Promise<boolean>;
 
   createTaskAtomically(input: AtomicTaskCreateInput): Promise<AtomicTaskCreateResult>;
+  restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult>;
   updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
   updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
   updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
@@ -588,6 +590,20 @@ export type AtomicTaskCreateResult=
   | {kind:"library_not_found"}
   | {kind:"already_bound"}
   | {kind:"capacity_rejected"};
+
+export interface AtomicTaskSandboxRestartInput {
+  expectedReleasedRunId: string;
+  task: PersistedAgentTask;
+  runtimeState: Record<string, unknown>;
+  sandboxRun: PersistedSandboxRunState;
+  interruptedAt: string;
+}
+
+export type AtomicTaskSandboxRestartResult =
+  | { kind: "restarted"; task: PersistedAgentTask }
+  | { kind: "existing_active"; task: PersistedAgentTask }
+  | { kind: "capacity_rejected" }
+  | { kind: "conflict" };
 
 export interface PersistTaskArtifactProjectionInput {
   projectId: string;

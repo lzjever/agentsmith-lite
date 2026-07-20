@@ -70,6 +70,7 @@ export interface SandboxRunState extends SandboxIdentity {
   terminalFailure?: SandboxTerminalFailure | null;
   fencingToken: number;
   cleanupStatus: SandboxCleanupStatus;
+  resumeUnfinished?: boolean;
   cleanupAttempts?: number;
   lastCleanupAt?: string | null;
   lastCleanupError?: {

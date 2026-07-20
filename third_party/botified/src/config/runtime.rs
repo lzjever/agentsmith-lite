@@ -204,6 +204,8 @@ pub struct RuntimeAgentConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub session: Option<String>,
+    #[serde(default = "default_resume_unfinished")]
+    pub resume_unfinished: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1050,6 +1052,7 @@ runtime:
   cwd: .
   data_dir: .botified/state
   session: null
+  resume_unfinished: true
 
 timeline:
   retention_days: 14
@@ -1213,6 +1216,10 @@ fn default_timeline_retention_days() -> u64 {
     RuntimeTimelineConfig::DEFAULT_RETENTION_DAYS
 }
 
+fn default_resume_unfinished() -> bool {
+    true
+}
+
 fn default_files_root_dir() -> PathBuf {
     PathBuf::from(DEFAULT_FILES_ROOT_DIR)
 }
@@ -1324,6 +1331,22 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_unfinished_defaults_true_and_accepts_false() {
+        let without_field = default_example_yaml().replace("  resume_unfinished: true\n", "");
+        let defaulted = RuntimeConfig::from_yaml_str(&without_field)
+            .expect("older runtime config should keep crash recovery enabled");
+        assert!(defaulted.runtime.resume_unfinished);
+
+        let explicit_false = default_example_yaml().replace(
+            "  resume_unfinished: true\n",
+            "  resume_unfinished: false\n",
+        );
+        let disabled = RuntimeConfig::from_yaml_str(&explicit_false)
+            .expect("runtime config should allow an explicit discard boundary");
+        assert!(!disabled.runtime.resume_unfinished);
+    }
 
     #[test]
     fn ca_bundle_path_resolves_into_openai_compatible_provider_config() {

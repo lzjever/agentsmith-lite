@@ -71,7 +71,7 @@ export type MemberRole = "owner" | "admin" | "member" | "viewer";
 export interface ProjectMember { projectId: string; userId: string; role: MemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
 export type WorkspaceMemberRole = "owner" | "admin" | "member" | "viewer";
 export interface WorkspaceMember { workspaceId: string; userId: string; role: WorkspaceMemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
-export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; canCancelTasks: boolean; canSendChat: boolean; }
+export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; canSendChat: boolean; }
 export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
 export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; chatReadyEndpointCount: number; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
 export type EndpointCapability = "text" | "image" | "tool_calls";

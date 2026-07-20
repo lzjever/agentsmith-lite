@@ -1071,6 +1071,16 @@ postgresDescribe("postgres product store", () => {
     const persistedReleaseAudit=(await store.listProjectAuditEvents(cleaned.projectId)).find((event)=>event.id===releaseAudit.id);assert.deepEqual(persistedReleaseAudit,releaseAudit);
     assert.equal(await store.completeSandboxRunRelease({runId:persistedCleaned.runId,expectedFencingToken:persistedCleaned.fencingToken,run:persistedCleaned,settlement:persistedSettlement,auditEvent:persistedReleaseAudit}),"already_applied");
     assert.equal(await store.completeSandboxRunRelease({runId:persistedCleaned.runId,expectedFencingToken:persistedCleaned.fencingToken,run:persistedCleaned,settlement:{...persistedSettlement,durationSeconds:6},auditEvent:persistedReleaseAudit}),"conflict");
+
+    await store.createTaskMessage({id:"message_pg_interrupted",taskId:settlementTask.id,actorId:settlementTask.createdByUserId!,content:"old pending",deliveryStatus:"pending",createdAt:cleaned.updatedAt,updatedAt:cleaned.updatedAt});
+    const releasedTask=await store.findTask(settlementTask.id);assert.ok(releasedTask);assert.equal(releasedTask.activeReservation,false);
+    const restartAt="2026-07-04T00:11:00.000Z";
+    const restartInput=(suffix:string)=>{const runId=`run_pg_restarted_${suffix}`;const task={...releasedTask,runId,status:"starting" as const,activeReservation:true,updatedAt:restartAt};return{expectedReleasedRunId:cleaned.runId,task,runtimeState:{botifiedBaseUrl:"http://task:3099"},sandboxRun:sandboxRun({workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,fileLibraryId:task.fileLibraryId!,startedByUserId:task.createdByUserId!,projectSubPath:cleaned.projectSubPath,fileLibraryRootSubPath:cleaned.fileLibraryRootSubPath,resumeUnfinished:false,updatedAt:restartAt,createdAt:restartAt}),interruptedAt:restartAt};};
+    const restarts=await Promise.all([store.restartTaskSandboxAtomically(restartInput("a")),store.restartTaskSandboxAtomically(restartInput("b"))]);
+    assert.deepEqual(restarts.map((result)=>result.kind).sort(),["existing_active","restarted"]);
+    const activeRestart=await store.findTask(settlementTask.id);assert.ok(activeRestart);assert.notEqual(activeRestart.runId,cleaned.runId);assert.equal(activeRestart.activeReservation,true);assert.equal((await store.sandboxRuns.get(activeRestart.runId))?.resumeUnfinished,false);
+    assert.equal((await store.findTaskMessage("message_pg_interrupted"))?.deliveryStatus,"failed");assert.match((await store.findTaskMessage("message_pg_interrupted"))?.safeError??"",/sandbox was released/i);
+    assert.equal((await store.findProjectResourceUsage(settlementTask.projectId))?.activeTasks,1);
   });
 });
 

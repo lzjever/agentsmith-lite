@@ -40,6 +40,8 @@ import type {
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
+  AtomicTaskSandboxRestartInput,
+  AtomicTaskSandboxRestartResult,
   TaskStoreListQuery,
   TaskStoreListPage,
   TaskDeliveryClaimInput,
@@ -686,6 +688,31 @@ export class InMemoryProductStore implements ProductStore {
       if(input.initialMessage){const index=this.messages.findIndex((message)=>message.id===input.initialMessage!.id);if(index>=0)this.messages.splice(index,1);}
       throw error;
     }
+  }
+
+  async restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult> {
+    const current=this.tasks.get(input.task.id);
+    if(!current||current.deletedAt||current.archivedAt||current.executionMode!=="live")return{kind:"conflict"};
+    if(current.runId!==input.expectedReleasedRunId){
+      const active=await this.sandboxRuns.get(current.runId);
+      return current.activeReservation&&active?.taskId===current.id&&active.cleanupStatus==="active"&&["queued","starting","running"].includes(active.phase)
+        ?{kind:"existing_active",task:clone(current)}:{kind:"conflict"};
+    }
+    const released=await this.sandboxRuns.get(input.expectedReleasedRunId);
+    if(!released||released.taskId!==current.id||released.runId!==current.runId||released.cleanupStatus!=="cleaned"||current.activeReservation)return{kind:"conflict"};
+    if(!sandboxRestartIdentityMatches(current,input))return{kind:"conflict"};
+    return this.atomicTaskMessageMutation([{task:input.task,reserveActive:true,runtimeState:input.runtimeState,sandboxRun:input.sandboxRun}],async()=>{
+      if(!this.reserveActiveTask(current.projectId,input.interruptedAt))return{kind:"capacity_rejected" as const};
+      const restarted=normalizeStoredTask(input.task,true);
+      this.tasks.set(restarted.id,clone(restarted));
+      await this.jsonDocs.put("sandbox_runtime_state",restarted.id,input.runtimeState);
+      await this.sandboxRuns.put(input.sandboxRun);
+      for(let index=0;index<this.messages.length;index++){
+        const message=this.messages[index]!;
+        if(message.taskId===restarted.id&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending"))this.messages[index]=clone({...message,deliveryStatus:"failed",claimToken:null,claimedAt:null,leaseExpiresAt:null,nextRetryAt:null,safeError:"Sandbox was released before this message was delivered",updatedAt:input.interruptedAt});
+      }
+      return{kind:"restarted",task:clone(restarted)};
+    });
   }
 
   async updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
@@ -1388,6 +1415,11 @@ function normalizeStoredTask(task: PersistedAgentTask, activeReservation: boolea
     cleanupNextRetryAt: task.cleanupNextRetryAt ?? null,
     cleanupCompletedAt: task.cleanupCompletedAt ?? null
   };
+}
+
+function sandboxRestartIdentityMatches(current:PersistedAgentTask,input:AtomicTaskSandboxRestartInput):boolean{
+  const task=input.task,run=input.sandboxRun;
+  return task.id===current.id&&task.workspaceId===current.workspaceId&&task.projectId===current.projectId&&task.endpointId===current.endpointId&&task.fileLibraryId===current.fileLibraryId&&task.executionMode==="live"&&task.runId!==input.expectedReleasedRunId&&run.runId===task.runId&&run.taskId===current.id&&run.workspaceId===current.workspaceId&&run.projectId===current.projectId&&run.fileLibraryId===current.fileLibraryId&&run.phase==="starting"&&run.cleanupStatus==="active";
 }
 
 function normalizeStoredMessage(message: PersistedTaskMessage): PersistedTaskMessage {

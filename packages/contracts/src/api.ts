@@ -50,7 +50,6 @@ export interface ProjectCapabilities {
   canManagePolicy: boolean;
   canWriteFiles: boolean;
   canCreateTasks: boolean;
-  canCancelTasks: boolean;
   canSendChat: boolean;
 }
 

@@ -2,7 +2,7 @@
 
 AgentSmith Lite is a product API and Web client for the local single-node Kubernetes loop. The Node server owns authorization, projects, endpoints, tasks, task conversations, artifacts, and sandbox lifecycle. The Web UI is a presentation client: it does not call model providers, Botified, Kubernetes, databases, object storage, or filesystem APIs directly.
 
-Postgres is the product store when `POSTGRES_APP_URL` is set; only local dry-run and tests may use the in-memory fallback. SQL migrations live in `infra/db/migrations/*.sql`. Sandbox lifecycle uses app-owned labels, task/run identity, and resource UID fences, so cancel, TTL, and reap affect only the matching task resources.
+Postgres is the product store when `POSTGRES_APP_URL` is set; only local dry-run and tests may use the in-memory fallback. SQL migrations live in `infra/db/migrations/*.sql`. Sandbox lifecycle uses app-owned labels, task/run identity, and resource UID fences, so an explicit release or deletion intent affects only the matching Run resources. Healthy Sandboxes have no idle, TTL, or automatic release path.
 
 ## Task Conversations
 
@@ -14,7 +14,9 @@ Botified history is the canonical input. The server resumes from a safe source c
 
 The runtime config enables Botified LLM text preview. The server relays it as transient `assistant_preview` SSE for the active assistant interaction and does not persist it as final conversation truth. Completed timeline interactions replace the preview. Preview loss affects only the live display, not timeline recovery.
 
-`abortTurn` is a current-turn operation through Botified and leaves the task and detached work alive. Task cancellation is a separate task-lifecycle operation: it fences delivery, drains artifacts, and starts scoped cleanup. Stoppable background work is also a typed interaction operation, not a task cancellation.
+`abortTurn` is a current-turn operation through Botified and leaves the Task, Sandbox, and detached work alive. Releasing a Sandbox is a separate, unconditional operation initiated only after user confirmation. It stops all work in the current Run and deletes that Run's app-owned Kubernetes resources while retaining the Task conversation, Botified session, and bound File Library. The next message or Terminal open creates a new Run for the same Task; completed history is retained and work interrupted by release is not resumed. Stoppable background work remains a typed interaction operation.
+
+Each Sandbox Run records its own ready and released timestamps and is settled once in Usage. Idle allocation time is counted because the Sandbox remains allocated until the user releases it.
 
 ## Secrets
 

@@ -2,7 +2,7 @@
 
 P0 renders one sandbox pod per active task in dry-run form and has a tested reconciler for run resource state plus a tested in-cluster Kubernetes port/action applier. TaskService also has an explicit live startup path: when live mode is configured, it persists run state, materializes the six per-run resources, applies them, waits for the Pod to become ready with a bounded poll loop, then posts the prompt to Botified.
 
-Live mode also starts a P0 single-replica runtime tick. On startup and then each interval, it syncs active task Botified timelines through TaskService and runs `reapSandboxRunsOnce({ apply: true })`. Cleanup runs only from task startup, cancel, TTL, and this runtime tick; it is not a Kubernetes watch, lease/queue framework, or global control plane.
+Live mode also starts a single-replica runtime tick. On startup and then each interval, it syncs active Task Botified timelines and finishes persisted explicit release or deletion intents. The tick never selects a healthy Sandbox for release, and there is no idle, TTL, or automatic release policy.
 
 ## Run State
 
@@ -14,8 +14,8 @@ Desired sandbox state is represented by the pure `SandboxRunState` input to the 
 - Botified service key secret ref.
 - task home, artifacts, and Botified data directories.
 - runner image, PVC/project subPath, port, and resource requests/limits.
-- expiry and idle expiry timestamps.
-- timeline cursor, fencing token, and minimal cleanup metadata for fenced store updates and recent cleanup diagnostics.
+- ready/release timestamps, the user who started the Run, and the release reason.
+- timeline cursor, fencing token, and minimal metadata for fenced store updates.
 
 The run state document stores resource names, Secret key references, directories, limits, phase, cleanup status, and timestamps. It must not store real Botified service keys or model API keys; those values only appear in live Kubernetes Secret apply bodies. State transitions are emitted as idempotent `store_run_state` actions and are persisted only after cleanup mutations succeed.
 
@@ -47,7 +47,7 @@ The API Role remains in app manifests, not per-run sandbox output. It intentiona
 - create missing lifecycle resources: Secret, ConfigMap, ServiceAccount, NetworkPolicy, Service, Pod.
 - adopt observed resources whose kind/name/namespace and immutable labels match the desired run.
 - delete unmatched Agentsmith-managed resources only when their full immutable identity is present; ignore partial-identity and unowned resources.
-- delete stopping, expired, or idle-expired resources in Pod -> Service -> NetworkPolicy -> ConfigMap -> Secret -> ServiceAccount order.
+- delete resources for a persisted release or deletion intent in Pod -> Service -> NetworkPolicy -> ConfigMap -> Secret -> ServiceAccount order.
 - emit idempotent store-state actions for observed desired state and cleanup transitions.
 
 `applySandboxReconcileActions` is an in-memory fake applier for tests. It only mutates resources when the action labels match the resource labels, which preserves the same label fence the real Kubernetes client must use later.
@@ -58,6 +58,6 @@ The API Role remains in app manifests, not per-run sandbox output. It intentiona
 
 TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SANDBOX_MODE=live` has wired a real Kubernetes port. Default local development remains dry-run and does not resolve model credentials, apply Kubernetes resources, or wait for Pod readiness. Live API startup requires `POSTGRES_APP_URL` so sandbox lifecycle state cannot silently run on the local in-memory store.
 
-## Lifecycle Cleanup
+## Explicit Release
 
-`SandboxLifecycleService.reapSandboxRunsOnce({ apply: true })` computes one reconciliation pass. It never executes `create_resource`; startup remains the only create path. It executes delete actions, then re-observes resources. Only after Kubernetes cleanup is complete does it remove runtime cleanup candidates (`home` and `botified`), retain durable `artifacts`, and persist cleaned store-state transitions with fencing. Targets include non-secret K8s/store summaries (`delete_resource`, `store_run_state`) plus runtime directory targets that distinguish cleanup candidates from retained artifacts. Directory cleanup is performed only in the service layer after `dataRoot` containment checks. Cleanup failures are recorded back into the run state as bounded, redacted recent failure metadata and prevent the run from being marked cleaned.
+`SandboxLifecycleService.reapSandboxRunsOnce({ apply: true })` finishes a previously persisted explicit release or deletion intent. It never executes `create_resource`; TaskService owns new-Run startup. It executes exact-identity delete actions, re-observes the resources, and only then marks the Run released with fencing and settles that Run's Usage once. A Sandbox release never deletes Task HOME, Botified session data, File Library files, or artifacts. Those durable paths let the next message or Terminal open create a new Run for the same Task, session, and File Library. Cleanup failure leaves the release intent pending for a later retry and does not free the active-Sandbox reservation.

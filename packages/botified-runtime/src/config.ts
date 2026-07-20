@@ -13,6 +13,7 @@ export interface BotifiedTaskRuntimeInput {
   providerApiKeyEnv: string;
   providerBaseUrl: string;
   servicePort?: number;
+  resumeUnfinished?: boolean;
 }
 
 export interface GenerateBotifiedConfigInput {
@@ -29,6 +30,7 @@ export interface BotifiedConfig {
     cwd: string;
     data_dir: string;
     session: string;
+    resume_unfinished: boolean;
   };
   timeline: {
     retention_days: number;
@@ -145,7 +147,8 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     runtime: {
       cwd: input.task.taskHomePath,
       data_dir: input.task.botifiedDataPath,
-      session: input.task.taskId
+      session: input.task.taskId,
+      resume_unfinished: input.task.resumeUnfinished ?? true
     },
     timeline: {
       retention_days: 14

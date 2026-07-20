@@ -53,7 +53,7 @@ describe("task File Library creation", () => {
     let libraryReads = 0;
     apiClient.tasks = async () => ({ items: [], nextCursor: null, total: 0 });
     apiClient.endpoints = async () => [endpoint];
-    apiClient.projectCapabilities = async () => ({ canManageEndpoints:true, canManageMembers:true, canManagePolicy:true, canWriteFiles:true, canCreateTasks:true, canCancelTasks:true, canSendChat:true });
+    apiClient.projectCapabilities = async () => ({ canManageEndpoints:true, canManageMembers:true, canManagePolicy:true, canWriteFiles:true, canCreateTasks:true, canSendChat:true });
     apiClient.fileLibraries = async () => ++libraryReads === 1 ? [library("available", null, { canDelete:false,canWriteFiles:true })] : [];
     apiClient.createTask = async () => { throw new ApiError(409, "Server wording can change", "file_library_already_bound"); };
     try {
@@ -76,7 +76,7 @@ describe("task File Library creation", () => {
     let libraryReads = 0;
     apiClient.tasks = async () => ({ items:[], nextCursor:null, total:0 });
     apiClient.endpoints = async () => [endpoint];
-    apiClient.projectCapabilities = async () => ({ canManageEndpoints:true, canManageMembers:true, canManagePolicy:true, canWriteFiles:true, canCreateTasks:true, canCancelTasks:true, canSendChat:true });
+    apiClient.projectCapabilities = async () => ({ canManageEndpoints:true, canManageMembers:true, canManagePolicy:true, canWriteFiles:true, canCreateTasks:true, canSendChat:true });
     apiClient.fileLibraries = async () => { libraryReads += 1; return []; };
     apiClient.createTask = async () => { throw new ApiError(409, "Different conflict wording", "file_library_name_conflict"); };
     try {

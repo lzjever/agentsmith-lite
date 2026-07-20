@@ -77,7 +77,6 @@ describe("profile and settings services", () => {
       canManagePolicy: false,
       canWriteFiles: false,
       canCreateTasks: false,
-      canCancelTasks: false,
       canSendChat: false
     });
     assert.equal((await services.settings.project(owner.user.id, project.id)).capabilities.canManageSettings, false);

@@ -194,6 +194,16 @@ function runtimeActionsEnabled(sandboxState: TaskDetail["sandboxState"]): boolea
 }
 
 function taskInteractionCapabilities(detail: TaskCapabilities, stream: TaskCapabilities, sandboxState: TaskDetail["sandboxState"]): TaskCapabilities {
+  if (sandboxState.state === "released") return {
+    sendMessage:detail.sendMessage,
+    editQueuedMessage:false,
+    abortTurn:false,
+    openTerminal:detail.openTerminal,
+    releaseSandbox:false,
+    editTask:detail.editTask,
+    archiveTask:detail.archiveTask,
+    deleteTask:detail.deleteTask
+  };
   const usable = sandboxState.state === "starting" || sandboxState.state === "active";
   return {
     sendMessage:usable && detail.sendMessage && stream.sendMessage,

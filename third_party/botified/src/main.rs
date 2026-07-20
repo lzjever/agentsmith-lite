@@ -129,8 +129,11 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         Option<botified::SessionRestartBoundary>,
         Option<Arc<botified::FileSessionRecorder>>,
     ) = if let Some(session) = runtime_config.runtime.session.clone() {
-        let session =
+        let mut session =
             open_or_create_session_in_home_with_cwd(&session, &data_dir, config.cwd.clone())?;
+        if !runtime_config.runtime.resume_unfinished {
+            session.discard_unfinished_sync()?;
+        }
         startup_warnings.extend(session.warnings().iter().cloned());
         config = config.with_session(session.name().to_owned());
         (

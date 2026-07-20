@@ -75,36 +75,40 @@ describe("Phase3 Task workspace", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
-  it("renders a released sandbox as a normal final state and disables composer and Terminal while preserving File Library access", async () => {
+  it("offers same-Task cold start from a released sandbox while preserving history and File Library access", async () => {
     const original = interactionApis();
-    const unavailable = { ...available, sendMessage:false, openTerminal:false, archiveTask:true, deleteTask:true };
-    apiClient.taskDetail = async () => detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:unavailable });
+    const coldStart = { ...available, sendMessage:true, openTerminal:true, releaseSandbox:false, archiveTask:true, deleteTask:true };
+    apiClient.taskDetail = async () => detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:coldStart });
     apiClient.taskArtifacts = async () => [];
-    apiClient.getTaskInteractions = async () => ({ ...snapshot(unavailable), runtimeReachability:"unreachable" });
+    apiClient.getTaskInteractions = async () => ({ ...snapshot({ ...coldStart, sendMessage:false, openTerminal:false }), runtimeReachability:"unreachable" });
     apiClient.streamTaskInteractions = holdStream;
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
       assert.ok(await screen.findByText(`Sandbox released · ${task.id}`));
-      const releaseNotice = screen.getByText("Sandbox resources were released. Conversation history and File Library files remain available.").closest("div");
+      const releaseNotice = screen.getByText("Sandbox resources were released. Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available.").closest("div");
       assert.ok(releaseNotice);
       assert.doesNotMatch(releaseNotice.className, /warning|error/);
-      assert.equal(screen.queryByText(/cold provisioning|runtime is temporarily unreachable/i), null);
+      assert.equal(screen.queryByText(/runtime is temporarily unreachable/i), null);
       assert.equal(screen.queryByRole("button", { name:"Retry" }), null);
       const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
-      assert.equal(composer.disabled, true);
-      assert.equal(composer.placeholder, "Sandbox has been released");
-      assert.equal((screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement).disabled, true);
+      assert.equal(composer.disabled, false);
+      assert.equal(composer.placeholder, "Message the task");
+      const terminalTab = screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement;
+      assert.equal(terminalTab.disabled, false);
+      fireEvent.click(terminalTab);
+      assert.ok(screen.getByRole("region", { name:"Task terminal" }));
       fireEvent.click(screen.getByText("Task details"));
       assert.equal(screen.getByRole("link", { name:task.fileLibraryId }).getAttribute("href"), `/workspaces/workspace_1/projects/project_1/files?libraryId=${task.fileLibraryId}`);
     } finally { Object.assign(apiClient, original); }
   });
 
-  it("lets a released detail projection override a stale permissive interaction stream", async () => {
+  it("lets released cold-start capabilities override a stale interaction stream", async () => {
     const original = interactionApis();
-    const unavailable = { ...available, sendMessage:false, openTerminal:false, abortTurn:false };
+    const stale = { ...available, sendMessage:false, openTerminal:false, abortTurn:false };
+    const coldStart = { ...available, sendMessage:true, openTerminal:true, abortTurn:false, releaseSandbox:false };
     let detailReads = 0;
     let receive: ((event: TaskInteractionStreamEvent) => void) | undefined;
-    apiClient.taskDetail = async () => detailReads++ === 0 ? detail() : detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:unavailable });
+    apiClient.taskDetail = async () => detailReads++ === 0 ? detail() : detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:coldStart });
     apiClient.taskArtifacts = async () => [];
     apiClient.getTaskInteractions = async () => snapshot(available);
     apiClient.streamTaskInteractions = async (_taskId, _cursor, signal, onEvent) => {
@@ -117,9 +121,13 @@ describe("Phase3 Task workspace", () => {
       await waitFor(() => assert.ok(receive));
       act(() => receive?.({ type:"state", queuedMessages:[], capabilities:available }));
 
-      await waitFor(() => assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).disabled, true));
-      assert.equal((screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement).disabled, true);
-      assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).placeholder, "Sandbox has been released");
+      await waitFor(() => assert.ok(screen.getByText(`Sandbox released · ${task.id}`)));
+      act(() => receive?.({ type:"state", queuedMessages:[], capabilities:stale }));
+      await waitFor(() => {
+        assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).disabled, false);
+        assert.equal((screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement).disabled, false);
+        assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).placeholder, "Message the task");
+      });
     } finally { Object.assign(apiClient, original); }
   });
 

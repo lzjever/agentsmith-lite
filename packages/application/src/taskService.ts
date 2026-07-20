@@ -253,6 +253,7 @@ export class TaskService {
   private readonly occupiedTerminalTaskIds = new Set<string>();
   private readonly abortingTaskIds = new Set<string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
+  private readonly taskSandboxStarts = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: ProductStore,
@@ -546,7 +547,9 @@ export class TaskService {
   }
 
   async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
-    const task=await this.requireTaskTerminalAccess(userId,taskId);
+    const candidate=await this.requireTaskForUser(userId,taskId,"write");
+    const task=await this.ensureLiveSandbox(userId,candidate);
+    await this.requireTaskTerminalAccess(userId,taskId);
     if(this.occupiedTerminalTaskIds.has(task.id))throw new ProductError("Task terminal is already open",409);
     this.occupiedTerminalTaskIds.add(task.id);
     try{
@@ -582,7 +585,7 @@ export class TaskService {
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to receive messages", 409);
-      if(!await this.activeSandboxRun(current))throw new ProductError("Task sandbox is released; cold start is not available",409,"task_sandbox_released");
+      await this.ensureLiveSandbox(userId,current);
       const timestamp = nowIso();
       const message: PersistedTaskMessage = {
         id,
@@ -1012,6 +1015,51 @@ export class TaskService {
     return task;
   }
 
+  private async ensureLiveSandbox(userId:string,task:PersistedAgentTask):Promise<PersistedAgentTask>{
+    const previous=this.taskSandboxStarts.get(task.id)??Promise.resolve();
+    let release!:()=>void;
+    const current=new Promise<void>((resolve)=>{release=resolve;});
+    this.taskSandboxStarts.set(task.id,current);
+    await previous;
+    try{return await this.ensureLiveSandboxUnlocked(userId,task.id);}finally{
+      release();
+      if(this.taskSandboxStarts.get(task.id)===current)this.taskSandboxStarts.delete(task.id);
+    }
+  }
+
+  private async ensureLiveSandboxUnlocked(userId:string,taskId:string):Promise<PersistedAgentTask>{
+    const stored=await this.store.findTask(taskId);
+    if(!stored||stored.deletedAt)throw new ProductError("Task not found",404);
+    let task:PersistedAgentTask=stored;
+    if(task.archivedAt||task.executionMode!=="live")throw new ProductError("Task sandbox cannot be started",409);
+    let run=await this.activeSandboxRun(task);
+    if(!run){
+      const released=await this.store.sandboxRuns.get(task.runId);
+      if(!released||released.taskId!==task.id||released.runId!==task.runId||released.cleanupStatus!=="cleaned"||task.activeReservation)throw new ProductError("Task sandbox release is not complete",409,"task_sandbox_release_pending");
+      const [project,library]=await Promise.all([this.store.findProject(task.projectId),task.fileLibraryId?this.store.findFileLibrary(task.fileLibraryId):null]);
+      if(!project||!library||library.workspaceId!==task.workspaceId||library.projectId!==task.projectId)throw new ProductError("Task File Library is unavailable",409);
+      const timestamp=nowIso(),runId=newId("run"),botifiedPort=this.config.botifiedPort??3099,resourceNames=sandboxResourceNamesForTask(task.id);
+      const sandbox=renderSandboxResources({namespace:this.config.namespace,workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,image:this.config.botifiedRunnerImage,pvcName:this.config.pvcName,projectSubPath:project.rootPath,fileLibraryRootSubPath:library.rootSubPath,botifiedPort,serviceKeySecretName:resourceNames.secret,cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi",...(this.config.modelCa?{modelCa:this.config.modelCa}:{}),resourceNames});
+      const replacement:PersistedAgentTask={...task,runId,status:"starting",activeReservation:true,sandbox,startDeliveryKey:null,startRequestHash:null,startClaimToken:null,startReceipt:null,startTimelineCursor:null,startClaimedAt:null,startLeaseExpiresAt:null,startAttemptCount:0,startNextRetryAt:null,updatedAt:timestamp};
+      const nextRun=this.buildLiveSandboxRun({task:replacement,timestamp,botifiedPort,projectSubPath:project.rootPath,fileLibraryRootSubPath:library.rootSubPath,resourceNames,startedByUserId:userId,resumeUnfinished:false});
+      const restarted=await this.store.restartTaskSandboxAtomically({expectedReleasedRunId:task.runId,task:replacement,runtimeState:{botifiedBaseUrl:this.botifiedBaseUrlForTask(task.id,botifiedPort)},sandboxRun:nextRun,interruptedAt:timestamp});
+      if(restarted.kind==="capacity_rejected"){await this.policies.recordTaskReservationRejected(task.projectId,userId,task.id);throw activeTasksLimitError();}
+      if(restarted.kind==="conflict")throw new ProductError("Task sandbox changed concurrently; retry",409,"task_sandbox_restart_conflict");
+      task=restarted.task;
+      run=await this.activeSandboxRun(task);
+      if(!run)throw new ProductError("Task sandbox restart did not create an active run",409);
+    }
+    if(run.phase==="starting"||run.phase==="queued"){
+      const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
+      requireTaskEndpointCapabilities(endpoint);
+      const serviceKey=this.serviceKeyForTask(task);
+      await this.startLiveSandbox({endpoint,task,run,serviceKey});
+      await this.claimLiveRunForPrompt(run.runId);
+      task=await this.store.updateTaskStatusIfStarting(task.id,"running",nowIso())??await this.store.findTask(task.id)??task;
+    }
+    return task;
+  }
+
   private async requireTaskTerminalAccess(userId:string,taskId:string):Promise<PersistedAgentTask>{
     const task=await this.requireTaskForUser(userId,taskId,"write");
     const run=await this.activeSandboxRun(task);
@@ -1428,6 +1476,8 @@ export class TaskService {
     projectSubPath: string;
     fileLibraryRootSubPath:string;
     resourceNames: SandboxRunState["resourceNames"];
+    startedByUserId?: string;
+    resumeUnfinished?: boolean;
   }): SandboxRunState {
     const paths = this.taskRuntimePaths(input.task);
     return {
@@ -1442,7 +1492,7 @@ export class TaskService {
       projectSubPath: input.projectSubPath,
       fileLibraryRootSubPath:input.fileLibraryRootSubPath,
       fileLibraryId: input.task.fileLibraryId!,
-      startedByUserId: input.task.createdByUserId!,
+      startedByUserId: input.startedByUserId??input.task.createdByUserId!,
       startedAt: null,
       botifiedPort: input.botifiedPort,
       resourceNames: input.resourceNames,
@@ -1464,6 +1514,7 @@ export class TaskService {
       ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
       fencingToken: 1,
       cleanupStatus: "active",
+      resumeUnfinished:input.resumeUnfinished??true,
       createdAt: input.timestamp,
       updatedAt: input.timestamp
     };
@@ -1495,7 +1546,8 @@ export class TaskService {
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerBaseUrl: this.botifiedBrokerBaseUrlForTask(input.task),
-        servicePort: input.run.botifiedPort
+        servicePort: input.run.botifiedPort,
+        resumeUnfinished:input.run.resumeUnfinished??true
       }
     });
     const materialized = materializeLiveCreateActions(actions, {
@@ -1767,12 +1819,13 @@ export class TaskService {
     const runtime=knownRunState!==undefined&&knownReachability!==undefined?{runState:knownRunState,reachability:knownReachability}:await this.taskRuntimePresentation(task);
     const runState = knownRunState ?? runtime.runState;
     const sessionFenced=!run||run.phase!=="running"||runtime.reachability==="reachable";
-    const canInteract = canWrite && retained && executionEligible && Boolean(run) && sessionFenced;
+    const coldStartable=task.executionMode==="live"&&releaseConfirmed;
+    const canInteract = canWrite && retained && executionEligible && ((Boolean(run)&&sessionFenced)||coldStartable);
     return {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn: canInteract && task.executionMode === "live" && runState === "running",
-      openTerminal: canInteract && task.executionMode === "live" && run?.phase==="running" && runState === "running" && !this.occupiedTerminalTaskIds.has(task.id),
+      openTerminal: canInteract && task.executionMode === "live" && (coldStartable||(run?.phase==="running"&&runState==="running")) && !this.occupiedTerminalTaskIds.has(task.id),
       editTask: canWrite && !task.deletedAt,
       releaseSandbox: canWrite && !task.deletedAt && Boolean(ownedRun) && ownedRun?.cleanupStatus!=="cleanup_requested" && ownedRun?.cleanupStatus!=="deleting",
       archiveTask: canWrite && !task.deletedAt && !task.archivedAt && !task.activeReservation && releaseConfirmed,
