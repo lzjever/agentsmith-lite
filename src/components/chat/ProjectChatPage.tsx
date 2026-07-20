@@ -464,13 +464,13 @@ function ProjectChatProjectPage({ workspaceId, projectId }: { workspaceId: strin
           : "Endpoint deleted. Sending is unavailable."
       : "Choose an endpoint for a new conversation.";
 
-  return <PageLayout contentWidth="full" header={<PageHeader title={selectedThread?.title ?? "Chat"} subtitle={subtitle} actions={<Button variant="quiet" size="icon" aria-label="Refresh chat" title="Refresh chat" disabled={sending || threadMutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>} />}>
+  return <PageLayout contentWidth="full" header={<PageHeader title="Chat" subtitle={subtitle} actions={<Button variant="quiet" size="icon" aria-label="Refresh chat" title="Refresh chat" disabled={sending || threadMutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>} />}>
     <div className="grid h-[calc(100dvh-12rem)] min-h-[30rem] overflow-hidden border border-border lg:h-[calc(100vh-15rem)] lg:grid-cols-[15rem_minmax(0,1fr)]">
       <div className="hidden min-h-0 lg:block" aria-hidden={threadSheetOpen || undefined}>{threadRail(false)}</div>
       <section className="flex min-h-0 min-w-0 flex-col">
-        <div className="flex items-center justify-between border-b border-border bg-surface-low px-3 py-2 lg:hidden">
-          <Button variant="quiet" onClick={() => setThreadSheetOpen(true)} aria-label="Open conversations"><MessagesSquare size={16} />Conversations</Button>
-          <span className="max-w-[55%] truncate text-xs text-secondary">{selectedThread?.title ?? "New conversation"}</span>
+        <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border bg-surface-low px-3 py-2">
+          <Button className="lg:hidden" variant="quiet" onClick={() => setThreadSheetOpen(true)} aria-label="Open conversations"><MessagesSquare size={16} />Conversations</Button>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground lg:px-2">{selectedThread?.title ?? "New conversation"}</span>
         </div>
         <ChatMessageList
           messages={messages}

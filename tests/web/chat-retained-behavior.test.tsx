@@ -242,19 +242,15 @@ describe("retained chat and overview behavior", () => {
     apiClient.projectOverview = async () => ({ project:{id:"project_1",workspaceId:"workspace_1",name:"Project",lifecycleStatus:"active",taskConcurrencyLimit:2,createdAt:endpoint.createdAt,updatedAt:endpoint.updatedAt},workspaceLifecycleStatus:"active",capabilities:readOnly,owner:{displayName:"Project Owner",email:"owner@example.test"},memberRole:"viewer",chatReadyEndpointCount:1,taskReadyEndpointCount:1,recommendedActions:[] });
     try {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
-      await screen.findByText("This project is available for viewing.");
+      await screen.findByText("Explore this project");
       assert.ok(screen.getByRole("heading", { name: "Project" }));
       assert.ok(screen.getByText("Owner: Project Owner · Your access: Viewer · Status: Active"));
       assert.equal(screen.queryByRole("link", { name: "Configure an endpoint" }), null);
       assert.equal(screen.queryByRole("link", { name: "Invite collaborators" }), null);
-      assert.ok(screen.getByText("Use"));
-      assert.ok(screen.getByText("Develop"));
-      assert.ok(screen.getByText("Manage"));
-      assert.equal(screen.getByRole("link", { name: "Context" }).closest("section")?.querySelector("h3")?.textContent, "Use");
-      assert.ok(screen.getByRole("link", { name: "Endpoints" }));
-      assert.ok(screen.getByRole("link", { name: "Members" }));
-      assert.ok(screen.getByRole("link", { name: "Resource policy" }));
-      assert.ok(screen.getByRole("link", { name: "Tasks" }));
+      assert.ok(screen.getByRole("region", { name: "Project availability" }));
+      assert.ok(screen.getByText("Read-only access"));
+      assert.ok(screen.getByText("You can inspect the project areas available to your role."));
+      assert.equal(screen.queryByText("Also available"), null);
     } finally {
       apiClient.projectOverview = original;
     }
@@ -283,7 +279,7 @@ describe("retained chat and overview behavior", () => {
       render(<ProjectOverviewPage workspaceId="workspace_1" projectId="project_1" />);
       await screen.findByText("Project overview unavailable");
       fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-      await screen.findByText("Project status: Active.");
+      await screen.findByRole("link",{name:"Start a chat"});
       assert.equal(reads, 2);
       assert.ok(screen.getByRole("link",{name:"Start a chat"}));
       assert.equal(screen.queryByRole("link",{name:/Configure an endpoint/}),null);
@@ -866,7 +862,7 @@ describe("retained chat and overview behavior", () => {
       render(<ProjectChatPage projectId="project_1" />);
       await screen.findByText("Message for chat_1");
       const open = screen.getByRole("button", { name: "Open conversations" });
-      assert.match(open.parentElement?.className ?? "", /lg:hidden/);
+      assert.match(open.className, /lg:hidden/);
       fireEvent.click(open);
       const sheet = await screen.findByRole("dialog", { name: "Conversations" });
       fireEvent.click(within(sheet).getByRole("button", { name: "Release notes" }));
