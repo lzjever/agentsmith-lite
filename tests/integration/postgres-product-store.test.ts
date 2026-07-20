@@ -44,6 +44,7 @@ postgresDescribe("postgres product store", () => {
     try {
       await client.query(`
         truncate table
+          sandbox_usage_settlements,
           agent_task_artifacts,
           task_interaction_changes,
           task_messages,
@@ -207,34 +208,56 @@ postgresDescribe("postgres product store", () => {
   });
 
   it("reactivates deleting project and workspace retries when sandbox ownership is uncertain",async()=>{
-    const timestamp="2026-07-19T00:00:00.000Z",owner="user_delete_retry",workspaceId="ws_delete_retry",projectId="proj_delete_retry",taskId="task_delete_retry",runId="run_delete_retry";
+    const timestamp="2026-07-19T00:00:00.000Z",owner="user_delete_retry",workspaceId="ws_delete_retry",projectId="proj_delete_retry";
     await store.createUser({id:owner,email:"delete-retry@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
     await store.createWorkspace({id:workspaceId,name:"Retry workspace",ownerUserId:owner,createdAt:timestamp,updatedAt:timestamp});
     await store.createProject({id:projectId,workspaceId,name:"Retry project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
     await createTestCredential(store,projectId,"cred_delete_retry",timestamp);
     await store.createEndpoint(endpointRecord("endpoint_delete_retry",projectId,"cred_delete_retry",timestamp));
-    const task:TaskFixture={id:taskId,workspaceId,projectId,endpointId:"endpoint_delete_retry",fileLibraryId:"library_delete_retry",title:"Retry Task",prompt:"work",status:"queued",runId,executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:false,createdAt:timestamp,updatedAt:timestamp};
-    assert.equal((await createTaskWithLibrary(store,task,false)).kind,"created");
-    const cleaned=sandboxRun({workspaceId,projectId,taskId,runId,phase:"cleaned",cleanupStatus:"cleaned",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:"libraries/library_delete_retry/home"});
-    await store.sandboxRuns.put(cleaned);
+    const createStartedRun=async(label:string,createdAt:string,startedAt:string)=>{
+      const taskId=`task_delete_retry_${label}`,runId=`run_delete_retry_${label}`,fileLibraryId=`library_delete_retry_${label}`;
+      const task:TaskFixture={id:taskId,workspaceId,projectId,endpointId:"endpoint_delete_retry",fileLibraryId,createdByUserId:owner,title:`Retry Task ${label}`,prompt:"work",status:"starting",runId,executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:true,createdAt,updatedAt:createdAt};
+      const run=sandboxRun({workspaceId,projectId,taskId,runId,fileLibraryId,startedByUserId:owner,createdAt,updatedAt:createdAt,projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${fileLibraryId}/home`});
+      assert.equal((await store.createTaskAtomically({task:{...task,fileLibraryId},newFileLibrary:{id:fileLibraryId,workspaceId,projectId,name:`Library ${taskId}`,rootSubPath:`libraries/${fileLibraryId}/home`,createdByUserId:owner,createdAt,updatedAt:createdAt},reserveActive:true,sandboxRun:run})).kind,"created");
+      const started=await store.confirmSandboxRunStarted({runId,expectedFencingToken:run.fencingToken,startedAt,auditEvent:{id:`audit_sandbox_started_${runId}`,projectId,actorId:null,subjectUserId:owner,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:taskId,detail:{taskId,runId},createdAt:startedAt}});
+      assert.equal(started.kind,"started");
+      if(started.kind!=="started")throw new Error(`Failed to start deletion retry run ${runId}`);
+      return started.run;
+    };
+    const releaseRun=async(run:SandboxRunState,releasedAt:string)=>{
+      assert.ok(run.startedAt);
+      const cleaned={...run,phase:"cleaned" as const,cleanupStatus:"cleaned" as const,releaseReason:"requested" as const,fencingToken:run.fencingToken+1,updatedAt:releasedAt};
+      const settlement={runId:cleaned.runId,workspaceId,projectId,taskId:cleaned.taskId,fileLibraryId:cleaned.fileLibraryId,startedByUserId:owner,startedAt:cleaned.startedAt,releasedAt,durationSeconds:(Date.parse(releasedAt)-Date.parse(run.startedAt))/1000,resources:cleaned.resourceSnapshot,releaseReason:"requested" as const};
+      const auditEvent={id:`audit_sandbox_released_${run.runId}`,projectId,actorId:null,subjectUserId:owner,action:"sandbox.released" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId,releaseReason:"requested" as const},createdAt:releasedAt};
+      assert.equal(await store.completeSandboxRunRelease({runId:run.runId,expectedFencingToken:run.fencingToken,run:cleaned,settlement,auditEvent}),"applied");
+      return cleaned;
+    };
 
-    assert.equal((await store.beginProjectDeletion(projectId,timestamp,owner)).kind,"ready");
-    await store.sandboxRuns.put({...cleaned,phase:"running",cleanupStatus:"active",fencingToken:2});
+    const projectRun=await createStartedRun("project","2026-07-19T00:00:10.000Z","2026-07-19T00:00:20.000Z");
+    const cleanedProjectRun=await releaseRun(projectRun,"2026-07-19T00:00:30.000Z");
+    assert.equal((await store.findTask(projectRun.taskId))?.activeReservation,false);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,0);
+    assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:00:40.000Z",owner)).kind,"ready");
+    await store.jsonDocs.delete("sandbox_run_state",projectRun.runId);
     assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:01:00.000Z",owner)).kind,"sandbox_not_released");
     assert.equal((await store.findProject(projectId))?.lifecycleStatus,"active");
+    await store.sandboxRuns.put(cleanedProjectRun);
     assert.equal((await store.updateProjectName(projectId,"Writable retry","2026-07-19T00:02:00.000Z","Retry project"))?.name,"Writable retry");
 
-    await store.sandboxRuns.put({...cleaned,fencingToken:3});
+    const workspaceRun=await createStartedRun("workspace","2026-07-19T00:02:30.000Z","2026-07-19T00:02:40.000Z");
+    const cleanedWorkspaceRun=await releaseRun(workspaceRun,"2026-07-19T00:02:50.000Z");
+    assert.equal((await store.findTask(workspaceRun.taskId))?.activeReservation,false);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,0);
     assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:03:00.000Z",owner)).kind,"ready");
     assert.equal((await store.beginProjectDeletion(projectId,"2026-07-19T00:04:00.000Z",owner)).kind,"ready");
     assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:05:00.000Z",owner)).kind,"ready");
-    await store.sandboxRuns.put({...cleaned,phase:"running",cleanupStatus:"cleanup_requested",fencingToken:4});
+    await store.jsonDocs.delete("sandbox_run_state",workspaceRun.runId);
     assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:06:00.000Z",owner)).kind,"sandbox_not_released");
     assert.equal((await store.findWorkspace(workspaceId))?.lifecycleStatus,"active");
     assert.equal((await store.findProject(projectId))?.lifecycleStatus,"active");
+    await store.sandboxRuns.put(cleanedWorkspaceRun);
     assert.equal((await store.updateWorkspaceName(workspaceId,"Writable workspace","2026-07-19T00:07:00.000Z","Retry workspace"))?.name,"Writable workspace");
 
-    await store.sandboxRuns.put({...cleaned,fencingToken:5});
     assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:08:00.000Z",owner)).kind,"ready");
     assert.equal((await store.beginWorkspaceDeletion(workspaceId,"2026-07-19T00:09:00.000Z",owner)).kind,"ready");
   });
@@ -996,18 +1019,37 @@ postgresDescribe("postgres product store", () => {
 
     const run = sandboxRun();
     await store.sandboxRuns.put(run);
-    assert.deepEqual(await store.sandboxRuns.get(run.runId), run);
+    const persistedRun = await store.sandboxRuns.get(run.runId);
+    assert.ok(persistedRun);
+    assert.deepEqual(persistedRun, run);
     assert.deepEqual((await store.sandboxRuns.listActive()).map((item) => item.runId), [run.runId]);
     assert.equal(
-      await store.sandboxRuns.updateWithFencing(run.runId, 0, { ...run, phase: "running", fencingToken: 2 }),
+      await store.sandboxRuns.updateWithFencing(run.runId, 0, { ...persistedRun, phase: "running", fencingToken: 2, updatedAt: "2026-07-04T00:00:01.000Z" }),
       null
     );
     const updated = await store.sandboxRuns.updateWithFencing(run.runId, 1, {
-      ...run,
+      ...persistedRun,
       phase: "running",
-      fencingToken: 2
+      fencingToken: 2,
+      updatedAt: "2026-07-04T00:00:01.000Z"
     });
     assert.equal(updated?.phase, "running");
+    const settlementTask:TaskFixture={id:"task_pg_settlement",workspaceId:"ws_pg_settlement",projectId:"proj_pg_settlement",endpointId:"endpoint_pg_settlement",fileLibraryId:"library_task_pg_settlement",createdByUserId:"user_pg_settlement",prompt:"settle",status:"starting",runId:"run_pg_settlement",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:true,createdAt:"2026-07-04T00:09:00.000Z",updatedAt:"2026-07-04T00:09:00.000Z"};
+    await store.createUser({id:settlementTask.createdByUserId!,email:"settlement@example.test",emailVerified:true,passwordHash:"hash",createdAt:settlementTask.createdAt,updatedAt:settlementTask.updatedAt});
+    await store.createWorkspace({id:settlementTask.workspaceId,name:"Settlement",ownerUserId:settlementTask.createdByUserId!,createdAt:settlementTask.createdAt,updatedAt:settlementTask.updatedAt});
+    await store.createProject({id:settlementTask.projectId,workspaceId:settlementTask.workspaceId,name:"Settlement",ownerUserId:settlementTask.createdByUserId!,rootPath:`workspaces/${settlementTask.workspaceId}/projects/${settlementTask.projectId}`,taskConcurrencyLimit:1,createdAt:settlementTask.createdAt,updatedAt:settlementTask.updatedAt});
+    await createTestCredential(store,settlementTask.projectId,"cred_pg_settlement",settlementTask.createdAt);await store.createEndpoint(endpointRecord(settlementTask.endpointId,settlementTask.projectId,"cred_pg_settlement",settlementTask.createdAt));
+    assert.equal((await createTaskWithLibrary(store,settlementTask,true)).kind,"created");
+    const settlementResources={cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"};
+    const settlementRun=sandboxRun({workspaceId:settlementTask.workspaceId,projectId:settlementTask.projectId,taskId:settlementTask.id,runId:settlementTask.runId,fileLibraryId:settlementTask.fileLibraryId!,startedByUserId:settlementTask.createdByUserId!,startedAt:null,resourceSnapshot:settlementResources,projectSubPath:`workspaces/${settlementTask.workspaceId}/projects/${settlementTask.projectId}`,fileLibraryRootSubPath:`libraries/${settlementTask.fileLibraryId}/home`});await store.sandboxRuns.put(settlementRun);
+    const started=await store.confirmSandboxRunStarted({runId:settlementRun.runId,expectedFencingToken:settlementRun.fencingToken,startedAt:"2026-07-04T00:10:00.000Z",auditEvent:{id:"audit_pg_sandbox_started",projectId:settlementRun.projectId,actorId:null,subjectUserId:settlementRun.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:settlementRun.taskId,detail:{taskId:settlementRun.taskId,runId:settlementRun.runId},createdAt:"2026-07-04T00:10:00.000Z"}});assert.notEqual(started.kind,"conflict");if(started.kind==="conflict")return;
+    const cleaned={...started.run,phase:"cleaned" as const,cleanupStatus:"cleaned" as const,releaseReason:"requested" as const,fencingToken:started.run.fencingToken+1,updatedAt:"2026-07-04T00:10:05.000Z"};const settlement={runId:cleaned.runId,workspaceId:cleaned.workspaceId,projectId:cleaned.projectId,taskId:cleaned.taskId,fileLibraryId:cleaned.fileLibraryId,startedByUserId:cleaned.startedByUserId,startedAt:cleaned.startedAt,releasedAt:cleaned.updatedAt,durationSeconds:5,resources:cleaned.resourceSnapshot,releaseReason:"requested" as const};const releaseAudit={id:"audit_pg_sandbox_released",projectId:cleaned.projectId,actorId:null,subjectUserId:cleaned.startedByUserId,action:"sandbox.released" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:cleaned.taskId,detail:{taskId:cleaned.taskId,runId:cleaned.runId,releaseReason:"requested" as const},createdAt:cleaned.updatedAt};
+    assert.equal(await store.completeSandboxRunRelease({runId:cleaned.runId,expectedFencingToken:started.run.fencingToken,run:cleaned,settlement,auditEvent:releaseAudit}),"applied");
+    const persistedCleaned=await store.sandboxRuns.get(cleaned.runId);assert.ok(persistedCleaned);assert.deepEqual(persistedCleaned,cleaned);
+    const persistedSettlements=await store.listSandboxUsageSettlements(cleaned.projectId,cleaned.startedByUserId);assert.equal(persistedSettlements.length,1);const persistedSettlement=persistedSettlements[0]!;assert.deepEqual(persistedSettlement,settlement);assert.deepEqual(persistedSettlement.resources,settlementResources);
+    const persistedReleaseAudit=(await store.listProjectAuditEvents(cleaned.projectId)).find((event)=>event.id===releaseAudit.id);assert.deepEqual(persistedReleaseAudit,releaseAudit);
+    assert.equal(await store.completeSandboxRunRelease({runId:persistedCleaned.runId,expectedFencingToken:persistedCleaned.fencingToken,run:persistedCleaned,settlement:persistedSettlement,auditEvent:persistedReleaseAudit}),"already_applied");
+    assert.equal(await store.completeSandboxRunRelease({runId:persistedCleaned.runId,expectedFencingToken:persistedCleaned.fencingToken,run:persistedCleaned,settlement:{...persistedSettlement,durationSeconds:6},auditEvent:persistedReleaseAudit}),"conflict");
   });
 });
 
@@ -1078,6 +1120,9 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws_pg/projects/proj_pg",
     fileLibraryRootSubPath: "libraries/library_task_pg/home",
+    fileLibraryId: "library_task_pg",
+    startedByUserId: "user_pg",
+    startedAt: null,
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task_pg",
@@ -1101,6 +1146,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       cpuLimit: "1",
       memoryLimit: "1Gi"
     },
+    resourceSnapshot: { cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824" },
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: "2026-07-04T00:00:00.000Z",

@@ -34,7 +34,9 @@ import type {
   WorkspaceMembershipView,
   TaskListArchivedFilter,
   TaskListSort,
-  SandboxRenderResult
+  SandboxRenderResult,
+  SandboxResourceSnapshot,
+  SandboxReleaseReason
 } from "../../contracts/src/api.js";
 
 export interface PersistedDeliveryReceipt {
@@ -220,6 +222,9 @@ export interface PersistedSandboxRunState {
   pvcName: string;
   projectSubPath: string;
   fileLibraryRootSubPath:string;
+  fileLibraryId: string;
+  startedByUserId: string;
+  startedAt: string | null;
   botifiedPort: number;
   resourceNames: PersistedSandboxRunResourceNames;
   serviceKeySecretRef: {
@@ -236,6 +241,8 @@ export interface PersistedSandboxRunState {
     cpuLimit: string;
     memoryLimit: string;
   };
+  resourceSnapshot: SandboxResourceSnapshot;
+  releaseReason?: SandboxReleaseReason | null;
   modelCa?: {
     configMapName: string;
     configMapKey: string;
@@ -275,6 +282,42 @@ export interface SandboxRunStore {
     run: PersistedSandboxRunState
   ): Promise<PersistedSandboxRunState | null>;
 }
+
+export interface SandboxUsageSettlement {
+  runId: string;
+  workspaceId: string;
+  projectId: string;
+  taskId: string;
+  fileLibraryId: string;
+  startedByUserId: string;
+  startedAt: string | null;
+  releasedAt: string;
+  durationSeconds: number;
+  resources: SandboxResourceSnapshot;
+  releaseReason: SandboxReleaseReason;
+}
+
+export interface ConfirmSandboxRunStartedInput {
+  runId: string;
+  expectedFencingToken: number;
+  startedAt: string;
+  auditEvent: ProjectAuditEvent;
+}
+
+export type ConfirmSandboxRunStartedResult = {
+  kind: "started" | "already_started";
+  run: PersistedSandboxRunState;
+} | { kind: "conflict" };
+
+export interface CompleteSandboxRunReleaseInput {
+  runId: string;
+  expectedFencingToken: number;
+  run: PersistedSandboxRunState;
+  settlement: SandboxUsageSettlement;
+  auditEvent: ProjectAuditEvent;
+}
+
+export type CompleteSandboxRunReleaseResult = "applied" | "already_applied" | "conflict";
 
 export type SandboxGuardedDeletionResult<T> = { kind: "ready"; value: T } | { kind: "sandbox_not_released" } | { kind: "not_found_or_forbidden" };
 
@@ -448,6 +491,9 @@ export interface ProductStore {
   appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void>;
   listProjectAuditEvents(projectId: string): Promise<ProjectAuditEvent[]>;
   queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery): Promise<{ items: ProjectAuditEvent[]; nextCursor: string | null }>;
+  confirmSandboxRunStarted(input: ConfirmSandboxRunStartedInput): Promise<ConfirmSandboxRunStartedResult>;
+  completeSandboxRunRelease(input: CompleteSandboxRunReleaseInput): Promise<CompleteSandboxRunReleaseResult>;
+  listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;
 
   createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential>;
   findProjectCredential(id: string): Promise<StoredProjectCredential | null>;

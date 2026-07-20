@@ -287,11 +287,12 @@ function sandboxRun(task: PersistedAgentTask, state: "active" | "failed" | "clea
   return {
     namespace: "agentsmith", workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id, runId: task.runId,
     phase: cleaned ? "cleaned" : "running", image: "botified:test", pvcName: "files",
-    projectSubPath: `workspaces/${task.workspaceId}/projects/${task.projectId}`, fileLibraryRootSubPath: `libraries/${task.fileLibraryId}/home`, botifiedPort: 3099,
+    projectSubPath: `workspaces/${task.workspaceId}/projects/${task.projectId}`, fileLibraryRootSubPath: `libraries/${task.fileLibraryId}/home`, fileLibraryId:task.fileLibraryId!,startedByUserId:task.createdByUserId??"owner",startedAt:task.createdAt,botifiedPort: 3099,
     resourceNames: { pod: `pod-${task.id}`, service: `service-${task.id}`, configMap: `config-${task.id}`, secret: `secret-${task.id}` },
     serviceKeySecretRef: { name: `secret-${task.id}`, key: "BOTIFIED_SERVICE_KEY" },
     directories: { libraryHome: "/workspace/project/library", botified: "/workspace/project/botified" },
     resourceLimits: { cpuRequest: "100m", memoryRequest: "128Mi", cpuLimit: "1", memoryLimit: "1Gi" },
+    resourceSnapshot:{cpuRequestMillis:"100",memoryRequestBytes:"134217728",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
     fencingToken: 1, cleanupStatus: cleaned ? "cleaned" : state === "cleanup_requested" ? "cleanup_requested" : "active", createdAt: task.createdAt, updatedAt: task.updatedAt
   };
 }

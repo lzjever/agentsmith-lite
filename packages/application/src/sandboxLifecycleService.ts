@@ -239,10 +239,9 @@ export class SandboxLifecycleService {
           blockedRunIds.add(action.run.runId);
           continue;
         }
-        const transition = await this.persistRunTransition(action.run);
+        const transition = await this.completeCleanedRelease(action.run);
         if (transition) {
           result.storedRunIds.push(transition.stored.runId);
-          await this.store.appendProjectAuditEvent({id:`audit_sandbox_released_${action.run.runId}`,projectId:action.run.projectId,actorId:null,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:action.run.taskId,detail:{taskId:action.run.taskId},createdAt:transition.stored.updatedAt});
         } else {
           result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
         }
@@ -468,6 +467,17 @@ export class SandboxLifecycleService {
     return stored ? { previous: current, stored } : null;
   }
 
+  private async completeCleanedRelease(run:SandboxRunState):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
+    const current=await this.store.sandboxRuns.get(run.runId);if(!current)return null;
+    const releasedAt=(this.config.now?.()??new Date()).toISOString();
+    const stored={...(run as PersistedSandboxRunState),releaseReason:releaseReason(current),fencingToken:current.fencingToken+1,updatedAt:releasedAt};
+    const startedAt=current.startedAt;
+    const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
+    const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
+    const result=await this.store.completeSandboxRunRelease({runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,auditEvent:{id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},createdAt:releasedAt}});
+    return result==="conflict"?null:{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
+  }
+
   private async persistTerminalFailureTransitions(
     actions: SandboxReconcileAction[],
     result: SandboxReapResult
@@ -497,8 +507,8 @@ export class SandboxLifecycleService {
     const timestamp = nowIso();
     const endpointId=task?.endpointId;
     await recordProjectFailure(this.store,"sandbox_failure",{
-      id:`audit_sandbox_failed_${run.runId}`,projectId:run.projectId,actorId:null,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,
-      detail:{taskId:run.taskId,...(endpointId?{endpointId}:{})},createdAt:timestamp
+      id:`audit_sandbox_failed_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,
+      detail:{taskId:run.taskId,runId:run.runId,...(endpointId?{endpointId}:{})},createdAt:timestamp
     },endpointId?{endpointId}:{});
   }
 
@@ -520,6 +530,7 @@ export class SandboxLifecycleService {
         phase: current.phase,
         cleanupStatus: "active",
         terminalFailure: structuredClone(actionRun.terminalFailure),
+        releaseReason: "failed",
         fencingToken: current.fencingToken + 1,
         updatedAt: now
       });
@@ -583,6 +594,8 @@ function isActiveRun(run: PersistedSandboxRunState): boolean {
 function isTerminalFailureEligibleRun(run: PersistedSandboxRunState): boolean {
   return run.cleanupStatus === "active" && (run.phase === "queued" || run.phase === "starting" || run.phase === "running");
 }
+
+function releaseReason(run:PersistedSandboxRunState):import("../../contracts/src/api.js").SandboxReleaseReason{return run.releaseReason??(run.terminalFailure?"failed":run.phase==="expired"?"legacy_cleaned":"cleanup")}
 
 const defaultRuntimeDirectoryCleaner: RuntimeDirectoryCleaner = {
   async removeRuntimePath(absolutePath: string): Promise<void> {

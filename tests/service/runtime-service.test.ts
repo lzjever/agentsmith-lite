@@ -58,6 +58,23 @@ describe("live sandbox runtime service", () => {
     assert.equal((await store.sandboxRuns.get(task.runId))?.startupFailure, undefined);
   });
 
+  it("records Pod readiness once before a failing Botified readiness probe",async()=>{
+    const botified=new FakeBotifiedClient([],[new Error("service endpoint is not ready")]);
+    const livePort=new FakeLiveSandboxPort();
+    const {services,store,userId,projectId,endpointId}=await setupRuntimeServices(botified,livePort,{readinessTimeoutMs:0,taskRetryDelayMs:0});
+    const task=await services.tasks.createTask(userId,projectId,taskInput("Botified starts late",endpointId));
+
+    await services.tasks.syncActiveTasksOnce();
+    const afterFailure=await store.sandboxRuns.get(task.runId);
+    assert.ok(afterFailure?.startedAt);
+    const firstStartedAt=afterFailure.startedAt;
+
+    const second=await services.tasks.syncActiveTasksOnce();
+    assert.deepEqual(second.syncedTaskIds,[task.id]);
+    assert.equal((await store.sandboxRuns.get(task.runId))?.startedAt,firstStartedAt);
+    assert.equal((await store.listProjectAuditEvents(projectId)).filter((event)=>event.action==="sandbox.started").length,1);
+  });
+
   it("syncs active task timelines without reaping a completed turn sandbox", async () => {
     const botified = new FakeBotifiedClient([
       { status: "ok", events: [], nextCursor: "evt_s1_0" },
@@ -238,7 +255,7 @@ function taskInput(prompt: string, endpointId: string) {
   return { prompt, endpointId, fileLibrary: { mode: "create_new" as const, name: `Library ${prompt}` } };
 }
 
-async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: FakeLiveSandboxPort) {
+async function setupRuntimeServices(botified:FakeBotifiedClient,livePort:FakeLiveSandboxPort,options:{readinessTimeoutMs?:number;taskRetryDelayMs?:number}={}) {
   const store = createLocalInMemoryProductStore();
   const services = createApplicationServices({
     store,
@@ -251,10 +268,12 @@ async function setupRuntimeServices(botified: FakeBotifiedClient, livePort: Fake
       async completeChat() { throw new Error("not used"); }
     },
     botifiedServiceKeyFactory: () => "test-service-key",
+    ...(options.taskRetryDelayMs!==undefined?{taskRetryDelayMs:options.taskRetryDelayMs}:{}),
     botifiedBaseUrlForTask: ({taskId}) => `http://botified.test/${taskId}`,
     liveSandbox: {
       port: livePort,
-      sleep: livePort.sleep
+      sleep: livePort.sleep,
+      ...(options.readinessTimeoutMs!==undefined?{readinessTimeoutMs:options.readinessTimeoutMs}:{})
     }
   });
   const { user } = await services.auth.loginAfterBootstrap("test-admin-password");

@@ -1,7 +1,8 @@
 import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import type { ProductStore } from "../../ports/src/store.js";
+import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
+import type { PersistedAgentTask, PersistedSandboxRunState, ProductStore, SandboxUsageSettlement } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
@@ -9,13 +10,17 @@ import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, reco
 type Limit = ProjectAlertType;
 const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: nowIso() });
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
+function ownedRunMatchesTask(run:PersistedSandboxRunState,task:PersistedAgentTask):boolean{return run.runId===task.runId&&run.taskId===task.id&&run.projectId===task.projectId&&run.workspaceId===task.workspaceId&&run.fileLibraryId===task.fileLibraryId&&run.startedByUserId===(task.createdByUserId??null)}
+function ownedSettlementMatchesTask(value:SandboxUsageSettlement,task:PersistedAgentTask):boolean{return value.runId===task.runId&&value.taskId===task.id&&value.projectId===task.projectId&&value.workspaceId===task.workspaceId&&value.fileLibraryId===task.fileLibraryId&&value.startedByUserId===(task.createdByUserId??null)}
 
 export class ProjectPolicyService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
 
   async getPolicy(userId: string, projectId: string): Promise<ProjectResourcePolicy> { await this.authorization.requireProject(userId, projectId); return this.requirePolicy(projectId); }
-  async getUsageOverview(userId: string, projectId: string, endpointId?: string): Promise<ProjectUsageOverview> {
-    await this.authorization.requireProject(userId, projectId);
+  async getUsageOverview(userId: string, projectId: string, endpointId?: string, selectedUserId = userId): Promise<ProjectUsageOverview> {
+    const access=await this.authorization.projectAccess(userId,projectId);
+    if(selectedUserId!==userId&&!access.canAdmin)throw new ProductError("Project admin permission is required to view another member's sandbox usage",403);
+    if(!await this.store.findProjectMembership(projectId,selectedUserId))throw new ProductError("Project member not found",404);
     const [project, policy, usage, endpoints] = await Promise.all([this.store.findProject(projectId), this.requirePolicy(projectId), this.usage(projectId), this.store.listEndpointsForProject(projectId)]);
     if (!project) throw new ProductError("Project not found", 404);
     if (endpointId !== undefined && !endpoints.some((endpoint) => endpoint.id === endpointId)) throw new ProductError("Endpoint not found", 404);
@@ -47,7 +52,20 @@ export class ProjectPolicyService {
     const measuredAt=Date.now();
     for(const endpoint of endpointUsage.values()){const windows=(policy.endpointWindows??[]).filter(item=>item.endpointId===endpoint.endpointId);endpoint.limits=[];for(const window of windows){const cutoff=new Date(measuredAt-window.windowSeconds*1000).toISOString();const measured=await this.store.measureProjectProviderWindow({projectId,endpointId:endpoint.endpointId,actorId:userId,metric:window.metric,since:cutoff});const resetAt=measured.oldestReservedAt?new Date(Date.parse(measured.oldestReservedAt)+window.windowSeconds*1000).toISOString():null;endpoint.limits.push({metric:window.metric,current:measured.current,limit:window.limit,remaining:Math.max(0,window.limit-measured.current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt}})}}
     const trendTotals = daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 });
-    return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values(), ...(unassignedEndpointUsage ? [unassignedEndpointUsage] : [])], selectedEndpointId: endpointId ?? null };
+    const sandbox=await this.sandboxUsage(projectId,selectedUserId);
+    return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values(), ...(unassignedEndpointUsage ? [unassignedEndpointUsage] : [])], selectedEndpointId: endpointId ?? null, sandbox };
+  }
+  private async sandboxUsage(projectId:string,selectedUserId:string):Promise<import("../../contracts/src/api.js").ProjectSandboxUsage>{
+    const [tasks,runs,settlements]=await Promise.all([this.store.listTasksForProject(projectId),this.store.sandboxRuns.list(),this.store.listSandboxUsageSettlements(projectId,selectedUserId)]);
+    const projectRuns=runs.filter((run)=>run.projectId===projectId&&run.startedByUserId===selectedUserId),runsById=new Map(projectRuns.map((run)=>[run.runId,run])),settlementsById=new Map(settlements.map((value)=>[value.runId,value]));
+    const ownedTasks=tasks.filter((task)=>!task.deletedAt&&task.executionMode==="live"&&(task.createdByUserId??null)===selectedUserId),tasksByRun=new Map(ownedTasks.map((task)=>[task.runId,task]));
+    for(const task of ownedTasks){const run=runsById.get(task.runId),settlement=settlementsById.get(task.runId);if(!(run&&ownedRunMatchesTask(run,task))&&!(settlement&&ownedSettlementMatchesTask(settlement,task)))throw new ProductError("Sandbox usage is unavailable because an owned run or settlement is missing or mismatched",503,"sandbox_usage_unavailable");if(run&&(run.cleanupStatus==="cleaned"||run.phase==="cleaned")&&!settlement)throw new ProductError("Sandbox usage is unavailable because a cleaned run settlement is missing",503,"sandbox_usage_unavailable");}
+    for(const run of projectRuns){if(run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"){const task=tasksByRun.get(run.runId);if(!task||!ownedRunMatchesTask(run,task))throw new ProductError("Sandbox usage is unavailable because an owned run is missing or mismatched",503,"sandbox_usage_unavailable");}}
+    const measuredAt=Date.now();
+    const rows:import("../../contracts/src/api.js").ProjectSandboxUsageRow[]=[...settlements.map((value)=>({taskId:value.taskId,runId:value.runId,fileLibraryId:value.fileLibraryId,state:"settled" as const,startedAt:value.startedAt,releasedAt:value.releasedAt,durationSeconds:value.durationSeconds,resources:structuredClone(value.resources),releaseReason:value.releaseReason})),...projectRuns.filter((run)=>run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned").map((run)=>({taskId:run.taskId,runId:run.runId,fileLibraryId:run.fileLibraryId,state:"live" as const,startedAt:run.startedAt,releasedAt:null,durationSeconds:run.startedAt?Math.max(0,(measuredAt-Date.parse(run.startedAt))/1000):0,resources:structuredClone(run.resourceSnapshot),releaseReason:null}))].sort((a,b)=>(b.startedAt??b.releasedAt??"").localeCompare(a.startedAt??a.releasedAt??"")||b.runId.localeCompare(a.runId));
+    let totalDurationMs=0n,cpuRequestMillisMs=0n,memoryRequestByteMs=0n;
+    for(const row of rows){const roundedDurationMs=Math.round(row.durationSeconds*1000);if(!Number.isSafeInteger(roundedDurationMs)||roundedDurationMs<0)throw new ProductError("Sandbox usage is unavailable because a duration is outside the supported range",503,"sandbox_usage_unavailable");const durationMs=BigInt(roundedDurationMs);totalDurationMs+=durationMs;cpuRequestMillisMs+=BigInt(row.resources.cpuRequestMillis)*durationMs;memoryRequestByteMs+=BigInt(row.resources.memoryRequestBytes)*durationMs;}
+    return{selectedUserId,activeCount:rows.filter((row)=>row.state==="live"&&row.startedAt!==null).length,launches:rows.filter((row)=>row.startedAt!==null).length,totalDurationSeconds:formatDecimal(totalDurationMs,3),cpuRequestSeconds:formatDecimal(cpuRequestMillisMs,6),memoryRequestByteSeconds:formatDecimal(memoryRequestByteMs,3),rows};
   }
   async alerts(userId:string,projectId:string):Promise<ProjectAlert[]>;
   async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery):Promise<import("../../contracts/src/api.js").ProjectAlertPage>;

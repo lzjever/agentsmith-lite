@@ -107,7 +107,7 @@ describe("durable failure alerts", () => {
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus], [1, 1, "delivered"]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
     const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "sandbox.failed");
-    assert.deepEqual([event?.status, event?.resourceKind, event?.resourceId, event?.detail], ["accepted", "sandbox", setup.run.taskId, { endpointId: setup.task.endpointId, taskId: setup.run.taskId }]);
+    assert.deepEqual([event?.status, event?.resourceKind, event?.resourceId, event?.detail], ["accepted", "sandbox", setup.run.taskId, { endpointId: setup.task.endpointId, taskId: setup.run.taskId, runId:setup.run.runId }]);
     assert.doesNotMatch(JSON.stringify(await setup.store.listProjectAuditEvents(setup.projectId)), /sandbox-secret-must-not-leak/);
   });
 
@@ -208,11 +208,15 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     pvcName: "agentsmith-lite-files",
     projectSubPath,
     fileLibraryRootSubPath: `libraries/library-${taskId}/home`,
+    fileLibraryId:`library-${taskId}`,
+    startedByUserId:"owner",
+    startedAt:timestamp,
     botifiedPort: 3099,
     resourceNames: { pod: `asl-${taskId}`, service: `asl-${taskId}`, configMap: `asl-${taskId}-config`, secret: `asl-${taskId}-secret`, serviceAccount: `asl-${taskId}`, networkPolicy: `asl-${taskId}` },
     serviceKeySecretRef: { name: `asl-${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" },
     directories: { libraryHome: `/tmp/agentsmith-failure-alerts/${projectSubPath}/libraries/library-${taskId}/home`, botified: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/botified` },
     resourceLimits: { cpuRequest: "250m", memoryRequest: "512Mi", cpuLimit: "1", memoryLimit: "1Gi" },
+    resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: timestamp,

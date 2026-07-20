@@ -1,4 +1,4 @@
-import type { KubernetesResource } from "../../contracts/src/api.js";
+import type { KubernetesResource, SandboxReleaseReason, SandboxResourceSnapshot } from "../../contracts/src/api.js";
 import type { SandboxIdentity } from "./labels.js";
 import { sandboxIdentityLabels as identityLabels } from "./labels.js";
 import { renderSandboxResources } from "./manifestRenderer.js";
@@ -55,11 +55,16 @@ export interface SandboxRunState extends SandboxIdentity {
   pvcName: string;
   projectSubPath: string;
   fileLibraryRootSubPath:string;
+  fileLibraryId: string;
+  startedByUserId: string;
+  startedAt: string | null;
   botifiedPort: number;
   resourceNames: SandboxRunResourceNames;
   serviceKeySecretRef: SandboxServiceKeySecretRef;
   directories: SandboxRunDirectories;
   resourceLimits: SandboxRunResourceLimits;
+  resourceSnapshot: SandboxResourceSnapshot;
+  releaseReason?: SandboxReleaseReason | null;
   modelCa?: SandboxRunModelCaReference;
   timelineCursor?: string | null;
   terminalFailure?: SandboxTerminalFailure | null;

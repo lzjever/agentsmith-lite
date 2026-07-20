@@ -30,6 +30,7 @@ import type {
 } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
+import { normalizeSandboxResources } from "../../domain/src/kubernetesQuantity.js";
 import { DEFAULT_SANDBOX_NAMESPACE_LIMIT, MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
@@ -529,8 +530,8 @@ export class TaskService {
       const cleaned=run.cleanupStatus==="cleaned"||run.phase==="cleaned",updatedAt=nowIso();
       const capabilities=await this.taskCapabilities(userId,currentTask);
       const response:TaskSandboxReleaseReceipt={taskId:task.id,sandboxState:{state:cleaned?"released":"release_requested",runId:run.runId},capabilities:{...capabilities,sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,releaseSandbox:false,archiveTask:cleaned&&!currentTask.activeReservation&&capabilities.archiveTask,deleteTask:cleaned&&!currentTask.activeReservation&&capabilities.deleteTask}};
-      const nextRun=cleaned||run.cleanupStatus==="cleanup_requested"||run.cleanupStatus==="deleting"?run:{...run,phase:"stopping" as const,cleanupStatus:"cleanup_requested" as const,fencingToken:run.fencingToken+1,updatedAt};
-      const result=await this.store.requestTaskSandboxRelease({runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,run:nextRun,auditEvent:{id:`audit_sandbox_release_requested_${run.runId}`,projectId:task.projectId,actorId:userId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id},createdAt:updatedAt},idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt}});
+      const nextRun:PersistedSandboxRunState=cleaned||run.cleanupStatus==="cleanup_requested"||run.cleanupStatus==="deleting"?run:{...run,phase:"stopping",cleanupStatus:"cleanup_requested",releaseReason:"requested",fencingToken:run.fencingToken+1,updatedAt};
+      const result=await this.store.requestTaskSandboxRelease({runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,run:nextRun,auditEvent:{id:`audit_sandbox_release_requested_${run.runId}`,projectId:task.projectId,actorId:userId,subjectUserId:run.startedByUserId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id,runId:run.runId},createdAt:updatedAt},idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt}});
       if(result==="conflict")throw new ProductError("Task sandbox release changed concurrently; retry",409,"task_sandbox_release_conflict");
       return response;
     }catch(error){if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});throw error;}
@@ -1440,6 +1441,9 @@ export class TaskService {
       pvcName: this.config.pvcName,
       projectSubPath: input.projectSubPath,
       fileLibraryRootSubPath:input.fileLibraryRootSubPath,
+      fileLibraryId: input.task.fileLibraryId!,
+      startedByUserId: input.task.createdByUserId!,
+      startedAt: null,
       botifiedPort: input.botifiedPort,
       resourceNames: input.resourceNames,
       serviceKeySecretRef: {
@@ -1456,6 +1460,7 @@ export class TaskService {
         cpuLimit: "1",
         memoryLimit: "1Gi"
       },
+      resourceSnapshot: normalizeSandboxResources({ cpuRequest:"250m", memoryRequest:"512Mi", cpuLimit:"1", memoryLimit:"1Gi" }),
       ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
       fencingToken: 1,
       cleanupStatus: "active",
@@ -1504,6 +1509,25 @@ export class TaskService {
       throw new ProductError("Live sandbox pod manifest was not generated", 500);
     }
     await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
+    const startedAt = nowIso();
+    const confirmed = await this.store.confirmSandboxRunStarted({
+      runId: input.run.runId,
+      expectedFencingToken: input.run.fencingToken,
+      startedAt,
+      auditEvent: {
+        id: `audit_sandbox_started_${input.run.runId}`,
+        projectId: input.run.projectId,
+        actorId: null,
+        subjectUserId: input.run.startedByUserId,
+        action: "sandbox.started",
+        status: "accepted",
+        resourceKind: "sandbox",
+        resourceId: input.run.taskId,
+        detail: { taskId:input.run.taskId, runId:input.run.runId },
+        createdAt: startedAt
+      }
+    });
+    if (confirmed.kind === "conflict") throw new ProductError("Sandbox run state fencing token changed before start confirmation", 409);
     await waitForBotifiedServiceReady(live, this.botified, this.botifiedBaseUrlForTask(input.task.id, input.run.botifiedPort));
   }
 

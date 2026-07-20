@@ -11,6 +11,7 @@ export function prepareSandboxRunDocument(run: PersistedSandboxRunState): Record
 
 export function sandboxRunFromDocument(document: Record<string, unknown>): PersistedSandboxRunState {
   const clone = structuredClone(document) as unknown;
+  if(clone&&typeof clone==="object"&&!Array.isArray(clone)&&(clone as Record<string,unknown>).releaseReason==="expired")(clone as Record<string,unknown>).releaseReason="legacy_cleaned";
   assertSandboxRunDocument(clone);
   return clone as unknown as PersistedSandboxRunState;
 }
@@ -23,11 +24,25 @@ function assertSandboxRunDocument(clone: unknown): asserts clone is Record<strin
   assertString(clone.workspaceId, "workspaceId");
   assertString(clone.projectId, "projectId");
   assertString(clone.taskId, "taskId");
+  assertString(clone.fileLibraryId, "fileLibraryId");
+  assertString(clone.startedByUserId, "startedByUserId");
+  if (clone.startedAt !== null) assertString(clone.startedAt, "startedAt");
+  assertResourceSnapshot(clone.resourceSnapshot);
   assertNumber(clone.fencingToken, "fencingToken");
   assertString(clone.phase, "phase");
   assertString(clone.cleanupStatus, "cleanupStatus");
+  if(clone.releaseReason!==undefined&&clone.releaseReason!==null&&!['requested','failed','cleanup','legacy_cleaned'].includes(String(clone.releaseReason)))throw new Error("Sandbox run state releaseReason is invalid");
   assertTerminalFailure(clone.terminalFailure);
   assertStartupFailure(clone.startupFailure);
+}
+
+function assertResourceSnapshot(value:unknown):void {
+  assertRecord(value);
+  for (const field of ["cpuRequestMillis","memoryRequestBytes","cpuLimitMillis","memoryLimitBytes"] as const) {
+    const item=value[field];
+    if(typeof item!=="string"||!/^(?:0|[1-9]\d*)$/u.test(item))throw new Error(`Sandbox run state resourceSnapshot.${field} is invalid`);
+    try{BigInt(item)}catch{throw new Error(`Sandbox run state resourceSnapshot.${field} is invalid`)}
+  }
 }
 
 function assertNoSecretValues(value: unknown): void {

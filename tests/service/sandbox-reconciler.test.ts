@@ -357,6 +357,9 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/w1/projects/p1",
     fileLibraryRootSubPath: "libraries/library-t1/home",
+    fileLibraryId:"library-t1",
+    startedByUserId:"user1",
+    startedAt:"2026-07-04T00:00:00.000Z",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-t1",
@@ -378,6 +381,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       cpuLimit: "1",
       memoryLimit: "1Gi"
     },
+    resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
     timelineCursor: "cursor-0",
     fencingToken: 7,
     cleanupStatus: "active",

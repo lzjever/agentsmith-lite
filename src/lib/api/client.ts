@@ -1,11 +1,13 @@
 "use client";
 
-import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
+export type ProjectAuditEvent = ProjectAuditEventView;
+export type ProjectUsageOverview = ApiProjectUsageOverview;
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string, public readonly code?: string) {
@@ -126,13 +128,11 @@ export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { k
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
 export interface ProjectUsageEndpoint { endpointId: string | null; endpointName: string; requests: number; tokens: number; cost: number;limits?:ProjectUsageLimit[]; }
-export interface ProjectUsageOverview { projectId: string; usage: ProjectResourceUsage; limits: ProjectUsageLimit[]; daily: ProjectUsageDay[]; trendTotals: { requests: number; tokens: number; cost: number }; endpoints: ProjectUsageEndpoint[]; selectedEndpointId: string | null; }
 export interface ProjectAlert { id: string; projectId: string; type: "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure"; status: "active" | "resolved" | "dismissed"; deliveryStatus: "not_configured" | "pending" | "delivered" | "failed";ruleId?:string|null;metric?:string|null;metricValue?:number|null;threshold?:number|null;endpointId?:string|null;acknowledgedAt?:string|null;acknowledgedBy?:string|null;silencedUntil?:string|null; createdAt: string; updatedAt: string; resolvedAt: string | null; dismissedAt: string | null; }
 export interface ProjectAlertPage { items: ProjectAlert[]; nextCursor: string | null; activeCount: number; }
 export type ProjectAlertType = ProjectAlert["type"];
 export interface ProjectAlertRule { id: string; projectId: string;name?:string; alertType: ProjectAlertType;metric?:string;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string}; enabled: boolean; createdAt: string; updatedAt: string; }
 export interface UserNotification { id: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditEvent["resourceKind"] | null; resourceId: string | null; linkPath: string | null; readAt: string | null; createdAt: string; }
-export interface ProjectAuditEvent { id: string; projectId: string; actorId: string | null; actorDisplayName: string | null; actorEmail: string | null; action: ProjectAuditAction; status: "accepted" | "rejected"; resourceKind: ProjectAuditResourceKind; resourceId: string | null;detail?:Record<string,string|number>; createdAt: string; }
 export interface ProjectPolicyInput {
   activeTasksLimit?: number;
   providerRequestsLimit?: number | null;
@@ -278,7 +278,7 @@ export const apiClient = {
   policy: (projectId: string) => request<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`),
   updatePolicy: (projectId: string, input: ProjectPolicyUpdate, idempotencyKey: string) =>
     jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
-  usage: (projectId: string, endpointId?: string) => request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${endpointId ? `?endpointId=${encodeURIComponent(endpointId)}` : ""}`),
+  usage: (projectId: string, query: { endpointId?: string; userId?: string } = {}) => { const params = new URLSearchParams(); if (query.endpointId) params.set("endpointId", query.endpointId); if (query.userId) params.set("userId", query.userId); return request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${params.size ? `?${params}` : ""}`); },
   alerts: (projectId: string, query: { status?: ProjectAlert["status"]; cursor?: string; limit?: number } = {}) => { const params=new URLSearchParams();if(query.status)params.set("status",query.status);if(query.cursor)params.set("cursor",query.cursor);if(query.limit)params.set("limit",String(query.limit));return request<ProjectAlertPage>(`/projects/${encodeURIComponent(projectId)}/alerts${params.size?`?${params}`:""}`); },
   alert: (projectId:string,alertId:string) => request<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`),
   transitionAlert: (projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey: string) => jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`, "PATCH", idempotencyKey, { status }),

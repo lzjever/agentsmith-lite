@@ -2,8 +2,81 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
+import { normalizeSandboxResources, parseKubernetesCpuMillis, parseKubernetesMemoryBytes } from "../../packages/domain/src/kubernetesQuantity.js";
 
 describe("sandbox run store", () => {
+  it("normalizes Kubernetes quantities exactly and rounds positive memory sub-units up", () => {
+    assert.deepEqual(normalizeSandboxResources({cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1500m",memoryLimit:"2Gi"}),{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1500",memoryLimitBytes:"2147483648"});
+    assert.equal(parseKubernetesCpuMillis("1e-3"),"1");
+    assert.equal(parseKubernetesCpuMillis("2E3"),"2000000");
+    assert.equal(parseKubernetesCpuMillis("1e-4"),"1");
+    assert.equal(parseKubernetesCpuMillis("0.000001"),"1");
+    assert.equal(parseKubernetesCpuMillis("0.1m"),"1");
+    assert.equal(parseKubernetesCpuMillis("1n"),"1");
+    assert.equal(parseKubernetesCpuMillis("0e-1000"),"0");
+    assert.equal(parseKubernetesCpuMillis("0.0000m"),"0");
+    assert.equal(parseKubernetesMemoryBytes("1.1"),"2");
+    assert.equal(parseKubernetesMemoryBytes("1.1Ki"),"1127");
+    assert.equal(parseKubernetesMemoryBytes("1e-9"),"1");
+  });
+
+  it("rejects invalid, negative, and overflowing quantities",()=>{
+    for(const value of ["-1","1K","1foo","NaN"])assert.throws(()=>parseKubernetesMemoryBytes(value),/invalid/);
+    assert.throws(()=>parseKubernetesMemoryBytes("9223372036854775808"),/exceeds/);
+    assert.throws(()=>parseKubernetesCpuMillis("9223372036854775808"),/exceeds/);
+    assert.throws(()=>parseKubernetesMemoryBytes("1e100000000000000000"),/exponent exceeds/);
+  });
+  it("confirms sandbox start once and preserves the first timestamp on retry", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.sandboxRuns.put(run);
+
+    const first = await store.confirmSandboxRunStarted({
+      runId: run.runId,
+      expectedFencingToken: run.fencingToken,
+      startedAt: "2026-07-04T00:01:00.000Z",
+      auditEvent: {
+        id: `audit_sandbox_started_${run.runId}`,
+        projectId: run.projectId,
+        actorId: null,
+        subjectUserId: run.startedByUserId,
+        action: "sandbox.started",
+        status: "accepted",
+        resourceKind: "sandbox",
+        resourceId: run.taskId,
+        detail: { taskId: run.taskId, runId: run.runId },
+        createdAt: "2026-07-04T00:01:00.000Z"
+      }
+    });
+    assert.notEqual(first.kind,"conflict");
+    if(first.kind==="conflict")return;
+    const retry = await store.confirmSandboxRunStarted({
+      runId: run.runId,
+      expectedFencingToken: first.run.fencingToken,
+      startedAt: "2026-07-04T00:02:00.000Z",
+      auditEvent: {
+        id: `audit_sandbox_started_${run.runId}`,
+        projectId: run.projectId,
+        actorId: null,
+        subjectUserId: run.startedByUserId,
+        action: "sandbox.started",
+        status: "accepted",
+        resourceKind: "sandbox",
+        resourceId: run.taskId,
+        detail: { taskId: run.taskId, runId: run.runId },
+        createdAt: "2026-07-04T00:02:00.000Z"
+      }
+    });
+
+    assert.equal(first.kind, "started");
+    assert.equal(retry.kind, "already_started");
+    assert.equal(retry.run.startedAt, "2026-07-04T00:01:00.000Z");
+    assert.equal((await store.listProjectAuditEvents(run.projectId)).filter((event) => event.action === "sandbox.started").length, 1);
+    await store.appendProjectAuditEvent({id:"audit_release_request",projectId:run.projectId,actorId:"admin1",subjectUserId:run.startedByUserId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-04T00:03:00.000Z"});
+    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{actorId:"admin1"})).items.map((event)=>event.id),["audit_release_request"]);
+    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{subjectUserId:run.startedByUserId})).items.map((event)=>event.id),["audit_release_request",`audit_sandbox_started_${run.runId}`]);
+  });
+
   it("persists bounded terminal runner failure metadata without Kubernetes status text", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ terminalFailure: { reason: "runner_terminated", exitCode: 19 } });
@@ -127,6 +200,9 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws1/projects/proj1",
     fileLibraryRootSubPath: "libraries/library-task1/home",
+    fileLibraryId: "library-task1",
+    startedByUserId: "user1",
+    startedAt: null,
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task1",
@@ -149,6 +225,12 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       memoryRequest: "512Mi",
       cpuLimit: "1",
       memoryLimit: "1Gi"
+    },
+    resourceSnapshot: {
+      cpuRequestMillis:"250",
+      memoryRequestBytes:"536870912",
+      cpuLimitMillis:"1000",
+      memoryLimitBytes:"1073741824"
     },
     fencingToken: 1,
     cleanupStatus: "active",

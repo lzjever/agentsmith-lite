@@ -14,7 +14,7 @@ const projectId = "project_1";
 const policy: ProjectResourcePolicy = { projectId, activeTasksLimit: 2, providerRequestsLimit: 10, providerTokensLimit: null, providerCostLimit: 3.5, projectFileBytesLimit: 2048, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z" };
 const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: true, canWriteFiles: true, canCreateTasks: true, canCancelTasks: true, canSendChat: true };
 const usage: ProjectResourceUsage = { projectId, activeTasks: 1, providerRequests: 4, providerTokens: 50, providerCost: 1.25, projectFileBytes: 2048, updatedAt: "2026-07-11T00:00:00.000Z" };
-const usageOverview: ProjectUsageOverview = { projectId, usage, limits: [{ metric: "activeTasks", current: 1, limit: 2, remaining: 1, window: { kind: "current_gauge", resetAt: null } }, { metric: "providerRequests", current: 4, limit: 10, remaining: 6, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerTokens", current: 50, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerCost", current: 1.25, limit: 3.5, remaining: 2.25, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "projectFileBytes", current: 2048, limit: 2048, remaining: 0, window: { kind: "current_gauge", resetAt: null } }], daily: Array.from({ length: 30 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, "0")}`, requests: index === 29 ? 4 : 0, tokens: index === 29 ? 50 : 0, cost: index === 29 ? 1.25 : 0 })), trendTotals: { requests: 4, tokens: 50, cost: 1.25 }, endpoints: [{ endpointId: "endpoint_1", endpointName: "Primary", requests: 4, tokens: 50, cost: 1.25 }, { endpointId: "endpoint_2", endpointName: "Secondary", requests: 0, tokens: 0, cost: 0 }], selectedEndpointId: null };
+const usageOverview: ProjectUsageOverview = { projectId, usage, limits: [{ metric: "activeTasks", current: 1, limit: 2, remaining: 1, window: { kind: "current_gauge", resetAt: null } }, { metric: "providerRequests", current: 4, limit: 10, remaining: 6, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerTokens", current: 50, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerCost", current: 1.25, limit: 3.5, remaining: 2.25, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "projectFileBytes", current: 2048, limit: 2048, remaining: 0, window: { kind: "current_gauge", resetAt: null } }], daily: Array.from({ length: 30 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, "0")}`, requests: index === 29 ? 4 : 0, tokens: index === 29 ? 50 : 0, cost: index === 29 ? 1.25 : 0 })), trendTotals: { requests: 4, tokens: 50, cost: 1.25 }, endpoints: [{ endpointId: "endpoint_1", endpointName: "Primary", requests: 4, tokens: 50, cost: 1.25 }, { endpointId: "endpoint_2", endpointName: "Secondary", requests: 0, tokens: 0, cost: 0 }], selectedEndpointId: null, sandbox: { selectedUserId: "user_1", activeCount: 0, launches: 0, totalDurationSeconds: "0", cpuRequestSeconds: "0", memoryRequestByteSeconds: "0", rows: [] } };
 const endpoint: Endpoint = { id: "endpoint_1", projectId, name: "Primary", protocol: "openai_chat_completions", baseUrl: "https://provider.example/v1", model: "model", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
 
 afterEach(() => {
@@ -671,8 +671,8 @@ describe("project resource pages", () => {
 
   it("renders API-computed limits and trends, and refetches for the selected endpoint", async () => {
     const original = snapshotClient();
-    const usageCalls: Array<string | undefined> = [];
-    apiClient.usage = async (_projectId, endpointId) => { usageCalls.push(endpointId); return { ...usageOverview, selectedEndpointId: endpointId ?? null, daily: endpointId === "endpoint_2" ? usageOverview.daily.map((day) => ({ ...day, requests: 0, tokens: 0, cost: 0 })) : usageOverview.daily, trendTotals: endpointId === "endpoint_2" ? { requests: 0, tokens: 0, cost: 0 } : usageOverview.trendTotals }; };
+    const usageCalls: Array<{ endpointId?: string; userId?: string }> = [];
+    apiClient.usage = async (_projectId, query) => { usageCalls.push(query); return { ...usageOverview, selectedEndpointId: query.endpointId ?? null, daily: query.endpointId === "endpoint_2" ? usageOverview.daily.map((day) => ({ ...day, requests: 0, tokens: 0, cost: 0 })) : usageOverview.daily, trendTotals: query.endpointId === "endpoint_2" ? { requests: 0, tokens: 0, cost: 0 } : usageOverview.trendTotals }; };
     apiClient.alerts = async () => alertTypes.map((type, index) => ({ id: `alert_${index}`, projectId, type, status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null }));
     apiClient.projectCapabilities = async () => capabilities;
     try {
@@ -690,7 +690,7 @@ describe("project resource pages", () => {
       fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await screen.findByText("No settled provider usage in this period.");
-      assert.deepEqual(usageCalls, [undefined, "endpoint_2"]);
+      assert.deepEqual(usageCalls, [{}, { endpointId: "endpoint_2" }]);
       usageView.unmount();
       render(<AlertsPage projectId={projectId} />);
       await screen.findByText("Sandbox failure");
@@ -703,8 +703,8 @@ describe("project resource pages", () => {
     let secondaryReads = 0;
     let resolveOlder!: (value: ProjectUsageOverview) => void;
     const withRequests = (requests: number): ProjectUsageOverview => ({ ...usageOverview, selectedEndpointId: "endpoint_2", daily: usageOverview.daily.map((day, index) => ({ ...day, requests: index === 29 ? requests : 0 })), trendTotals: { ...usageOverview.trendTotals, requests } });
-    apiClient.usage = async (_projectId, endpointId) => {
-      if (!endpointId) return usageOverview;
+    apiClient.usage = async (_projectId, query) => {
+      if (!query.endpointId) return usageOverview;
       secondaryReads += 1;
       if (secondaryReads === 1) return new Promise((resolve) => { resolveOlder = resolve; });
       return withRequests(22);
@@ -725,10 +725,10 @@ describe("project resource pages", () => {
 
   it("filters audit events, opens a safe detail view, and never renders unsupported sensitive event fields", async () => {
     const original = snapshotClient();
-    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", action: "alert.rule.delete", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_rule_1", createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as ProjectAuditEvent;
+    const event = { id: "audit_1", projectId, actorId: "user_1", actorDisplayName: "Ada Admin", actorEmail: "ada@example.test", subjectUserId: "user_2", action: "alert.rule.delete", status: "accepted" as const, resourceKind: "alert" as const, resourceId: "alert_rule_1", detail: { taskId: "task_1", runId: "run_1", releaseReason: "expired" }, createdAt: "2026-07-11T00:00:00.123Z", payload: { prompt: "do not render", credential: "supersecret" } } as unknown as ProjectAuditEvent;
     const queries: Array<Record<string, string | number | undefined>> = [];
     apiClient.audit = async (_projectId, query = {}) => { queries.push(query); return { items: [event], nextCursor: null }; };
-    apiClient.members = async () => [{ projectId, userId: "user_1", role: "owner", displayName: "Ada Admin", email: "ada@example.test", createdAt: policy.createdAt, updatedAt: policy.updatedAt }];
+    apiClient.members = async () => [{ projectId, userId: "user_1", role: "owner", displayName: "Ada Admin", email: "ada@example.test", createdAt: policy.createdAt, updatedAt: policy.updatedAt }, { projectId, userId: "user_2", role: "member", displayName: "Rae Runner", email: "rae@example.test", createdAt: policy.createdAt, updatedAt: policy.updatedAt }];
     try {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_rule_1");
       render(<AuditPage projectId={projectId} />);
@@ -743,6 +743,11 @@ describe("project resource pages", () => {
       fireEvent.click(await screen.findByRole("option", { name: "Ada Admin (ada@example.test)" }));
       await waitFor(() => assert.equal(queries.at(-1)?.actorId, "user_1"));
       assert.equal(new URL(window.location.href).searchParams.get("actorId"), "user_1");
+      fireEvent.click(screen.getByRole("combobox", { name: "Resource user" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Rae Runner (rae@example.test)" }));
+      await waitFor(() => assert.equal(queries.at(-1)?.subjectUserId, "user_2"));
+      assert.equal(queries.at(-1)?.actorId, "user_1");
+      assert.equal(new URL(window.location.href).searchParams.get("subjectUserId"), "user_2");
       fireEvent.click(screen.getByRole("combobox", { name: "Action" }));
       assert.ok(await screen.findByRole("option", { name: "Sent chat message" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));
@@ -754,7 +759,11 @@ describe("project resource pages", () => {
       assert.ok(screen.getAllByText("Deleted alert rule").length >= 2);
       assert.ok(screen.getByText("alert.rule.delete"));
       assert.ok(screen.getAllByText("Ada Admin").length > 0);
+      assert.ok(screen.getAllByText(/Rae Runner|user_2/).length > 0);
       assert.ok(screen.getByText(event.createdAt));
+      assert.ok(screen.getByText("Task ID"));
+      assert.ok(screen.getByText("Run ID"));
+      assert.equal(screen.queryByText("expired", { exact: false }), null);
       assert.equal(screen.queryByText("do not render"), null);
       assert.equal(screen.queryByText("supersecret"), null);
     } finally { window.history.pushState({}, "", "/"); restoreClient(original); }
@@ -763,14 +772,19 @@ describe("project resource pages", () => {
   it("labels sandbox release audit events", async () => {
     const original = snapshotClient();
     const events = [
-      { id:"audit_release_requested", projectId, actorId:null, action:"sandbox.release_requested", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", createdAt:policy.createdAt },
-      { id:"audit_released", projectId, actorId:null, action:"sandbox.released", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", createdAt:policy.updatedAt }
-    ] as ProjectAuditEvent[];
+      { id:"audit_started", projectId, actorId:null, actorDisplayName:null, actorEmail:null, subjectUserId:"user_1", action:"sandbox.started", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", detail:{taskId:"task_1",runId:"run_1"}, createdAt:policy.createdAt },
+      { id:"audit_release_requested", projectId, actorId:null, actorDisplayName:null, actorEmail:null, subjectUserId:"user_1", action:"sandbox.release_requested", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", detail:{taskId:"task_1",runId:"run_1"}, createdAt:policy.createdAt },
+      { id:"audit_released", projectId, actorId:null, actorDisplayName:null, actorEmail:null, subjectUserId:"user_1", action:"sandbox.released", status:"accepted" as const, resourceKind:"sandbox" as const, resourceId:"task_1", detail:{taskId:"task_1",runId:"run_1",releaseReason:"cleanup" as const}, createdAt:policy.updatedAt }
+    ] satisfies ProjectAuditEvent[];
     apiClient.audit = async () => ({ items:events, nextCursor:null });
     try {
       render(<AuditPage projectId={projectId} />);
+      assert.ok(await screen.findByText("Started sandbox"));
       assert.ok(await screen.findByText("Requested sandbox release"));
       assert.ok(screen.getByText("Released sandbox"));
+      fireEvent.click(screen.getByRole("button", { name: /sandbox.released/ }));
+      assert.ok(await screen.findByText("Release reason"));
+      assert.ok(screen.getByText("Cleanup"));
     } finally { restoreClient(original); }
   });
 
@@ -786,7 +800,7 @@ describe("project resource pages", () => {
 
       assert.ok(screen.getByText("From"));
       assert.ok(screen.getByText("To"));
-      assert.match(screen.getByLabelText("To timestamp").parentElement?.parentElement?.className ?? "", /xl:grid-cols-4/);
+      assert.match(screen.getByLabelText("To timestamp").parentElement?.parentElement?.className ?? "", /xl:grid-cols-5/);
 
       fireEvent.click(screen.getByRole("combobox", { name: "Resource type" }));
       fireEvent.click(await screen.findByRole("option", { name: "Task", exact: true }));

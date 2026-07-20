@@ -54,6 +54,11 @@ import type {
   CompleteTaskIdempotencyInput,
   TaskSandboxReleaseMutationInput,
   TaskSandboxReleaseMutationResult,
+  ConfirmSandboxRunStartedInput,
+  ConfirmSandboxRunStartedResult,
+  CompleteSandboxRunReleaseInput,
+  CompleteSandboxRunReleaseResult,
+  SandboxUsageSettlement,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
@@ -93,7 +98,7 @@ export class InMemoryProductStore implements ProductStore {
 
   readonly jsonDocs: PostgresJsonDocStore = new InMemoryJsonDocStore();
   readonly leases: PostgresLeaseStore = new InMemoryLeaseStore();
-  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs,(run)=>this.releaseReservationForCleanedRun(run));
+  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs);
 
   private readonly users = new Map<string, StoredUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -106,6 +111,7 @@ export class InMemoryProductStore implements ProductStore {
   private readonly policies = new Map<string, ProjectResourcePolicy>();
   private readonly usage = new Map<string, ProjectResourceUsage>();
   private readonly providerSettlements = new Map<string, ProjectProviderSettlement>();
+  private readonly sandboxUsageSettlements = new Map<string, SandboxUsageSettlement>();
   private readonly alerts = new Map<string, ProjectAlert>();
   private readonly auditEvents: ProjectAuditEvent[] = [];
   private readonly endpoints = new Map<string, ModelEndpoint>();
@@ -503,7 +509,26 @@ export class InMemoryProductStore implements ProductStore {
   async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId) return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
   async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
   async listProjectAuditEvents(projectId:string){return this.auditEvents.filter(event=>event.projectId===projectId).map(clone)}
-  async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
+  async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
+  async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{
+    return this.sandboxRuns.confirmStarted(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
+  }
+  async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{
+    try{return await this.sandboxRuns.completeRelease(input,(replay)=>{
+      const existing=this.sandboxUsageSettlements.get(input.runId);
+      if(existing&&!sameSettlement(existing,input.settlement))throw new Error("Sandbox usage settlement conflict");
+      if(replay){if(!existing)throw new Error("Sandbox usage settlement conflict");}
+      else{
+        const task=this.tasks.get(input.run.taskId);
+        const project=this.projects.get(input.run.projectId);
+        if(!taskMatchesActiveSandboxRun(task,project,input.run))throw new Error("Sandbox usage task conflict");
+      }
+      if(!existing)this.sandboxUsageSettlements.set(input.runId,clone(input.settlement));
+      if(!replay)this.releaseReservationForCleanedRun(input.run);
+      if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
+    });}catch(error){if(error instanceof Error&&(error.message==="Sandbox usage settlement conflict"||error.message==="Sandbox usage task conflict"))return"conflict";throw error}
+  }
+  async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{return[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===projectId&&value.startedByUserId===startedByUserId).sort((a,b)=>b.releasedAt.localeCompare(a.releasedAt)||b.runId.localeCompare(a.runId)).map(clone)}
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }
   async findProjectCredential(id:string): Promise<StoredProjectCredential | null> { return clone(this.credentials.get(id) ?? null); }
   async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
@@ -1121,14 +1146,14 @@ class InMemoryJsonDocStore implements PostgresJsonDocStore {
 class InMemorySandboxRunStore {
   private mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly jsonDocs: PostgresJsonDocStore,private readonly onCleaned:(run:PersistedSandboxRunState)=>void) {}
+  constructor(private readonly jsonDocs: PostgresJsonDocStore) {}
 
   async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
-    const previous=await this.get(run.runId);
+    const current=await this.get(run.runId);if(current&&!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");
+    if(current&&!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");
     const document = prepareSandboxRunDocument(run);
     await this.jsonDocs.put("sandbox_run_state", run.runId, document);
     const stored=sandboxRunFromDocument(document);
-    if((stored.cleanupStatus==="cleaned"||stored.phase==="cleaned")&&(!previous||previous.cleanupStatus!=="cleaned"&&previous.phase!=="cleaned"))this.onCleaned(stored);
     return stored;
   }
 
@@ -1177,6 +1202,8 @@ class InMemorySandboxRunStore {
       if (!current || current.fencingToken !== expectedFencingToken) {
         return null;
       }
+      if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");
+      if(!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");
       return this.put(run);
     });
   }
@@ -1195,6 +1222,29 @@ class InMemorySandboxRunStore {
     });
   }
 
+  async confirmStarted(input:ConfirmSandboxRunStartedInput,commit:(event:ProjectAuditEvent)=>void):Promise<ConfirmSandboxRunStartedResult>{
+    return this.serializeMutation(async()=>{
+      const current=await this.get(input.runId);
+      if(!current)return{kind:"conflict"};
+      if(current.startedAt){commit(input.auditEvent);return{kind:"already_started",run:current};}
+      if(current.fencingToken!==input.expectedFencingToken||current.cleanupStatus!=="active"||current.phase!=="starting")return{kind:"conflict"};
+      const run={...current,startedAt:input.startedAt,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
+      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return{kind:"conflict"};
+      this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(run));
+      try{commit(input.auditEvent);return{kind:"started",run};}catch(error){this.jsonDocs.putSync("sandbox_run_state",current.runId,prepareSandboxRunDocument(current));throw error}
+    });
+  }
+
+  async completeRelease(input:CompleteSandboxRunReleaseInput,commit:(replay:boolean)=>void):Promise<CompleteSandboxRunReleaseResult>{
+    return this.serializeMutation(async()=>{
+      const current=await this.get(input.runId);
+      if(!current||!sameRunIdentity(current,input.run))return"conflict";
+      if(current.cleanupStatus==="cleaned"||current.phase==="cleaned"){commit(true);return"already_applied";}
+      if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.cleanupStatus!=="cleaned"||input.run.phase!=="cleaned"||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
+      try{if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return"conflict";this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(input.run));commit(false);return"applied";}catch(error){if(this.jsonDocs instanceof InMemoryJsonDocStore)this.jsonDocs.putSync("sandbox_run_state",current.runId,prepareSandboxRunDocument(current));throw error}
+    });
+  }
+
   private async serializeMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTail;
     let release!: () => void;
@@ -1207,6 +1257,12 @@ class InMemorySandboxRunStore {
     }
   }
 }
+
+function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.startedAt===right.startedAt&&JSON.stringify(left.resourceLimits)===JSON.stringify(right.resourceLimits)&&JSON.stringify(left.resourceSnapshot)===JSON.stringify(right.resourceSnapshot)}
+function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return JSON.stringify(left)===JSON.stringify(right)}
+function isConfirmedCleanedRun(run:PersistedSandboxRunState):boolean{return run.cleanupStatus==="cleaned"||run.phase==="cleaned"}
+function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,cleaned:PersistedSandboxRunState):boolean{const duration=current.startedAt===null?0:Math.max(0,(Date.parse(cleaned.updatedAt)-Date.parse(current.startedAt))/1000);return value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===cleaned.updatedAt&&value.durationSeconds===duration&&value.releaseReason===cleaned.releaseReason&&JSON.stringify(value.resources)===JSON.stringify(current.resourceSnapshot)}
+function taskMatchesActiveSandboxRun(task:PersistedAgentTask|undefined,project:Project|undefined,run:PersistedSandboxRunState):boolean{return Boolean(task&&project&&!task.deletedAt&&task.executionMode==="live"&&task.activeReservation===true&&task.id===run.taskId&&task.runId===run.runId&&task.projectId===run.projectId&&task.workspaceId===run.workspaceId&&task.fileLibraryId===run.fileLibraryId&&project.id===run.projectId&&project.workspaceId===run.workspaceId&&(task.createdByUserId??project.ownerUserId)===run.startedByUserId)}
 
 function sandboxRunCleanupEligible(run: PersistedSandboxRunState, _claimedAt: string): boolean {
   if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") return false;

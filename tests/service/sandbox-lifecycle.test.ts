@@ -26,7 +26,7 @@ describe("sandbox lifecycle service", () => {
   it("allows only one concurrent reaper to execute destructive cleanup", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const operations: string[] = [];
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)), { operations });
     const service = new SandboxLifecycleService(store, {
@@ -51,7 +51,7 @@ describe("sandbox lifecycle service", () => {
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
     const laterRun = sandboxRunFor("task2", "run2", { phase: "stopping", cleanupStatus: "cleanup_requested" });
     await store.sandboxRuns.put(run);
-    await store.sandboxRuns.put(laterRun);
+    await createReleasableRun(store,laterRun);
     const claimForCleanup = store.sandboxRuns.claimForCleanup.bind(store.sandboxRuns);
     let stalePlanRejected = false;
     store.sandboxRuns.claimForCleanup = async (input) => {
@@ -146,7 +146,7 @@ describe("sandbox lifecycle service", () => {
   it("applies cleanup in delete order and persists cleaned state when resources are gone", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const port = new FakeLifecyclePort(createdResourcesForRun(asObservedActiveRun(run)));
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
@@ -176,7 +176,7 @@ describe("sandbox lifecycle service", () => {
   it("treats a delete error as applied when fresh observe no longer has the exact target", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const resources = createdResourcesForRun(asObservedActiveRun(run));
     const pod = resources.find((resource) => resource.kind === "Pod");
     assert.ok(pod);
@@ -271,7 +271,7 @@ describe("sandbox lifecycle service", () => {
   it("applies cleanup for live listed resources even when list items omit kind and apiVersion", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const transport = liveListTransport(createdResourcesForRun(asObservedActiveRun(run)));
     const cleaner = new FakeRuntimeDirectoryCleaner();
     const service = new SandboxLifecycleService(store, {
@@ -310,7 +310,7 @@ describe("sandbox lifecycle service", () => {
   it("applies live cleanup from listed resource UIDs when Service GET before delete returns HTTP 400", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const transport = liveListTransport(createdResourcesForRun(asObservedActiveRun(run)).map(withUid), {
       rejectServiceRead: true
     });
@@ -347,7 +347,7 @@ describe("sandbox lifecycle service", () => {
   it("does not report a Service delete HTTP 400 when fresh observe shows the same Service terminating", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const transport = liveListTransport(createdResourcesForRun(asObservedActiveRun(run)).map(withUid), {
       rejectServiceDeleteAfterTerminating: true
     });
@@ -369,7 +369,7 @@ describe("sandbox lifecycle service", () => {
   it("retries Service delete HTTP 400 confirmation until a fresh observe no longer sees the target", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const resources = createdResourcesForRun(asObservedActiveRun(run)).map(withUid);
     const afterPodDeleted = resources.filter((resource) => resource.kind !== "Pod");
     const afterServiceDeleted = afterPodDeleted.filter((resource) => resource.kind !== "Service");
@@ -409,7 +409,7 @@ describe("sandbox lifecycle service", () => {
   it("uses the bounded default delete error confirmation attempts", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     const resources = createdResourcesForRun(asObservedActiveRun(run)).map(withUid);
     const afterPodDeleted = resources.filter((resource) => resource.kind !== "Pod");
     const defaultConfirmAttempts = 5;
@@ -519,7 +519,7 @@ describe("sandbox lifecycle service", () => {
 
   it("retains reservation while cleanup is in progress and releases it only when cleaned", async () => {
     const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });
+    const run = sandboxRun({ phase: "expired", cleanupStatus: "cleanup_requested" });
     await store.createProject({ id: run.projectId, workspaceId: run.workspaceId, name: "P", ownerUserId: "user1", rootPath: run.projectSubPath, taskConcurrencyLimit: 1, createdAt: run.createdAt, updatedAt: run.updatedAt });
     await store.createProjectResourcePolicy({ projectId: run.projectId, activeTasksLimit: 1, providerRequestsLimit: null, providerTokensLimit: null, providerCostLimit: null, projectFileBytesLimit: null, createdAt: run.createdAt, updatedAt: run.updatedAt });
     await store.upsertProjectResourceUsage({ projectId: run.projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: run.updatedAt });
@@ -531,6 +531,7 @@ describe("sandbox lifecycle service", () => {
     const completeService=new SandboxLifecycleService(store,{dataRoot:"/workspace",namespace:run.namespace,port:new FakeLifecyclePort([])});await completeService.reapSandboxRunsOnce({runId:run.runId,apply:true});
     assert.equal((await store.sandboxRuns.get(run.runId))?.cleanupStatus,"cleaned");assert.equal((await store.findTask(run.taskId))?.activeReservation,false);assert.equal((await store.findTask(run.taskId))?.status,"running");
     assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks, 0);
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId))[0]?.releaseReason,"legacy_cleaned");
   });
 
   it("retains full-identity resources without an explicit persisted cleanup request", async () => {
@@ -581,7 +582,7 @@ describe("sandbox lifecycle service", () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ cleanupStatus: "cleanup_requested", phase: "stopping" });
     const otherRun = sandboxRunFor("task2", "run2");
-    await store.sandboxRuns.put(run);
+    await createReleasableRun(store,run);
     await store.sandboxRuns.put(otherRun);
     const unknown = observedResource("Pod", "asl-task-unknown", {
       "agentsmith-lite/managed-by": "agentsmith-lite",
@@ -749,6 +750,9 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
     pvcName: "agentsmith-lite-files",
     projectSubPath: "workspaces/ws1/projects/proj1",
     fileLibraryRootSubPath: "libraries/library-task1/home",
+    fileLibraryId:"library-task1",
+    startedByUserId:"user1",
+    startedAt:"2026-07-04T00:00:00.000Z",
     botifiedPort: 3099,
     resourceNames: {
       pod: "asl-task-task1",
@@ -772,6 +776,7 @@ function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
       cpuLimit: "1",
       memoryLimit: "1Gi"
     },
+    resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
     fencingToken: 1,
     cleanupStatus: "active",
     createdAt: "2026-07-04T00:00:00.000Z",
@@ -784,6 +789,7 @@ function sandboxRunFor(taskId: string, runId: string, overrides: Partial<Sandbox
   return sandboxRun({
     taskId,
     runId,
+    fileLibraryId:`library-${taskId}`,
     fileLibraryRootSubPath: `libraries/library-${taskId}/home`,
     resourceNames: {
       pod: `asl-task-${taskId}`,
@@ -845,6 +851,13 @@ async function createTaskForRun(
     reserveActive
   });
   assert.equal(created.kind, "created");
+}
+
+async function createReleasableRun(store:ReturnType<typeof createLocalInMemoryProductStore>,run:SandboxRunState):Promise<void>{
+  if(!await store.findProject(run.projectId))await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Sandbox project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:10,createdAt:run.createdAt,updatedAt:run.updatedAt});
+  if(!await store.findProjectResourcePolicy(run.projectId))await store.createProjectResourcePolicy({projectId:run.projectId,activeTasksLimit:10,providerRequestsLimit:null,providerTokensLimit:null,providerCostLimit:null,projectFileBytesLimit:null,createdAt:run.createdAt,updatedAt:run.updatedAt});
+  if(!await store.findProjectResourceUsage(run.projectId))await store.upsertProjectResourceUsage({projectId:run.projectId,activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:0,updatedAt:run.updatedAt});
+  await createTaskForRun(store,taskForRun(run,"running"),true);await store.sandboxRuns.put(run);
 }
 
 function createdResourcesForRun(run: SandboxRunState): KubernetesResource[] {

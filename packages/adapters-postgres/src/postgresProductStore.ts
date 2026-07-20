@@ -54,6 +54,11 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   TaskSandboxReleaseMutationInput,
+  ConfirmSandboxRunStartedInput,
+  ConfirmSandboxRunStartedResult,
+  CompleteSandboxRunReleaseInput,
+  CompleteSandboxRunReleaseResult,
+  SandboxUsageSettlement,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
@@ -526,9 +531,31 @@ export class PostgresProductStore implements ProductStore {
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const column = status === "resolved" ? "resolved_at" : "dismissed_at"; const rows = await this.queryRows<ProjectAlertRow>(`update project_alerts set status=$3, ${column}=$4, updated_at=$4 where project_id=$1 and id=$2 and status='active' returning *`, [projectId, id, status, updatedAt]); return rows[0] ? mapAlert(rows[0]) : null; }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const rows=await this.queryRows<ProjectAlertRow>(`update project_alerts set acknowledged_at=coalesce($3,acknowledged_at),acknowledged_by=coalesce($4,acknowledged_by),silenced_until=case when $5::boolean then $6::timestamptz else silenced_until end,updated_at=$7 where project_id=$1 and id=$2 and status='active' returning *`,[projectId,id,input.acknowledgedAt??null,input.acknowledgedBy??null,Object.hasOwn(input,'silencedUntil'),input.silencedUntil??null,updatedAt]);return rows[0]?mapAlert(rows[0]):null}
   async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const rows = await this.queryRows<ProjectAlertRow>("update project_alerts set delivery_status=$3, updated_at=$4 where project_id=$1 and id=$2 returning *", [projectId, id, status, updatedAt]); return rows[0] ? mapAlert(rows[0]) : null; }
-  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { await this.pool.query("insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (id) do nothing", [event.id,event.projectId,event.actorId,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]); }
+  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { await this.pool.query("insert into project_audit_events (id,project_id,actor_id,subject_user_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict (id) do nothing", [event.id,event.projectId,event.actorId,event.subjectUserId??null,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]); }
   async listProjectAuditEvents(projectId:string){const rows=await this.queryRows<ProjectAuditRow>('select * from project_audit_events where project_id=$1 order by created_at,id',[projectId]);return rows.map(mapAudit)}
-  async queryProjectAuditEvents(projectId:string,query:import("../../contracts/src/api.js").ProjectAuditQuery){const limit=Math.min(100,Math.max(1,query.limit??20));const values:unknown[]=[projectId];const where=["project_id=$1"];const add=(sql:string,value:unknown)=>{values.push(value);where.push(sql.replace('?',`$${values.length}`))};if(Object.hasOwn(query,'actorId'))query.actorId===null?where.push('actor_id is null'):add('actor_id=?',query.actorId);if(query.action)add('action=?',query.action);if(query.status)add('status=?',query.status);if(query.resourceKind)add('resource_kind=?',query.resourceKind);if(query.resourceId)add('resource_id=?',query.resourceId);if(query.from)add('created_at>=?',query.from);if(query.to)add('created_at<=?',query.to);if(query.cursor){const split=query.cursor.lastIndexOf('|');if(split<1)throw new Error('Invalid audit cursor');values.push(query.cursor.slice(0,split),query.cursor.slice(split+1));where.push(`(created_at,id)<($${values.length-1},$${values.length})`)}values.push(limit+1);const rows=await this.queryRows<ProjectAuditRow>(`select * from project_audit_events where ${where.join(' and ')} order by created_at desc,id desc limit $${values.length}`,values);const page=rows.slice(0,limit);return{items:page.map(mapAudit),nextCursor:rows.length>limit&&page.length?`${toIso(page.at(-1)!.created_at)}|${page.at(-1)!.id}`:null}}
+  async queryProjectAuditEvents(projectId:string,query:import("../../contracts/src/api.js").ProjectAuditQuery){const limit=Math.min(100,Math.max(1,query.limit??20));const values:unknown[]=[projectId];const where=["project_id=$1"];const add=(sql:string,value:unknown)=>{values.push(value);where.push(sql.replace('?',`$${values.length}`))};if(Object.hasOwn(query,'actorId'))query.actorId===null?where.push('actor_id is null'):add('actor_id=?',query.actorId);if(Object.hasOwn(query,'subjectUserId'))query.subjectUserId===null?where.push('subject_user_id is null'):add('subject_user_id=?',query.subjectUserId);if(query.action)add('action=?',query.action);if(query.status)add('status=?',query.status);if(query.resourceKind)add('resource_kind=?',query.resourceKind);if(query.resourceId)add('resource_id=?',query.resourceId);if(query.from)add('created_at>=?',query.from);if(query.to)add('created_at<=?',query.to);if(query.cursor){const split=query.cursor.lastIndexOf('|');if(split<1)throw new Error('Invalid audit cursor');values.push(query.cursor.slice(0,split),query.cursor.slice(split+1));where.push(`(created_at,id)<($${values.length-1},$${values.length})`)}values.push(limit+1);const rows=await this.queryRows<ProjectAuditRow>(`select * from project_audit_events where ${where.join(' and ')} order by created_at desc,id desc limit $${values.length}`,values);const page=rows.slice(0,limit);return{items:page.map(mapAudit),nextCursor:rows.length>limit&&page.length?`${toIso(page.at(-1)!.created_at)}|${page.at(-1)!.id}`:null}}
+  async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{return transaction(this.pool,async(client)=>{
+    const locked=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.runId]);
+    const current=locked.rows[0]?.document?sandboxRunFromDocument(asRecord(locked.rows[0].document)):null;if(!current)return{kind:"conflict" as const};
+    if(current.startedAt){await insertAuditEventWithClient(client,{...input.auditEvent,createdAt:current.startedAt});return{kind:"already_started" as const,run:current};}
+    if(current.fencingToken!==input.expectedFencingToken||current.phase!=="starting"||current.cleanupStatus!=="active")return{kind:"conflict" as const};
+    const run={...current,startedAt:input.startedAt,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
+    await client.query("update postgres_json_docs set document=$2::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1",[input.runId,JSON.stringify(prepareSandboxRunDocument(run))]);
+    await insertAuditEventWithClient(client,input.auditEvent);return{kind:"started" as const,run};
+  })}
+  async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{return transaction(this.pool,async(client)=>{
+    const locked=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.runId]);
+    const current=locked.rows[0]?.document?sandboxRunFromDocument(asRecord(locked.rows[0].document)):null;if(!current||!sameRunIdentity(current,input.run))return"conflict" as const;
+    const existing=await client.query<SandboxUsageSettlementRow>("select * from sandbox_usage_settlements where run_id=$1",[input.runId]);
+    if(isConfirmedCleanedRun(current)){if(!existing.rows[0]||!sameSettlement(mapSandboxUsageSettlement(existing.rows[0]),input.settlement))return"conflict" as const;await insertAuditEventWithClient(client,input.auditEvent);return"already_applied" as const;}
+    if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||!isConfirmedCleanedRun(input.run)||!settlementMatchesRun(input.settlement,current,input.run))return"conflict" as const;
+    const lockedTask=await client.query<SandboxReleaseTaskRow>("select task.*,project.workspace_id as project_workspace_id,project.owner_user_id as project_owner_user_id from agent_tasks task join projects project on project.id=task.project_id where task.id=$1 for update of task",[current.taskId]);const task=lockedTask.rows[0];
+    if(!taskMatchesActiveSandboxRunRow(task,current))return"conflict" as const;
+    await client.query("insert into sandbox_usage_settlements (run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,started_at,released_at,duration_seconds,cpu_request_millis,memory_request_bytes,cpu_limit_millis,memory_limit_bytes,release_reason) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",[input.settlement.runId,input.settlement.workspaceId,input.settlement.projectId,input.settlement.taskId,input.settlement.fileLibraryId,input.settlement.startedByUserId,input.settlement.startedAt,input.settlement.releasedAt,input.settlement.durationSeconds,input.settlement.resources.cpuRequestMillis,input.settlement.resources.memoryRequestBytes,input.settlement.resources.cpuLimitMillis,input.settlement.resources.memoryLimitBytes,input.settlement.releaseReason]);
+    await client.query("update postgres_json_docs set document=$2::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1",[input.runId,JSON.stringify(prepareSandboxRunDocument(input.run))]);
+    await releaseSandboxReservationWithClient(client,task,input.run);await insertAuditEventWithClient(client,input.auditEvent);return"applied" as const;
+  })}
+  async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{const rows=await this.queryRows<SandboxUsageSettlementRow>("select * from sandbox_usage_settlements where project_id=$1 and started_by_user_id=$2 order by released_at desc,run_id desc",[projectId,startedByUserId]);return rows.map(mapSandboxUsageSettlement)}
 
   async createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential> {
     const rows = await this.queryRows<ProjectCredentialRow>(
@@ -957,7 +984,7 @@ export class PostgresProductStore implements ProductStore {
       if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.cleanupStatus!=="cleanup_requested")return"conflict" as const;
       await client.query("update postgres_json_docs set document=$2::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1",[input.runId,JSON.stringify(prepareSandboxRunDocument(input.run))]);
     }
-    const event=input.auditEvent;await client.query("insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (id) do nothing",[event.id,event.projectId,event.actorId,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]);
+    await insertAuditEventWithClient(client,input.auditEvent);
     await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
     return already?"already_requested" as const:"applied" as const;
   })}
@@ -1112,13 +1139,12 @@ class PostgresSandboxRunStoreImpl {
     const document = prepareSandboxRunDocument(run);
     return transaction(this.pool,async(client)=>{
       const previous=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[run.runId]);
+      if(previous.rows[0]?.document){const current=sandboxRunFromDocument(asRecord(previous.rows[0].document));if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");if(!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");}
       await client.query(`insert into postgres_json_docs (collection, id, document, updated_at)
        values ('sandbox_run_state', $1, $2::jsonb, now())
        on conflict (collection, id)
        do update set document = excluded.document, updated_at = now()`,
       [run.runId, JSON.stringify(document)]);
-      const prior=previous.rows[0]?.document?sandboxRunFromDocument(asRecord(previous.rows[0].document)):null;
-      if(isConfirmedCleanedRun(run)&&(!prior||!isConfirmedCleanedRun(prior)))await releaseSandboxReservationWithClient(client,run);
       return sandboxRunFromDocument(document);
     });
   }
@@ -1180,7 +1206,7 @@ class PostgresSandboxRunStoreImpl {
       throw new Error("Sandbox run fencing update runId mismatch");
     }
     const document = prepareSandboxRunDocument(run);
-    return transaction(this.pool,async(client)=>{const result = await client.query(
+    return transaction(this.pool,async(client)=>{const locked=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[runId]);if(locked.rows[0]?.document){const current=sandboxRunFromDocument(asRecord(locked.rows[0].document));if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");if(!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");}const result = await client.query(
       `update postgres_json_docs
        set document = $3::jsonb, updated_at = now()
        where collection = 'sandbox_run_state'
@@ -1190,17 +1216,14 @@ class PostgresSandboxRunStoreImpl {
       [runId, expectedFencingToken, JSON.stringify(document)]
     );
     const saved = result.rows[0]?.document as unknown;
-    if(!saved)return null;const stored=sandboxRunFromDocument(asRecord(saved));
-    if(isConfirmedCleanedRun(stored))await releaseSandboxReservationWithClient(client,stored);
-    return stored;});
+    if(!saved)return null;return sandboxRunFromDocument(asRecord(saved));});
   }
 }
 
 function isConfirmedCleanedRun(run:PersistedSandboxRunState):boolean{return run.cleanupStatus==="cleaned"||run.phase==="cleaned";}
 
-async function releaseSandboxReservationWithClient(client:PoolClient,run:PersistedSandboxRunState):Promise<void>{
-  const locked=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 and run_id=$2 for update",[run.taskId,run.runId]);const task=locked.rows[0];
-  if(!task?.active_reservation)return;await releaseActiveTaskWithClient(client,task.project_id,run.updatedAt);await client.query("update agent_tasks set active_reservation=false,updated_at=greatest(updated_at,$2::timestamptz) where id=$1",[task.id,run.updatedAt]);
+async function releaseSandboxReservationWithClient(client:PoolClient,task:AgentTaskRow,run:PersistedSandboxRunState):Promise<void>{
+  await releaseActiveTaskWithClient(client,task.project_id,run.updatedAt);const released=await client.query("update agent_tasks set active_reservation=false,updated_at=greatest(updated_at,$2::timestamptz) where id=$1 and active_reservation=true",[task.id,run.updatedAt]);if(released.rowCount!==1)throw new Error("Sandbox reservation changed during release");
 }
 
 class PostgresLeaseStoreImpl implements PostgresLeaseStore {
@@ -1320,8 +1343,8 @@ async function putJsonDocumentWithClient(client: PoolClient, collection: JsonDoc
 
 async function insertAuditEventWithClient(client: PoolClient, event: ProjectAuditEvent): Promise<void> {
   await client.query(
-    "insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) on conflict (id) do nothing",
-    [event.id,event.projectId,event.actorId,event.action,event.status,event.resourceKind,event.resourceId,JSON.stringify(sanitizeProjectAuditDetail(event.detail)),event.createdAt]
+    "insert into project_audit_events (id,project_id,actor_id,subject_user_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) on conflict (id) do nothing",
+    [event.id,event.projectId,event.actorId,event.subjectUserId??null,event.action,event.status,event.resourceKind,event.resourceId,JSON.stringify(sanitizeProjectAuditDetail(event.detail)),event.createdAt]
   );
 }
 
@@ -1509,6 +1532,7 @@ interface AgentTaskRow {
   created_at: unknown;
   updated_at: unknown;
 }
+interface SandboxReleaseTaskRow extends AgentTaskRow { project_workspace_id:string;project_owner_user_id:string; }
 
 interface ProfileRow { user_id: string; display_name: string | null; timezone: string | null; bio:string|null; job_title:string|null; company:string|null; greeting_preference:string|null; interests:string[]|null; updated_at: unknown; }
 interface NotificationRow { id:string; user_id:string; type:string; title:string; body:string|null; project_id:string|null; resource_kind:UserNotification["resourceKind"]; resource_id:string|null; link_path:string|null; read_at:unknown; created_at:unknown; dedupe_key:string|null; }
@@ -1542,7 +1566,8 @@ interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | nu
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
 interface ProjectAlertRow { id: string; project_id: string; type: ProjectAlert["type"]; status: ProjectAlert["status"]; delivery_status: ProjectAlert["deliveryStatus"]; rule_id:string|null;metric:import("../../contracts/src/api.js").AlertRuleMetric|null;metric_value:number|null;threshold:number|null;endpoint_id:string|null;acknowledged_at:unknown;acknowledged_by:string|null;silenced_until:unknown; created_at: unknown; updated_at: unknown; resolved_at: unknown; dismissed_at: unknown; }
-interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; }
+interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; subject_user_id:string|null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; }
+interface SandboxUsageSettlementRow { run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;started_at:unknown;released_at:unknown;duration_seconds:number|string;cpu_request_millis:string;memory_request_bytes:string;cpu_limit_millis:string;memory_limit_bytes:string;release_reason:import("../../contracts/src/api.js").SandboxReleaseReason; }
 
 interface RuntimeLeaseRow {
   name: string;
@@ -1761,7 +1786,12 @@ function usageLimitColumn(limit: ProjectAlert["type"]): string { return `${usage
 function usageDeltaPlaceholder(limit: ProjectAlert["type"]): number { return limit === "active_tasks_limit" ? 2 : limit === "provider_requests_limit" ? 3 : limit === "provider_tokens_limit" ? 4 : limit === "provider_cost_limit" ? 5 : 6; }
 function usageDelta(limit: ProjectAlert["type"], delta: ProjectResourceUsageAdjustment["delta"]): number { return limit === "active_tasks_limit" ? delta.activeTasks : limit === "provider_requests_limit" ? delta.providerRequests : limit === "provider_tokens_limit" ? delta.providerTokens : limit === "provider_cost_limit" ? delta.providerCost : delta.projectFileBytes; }
 function mapAlert(row: ProjectAlertRow): ProjectAlert { return { id: row.id, projectId: row.project_id, type: row.type, status: row.status, deliveryStatus: row.delivery_status,ruleId:row.rule_id,metric:row.metric,metricValue:row.metric_value===null?null:Number(row.metric_value),threshold:row.threshold===null?null:Number(row.threshold),endpointId:row.endpoint_id,acknowledgedAt:row.acknowledged_at?toIso(row.acknowledged_at):null,acknowledgedBy:row.acknowledged_by,silencedUntil:row.silenced_until?toIso(row.silenced_until):null, createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at), resolvedAt: row.resolved_at ? toIso(row.resolved_at) : null, dismissedAt: row.dismissed_at ? toIso(row.dismissed_at) : null }; }
-function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
+function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, subjectUserId:row.subject_user_id??null, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
+function mapSandboxUsageSettlement(row:SandboxUsageSettlementRow):SandboxUsageSettlement{return{runId:row.run_id,workspaceId:row.workspace_id,projectId:row.project_id,taskId:row.task_id,fileLibraryId:row.file_library_id,startedByUserId:row.started_by_user_id,startedAt:row.started_at?toIso(row.started_at):null,releasedAt:toIso(row.released_at),durationSeconds:Number(row.duration_seconds),resources:{cpuRequestMillis:String(row.cpu_request_millis),memoryRequestBytes:String(row.memory_request_bytes),cpuLimitMillis:String(row.cpu_limit_millis),memoryLimitBytes:String(row.memory_limit_bytes)},releaseReason:row.release_reason}}
+function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.startedAt===right.startedAt&&JSON.stringify(left.resourceLimits)===JSON.stringify(right.resourceLimits)&&JSON.stringify(left.resourceSnapshot)===JSON.stringify(right.resourceSnapshot)}
+function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return JSON.stringify(left)===JSON.stringify(right)}
+function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,cleaned:PersistedSandboxRunState):boolean{const duration=current.startedAt===null?0:Math.max(0,(Date.parse(cleaned.updatedAt)-Date.parse(current.startedAt))/1000);return value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===cleaned.updatedAt&&value.durationSeconds===duration&&value.releaseReason===cleaned.releaseReason&&JSON.stringify(value.resources)===JSON.stringify(current.resourceSnapshot)}
+function taskMatchesActiveSandboxRunRow(task:SandboxReleaseTaskRow|undefined,run:PersistedSandboxRunState):task is SandboxReleaseTaskRow{return Boolean(task&&task.deleted_at===null&&task.execution_mode==="live"&&task.active_reservation===true&&task.id===run.taskId&&task.run_id===run.runId&&task.project_id===run.projectId&&task.workspace_id===run.workspaceId&&task.file_library_id===run.fileLibraryId&&task.project_workspace_id===run.workspaceId&&(task.created_by_user_id??task.project_owner_user_id)===run.startedByUserId)}
 function nullableNumber(value: string | number | null): number | null { return value === null ? null : Number(value); }
 function isUniqueConstraintError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23505"; }
 function isConstraintError(error: unknown, constraint: string): boolean { return isUniqueConstraintError(error) && typeof error === "object" && error !== null && "constraint" in error && error.constraint === constraint; }

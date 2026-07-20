@@ -36,7 +36,8 @@ postgresDescribe("postgres migrations", () => {
             'task_messages',
             'agent_task_artifacts',
             'postgres_json_docs',
-            'runtime_leases'
+            'runtime_leases',
+            'sandbox_usage_settlements'
           )
         order by table_name
       `);
@@ -49,11 +50,16 @@ postgresDescribe("postgres migrations", () => {
         "project_memberships",
         "projects",
         "runtime_leases",
+        "sandbox_usage_settlements",
         "task_interaction_changes",
         "task_messages",
         "users",
         "workspaces"
       ]);
+      const sandboxAuditSubject=await client.query<{is_nullable:string}>("select is_nullable from information_schema.columns where table_schema='public' and table_name='project_audit_events' and column_name='subject_user_id'");
+      assert.deepEqual(sandboxAuditSubject.rows,[{is_nullable:"YES"}]);
+      const sandboxSettlementTrigger=await client.query<{tgname:string}>("select tgname from pg_trigger where tgrelid='sandbox_usage_settlements'::regclass and not tgisinternal");
+      assert.deepEqual(sandboxSettlementTrigger.rows,[{tgname:"sandbox_usage_settlements_immutable"}]);
 
       const interactionUniqueConstraints = await client.query<{ conname: string; definition: string }>(`
         select c.conname, pg_get_constraintdef(c.oid) as definition

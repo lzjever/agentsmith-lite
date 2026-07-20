@@ -15,11 +15,12 @@ describe("v1 project membership API", () => {
   let projectId = "";
   let ownerUserId = "";
   let fileLibraryId="";
+  let store:ReturnType<typeof createLocalInMemoryProductStore>;
   const memberSession = "member-session";
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-v1-membership-"));
-    const store = createLocalInMemoryProductStore();
+    store = createLocalInMemoryProductStore();
     const expiresAt = "2999-01-01T00:00:00.000Z";
     await store.createUser({
       id: "user_member",
@@ -132,6 +133,15 @@ describe("v1 project membership API", () => {
       createdAt: created.createdAt,
       updatedAt: created.updatedAt
     });
+    const ownerSelectedUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=user_member`,{headers:{cookie}});
+    assert.equal(ownerSelectedUsage.status,200);assert.deepEqual((await ownerSelectedUsage.json() as {sandbox:unknown}).sandbox,{selectedUserId:"user_member",activeCount:0,launches:0,totalDurationSeconds:"0",cpuRequestSeconds:"0",memoryRequestByteSeconds:"0",rows:[]});
+    const memberSelfUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage`,{headers:{cookie:`asl_session=${memberSession}`}});assert.equal(memberSelfUsage.status,200);assert.equal((await memberSelfUsage.json() as {sandbox:{selectedUserId:string}}).sandbox.selectedUserId,"user_member");
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=${ownerUserId}`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=missing-user`,{headers:{cookie}})).status,404);
+    await store.appendProjectAuditEvent({id:"audit_actor_owner_subject_member",projectId,actorId:ownerUserId,subjectUserId:"user_member",action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:"task_audit_1",detail:{taskId:"task_audit_1",runId:"run_audit_1"},createdAt:"2026-07-19T00:00:00.000Z"});
+    await store.appendProjectAuditEvent({id:"audit_actor_member_subject_owner",projectId,actorId:"user_member",subjectUserId:ownerUserId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:"task_audit_2",detail:{taskId:"task_audit_2",runId:"run_audit_2"},createdAt:"2026-07-19T00:01:00.000Z"});
+    const actorAudit=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit?actorId=${ownerUserId}&action=sandbox.release_requested`,{headers:{cookie}});assert.equal(actorAudit.status,200);assert.deepEqual((await actorAudit.json() as {items:Array<{id:string}>}).items.map((item)=>item.id),["audit_actor_owner_subject_member"]);
+    const subjectAudit=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit?subjectUserId=user_member&action=sandbox.release_requested`,{headers:{cookie}});assert.equal(subjectAudit.status,200);assert.deepEqual((await subjectAudit.json() as {items:Array<{id:string}>}).items.map((item)=>item.id),["audit_actor_owner_subject_member"]);
 
     const visible = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/endpoints`, {
       headers: { cookie: `asl_session=${memberSession}` }
@@ -261,7 +271,7 @@ describe("v1 project membership API", () => {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(cookie ? { cookie } : {}),
         ...(["POST", "PATCH", "DELETE"].includes(method) && csrfToken ? { "x-csrf-token": csrfToken } : {}),
-        ...((method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints)$/.test(pathname))) || (["POST", "PATCH", "DELETE"].includes(method) && /^\/api\/v1\/(workspaces|projects)\/[^/]+\/members$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
+        ...((method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|file-libraries)$/.test(pathname))) || (["POST", "PATCH", "DELETE"].includes(method) && /^\/api\/v1\/(workspaces|projects)\/[^/]+\/members$/.test(pathname)) ? { "idempotency-key": crypto.randomUUID() } : {})
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
