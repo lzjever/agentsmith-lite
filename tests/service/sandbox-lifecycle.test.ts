@@ -23,6 +23,23 @@ import { renderSandboxResources } from "../../packages/sandbox-controller/src/ma
 
 
 describe("sandbox lifecycle service", () => {
+  it("does not advance the fencing token for an unchanged active run", async () => {
+    const store = createLocalInMemoryProductStore();
+    const run = sandboxRun();
+    await store.sandboxRuns.put(run);
+    const service = new SandboxLifecycleService(store, {
+      dataRoot: "/workspace",
+      namespace: run.namespace,
+      port: new FakeLifecyclePort(createdResourcesForRun(run))
+    });
+
+    const result = await service.reapSandboxRunsOnce({ apply: true });
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.storedRunIds, []);
+    assert.deepEqual(await store.sandboxRuns.get(run.runId), run);
+  });
+
   it("allows only one concurrent reaper to execute destructive cleanup", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun({ phase: "stopping", cleanupStatus: "cleanup_requested" });

@@ -231,6 +231,9 @@ export class SandboxLifecycleService {
       if (action.type !== "store_run_state") {
         continue;
       }
+      if (action.reason === "desired_observed") {
+        continue;
+      }
       if (action.reason === "cleanup_complete") {
         const cleanupError = await this.removeRuntimeCleanupCandidates(action.run);
         if (cleanupError) {
