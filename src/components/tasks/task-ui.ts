@@ -21,7 +21,8 @@ export function taskDetailNeedsRefresh(detail: Pick<TaskDetail, "currentTurn" | 
 
 export function taskProjectionLabel(detail: Pick<TaskDetail, "lifecycle" | "currentTurn" | "sandboxState">): string {
   if (detail.lifecycle.state === "archived") return "Archived";
-  if (detail.sandboxState.state === "released" || detail.sandboxState.state === "failed") return "Sandbox unavailable";
+  if (detail.sandboxState.state === "released") return "Sandbox released";
+  if (detail.sandboxState.state === "failed") return "Sandbox unavailable";
   if (detail.sandboxState.state === "release_requested") return "Releasing sandbox";
   if (detail.sandboxState.state === "starting") return "Starting sandbox";
   if (detail.currentTurn.state === "ready") return "Ready";

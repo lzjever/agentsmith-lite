@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleDot, Loader2, Square } from "lucide-react";
 import { useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
 import { Button } from "../ui/button";
@@ -18,7 +18,10 @@ export function TaskRunStatus({ currentTurn, sandboxState, capabilities, abortin
   return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Icon role="img" aria-label={presentation.iconLabel} className={`size-4 shrink-0 ${presentation.iconClass} ${presentation.spinning ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{presentation.label}</p></div>{capabilities.abortTurn ? <Button variant="quiet" size="sm" disabled={aborting} onClick={() => void abort()}><Square size={14} />{aborting ? "Stopping..." : "Stop current turn"}</Button> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
 }
 
-export function TaskConnectionNotice({ connection, historyStatus, runtimeReachability, error, onRetry }: { connection: "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered"; historyStatus: TaskInteractionSnapshot["historyStatus"]; runtimeReachability: TaskInteractionSnapshot["runtimeReachability"]; error: string; onRetry: () => void }) {
+export function TaskConnectionNotice({ connection, historyStatus, runtimeReachability, runtimeAvailable = true, error, onRetry }: { connection: "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered"; historyStatus: TaskInteractionSnapshot["historyStatus"]; runtimeReachability: TaskInteractionSnapshot["runtimeReachability"]; runtimeAvailable?: boolean; error: string; onRetry: () => void }) {
+  if (!runtimeAvailable && historyStatus !== "gap") return null;
+  if (!runtimeAvailable) connection = "connected";
+  if (!runtimeAvailable) runtimeReachability = "reachable";
   const showConnection = connection !== "connected" || historyStatus === "gap" || runtimeReachability === "unreachable";
   if (!showConnection) return null;
   const detail = historyStatus === "gap" ? "Some earlier interaction history is no longer available." : runtimeReachability === "unreachable" ? "The task runtime is temporarily unreachable. Saved interactions remain available." : connection === "disconnected" ? ["Conversation updates are temporarily disconnected.", error].filter(Boolean).join(" ") : connection === "recovered" ? "Conversation updates recovered." : connection === "reconnecting" ? "Reconnecting to conversation updates..." : "Connecting to conversation updates...";
@@ -30,7 +33,8 @@ export function TaskPreviewNotice({ message, onRetry }: { message: string; onRet
 }
 
 function runStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
-  if (sandboxState.state === "released" || sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:sandboxState.state === "failed" ? "text-error" : "text-warning", label:"Sandbox is unavailable", spinning:false };
+  if (sandboxState.state === "released") return { icon:CircleCheck, iconLabel:"Sandbox released", iconClass:"text-icon-default", label:"Sandbox released", spinning:false };
+  if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:"Sandbox is unavailable", spinning:false };
   if (sandboxState.state === "release_requested") return { icon:Loader2, iconLabel:"Sandbox release requested", iconClass:"text-icon-default", label:"Releasing sandbox", spinning:true };
   if (sandboxState.state === "starting") return { icon:Loader2, iconLabel:"Sandbox starting", iconClass:"text-icon-default", label:"Starting sandbox", spinning:true };
   if (currentTurn.state === "ready") return { icon:CircleDot, iconLabel:"Task ready", iconClass:"text-icon-default", label:"Ready for a message", spinning:false };

@@ -75,20 +75,24 @@ describe("Phase3 Task workspace", () => {
     } finally { Object.assign(apiClient, original); }
   });
 
-  it("renders a released sandbox as unavailable and disables composer and Terminal while preserving File Library access", async () => {
+  it("renders a released sandbox as a normal final state and disables composer and Terminal while preserving File Library access", async () => {
     const original = interactionApis();
     const unavailable = { ...available, sendMessage:false, openTerminal:false, archiveTask:true, deleteTask:true };
     apiClient.taskDetail = async () => detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:unavailable });
     apiClient.taskArtifacts = async () => [];
-    apiClient.getTaskInteractions = async () => snapshot(unavailable);
+    apiClient.getTaskInteractions = async () => ({ ...snapshot(unavailable), runtimeReachability:"unreachable" });
     apiClient.streamTaskInteractions = holdStream;
     try {
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
-      assert.ok(await screen.findByText(`Sandbox unavailable · ${task.id}`));
-      assert.ok(screen.getByText(/cold provisioning in a later phase/i));
-      const composer = screen.getByLabelText("Message") as HTMLTextAreaElement;
+      assert.ok(await screen.findByText(`Sandbox released · ${task.id}`));
+      const releaseNotice = screen.getByText("Sandbox resources were released. Conversation history and File Library files remain available.").closest("div");
+      assert.ok(releaseNotice);
+      assert.doesNotMatch(releaseNotice.className, /warning|error/);
+      assert.equal(screen.queryByText(/cold provisioning|runtime is temporarily unreachable/i), null);
+      assert.equal(screen.queryByRole("button", { name:"Retry" }), null);
+      const composer = await screen.findByLabelText("Message") as HTMLTextAreaElement;
       assert.equal(composer.disabled, true);
-      assert.equal(composer.placeholder, "Sandbox is unavailable");
+      assert.equal(composer.placeholder, "Sandbox has been released");
       assert.equal((screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement).disabled, true);
       fireEvent.click(screen.getByText("Task details"));
       assert.equal(screen.getByRole("link", { name:task.fileLibraryId }).getAttribute("href"), `/workspaces/workspace_1/projects/project_1/files?libraryId=${task.fileLibraryId}`);
@@ -115,7 +119,7 @@ describe("Phase3 Task workspace", () => {
 
       await waitFor(() => assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).disabled, true));
       assert.equal((screen.getByRole("tab", { name:"Terminal" }) as HTMLButtonElement).disabled, true);
-      assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).placeholder, "Sandbox is unavailable");
+      assert.equal((screen.getByLabelText("Message") as HTMLTextAreaElement).placeholder, "Sandbox has been released");
     } finally { Object.assign(apiClient, original); }
   });
 
@@ -184,7 +188,7 @@ describe("Phase3 Task workspace", () => {
 
       apiClient.taskDetail = async () => detail({ sandboxState:{ state:"released", runId:task.runId }, capabilities:{ ...available, releaseSandbox:false } });
       render(<TaskDetailPage workspaceId="workspace_1" projectId="project_1" taskId={task.id} />);
-      await screen.findByText(`Sandbox unavailable · ${task.id}`);
+      await screen.findByText(`Sandbox released · ${task.id}`);
       assert.equal(screen.queryByRole("button", { name:"Release sandbox" }), null);
     } finally { Object.assign(apiClient, original); }
   });

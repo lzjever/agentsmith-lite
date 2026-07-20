@@ -34,8 +34,11 @@ describe("task list model", () => {
     assert.equal(taskDetailNeedsRefresh(ready), true);
     assert.equal(taskProjectionLabel(queued), "Message queued");
     assert.equal(taskDetailNeedsRefresh(queued), true);
-    assert.equal(taskProjectionLabel(released), "Sandbox unavailable");
+    assert.equal(taskProjectionLabel(released), "Sandbox released");
     assert.equal(taskDetailNeedsRefresh(released), false);
+
+    const failed = detail({ currentTurn:{ state:"ready" }, sandboxState:{ state:"failed", runId:"run_1", message:"Runtime failed" } });
+    assert.equal(taskProjectionLabel(failed), "Sandbox unavailable");
   });
 });
 

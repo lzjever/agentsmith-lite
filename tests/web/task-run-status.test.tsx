@@ -26,6 +26,10 @@ describe("TaskRunStatus", () => {
     assert.ok(screen.getByText("Message queued"));
 
     view.rerender(<TaskRunStatus currentTurn={{ state:"ready" }} sandboxState={{ state:"released", runId:"run_1" }} capabilities={{ ...capabilities, sendMessage:false }} aborting={false} onAbort={async () => undefined} />);
+    assert.ok(screen.getByRole("img", { name:"Sandbox released" }));
+    assert.ok(screen.getByText("Sandbox released"));
+
+    view.rerender(<TaskRunStatus currentTurn={{ state:"ready" }} sandboxState={{ state:"failed", runId:"run_1", message:"Runtime failed" }} capabilities={{ ...capabilities, sendMessage:false }} aborting={false} onAbort={async () => undefined} />);
     assert.ok(screen.getByRole("img", { name:"Sandbox unavailable" }));
     assert.ok(screen.getByText("Sandbox is unavailable"));
   });

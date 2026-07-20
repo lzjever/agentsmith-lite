@@ -1,6 +1,6 @@
 "use client";
 
-import { Archive, ArrowLeft, CircleAlert, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
+import { Archive, ArrowLeft, CircleAlert, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection } from "../../lib/api/client";
@@ -194,7 +194,11 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadTask(true)} /> : null;
   const archivedNotice = lifecycle.state === "archived" ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3"><Archive className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">This task is archived. Its conversation, files, and artifacts remain available.</p></div> : null;
-  const sandboxNotice = sandboxState.state === "released" || sandboxState.state === "failed" ? <div className="flex items-start gap-3 border border-warning/30 bg-warning/10 px-4 py-3" role="status"><CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><p className="text-sm text-secondary">This task's sandbox is unavailable. Conversation history and File Library files remain available; new messages and Terminal access require cold provisioning in a later phase.</p></div> : null;
+  const sandboxNotice = sandboxState.state === "released"
+    ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3" role="status"><CircleCheck className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">Sandbox resources were released. Conversation history and File Library files remain available.</p></div>
+    : sandboxState.state === "failed"
+      ? <div className="flex items-start gap-3 border border-error/30 bg-error/10 px-4 py-3" role="alert"><CircleAlert className="mt-0.5 size-4 shrink-0 text-error" /><p className="text-sm text-secondary">This task's sandbox is unavailable. Conversation history and File Library files remain available.</p></div>
+      : null;
 
   const releaseDialog = <ConfirmationDialog open={releaseOpen} onOpenChange={setReleaseOpen} title="Release sandbox?" description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." confirmText="Release sandbox" onConfirm={releaseSandbox} errorContext="Sandbox could not be released" />;
 
