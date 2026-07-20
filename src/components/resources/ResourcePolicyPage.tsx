@@ -154,6 +154,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   }
   return (
     <PageLayout
+      contentWidth="narrow"
       header={
         <PageHeader
           title="Resource policy"
@@ -187,7 +188,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
         </PageState>
       ) : null}
       {state === "ready" && policy && draft ? (
-        <form onSubmit={save} className="space-y-7">
+        <form onSubmit={save} className="space-y-6">
           {capabilitiesError ? (
             <p role="alert" className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
               {capabilitiesError}
@@ -212,13 +213,14 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <div className="mt-3 divide-y divide-border border-y border-border">
               {limits.map((limit) => (
                 <label
-                  className="grid gap-2 py-3 sm:grid-cols-[1fr_12rem] sm:items-center"
+                  className="grid gap-2 py-2.5 sm:grid-cols-[1fr_12rem] sm:items-center"
                   key={limit.key}
                 >
                   <span className="text-sm text-foreground">{limit.label}</span>
                   {canManage ? (
                     <Input
                       aria-label={limit.label}
+                      className="h-9"
                       name={limit.key}
                       type="number"
                       min="0"
@@ -278,7 +280,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                   );
                   return (
                     <div
-                      className="mt-2 grid gap-2 sm:grid-cols-[1fr_10rem_10rem] sm:items-center"
+                      className="mt-1.5 grid gap-2 sm:grid-cols-[1fr_10rem_10rem] sm:items-center"
                       key={metric.value}
                     >
                       <span className="text-sm text-secondary">
@@ -288,6 +290,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                         <>
                           <Input
                             aria-label={`${endpoint.name} ${metric.label} limit`}
+                            className="h-9"
                             type="number"
                             min="0"
                             step={metric.step}
@@ -323,7 +326,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                                   : value,
                               )
                             }
-                            className="h-9 border border-input bg-input px-2 text-sm"
+                            className="h-9 rounded-sm border border-input bg-input px-2 text-sm"
                           >
                             <option value="" disabled>No window</option>
                             {current && !endpointWindowOptions.some((option) => option.value === current.windowSeconds) ? (
@@ -351,7 +354,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             ) : null}
           </section>
           {canManage ? (
-            <div className="flex justify-end">
+            <div className="flex justify-end border-t border-subtle pt-4">
               <Button
                 type="submit"
                 disabled={saving || !dirty || draft.activeTasksLimit === null}
