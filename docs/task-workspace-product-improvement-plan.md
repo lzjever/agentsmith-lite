@@ -420,8 +420,9 @@ Terminal, and running programs will stop and unsaved work may be lost.
 
 Archive is intentionally different: reject Archive while a Sandbox is active
 and direct the user to `Release sandbox` first. Archive keeps the Library
-binding and Task/session data. An archived Task cannot send messages, cold-start
-a Sandbox, or open Terminal until it is restored to active.
+binding and Task/session data as read-only history. Task archive is one-way: an
+archived Task cannot send messages, cold-start a Sandbox, or open Terminal, but
+it remains available for inspection and explicit deletion.
 
 Project deletion uses the same release implementation for each exact active
 Run, with the same destructive-work warning in its confirmation. Do not create
@@ -558,7 +559,8 @@ contradictory status banners.
 - Released state says that files and conversation are retained and that the
   next message or Terminal open will start a Sandbox.
 - Archive with an active Sandbox is rejected with a direct instruction to
-  release it first; archived Tasks expose restore but no message/Terminal start.
+  release it first; archived Tasks remain read-only and deletable, with no
+  restore, message, or Terminal action.
 - Release confirmation uses the generic warning in section 6.4 and never runs
   a process inspection request.
 - Terminal open cold-starts the Sandbox if needed, then connects through
