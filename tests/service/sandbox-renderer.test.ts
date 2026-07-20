@@ -120,6 +120,36 @@ describe("sandbox manifest renderer", () => {
     assert.equal(pod?.spec.securityContext.runAsGroup, 10001);
     assert.equal(pod?.spec.securityContext.fsGroup, 10001);
     assert.equal(pod?.spec.shareProcessNamespace, false);
+    assert.deepEqual(pod?.spec.initContainers, [
+      {
+        name: "prepare-file-library",
+        image: "example/botified-runner@sha256:abc",
+        imagePullPolicy: "IfNotPresent",
+        command: [
+          "sh",
+          "-c",
+          "chgrp -R 10001 /workspace/file-library && chmod -R g+rwX /workspace/file-library"
+        ],
+        securityContext: {
+          runAsNonRoot: false,
+          runAsUser: 0,
+          runAsGroup: 0,
+          allowPrivilegeEscalation: false,
+          readOnlyRootFilesystem: true,
+          capabilities: {
+            drop: ["ALL"],
+            add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+          }
+        },
+        volumeMounts: [
+          {
+            name: "project-files",
+            mountPath: "/workspace/file-library",
+            subPath: "workspaces/w1/projects/p1/libraries/library_one/home"
+          }
+        ]
+      }
+    ]);
     assert.deepEqual(pod?.spec.containers.map((candidate) => candidate.name), ["botified-server", "bash-executor"]);
     const container = pod?.spec.containers.find((candidate) => candidate.name === "botified-server");
     const executor = pod?.spec.containers.find((candidate) => candidate.name === "bash-executor");
@@ -336,6 +366,21 @@ interface PodResource extends KubernetesResource {
     hostNetwork: boolean;
     shareProcessNamespace: boolean;
     securityContext: { runAsNonRoot: boolean; runAsUser: number; runAsGroup: number; fsGroup: number };
+    initContainers: Array<{
+      name: string;
+      image: string;
+      imagePullPolicy: string;
+      command: string[];
+      securityContext: {
+        runAsNonRoot: boolean;
+        runAsUser: number;
+        runAsGroup: number;
+        allowPrivilegeEscalation: boolean;
+        readOnlyRootFilesystem: boolean;
+        capabilities: { drop: string[]; add: string[] };
+      };
+      volumeMounts: Array<{ name: string; mountPath: string; subPath: string; readOnly?: boolean }>;
+    }>;
     containers: Array<{
       name: string;
       workingDir: string;

@@ -133,6 +133,36 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             type: "RuntimeDefault"
           }
         },
+        initContainers: [
+          {
+            name: "prepare-file-library",
+            image: input.image,
+            imagePullPolicy: "IfNotPresent",
+            command: [
+              "sh",
+              "-c",
+              "chgrp -R 10001 /workspace/file-library && chmod -R g+rwX /workspace/file-library"
+            ],
+            securityContext: {
+              runAsNonRoot: false,
+              runAsUser: 0,
+              runAsGroup: 0,
+              allowPrivilegeEscalation: false,
+              readOnlyRootFilesystem: true,
+              capabilities: {
+                drop: ["ALL"],
+                add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+              }
+            },
+            volumeMounts: [
+              {
+                name: "project-files",
+                mountPath: "/workspace/file-library",
+                subPath: librarySubPath
+              }
+            ]
+          }
+        ],
         containers: [
           {
             name: "botified-server",
