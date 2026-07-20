@@ -752,7 +752,9 @@ describe("project resource pages", () => {
       assert.ok(await screen.findByRole("option", { name: "Sent chat message" }));
       fireEvent.click(screen.getByRole("option", { name: "All actions" }));
       const row = await screen.findByRole("button", { name: /alert.rule.delete/ });
-      assert.match(row.querySelector("span.rounded-pill")?.className ?? "", /justify-self-start/);
+      assert.ok(screen.getByText("Time", { selector: "span" }));
+      assert.ok(screen.getByText("Resource", { selector: "span" }));
+      assert.match(row.textContent ?? "", /Resource user: Rae Runner/);
       fireEvent.click(row);
       await screen.findByRole("heading", { name: "Audit event detail" });
       assert.ok(screen.getByText("Event metadata for this project activity."));

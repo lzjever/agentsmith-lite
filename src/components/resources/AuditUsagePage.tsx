@@ -512,7 +512,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             </Button>
           </div>
         ) : null}
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-3 border-b border-subtle pb-4 md:grid-cols-2 xl:grid-cols-5">
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Actor</span>
             <Select value={actorId} onValueChange={(value) => {
@@ -623,31 +623,42 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         ) : null}
         {state === "ready" && items.length ? (
           <div className="divide-y divide-border border-y border-border">
+            <div className="hidden gap-2 bg-surface-low px-2 py-2 sm:grid sm:grid-cols-[9rem_9rem_9rem_minmax(10rem,1fr)_6rem_minmax(10rem,1fr)]" aria-hidden="true">
+              <span className="type-caption text-tertiary">Time</span>
+              <span className="type-caption text-tertiary">Actor</span>
+              <span className="type-caption text-tertiary">Resource user</span>
+              <span className="type-caption text-tertiary">Action</span>
+              <span className="type-caption text-tertiary">Result</span>
+              <span className="type-caption text-tertiary">Resource</span>
+            </div>
             {items.map((event) => (
               <button
-                className="grid w-full gap-2 py-3 text-left sm:grid-cols-[9rem_9rem_9rem_minmax(10rem,1fr)_6rem_minmax(10rem,1fr)]"
+                className="grid w-full gap-2 px-2 py-3 text-left transition-colors hover:bg-hover sm:grid-cols-[9rem_9rem_9rem_minmax(10rem,1fr)_6rem_minmax(10rem,1fr)]"
                 onClick={() => setSelected(event)}
                 key={event.id}
               >
-                <span className="text-xs text-secondary">
+                <span className="hidden text-xs text-secondary sm:block">
                   {formatDate(event.createdAt)}
                 </span>
-                <span className="truncate text-xs text-secondary" title={actorName(event)}>{actorName(event)}</span>
-                <span className="truncate text-xs text-secondary" title={subjectName(event, members)}>{subjectName(event, members)}</span>
-                <strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong>
+                <span className="hidden truncate text-xs text-secondary sm:block" title={actorName(event)}>{actorName(event)}</span>
+                <span className="hidden truncate text-xs text-secondary sm:block" title={subjectName(event, members)}>{subjectName(event, members)}</span>
+                <span className="flex items-start justify-between gap-3 sm:block"><strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong><Badge className="shrink-0 sm:hidden" variant={event.status === "rejected" ? "destructive" : "secondary"}>{auditResultLabel(event.status)}</Badge></span>
                 <Badge
-                  className="justify-self-start"
+                  className="hidden justify-self-start sm:inline-flex"
                   variant={
                     event.status === "rejected" ? "destructive" : "secondary"
                   }
                 >
                   {auditResultLabel(event.status)}
                 </Badge>
-                <span className="break-all text-xs text-secondary">
+                <span className="hidden break-all text-xs text-secondary sm:block">
                   {event.resourceId
                     ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}`
                     : auditResourceIdentity(event.resourceKind, event.resourceId)}
                 </span>
+                <span className="text-xs text-secondary sm:hidden">{formatDate(event.createdAt)} · {actorName(event)}</span>
+                {subjectName(event, members) !== "-" ? <span className="truncate text-xs text-secondary sm:hidden">Resource user: {subjectName(event, members)}</span> : null}
+                <span className="break-all text-xs text-secondary sm:hidden">{event.resourceId ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}` : auditResourceIdentity(event.resourceKind, event.resourceId)}</span>
               </button>
             ))}
           </div>
