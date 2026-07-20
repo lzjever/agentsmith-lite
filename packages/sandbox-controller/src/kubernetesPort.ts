@@ -41,6 +41,7 @@ export interface SandboxKubernetesReadinessPort {
 
 const FIELD_MANAGER = "agentsmith-lite-sandbox";
 const MANAGED_LABEL_SELECTOR = `${SANDBOX_LABEL_KEYS.managedBy}=${SANDBOX_MANAGED_BY}`;
+const KUBERNETES_REQUEST_TIMEOUT_MS = 10_000;
 
 const RESOURCE_MAPPINGS: Record<SandboxCoreResourceKind, { apiPrefix: string; apiVersion: string; plural: string }> = {
   Secret: { apiPrefix: "/api/v1", apiVersion: "v1", plural: "secrets" },
@@ -275,6 +276,9 @@ class InClusterHttpsKubernetesTransport implements KubernetesTransport {
         }
       );
       clientRequest.on("error", reject);
+      clientRequest.setTimeout(KUBERNETES_REQUEST_TIMEOUT_MS, () => {
+        clientRequest.destroy(new Error("Kubernetes API request timed out"));
+      });
       if (request.body) {
         clientRequest.write(request.body);
       }

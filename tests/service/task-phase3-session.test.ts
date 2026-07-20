@@ -189,7 +189,9 @@ describe("Phase 3 durable Botified task sessions", () => {
     const audit=(await setup.store.listProjectAuditEvents(setup.projectId)).filter((event)=>event.action==="sandbox.release_requested"||event.action==="sandbox.released");assert.deepEqual(audit.map((event)=>event.action).sort(),["sandbox.release_requested","sandbox.released"]);
 
     const previousTask=await setup.store.findTask(task.id);assert.ok(previousTask);
+    setup.port.readinessFailures=1;
     await setup.services.tasks.sendTaskMessage(setup.userId,task.id,"continue in this task","cold-restart-message");
+    assert.equal(setup.port.readinessFailures,0);
     const restarted=await setup.store.findTask(task.id);assert.ok(restarted);assert.notEqual(restarted.runId,task.runId);assert.equal(restarted.id,task.id);assert.equal(restarted.fileLibraryId,previousTask.fileLibraryId);assert.equal(restarted.activeReservation,true);
     assert.equal((await setup.store.sandboxRuns.get(task.runId))?.cleanupStatus,"cleaned");assert.equal((await setup.store.sandboxRuns.get(restarted.runId))?.cleanupStatus,"active");assert.equal((await setup.store.sandboxRuns.get(restarted.runId))?.resumeUnfinished,false);
     assert.equal(setup.botified.posts.at(-1)?.input.text,"continue in this task");assert.equal(setup.botified.sessions.get(task.id),task.id);
@@ -240,7 +242,7 @@ describe("Phase 3 durable Botified task sessions", () => {
     const credential = await services.credentials.create(user.id, project.id, { name:"Provider", baseUrl:"https://models.example.test/v1", secret:"secret" });
     const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name:"Endpoint", protocol:"openai_chat_completions", baseUrl:"https://models.example.test/v1", model:"model", credentialId:credential.id, capabilities:["text","tool_calls"], requestTimeoutSecs:30 });
     return {
-      services, store, botified, userId:user.id,projectId:project.id,restart:()=>createApplicationServices(applicationInput),
+      services, store, botified, port, userId:user.id,projectId:project.id,restart:()=>createApplicationServices(applicationInput),
       create:(prompt:string)=>services.tasks.createTask(user.id, project.id, { endpointId:endpoint.id, prompt, fileLibrary:{ mode:"create_new", name:`${prompt} Library` } }, `create-${prompt}`)
     };
   }
@@ -268,10 +270,11 @@ class BotifiedClient implements BotifiedRuntimeHttpClient {
 
 class SandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
   resources:KubernetesResource[]=[];
+  readinessFailures=0;
   async listManagedResources(){return structuredClone(this.resources);}
   async applyResource(resource:KubernetesResource){this.resources.push(structuredClone(resource));return"applied" as const;}
   async deleteResource(ref:KubernetesResourceRef){const index=this.resources.findIndex((resource)=>resource.kind===ref.kind&&resource.metadata.namespace===ref.namespace&&resource.metadata.name===ref.name);if(index<0)return"not_found" as const;this.resources.splice(index,1);return"deleted" as const;}
-  async getPodReadiness():Promise<PodReadiness>{return"ready";}
+  async getPodReadiness():Promise<PodReadiness>{if(this.readinessFailures>0){this.readinessFailures-=1;throw new Error("temporary Kubernetes transport error");}return"ready";}
 }
 
 function event(sessionId:string,seq:number,type:string,data:Record<string,unknown>={}){return{version:"botified.timeline.v1",seq,cursor:`evt_${token(sessionId)}_${seq}`,time:"2026-07-19T00:00:00.000Z",session_id:sessionId,type,trace:{cycle_id:`cycle-${seq}`},item:null,data};}

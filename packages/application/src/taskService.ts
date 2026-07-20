@@ -59,6 +59,7 @@ import {
 } from "./taskInteractionProjector.js";
 import {
   applySandboxReconcileActionsToKubernetes,
+  type PodReadiness,
   type SandboxKubernetesMutationPort,
   type SandboxKubernetesReadinessPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
@@ -2308,7 +2309,23 @@ async function waitForPodReady(
   let elapsedMs = 0;
 
   while (true) {
-    const readiness = await live.port.getPodReadiness(namespace, podName, labels);
+    const requestStartedAt = Date.now();
+    let readiness: PodReadiness;
+    try {
+      readiness = await live.port.getPodReadiness(namespace, podName, labels);
+    } catch {
+      elapsedMs += Date.now() - requestStartedAt;
+      if (elapsedMs >= timeoutMs) {
+        throw new ProductError("Timed out waiting for sandbox pod readiness", 504);
+      }
+      const delayMs = Math.min(pollMs, timeoutMs - elapsedMs);
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
+      elapsedMs += delayMs;
+      continue;
+    }
+    elapsedMs += Date.now() - requestStartedAt;
     switch (readiness) {
       case "ready":
         return;
