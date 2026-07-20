@@ -56,7 +56,7 @@ action before they notice the styling.
 - Top bar: 52px, persistent identity and workspace context.
 - Desktop navigation: 240px expanded, 72px collapsed, with a visible active
   indicator and restrained group labels.
-- Standard pages: 24px mobile and 32px desktop gutters, maximum useful width
+- Standard pages: 20px mobile and 32px desktop gutters, maximum useful width
   around 1480px. Conversation and file workspaces may use the full width.
 - Minimum interactive target: 36px desktop and 40px where controls are primary
   on mobile.
