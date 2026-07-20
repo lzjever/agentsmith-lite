@@ -1,6 +1,6 @@
 "use client";
 
-import { ClipboardList, ExternalLink, RefreshCw, X } from "lucide-react";
+import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -370,12 +370,14 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
   const [queryProjectId, setQueryProjectId] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
   const [selected, setSelected] = useState<ProjectAuditEvent | null>(null);
   const requestRevision = useRef(0);
   const cursor = cursors.at(-1);
+  const activeFilterCount = [actorId, subjectUserId, action, status, kind].filter((value) => value !== "all").length + [resourceId, from, to].filter(Boolean).length;
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
@@ -512,7 +514,8 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             </Button>
           </div>
         ) : null}
-        <div className="grid gap-3 border-b border-subtle pb-4 md:grid-cols-2 xl:grid-cols-5">
+        <Button className="w-fit sm:hidden" variant="outline" aria-expanded={filtersOpen} aria-controls="audit-filters" onClick={() => setFiltersOpen((open) => !open)}><SlidersHorizontal size={16} />Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}</Button>
+        <div id="audit-filters" className={`${filtersOpen ? "grid" : "hidden"} gap-3 border-b border-subtle pb-4 sm:grid md:grid-cols-2 xl:grid-cols-5`}>
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Actor</span>
             <Select value={actorId} onValueChange={(value) => {

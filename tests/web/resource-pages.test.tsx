@@ -733,6 +733,10 @@ describe("project resource pages", () => {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/audit?resourceKind=alert&resourceId=alert_rule_1");
       render(<AuditPage projectId={projectId} />);
       await screen.findByText(/Showing events for alert rule/);
+      const filters = screen.getByRole("button", { name: /Filters/ });
+      assert.equal(filters.getAttribute("aria-expanded"), "false");
+      fireEvent.click(filters);
+      assert.equal(filters.getAttribute("aria-expanded"), "true");
       await waitFor(() => assert.equal(queries.at(-1)?.resourceKind, "alert"));
       assert.equal(queries.at(-1)?.resourceId, "alert_rule_1");
       fireEvent.click(screen.getByRole("button", { name: "Clear resource filter" }));
