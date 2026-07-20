@@ -195,6 +195,7 @@ export type SandboxReleaseReason = "requested" | "failed" | "cleanup" | "legacy_
 
 export interface ProjectSandboxUsageRow {
   taskId: string;
+  taskAvailable: boolean;
   runId: string;
   fileLibraryId: string;
   state: "live" | "settled";

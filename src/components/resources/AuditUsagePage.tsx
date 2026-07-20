@@ -230,9 +230,15 @@ function SandboxUsageView({
             {sandbox.rows.map((row) => (
               <div className="grid grid-cols-[minmax(11rem,1fr)_7rem_10rem_10rem_8rem_minmax(14rem,1fr)] items-center gap-3 px-2 py-3 text-xs" key={row.runId}>
                 <div className="min-w-0">
-                  <a className="inline-flex max-w-full items-center gap-1 font-medium text-foreground hover:underline" href={taskHref(projectId, row.taskId)}>
-                    <span className="truncate">Task {row.taskId}</span><ExternalLink className="size-3 shrink-0" />
-                  </a>
+                  {row.taskAvailable ? (
+                    <a className="inline-flex max-w-full items-center gap-1 font-medium text-foreground hover:underline" href={taskHref(projectId, row.taskId)}>
+                      <span className="truncate">Task {row.taskId}</span><ExternalLink className="size-3 shrink-0" />
+                    </a>
+                  ) : (
+                    <span className="inline-flex max-w-full items-center gap-1 text-secondary" title="This task was deleted">
+                      <span className="truncate">Task {row.taskId}</span><span className="shrink-0">(deleted)</span>
+                    </span>
+                  )}
                   <p className="mt-1 truncate font-mono text-[11px] text-tertiary" title={row.runId}>Run {row.runId}</p>
                 </div>
                 <Badge variant={row.state === "live" ? "default" : "secondary"} className="w-fit">{row.state === "live" ? "Live" : "Settled"}</Badge>

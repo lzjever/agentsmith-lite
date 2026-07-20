@@ -94,7 +94,8 @@ describe("project usage overview", () => {
     assert.equal((await store.listSandboxUsageSettlements(project.id,user.id)).length,1);assert.equal((await store.listProjectAuditEvents(project.id)).filter((event)=>event.action==="sandbox.released").length,1);assert.equal((await store.findProjectResourceUsage(project.id))?.activeTasks,0);
     assert.equal(await store.completeSandboxRunRelease({runId:run.runId,expectedFencingToken:cleaned.fencingToken,run:cleaned,settlement:{...settlement,durationSeconds:21},auditEvent}),"conflict");
     assert.equal(await store.completeSandboxRunRelease({runId:run.runId,expectedFencingToken:cleaned.fencingToken,run:{...cleaned,startedAt:"2026-07-19T00:00:01.000Z"},settlement,auditEvent}),"conflict");
-    await store.deleteTaskData(task.id,releasedAt);const usage=await services.policies.getUsageOverview(user.id,project.id);assert.equal(usage.sandbox.totalDurationSeconds,"20");assert.equal(usage.sandbox.rows[0]?.state,"settled");assert.equal(usage.sandbox.rows[0]?.runId,run.runId);
+    assert.equal((await services.policies.getUsageOverview(user.id,project.id)).sandbox.rows[0]?.taskAvailable,true);
+    await store.deleteTaskData(task.id,releasedAt);const usage=await services.policies.getUsageOverview(user.id,project.id);assert.equal(usage.sandbox.totalDurationSeconds,"20");assert.equal(usage.sandbox.rows[0]?.state,"settled");assert.equal(usage.sandbox.rows[0]?.runId,run.runId);assert.equal(usage.sandbox.rows[0]?.taskAvailable,false);
   });
 
   it("rolls back first settlement when the active Task is missing, mismatched, or unreserved",async()=>{
