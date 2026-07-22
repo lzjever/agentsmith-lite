@@ -734,7 +734,6 @@ function DetailDialog({
             subtitle="Event metadata for this project activity."
             onOpenChange={(open) => !open && onClose()}
             hasDivider
-            padding={5}
           />
           <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
             <DT label="Timestamp" value={event.createdAt} />
