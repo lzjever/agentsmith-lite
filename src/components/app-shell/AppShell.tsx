@@ -1,6 +1,6 @@
 "use client";
 
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { AppShell as AstryxAppShell, MobileNav } from "@astryxdesign/core";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -8,12 +8,10 @@ import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, o
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
 import { PageLoading } from "../ui/loading";
-import { Sheet, SheetContent } from "../ui/sheet";
 import { ToastContainer } from "../ui/toast";
 import { TooltipProvider } from "../ui/tooltip";
 import { ShellNavigation } from "./Sidebar";
-import { ProjectSwitcher, Topbar } from "./Topbar";
-import { ThemeToggle } from "../theme/ThemeToggle";
+import { Topbar } from "./Topbar";
 
 type ShellProps = { children: ReactNode; workspaceId?: string; projectId?: string; };
 type ShellState = "loading" | "ready" | "login" | "error";
@@ -23,6 +21,9 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   const mounted = useRef(true);
   const identityRequest = useRef(0);
   const directoryRequest = useRef(0);
+  const hasDirectory = useRef(false);
+  const contentStart = useRef<HTMLDivElement>(null);
+  const lastPathname = useRef<string | undefined>(undefined);
   const pathname = usePathname();
   const router = useRouter();
   const routeParams = useParams<{ project?: string | string[] }>();
@@ -49,13 +50,14 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
     }
   }
 
-  async function loadDirectory(preservePage = false) {
+  async function loadDirectory(preservePage = hasDirectory.current) {
     const request = ++directoryRequest.current;
     if (!preservePage) setDirectoryState("loading");
     try {
       const listed = await apiClient.workspaces();
       if (!mounted.current || request !== directoryRequest.current) return;
       setWorkspaces(listed);
+      hasDirectory.current = true;
       setDirectoryState("ready");
     } catch {
       if (!mounted.current || request !== directoryRequest.current) return;
@@ -89,12 +91,20 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   }, []);
 
   useEffect(() => {
-    void loadDirectory();
+    void loadDirectory(hasDirectory.current);
   }, [workspaceId, routedProjectId]);
 
-  function toggleCollapsed() {
-    setCollapsed((current) => {
-      const next = !current;
+  useEffect(() => {
+    const target = contentStart.current;
+    if (!target) return;
+    const heading = target.querySelector("h1")?.textContent?.trim();
+    if (heading) document.title = `${heading} | AgentSmith`;
+    if (lastPathname.current && lastPathname.current !== pathname) target.focus();
+    lastPathname.current = pathname;
+  }, [pathname, status, directoryState]);
+
+  function setNavigationCollapsed(next: boolean) {
+    setCollapsed(() => {
       window.localStorage.setItem("agentsmith-sidebar-collapsed", next ? "1" : "0");
       return next;
     });
@@ -120,7 +130,13 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
         : <ShellRecoveryState title="Project unavailable" detail="This project does not exist in this workspace or you no longer have permission to access it." projectsHref={`/workspaces/${workspace.id}/projects`} retry={loadDirectory} />
       : null;
   const profileReturnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  return <TooltipProvider><div className="min-h-screen bg-background"><Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} /><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className={`hidden shrink-0 flex-col border-r border-border bg-panel transition-[width] duration-200 md:flex ${collapsed ? "w-[var(--sidebar-width-collapsed)]" : "w-[var(--sidebar-width)]"}`}><ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} /><Button variant="quiet" size="icon" className="m-3 self-end" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</Button></aside><Sheet open={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen}><SheetContent aria-describedby={undefined}><div className="border-b border-border px-4 py-4"><span className="font-display text-lg text-foreground">AgentSmith</span>{workspace && project ? <div className="mt-3"><ProjectSwitcher workspace={workspace} project={project} mobile onSelect={(id) => { setMobileNavigationOpen(false); router.push(`/workspaces/${workspace.id}/projects/${id}/overview`); }} onViewAll={() => { setMobileNavigationOpen(false); router.push(`/workspaces/${workspace.id}/projects`); }} /></div> : null}</div><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /><ThemeToggle mobile /></SheetContent></Sheet><main className="min-w-0 flex-1">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</main></div><ToastContainer /></div></TooltipProvider>;
+  return <TooltipProvider><AstryxAppShell
+    variant="section"
+    height="auto"
+    topNav={<Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} />}
+    sideNav={<ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed} />}
+    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></MobileNav>}
+  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell><ToastContainer /></TooltipProvider>;
 }
 
 function ShellLoadingFrame() {

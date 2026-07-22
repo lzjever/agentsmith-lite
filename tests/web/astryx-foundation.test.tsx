@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import { renderToString } from "react-dom/server";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
 Object.assign(globalThis, {
@@ -38,4 +39,22 @@ test("root providers apply Astryx theme and route Astryx links through Next Link
   const link = screen.getByRole("link", { name: "Open workspace" });
   assert.equal(link.getAttribute("href"), "/workspaces/ws_1");
   assert.ok(document.querySelector("[data-astryx-theme]"));
+});
+
+test("a server-supplied dark theme renders the same Astryx mode before and after hydration", () => {
+  const serverMarkup = renderToString(
+    <AppProviders initialThemeMode="dark">
+      <p>Theme contract</p>
+    </AppProviders>
+  );
+  assert.match(serverMarkup, /data-theme="dark"/);
+
+  render(
+    <AppProviders initialThemeMode="dark">
+      <p>Theme contract</p>
+    </AppProviders>
+  );
+
+  assert.equal(document.documentElement.dataset.theme, "dark");
+  assert.equal(document.querySelector("[data-astryx-theme]")?.getAttribute("data-theme"), "dark");
 });

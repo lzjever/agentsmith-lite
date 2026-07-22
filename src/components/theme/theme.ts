@@ -1,17 +1,11 @@
 export type Theme = "light" | "dark";
 
-export const themeStorageKey = "agentsmith-theme";
+export const themeCookieName = "agentsmith-theme";
 
-export function storedTheme(): Theme | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = window.localStorage.getItem(themeStorageKey);
-    return value === "light" || value === "dark" ? value : null;
-  } catch {
-    return null;
-  }
+export function themeFromCookie(value: string | undefined): Theme {
+  return value === "dark" ? "dark" : "light";
 }
 
-export function systemTheme(): Theme {
-  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+export function saveThemeMode(theme: Theme): void {
+  document.cookie = `${themeCookieName}=${theme}; Path=/; Max-Age=31536000; SameSite=Lax`;
 }

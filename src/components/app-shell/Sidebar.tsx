@@ -1,22 +1,31 @@
 import type { LucideIcon } from "lucide-react";
 import { Bell, ClipboardList, FileKey, FileText, FolderKanban, Gauge, LayoutDashboard, NotebookTabs, Server, Settings, SlidersHorizontal, Users, Wrench } from "lucide-react";
-import Link from "next/link";
-import { cn } from "../ui/cn";
-import { Tooltip, TooltipContent } from "../ui/tooltip";
+import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core";
 import type { Project, Workspace } from "../../lib/api/client";
 
-type NavigationProps = { workspace?: Workspace | undefined; project?: Project | undefined; pathname: string; collapsed?: boolean | undefined; onNavigate?: (() => void) | undefined; };
+type NavigationProps = {
+  workspace?: Workspace | undefined;
+  project?: Project | undefined;
+  pathname: string;
+  collapsed?: boolean | undefined;
+  onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
+  onNavigate?: (() => void) | undefined;
+};
 type NavItem = { label: string; href: string; icon: LucideIcon; active: (pathname: string) => boolean; };
 
-export function ShellNavigation({ workspace, project, pathname, collapsed = false, onNavigate }: NavigationProps) {
+export function ShellNavigation({ workspace, project, pathname, collapsed = false, onCollapsedChange, onNavigate }: NavigationProps) {
   const groups = project && workspace ? projectGroups(workspace, project) : workspaceGroups(workspace);
-  return <nav aria-label="Primary navigation" className="flex-1 overflow-y-auto px-2.5 py-4">{groups.map((group) => <section className="mb-5" key={group.label}><p className={cn("mb-1.5 px-2.5 text-[11px] font-medium text-tertiary", collapsed && "sr-only")}>{group.label}</p><div className="space-y-1">{group.items.map((item) => <NavigationLink key={item.href} item={item} pathname={pathname} collapsed={collapsed} onNavigate={onNavigate} />)}</div></section>)}</nav>;
+  return <SideNav
+    collapsible={onCollapsedChange ? { isCollapsed: collapsed, onCollapsedChange, buttonLabel: collapsed ? "Expand navigation" : "Collapse navigation" } : false}
+    className="h-full"
+  >
+    {groups.map((group) => <SideNavSection key={group.label} title={group.label}>{group.items.map((item) => <NavigationLink key={item.href} item={item} pathname={pathname} onNavigate={onNavigate} />)}</SideNavSection>)}
+  </SideNav>;
 }
 
-function NavigationLink({ item, pathname, collapsed, onNavigate }: { item: NavItem; pathname: string; collapsed: boolean; onNavigate?: (() => void) | undefined }) {
+function NavigationLink({ item, pathname, onNavigate }: { item: NavItem; pathname: string; onNavigate?: (() => void) | undefined }) {
   const active = item.active(pathname);
-  const link = <Link href={item.href} {...(onNavigate ? { onClick: onNavigate } : {})} aria-label={collapsed ? item.label : undefined} aria-current={active ? "page" : undefined} className={cn("relative flex h-9 items-center rounded-md border border-transparent text-sm transition-[background-color,border-color,color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30", collapsed ? "justify-center px-0" : "gap-3 px-2.5", active ? "border-border bg-surface font-medium text-foreground shadow-ambient before:absolute before:-left-[3px] before:h-5 before:w-0.5 before:rounded-pill before:bg-accent" : "text-secondary hover:bg-hover hover:text-foreground")}><item.icon className={cn("size-[18px] shrink-0", active ? "text-accent" : "text-icon-default")} /><span className={cn("truncate", collapsed && "hidden")}>{item.label}</span></Link>;
-  return collapsed ? <Tooltip.Root><Tooltip.Trigger asChild>{link}</Tooltip.Trigger><TooltipContent>{item.label}</TooltipContent></Tooltip.Root> : link;
+  return <SideNavItem label={item.label} href={item.href} icon={<item.icon size={18} />} isSelected={active} {...(onNavigate ? { onClick: () => onNavigate() } : {})} />;
 }
 
 function workspaceGroups(workspace?: Workspace): Array<{ label: string; items: NavItem[] }> {

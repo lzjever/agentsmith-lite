@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronDown, FolderKanban, Globe, List, Menu } from "lucide-react";
+import { TopNav as AstryxTopNav } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, Workspace } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
@@ -32,7 +33,10 @@ export function Topbar({
 }) {
   const router = useRouter();
   return (
-    <header className="sticky top-0 z-30 flex h-[3.25rem] max-w-full items-center gap-2 overflow-hidden border-b border-border bg-surface/95 px-2 shadow-ambient backdrop-blur-sm sm:px-4 md:gap-3 md:px-5">
+    <AstryxTopNav
+      label="Application controls"
+      className="min-h-[3.25rem] border-b border-border bg-surface/95 px-2 shadow-ambient backdrop-blur-sm sm:px-4 md:px-5"
+      heading={
       <div className="flex shrink-0 items-center gap-1 sm:gap-2 [&_a>span:last-child]:hidden sm:[&_a>span:last-child]:inline">
         <Button
           variant="quiet"
@@ -45,7 +49,8 @@ export function Topbar({
         </Button>
         <Logo />
       </div>
-      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden before:mx-1 before:h-5 before:w-px before:bg-border md:gap-2">
+      }
+      startContent={<div className="flex min-w-0 items-center gap-1 overflow-hidden before:mx-1 before:h-5 before:w-px before:bg-border md:gap-2">
         {workspace ? (
           <WorkspaceSwitcher
             workspaces={workspaces}
@@ -64,7 +69,8 @@ export function Topbar({
           />
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+      }
+      endContent={<div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <NotificationBell {...(profileReturnTo ? { returnTo: profileReturnTo } : {})} />
         <ThemeToggle />
         <UserMenu
@@ -73,7 +79,8 @@ export function Topbar({
           {...(profileReturnTo ? { returnTo: profileReturnTo } : {})}
         />
       </div>
-    </header>
+      }
+    />
   );
 }
 

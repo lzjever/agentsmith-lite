@@ -4,8 +4,8 @@ import { LinkProvider } from "@astryxdesign/core/Link";
 import { Theme as AstryxTheme } from "@astryxdesign/core/theme";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 import Link from "next/link";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { storedTheme, systemTheme, themeStorageKey, type Theme } from "../components/theme/theme";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { saveThemeMode, type Theme } from "../components/theme/theme";
 
 type AppThemeContextValue = {
   theme: Theme;
@@ -14,29 +14,11 @@ type AppThemeContextValue = {
 
 const AppThemeContext = createContext<AppThemeContextValue | null>(null);
 
-function initialTheme(): Theme {
-  return storedTheme() ?? systemTheme();
-}
-
-export function AppProviders({ children }: Readonly<{ children: React.ReactNode }>) {
-  const [theme, setCurrentTheme] = useState<Theme>(initialTheme);
+export function AppProviders({ children, initialThemeMode = "light" }: Readonly<{ children: React.ReactNode; initialThemeMode?: Theme }>) {
+  const [theme, setCurrentTheme] = useState<Theme>(initialThemeMode);
   const setTheme = useCallback((nextTheme: Theme) => {
     setCurrentTheme(nextTheme);
-    try {
-      window.localStorage.setItem(themeStorageKey, nextTheme);
-    } catch {
-      // The selected theme still applies when storage is unavailable.
-    }
-  }, []);
-
-  useEffect(() => {
-    if (storedTheme() || typeof window.matchMedia !== "function") return;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const followSystem = () => {
-      if (!storedTheme()) setCurrentTheme(media.matches ? "dark" : "light");
-    };
-    media.addEventListener("change", followSystem);
-    return () => media.removeEventListener("change", followSystem);
+    saveThemeMode(nextTheme);
   }, []);
 
   const value = useMemo(() => ({ theme, setTheme }), [setTheme, theme]);

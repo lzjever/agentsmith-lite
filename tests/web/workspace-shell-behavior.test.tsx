@@ -14,6 +14,7 @@ const { ProjectSwitcher } = await import("../../src/components/app-shell/Topbar.
 const { ShellNavigation } = await import("../../src/components/app-shell/Sidebar.js");
 const { ThemeToggle } = await import("../../src/components/theme/ThemeToggle.js");
 const { AppProviders } = await import("../../src/app/providers.js");
+const { themeFromCookie } = await import("../../src/components/theme/theme.js");
 const { TooltipProvider } = await import("../../src/components/ui/tooltip.js");
 const { CreateProjectDialog } = await import("../../src/components/projects/CreateProjectDialog.js");
 const { AppShell } = await import("../../src/components/app-shell/AppShell.js");
@@ -35,6 +36,7 @@ afterEach(() => {
   cleanup();
   window.history.replaceState({}, "", "/");
   window.localStorage.clear();
+  document.cookie = "agentsmith-theme=; Path=/; Max-Age=0";
   document.documentElement.dataset.theme = "light";
   setSystemDark(false);
 });
@@ -125,15 +127,11 @@ describe("workspace and shell interactions", () => {
     assert.deepEqual(items.map((item) => item.textContent?.replace("Current", "").trim()), ["Zulu project", "Alpha project", "Beta project"]);
   });
 
-  it("follows system theme changes until the user saves a preference", async () => {
-    setSystemDark(true);
+  it("persists an explicit theme choice for server-rendered pages", async () => {
     const view = render(<AppProviders><ThemeToggle mobile /></AppProviders>);
-    await waitFor(() => assert.equal(document.documentElement.dataset.theme, "dark"));
-    act(() => setSystemDark(false));
-    await waitFor(() => assert.equal(document.documentElement.dataset.theme, "light"));
     fireEvent.click(view.getByRole("button", { name: "Dark" }));
-    act(() => setSystemDark(false));
     assert.equal(document.documentElement.dataset.theme, "dark");
+    assert.match(document.cookie, /agentsmith-theme=dark/);
   });
 
   it("keeps independently loaded content usable when workspace navigation fails", async () => {
@@ -285,12 +283,81 @@ describe("workspace and shell interactions", () => {
     }
   });
 
-  it("marks the active retained route and exposes its collapsed navigation label by tooltip", async () => {
+  it("keeps known content mounted while the route requests a fresh directory", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    let finishRefresh!: (value: Workspace[]) => void;
+    let reads = 0;
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => {
+      reads += 1;
+      return reads === 1 ? [workspace] : new Promise((resolve) => { finishRefresh = resolve; });
+    };
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<DraftHarness />, "/workspaces/ws_1", { workspace: "ws_1" }, "ws_1");
+      const draft = await view.findByRole("textbox", { name: "Unsaved draft" }) as HTMLInputElement;
+      fireEvent.change(draft, { target: { value: "Keep this work" } });
+
+      view.rerender(shell(<DraftHarness />, "/workspaces/ws_1/projects/proj_1/overview", { workspace: "ws_1", project: "proj_1" }, "ws_1"));
+      await waitFor(() => assert.equal(reads, 2));
+      assert.equal((view.getByRole("textbox", { name: "Unsaved draft" }) as HTMLInputElement).value, "Keep this work");
+
+      await act(async () => finishRefresh([workspace]));
+    } finally {
+      finishRefresh?.([workspace]);
+      Object.assign(apiClient, original);
+    }
+  });
+
+  it("provides a skip link and a stable main content target", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<h1>Project overview</h1>, "/workspaces/ws_1/projects/proj_1/overview", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      const skip = await view.findByRole("link", { name: "Skip to content" });
+      const main = document.querySelector('[role="main"]');
+      assert.ok(main);
+      assert.equal(skip.getAttribute("href"), `#${main.id}`);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("renders the server-resolved cookie theme through the Astryx shell", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    try {
+      const initialThemeMode = themeFromCookie("dark");
+      const view = render(<AppProviders initialThemeMode={initialThemeMode}><AppRouterContext.Provider value={router()}><PathnameContext.Provider value="/workspaces/ws_1/projects/proj_1/overview"><PathParamsContext.Provider value={{ workspace: "ws_1", project: "proj_1" }}><AppShell workspaceId="ws_1"><h1>Project overview</h1></AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider></AppProviders>);
+      await view.findByRole("main");
+      const theme = document.querySelector<HTMLElement>("[data-astryx-theme]");
+      assert.equal(theme?.dataset.theme, "dark");
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("closes mobile navigation explicitly and returns focus to its trigger", async () => {
+    const original = { currentIdentity: apiClient.currentIdentity, workspaces: apiClient.workspaces, notifications: apiClient.notifications };
+    apiClient.currentIdentity = async () => ({ user: { id: "user_1", email: "user@example.test" } });
+    apiClient.workspaces = async () => [workspace];
+    apiClient.notifications = async () => [];
+    try {
+      const view = renderShell(<p>Project content</p>, "/workspaces/ws_1/projects/proj_1/overview", { workspace: "ws_1", project: "proj_1" }, "ws_1");
+      const trigger = await view.findByRole("button", { name: "Open navigation" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      const close = await view.findByRole("button", { name: "Close navigation" });
+      fireEvent.click(close);
+      await waitFor(() => assert.equal(view.queryByRole("button", { name: "Close navigation" }), null));
+      assert.equal(document.activeElement, trigger);
+    } finally { Object.assign(apiClient, original); }
+  });
+
+  it("marks the active retained route with an accessible navigation label", async () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
     const tasks = view.getByRole("link", { name: "Tasks" });
     assert.equal(tasks.getAttribute("aria-current"), "page");
-    fireEvent.pointerMove(tasks, { pointerType: "mouse" });
-    await waitFor(() => assert.equal(view.getByRole("tooltip").textContent, "Tasks"), { timeout: 2000 });
   });
 });
 
@@ -337,6 +404,8 @@ function installDom(): void {
     Event: dom.window.Event,
     CustomEvent: dom.window.CustomEvent,
     DOMRect: dom.window.DOMRect,
+    requestAnimationFrame: (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 0),
+    cancelAnimationFrame: (handle: number) => window.clearTimeout(handle),
     getComputedStyle: dom.window.getComputedStyle,
     IS_REACT_ACT_ENVIRONMENT: true
   });
@@ -344,6 +413,10 @@ function installDom(): void {
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
   Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ get matches() { return systemDark; }, media: "(prefers-color-scheme: dark)", onchange: null, addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.add(listener), removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.delete(listener), addListener() {}, removeListener() {}, dispatchEvent: () => true }) });
   Object.assign(dom.window.HTMLElement.prototype, { attachEvent() {}, detachEvent() {} });
+  Object.assign(dom.window.HTMLDialogElement.prototype, {
+    showModal() { this.open = true; },
+    close() { this.open = false; this.dispatchEvent(new dom.window.Event("close")); }
+  });
   if (!("ResizeObserver" in globalThis)) {
     Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
   }
