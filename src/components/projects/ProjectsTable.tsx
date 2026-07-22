@@ -227,7 +227,6 @@ function ButtonPin({
   return (
     <IconButton
       label={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
-      title={pinned ? "Unpin project" : "Pin project"}
       variant="ghost"
       size="md"
       className="shrink-0 text-secondary hover:text-foreground"

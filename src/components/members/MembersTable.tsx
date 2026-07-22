@@ -63,7 +63,7 @@ function MemberRoleControl({ member, canManage, busy, onChangeRole }: { member: 
 }
 
 function MemberActions({ member, canManage, busy, onRemove, onView }: { member: ProjectMember; canManage: boolean; busy: boolean; onRemove: (member: ProjectMember) => void; onView: (member: ProjectMember) => void }) {
-  return <div className="flex flex-wrap items-center justify-end gap-2"><Button label="View details" variant="ghost" size="md" onClick={() => onView(member)} />{canManage && member.role !== "owner" ? <IconButton label={`Remove ${memberIdentityLabel(member)}`} variant="ghost" size="lg" className="text-error" title="Remove member" isDisabled={busy} onClick={() => onRemove(member)} icon={<Trash2 size={15} />} /> : null}</div>;
+  return <div className="flex flex-wrap items-center justify-end gap-2"><Button label="View details" variant="ghost" size="md" onClick={() => onView(member)} />{canManage && member.role !== "owner" ? <IconButton label={`Remove ${memberIdentityLabel(member)}`} variant="ghost" size="lg" className="text-error" isDisabled={busy} onClick={() => onRemove(member)} icon={<Trash2 size={15} />} /> : null}</div>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) { return <div className="mt-2 flex items-center justify-between gap-2 text-sm text-error" role="alert"><span>{message}</span><IconButton label="Dismiss role error" variant="ghost" size="lg" onClick={onDismiss} icon={<X size={15} />} /></div>; }
