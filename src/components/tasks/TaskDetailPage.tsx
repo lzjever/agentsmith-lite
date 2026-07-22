@@ -1,6 +1,7 @@
 "use client";
 
 import { Archive, ArrowLeft, CircleAlert, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
+import { Button as AstryxButton, IconButton } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection } from "../../lib/api/client";
@@ -190,7 +191,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const presentedDetail = releasing ? releasePendingDetail(detail) : detail;
   const { task, capabilities, lifecycle, currentTurn, sandboxState } = presentedDetail;
   const mutationBusy = deleting || releasing || lifecycleBusy;
-  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(presentedDetail)} · ${task.id}`} actions={<><Button variant="quiet" size="icon" aria-label="Refresh task" title="Refresh task" disabled={mutationBusy} onClick={refresh}><RefreshCw size={17} /></Button>{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <Button variant="danger" size="sm" disabled={mutationBusy} onClick={() => setReleaseOpen(true)}><Power size={15} />Release sandbox</Button> : null}{capabilities.deleteTask && !artifactsOnly ? <Button variant="danger" size="icon" aria-label="Delete task" title="Delete task" disabled={mutationBusy} onClick={() => setDeleteOpen(true)}><Trash2 size={16} /></Button> : null}</>} />;
+  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(presentedDetail)} · ${task.id}`} actions={<><IconButton label="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label="Release sandbox" variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadTask(true)} /> : null;
   const archivedNotice = lifecycle.state === "archived" ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3"><Archive className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">This task is archived. Its conversation, files, and artifacts remain available.</p></div> : null;
@@ -224,7 +225,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
 }
 
 function TaskLoadFailure({ title, detail, basePath, onRetry }: { title: string; detail: string; basePath: string; onRetry?: () => void }) {
-  return <PageLayout><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><h1 className="type-section-heading">{title}</h1><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <Button onClick={onRetry}>Try again</Button> : null}</div></div></PageState></PageLayout>;
+  return <PageLayout><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><h1 className="type-section-heading">{title}</h1><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <AstryxButton label="Try again" variant="secondary" onClick={onRetry} /> : null}</div></div></PageState></PageLayout>;
 }
 
 function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMessage, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; emptyMessage?: string; onRetry: () => Promise<void> }) {
@@ -242,7 +243,7 @@ function TaskDetailValue({ label, children }: { label: string; children: ReactNo
 }
 
 function SectionError({ title, message: detail, onRetry }: { title: string; message: string; onRetry: () => Promise<void> }) {
-  return <div className="border border-error/30 bg-error/10 px-3 py-3 text-sm" role="alert"><p className="font-medium text-foreground">{title}</p><p className="mt-1 break-words text-secondary">{detail}</p><Button className="mt-3" variant="quiet" size="sm" onClick={() => void onRetry()}><RefreshCw size={14} />Try again</Button></div>;
+  return <div className="border border-error/30 bg-error/10 px-3 py-3 text-sm" role="alert"><p className="font-medium text-foreground">{title}</p><p className="mt-1 break-words text-secondary">{detail}</p><AstryxButton label="Try again" className="mt-3" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={() => void onRetry()} /></div>;
 }
 
 function WorkspaceTab({ active, onClick, children, className, disabled = false }: { active: boolean; onClick: () => void; children: ReactNode; className?: string; disabled?: boolean }) {
