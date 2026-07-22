@@ -2,18 +2,22 @@
 
 import { RefreshCw, Save, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { Button, CheckboxInput, IconButton, Selector } from "@astryxdesign/core";
+import {
+  Button,
+  CheckboxInput,
+  Dialog,
+  DialogHeader,
+  IconButton,
+  Layout,
+  LayoutContent,
+  LayoutFooter,
+  Selector,
+} from "@astryxdesign/core";
 import type {
   EndpointCapability,
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-} from "../ui/dialog";
 import { Input } from "../ui/input";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
@@ -63,181 +67,205 @@ export function EndpointDialog({
         ? input.capabilities.filter((item) => item !== capability)
         : [...input.capabilities, capability],
     );
+  const handleOpenChange = (next: boolean) => {
+    if (!saving) onOpenChange(next);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
-        <form onSubmit={onSubmit}>
-          <DialogHeader
-            title={editing ? "Edit endpoint" : "Create endpoint"}
-            description="Configure an OpenAI-compatible model connection."
-          />
-          {error ? (
-            <div
-              className="mx-5 mt-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
-              role="alert"
-            >
-              <span>{error}</span>
-              <IconButton
-                type="button"
-                variant="ghost"
-                size="lg"
-                label="Dismiss endpoint error"
-                icon={<X size={15} />}
-                onClick={onDismissError}
-              />
-            </div>
-          ) : null}
-          <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
-            <label className="grid gap-1">
-              Name
-              <Input
-                required
-                maxLength={160}
-                disabled={saving}
-                value={input.name}
-                onChange={(event) => set("name", event.target.value)}
-              />
-              {nameConflict ? <span className="text-xs text-error">An endpoint already uses this name.</span> : null}
-            </label>
-            <label>
-              Model
-              <Input
-                required
-                disabled={saving}
-                value={input.model}
-                onChange={(event) => set("model", event.target.value)}
-              />
-            </label>
-            <label className="sm:col-span-2">
-              Base URL
-              <Input
-                required
-                type="url"
-                disabled={saving}
-                readOnly
-                value={input.baseUrl}
-              />
-            </label>
-            <div className="grid gap-2">
-              <Selector
-                label="Credential"
-                isRequired
-                options={credentials.map((credential) => ({
-                  value: credential.id,
-                  label: `${credential.name} (${credential.fingerprint})`,
-                }))}
-                value={input.credentialId}
-                onChange={(credentialId) => {
-                  const credential = credentials.find(
-                    (item) => item.id === credentialId,
-                  );
-                  onChange({
-                    ...input,
-                    credentialId,
-                    ...(credential ? { baseUrl: credential.baseUrl } : {}),
-                  });
-                }}
-                placeholder="Select credential"
-                isDisabled={saving || discovering}
-                size="lg"
-              />
-            </div>
-            <label>
-              Timeout
-              <Input
-                required
-                type="number"
-                min="1"
-                disabled={saving}
-                value={input.requestTimeoutSecs}
-                onChange={(event) =>
-                  set("requestTimeoutSecs", Number(event.target.value))
-                }
-              />
-            </label>
-            <div className="flex items-end gap-2 sm:col-span-2">
-              <Button
-                type="button"
-                variant="ghost"
-                size="lg"
-                label={discovering ? "Checking" : "Discover models"}
-                icon={
-                  <RefreshCw
-                    className={discovering ? "animate-spin" : ""}
-                    size={15}
+    <Dialog
+      isOpen={open}
+      onOpenChange={handleOpenChange}
+      purpose="info"
+      width="min(34rem, calc(100vw - 2rem))"
+      maxHeight="calc(100dvh - 2rem)"
+      padding={0}
+    >
+      <form className="flex min-h-0 flex-1" onSubmit={onSubmit}>
+        <Layout
+          height="fill"
+          defaultHasDividers
+          header={
+            <DialogHeader
+              title={editing ? "Edit endpoint" : "Create endpoint"}
+              subtitle="Configure an OpenAI-compatible model connection."
+              onOpenChange={handleOpenChange}
+            />
+          }
+          content={
+            <LayoutContent>
+              {error ? (
+                <div
+                  className="mb-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
+                  role="alert"
+                >
+                  <span>{error}</span>
+                  <IconButton
+                    type="button"
+                    variant="ghost"
+                    size="lg"
+                    label="Dismiss endpoint error"
+                    icon={<X size={15} />}
+                    onClick={onDismissError}
                   />
-                }
-                onClick={onDiscoverModels}
-                isDisabled={
-                  !canSubmit ||
-                  saving ||
-                  discovering ||
-                  !input.baseUrl ||
-                  !input.credentialId
-                }
-              />
-              {models.length > 0 ? (
-                <Selector
-                  label="Discovered models"
-                  isLabelHidden
-                  options={models.map((model) => ({ value: model, label: model }))}
-                  value={models.includes(input.model) ? input.model : ""}
-                  onChange={(model) => set("model", model)}
-                  placeholder="Choose discovered model"
-                  isDisabled={saving || discovering}
-                  size="lg"
-                  className="max-w-sm"
-                />
+                </div>
               ) : null}
-            </div>
-            <fieldset className="grid gap-2 sm:col-span-2">
-              <legend className="text-sm text-primary">Capabilities</legend>
-              <div className="flex flex-wrap gap-x-5 gap-y-2">
-                {endpointCapabilities.map((capability) => (
-                  <CheckboxInput
-                    key={capability}
-                    label={capability === "tool_calls"
-                      ? "Tool calls"
-                      : capability[0]!.toUpperCase() + capability.slice(1)}
-                    value={input.capabilities.includes(capability)}
-                    isDisabled={
-                      saving ||
-                      (input.capabilities.length === 1 &&
-                        input.capabilities.includes(capability))
-                    }
-                    onChange={() => toggle(capability)}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="grid gap-1">
+                  Name
+                  <Input
+                    required
+                    maxLength={160}
+                    disabled={saving}
+                    value={input.name}
+                    onChange={(event) => set("name", event.target.value)}
                   />
-                ))}
+                  {nameConflict ? <span className="text-xs text-error">An endpoint already uses this name.</span> : null}
+                </label>
+                <label>
+                  Model
+                  <Input
+                    required
+                    disabled={saving}
+                    value={input.model}
+                    onChange={(event) => set("model", event.target.value)}
+                  />
+                </label>
+                <label className="sm:col-span-2">
+                  Base URL
+                  <Input
+                    required
+                    type="url"
+                    disabled={saving}
+                    readOnly
+                    value={input.baseUrl}
+                  />
+                </label>
+                <div className="grid gap-2">
+                  <Selector
+                    label="Credential"
+                    isRequired
+                    options={credentials.map((credential) => ({
+                      value: credential.id,
+                      label: `${credential.name} (${credential.fingerprint})`,
+                    }))}
+                    value={input.credentialId}
+                    onChange={(credentialId) => {
+                      const credential = credentials.find(
+                        (item) => item.id === credentialId,
+                      );
+                      onChange({
+                        ...input,
+                        credentialId,
+                        ...(credential ? { baseUrl: credential.baseUrl } : {}),
+                      });
+                    }}
+                    placeholder="Select credential"
+                    isDisabled={saving || discovering}
+                    size="lg"
+                  />
+                </div>
+                <label>
+                  Timeout
+                  <Input
+                    required
+                    type="number"
+                    min="1"
+                    disabled={saving}
+                    value={input.requestTimeoutSecs}
+                    onChange={(event) =>
+                      set("requestTimeoutSecs", Number(event.target.value))
+                    }
+                  />
+                </label>
+                <div className="flex items-end gap-2 sm:col-span-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="lg"
+                    label={discovering ? "Checking" : "Discover models"}
+                    icon={
+                      <RefreshCw
+                        className={discovering ? "animate-spin" : ""}
+                        size={15}
+                      />
+                    }
+                    onClick={onDiscoverModels}
+                    isDisabled={
+                      !canSubmit ||
+                      saving ||
+                      discovering ||
+                      !input.baseUrl ||
+                      !input.credentialId
+                    }
+                  />
+                  {models.length > 0 ? (
+                    <Selector
+                      label="Discovered models"
+                      isLabelHidden
+                      options={models.map((model) => ({ value: model, label: model }))}
+                      value={models.includes(input.model) ? input.model : ""}
+                      onChange={(model) => set("model", model)}
+                      placeholder="Choose discovered model"
+                      isDisabled={saving || discovering}
+                      size="lg"
+                      className="max-w-sm"
+                    />
+                  ) : null}
+                </div>
+                <fieldset className="grid gap-2 sm:col-span-2">
+                  <legend className="text-sm text-primary">Capabilities</legend>
+                  <div className="flex flex-wrap gap-x-5 gap-y-2">
+                    {endpointCapabilities.map((capability) => (
+                      <CheckboxInput
+                        key={capability}
+                        label={capability === "tool_calls"
+                          ? "Tool calls"
+                          : capability[0]!.toUpperCase() + capability.slice(1)}
+                        value={input.capabilities.includes(capability)}
+                        isDisabled={
+                          saving ||
+                          (input.capabilities.length === 1 &&
+                            input.capabilities.includes(capability))
+                        }
+                        onChange={() => toggle(capability)}
+                      />
+                    ))}
+                  </div>
+                </fieldset>
               </div>
-            </fieldset>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              size="lg"
-              label="Cancel"
-              onClick={() => onOpenChange(false)}
-              isDisabled={saving}
-            />
-            <Button
-              type="submit"
-              variant="primary"
-              size="lg"
-              label="Save"
-              icon={<Save size={15} />}
-              isDisabled={
-                !canSubmit ||
-                !canSave ||
-                saving ||
-                discovering ||
-                !input.credentialId ||
-                input.capabilities.length === 0
-              }
-            />
-          </DialogFooter>
-        </form>
-      </DialogContent>
+            </LayoutContent>
+          }
+          footer={
+            <LayoutFooter>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="lg"
+                  label="Cancel"
+                  onClick={() => handleOpenChange(false)}
+                  isDisabled={saving}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  size="lg"
+                  label="Save"
+                  icon={<Save size={15} />}
+                  isDisabled={
+                    !canSubmit ||
+                    !canSave ||
+                    saving ||
+                    discovering ||
+                    !input.credentialId ||
+                    input.capabilities.length === 0
+                  }
+                />
+              </div>
+            </LayoutFooter>
+          }
+        />
+      </form>
     </Dialog>
   );
 }
