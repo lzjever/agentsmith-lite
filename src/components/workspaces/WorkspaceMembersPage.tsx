@@ -1,7 +1,7 @@
 "use client";
 
 import { Plus, Search, Trash2, X } from "lucide-react";
-import { Badge, Button, Dialog, DialogHeader, IconButton, Selector, TextInput } from "@astryxdesign/core";
+import { Badge, Banner, Button, Dialog, DialogHeader, IconButton, Selector, TextInput } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -232,7 +232,7 @@ function WorkspaceMemberRow({ member, canManage, busy, onChange, onRemove, onVie
 }
 
 function MutationNotice({ error, onDismiss }: { error: MutationError; onDismiss: () => void }) {
-  return <div className="flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{error.message}</span><span className="flex gap-2">{error.retry ? <Button label="Retry" size="md" variant="ghost" onClick={error.retry} /> : null}<IconButton label="Dismiss member error" icon={<X size={15} />} size="lg" variant="ghost" onClick={onDismiss} /></span></div>;
+  return <Banner status="error" title="Member update failed" description={error.message} endContent={<span className="flex gap-2">{error.retry ? <Button label="Retry" size="md" variant="ghost" onClick={error.retry} /> : null}<IconButton label="Dismiss member error" icon={<X size={15} />} size="lg" variant="ghost" onClick={onDismiss} /></span>} />;
 }
 
 function memberLabel(member: WorkspaceMember): string { return member.displayName || member.email || "Workspace member"; }
