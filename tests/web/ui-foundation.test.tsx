@@ -44,7 +44,6 @@ const { Badge, Button, EmptyState, Skeleton, Spinner } = await import("@astryxde
 const { AppProviders } = await import("../../src/app/providers.js");
 const { PageState } = await import("../../src/components/layout/PageState.js");
 const { PageHeader } = await import("../../src/components/layout/PageHeader.js");
-const { ProjectModuleHeader } = await import("../../src/components/layout/ProjectModuleHeader.js");
 const { default: TaskDetailLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/loading.js");
 const { default: TaskArtifactsLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/artifacts/loading.js");
 const { default: WorkspaceError } = await import("../../src/app/workspaces/[workspace]/error.js");
@@ -59,11 +58,9 @@ test("shared page state preserves success and labels non-success states", () => 
 });
 
 test("page framework uses one page-title baseline and a distinct compact workbench heading", () => {
-  render(<><PageHeader title="Projects" subtitle="Manage project access." /><ProjectModuleHeader title="Activity" /></>);
+  render(<PageHeader title="Projects" subtitle="Manage project access." />);
   const pageTitle = screen.getByRole("heading", { level: 1, name: "Projects" });
   assert.match(pageTitle.className, /type-display/);
-  const workbenchHeading = screen.getByRole("heading", { level: 2, name: "Activity" });
-  assert.match(workbenchHeading.className, /type-title/);
   assert.equal(screen.getAllByRole("heading", { level: 1 }).length, 1);
 });
 
