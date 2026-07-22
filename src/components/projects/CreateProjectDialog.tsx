@@ -47,7 +47,7 @@ export function CreateProjectDialog({ workspaceId, open, onOpenChange, onCreated
   };
 
   return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" padding={0} aria-label="Create project"><form onSubmit={submit}>
-    <DialogHeader title="New project" subtitle="Create a project with its own endpoints, files, members, and tasks." onOpenChange={handleOpenChange} hasDivider padding={5} startContent={<span className="grid size-10 shrink-0 place-items-center rounded-md bg-accent/10 text-accent"><FolderPlus size={20} /></span>} />
+    <DialogHeader title="New project" subtitle="Create a project with its own endpoints, files, members, and tasks." onOpenChange={handleOpenChange} hasDivider startContent={<span className="grid size-10 shrink-0 place-items-center rounded-md bg-accent/10 text-accent"><FolderPlus size={20} /></span>} />
     <div className="px-5 py-5">
       <label className="grid gap-2 text-sm text-primary">Project name<Input autoFocus data-autofocus="true" required maxLength={160} value={name} onChange={(event) => setName(event.target.value.slice(0, 160))} disabled={saving} /></label>
       {error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}

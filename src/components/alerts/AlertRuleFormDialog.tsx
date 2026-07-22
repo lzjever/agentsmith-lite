@@ -34,7 +34,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
   const handleOpenChange = (next: boolean) => !saving && onOpenChange(next);
 
   return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={onSubmit}>
-    <DialogHeader title={title} subtitle={description} onOpenChange={handleOpenChange} hasDivider padding={5} />
+    <DialogHeader title={title} subtitle={description} onOpenChange={handleOpenChange} hasDivider />
     <div className="grid gap-4 px-5 py-5">
       {error ? <p role="alert" className="rounded-sm border border-error/40 bg-error/5 px-3 py-2 text-sm text-error">{error}</p> : null}
       <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>

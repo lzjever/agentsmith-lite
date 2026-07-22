@@ -91,7 +91,7 @@ export function TaskCreateDialog({
   return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" padding={0} aria-label="Create task">
     <div className="overflow-y-auto">
       <form onSubmit={(event) => void submit(event)} aria-label="Create task">
-        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider padding={5} endContent={<Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
+        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider endContent={<Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
         {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
         <div className="grid gap-5 px-5 py-5">
           {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
