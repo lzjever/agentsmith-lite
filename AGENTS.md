@@ -44,7 +44,7 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
-- Do not run source JSDOM/TSX tests by default. When one is genuinely necessary, run exactly one serial process in an explicit user scope with an explicit working directory: `systemd-run --user --scope --working-directory="$PWD" -p MemoryMax=1G -p MemorySwapMax=0 -p TasksMax=64 env NODE_OPTIONS=--max-old-space-size=768 node --test --import tsx <test-file>`. Do not run a dev server, build, browser, K8s work, or any parallel worker runtime command at the same time.
+- Every agent-initiated Node/TSX test, build, typecheck, or browser diagnostic must run singly in an explicit `systemd-run --user --scope` with `MemoryMax=1G`, `MemorySwapMax=0`, and `TasksMax=64`; never overlap it with dev-server, K8s, browser, build, or test workloads. Do not use `npm exec tsx` as a bypass. Do not run source JSDOM/TSX tests by default. When one is genuinely necessary, run exactly one serial process in an explicit user scope with an explicit working directory: `systemd-run --user --scope --working-directory="$PWD" -p MemoryMax=1G -p MemorySwapMax=0 -p TasksMax=64 env NODE_OPTIONS=--max-old-space-size=768 node --test --import tsx <test-file>`.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
 - Choose precise, narrow verification for the current change, selected deliberately by the developer.
 - Do not run broad unrelated suites by default.
