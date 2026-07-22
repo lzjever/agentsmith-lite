@@ -2,12 +2,12 @@
 
 import { RefreshCw, Save, X } from "lucide-react";
 import type { FormEvent } from "react";
+import { Button, IconButton } from "@astryxdesign/core";
 import type {
   EndpointCapability,
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
@@ -86,15 +86,14 @@ export function EndpointDialog({
               role="alert"
             >
               <span>{error}</span>
-              <Button
+              <IconButton
                 type="button"
-                variant="quiet"
-                size="icon"
-                aria-label="Dismiss endpoint error"
+                variant="ghost"
+                size="lg"
+                label="Dismiss endpoint error"
+                icon={<X size={15} />}
                 onClick={onDismissError}
-              >
-                <X size={15} />
-              </Button>
+              />
             </div>
           ) : null}
           <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
@@ -173,22 +172,24 @@ export function EndpointDialog({
             <div className="flex items-end gap-2 sm:col-span-2">
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
+                size="lg"
+                label={discovering ? "Checking" : "Discover models"}
+                icon={
+                  <RefreshCw
+                    className={discovering ? "animate-spin" : ""}
+                    size={15}
+                  />
+                }
                 onClick={onDiscoverModels}
-                disabled={
+                isDisabled={
                   !canSubmit ||
                   saving ||
                   discovering ||
                   !input.baseUrl ||
                   !input.credentialId
                 }
-              >
-                <RefreshCw
-                  className={discovering ? "animate-spin" : ""}
-                  size={15}
-                />
-                {discovering ? "Checking" : "Discover models"}
-              </Button>
+              />
               {models.length > 0 ? (
                 <Select
                   value={models.includes(input.model) ? input.model : ""}
@@ -239,15 +240,19 @@ export function EndpointDialog({
           <DialogFooter>
             <Button
               type="button"
-              variant="quiet"
+              variant="ghost"
+              size="lg"
+              label="Cancel"
               onClick={() => onOpenChange(false)}
-              disabled={saving}
-            >
-              Cancel
-            </Button>
+              isDisabled={saving}
+            />
             <Button
               type="submit"
-              disabled={
+              variant="primary"
+              size="lg"
+              label="Save"
+              icon={<Save size={15} />}
+              isDisabled={
                 !canSubmit ||
                 !canSave ||
                 saving ||
@@ -255,11 +260,7 @@ export function EndpointDialog({
                 !input.credentialId ||
                 input.capabilities.length === 0
               }
-            >
-              {" "}
-              <Save size={15} />
-              Save
-            </Button>
+            />
           </DialogFooter>
         </form>
       </DialogContent>
