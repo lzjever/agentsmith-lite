@@ -2,9 +2,9 @@
 
 import { Save } from "lucide-react";
 import type { FormEvent } from "react";
+import { Button } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { Input } from "../ui/input";
@@ -46,7 +46,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
       <Label className="grid gap-2 text-sm text-primary">Scope<Select value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onValueChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} disabled={saving || !supportsEndpointScope(value.alertType)}><SelectTrigger aria-label="Rule scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="project">Entire project</SelectItem>{supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => <SelectItem value={endpoint.id} key={endpoint.id}>{endpoint.name}</SelectItem>) : null}</SelectContent></Select></Label>
       <Label className="flex items-center gap-3 text-sm text-primary"><Checkbox checked={value.enabled} disabled={saving} onChange={(event) => onChange({ ...value, enabled: event.target.checked })} />Enabled</Label>
     </div>
-    <DialogFooter><Button type="button" variant="quiet" disabled={saving} onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={saving || !canSave}><Save size={15} />{saving ? "Saving..." : editing ? "Save changes" : "Create rule"}</Button></DialogFooter>
+    <DialogFooter><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => onOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></DialogFooter>
   </form></DialogContent></Dialog>;
 }
 
