@@ -12,7 +12,9 @@ export type PageLayoutProps = {
 
 export function PageLayout({ header, toolbar, children, footer, density = "default", contentWidth = "wide" }: PageLayoutProps) {
   const immersive = density === "immersive";
-  const contentWidthValue = contentWidth === "full" ? undefined : contentWidth === "narrow" ? "64rem" : "1480px";
+  const contentWidthProps = contentWidth === "full"
+    ? {}
+    : { contentWidth: contentWidth === "narrow" ? "64rem" : "1480px" };
   const gutters = immersive
     ? "px-[var(--layout-padding-immersive)]"
     : "px-[var(--layout-padding)] md:px-8";
@@ -32,7 +34,7 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
       data-testid="page-layout"
       height="auto"
       padding={0}
-      contentWidth={contentWidthValue}
+      {...contentWidthProps}
       header={header || toolbar ? (
         <LayoutHeader padding={0}>
           <div className={`flex flex-col ${gutters} ${topPadding} ${gap}`}>
