@@ -1,10 +1,9 @@
 "use client";
 
 import { Download, Image as ImageIcon, Loader2 } from "lucide-react";
-import { Button, IconButton } from "@astryxdesign/core";
+import { Button, Dialog, DialogHeader, IconButton } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
 import { ApiError, apiClient } from "../../lib/api/client";
-import { Dialog, DialogClose, DialogContent, DialogHeader } from "../ui/dialog";
 import { formatArtifactBytes } from "./task-ui";
 
 const MAX_TEXT_PREVIEW_BYTES = 512 * 1024;
@@ -94,7 +93,7 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     onOpenChange(nextOpen);
   }
 
-  return <Dialog open={open} onOpenChange={close}><DialogContent aria-describedby={undefined} className="max-h-[min(48rem,calc(100vh-2rem))] overflow-auto"><DialogHeader title={artifact.name} description={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} />{loading ? <div className="grid min-h-64 place-items-center text-sm text-secondary"><Loader2 className="size-5 animate-spin" />Loading image...</div> : null}{error ? <div className="p-5"><p role="alert" className="text-sm text-error">{error}</p><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70vh] max-w-full object-contain p-5" /> : null}<div className="flex justify-end border-t border-subtle px-5 py-4"><DialogClose asChild><Button label="Close" variant="ghost" /></DialogClose></div></DialogContent></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100vh - 2rem))" padding={0} aria-label={artifact.name}><div className="overflow-auto"><DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} hasDivider padding={5} />{loading ? <div className="grid min-h-64 place-items-center text-sm text-secondary"><Loader2 className="size-5 animate-spin" />Loading image...</div> : null}{error ? <div className="p-5"><p role="alert" className="text-sm text-error">{error}</p><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70vh] max-w-full object-contain p-5" /> : null}<div className="flex justify-end border-t border-subtle px-5 py-4"><Button label="Close" variant="ghost" onClick={() => close(false)} /></div></div></Dialog>;
 }
 
 export function isPreviewableText(mediaType: string | null | undefined): boolean { return mediaType === "application/json" || mediaType?.startsWith("text/") === true && mediaType !== "text/html"; }
