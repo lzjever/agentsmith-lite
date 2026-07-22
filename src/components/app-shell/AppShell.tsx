@@ -108,7 +108,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   if (status === "loading") return <ShellLoadingFrame />;
   if (status === "login") {
     const returnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    return <ShellStatePage title="Sign in to continue" detail="Use your configured identity provider to access projects." action={<Button label="Sign in" variant="primary" href={oidcStartUrlForReturnTo(returnTo)} />} />;
+    return <ShellStatePage title="Sign in to continue" detail="Use your configured identity provider to access projects." action={<Button label="Sign in" variant="primary" onClick={() => window.location.assign(oidcStartUrlForReturnTo(returnTo))} />} />;
   }
   if (status === "error") return <main className="grid min-h-screen place-items-center bg-background"><ErrorState title="Workspace unavailable" message="The product API could not load your session." onRetry={() => void loadIdentity()} /></main>;
   if (directoryState === "loading") return <ShellLoadingFrame />;
