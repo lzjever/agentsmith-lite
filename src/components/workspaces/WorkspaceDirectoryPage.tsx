@@ -2,14 +2,13 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
-import { Badge, Button, EmptyState, Spinner } from "@astryxdesign/core";
+import { Badge, Button, Dialog, DialogHeader, EmptyState, Spinner } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { toast } from "../ui/toast";
@@ -96,7 +95,12 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
       setSaving(false);
     }
   }
-  return <Dialog open={open} onOpenChange={(next) => { if (!saving && !next) { mutationKeys.clear("workspace.create"); onClose(); } }}><DialogContent><form onSubmit={submit}><DialogHeader><p className="type-caption text-tertiary">Workspace</p><DialogTitle className="type-title mt-2 block">New workspace</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Create a home for one or more projects.</DialogDescription></DialogHeader><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><DialogClose asChild><Button label="Cancel" variant="ghost" isDisabled={saving} /></DialogClose><Button type="submit" label="Create workspace" variant="primary" isDisabled={name.trim().length === 0} isLoading={saving} /></footer></form></DialogContent></Dialog>;
+  const handleOpenChange = (next: boolean) => {
+    if (saving || next) return;
+    mutationKeys.clear("workspace.create");
+    onClose();
+  };
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label="New workspace"><form onSubmit={submit}><DialogHeader title="New workspace" subtitle="Create a home for one or more projects." hasDivider padding={5} /><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus data-autofocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><Button type="button" label="Cancel" variant="ghost" isDisabled={saving} onClick={() => handleOpenChange(false)} /><Button type="submit" label="Create workspace" variant="primary" isDisabled={name.trim().length === 0} isLoading={saving} /></footer></form></Dialog>;
 }
 
 function errorMessage(reason: unknown, fallback: string): string {
