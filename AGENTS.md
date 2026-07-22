@@ -43,6 +43,7 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
+- Source JSDOM/TSX tests on this workstation must run inside a user `systemd-run --scope` memory limit with `node --test --import tsx`, never direct `node --import tsx`; individual tests remain serial.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
 - Choose precise, narrow verification for the current change, selected deliberately by the developer.
 - Do not run broad unrelated suites by default.
