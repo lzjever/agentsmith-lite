@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Button, Selector, Spinner } from "@astryxdesign/core";
+import { Badge, Button, Selector, Spinner, Tab, TabList } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -29,7 +29,6 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -348,14 +347,12 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       {state === "ready" && capabilitiesError ? <p className="mb-3 border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</p> : null}
       {state === "ready" && error ? <p className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}
       {state === "ready" ? (
-        <Tabs value={view} onValueChange={(next) => setView(next as "instances" | "rules")}>
-          <TabsList aria-label="Alerts view">
-            <TabsTrigger value="instances">
-              Instances ({activeCount} active)
-            </TabsTrigger>
-            <TabsTrigger value="rules">Rules</TabsTrigger>
-          </TabsList>
-          <TabsContent value="instances">
+        <>
+          <TabList value={view} onChange={(next) => setView(next as "instances" | "rules")} aria-label="Alerts view">
+            <Tab value="instances" label={`Instances (${activeCount} active)`} />
+            <Tab value="rules" label="Rules" />
+          </TabList>
+          {view === "instances" ? (
             <AlertInstances
               alerts={alerts}
               status={alertStatus}
@@ -376,11 +373,13 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
               }
               onDismiss={setDismiss}
             />
-          </TabsContent>
-          <TabsContent value="rules">
+          ) : null}
+          {view === "rules" ? (
+            <div className="mt-3">
             <AlertRulesPanel projectId={projectId} endpoints={endpoints} canManage={canManage} onAccessDenied={revokeAccess} onInstancesChanged={async () => { await refreshInstances(); }} />
-          </TabsContent>
-        </Tabs>
+            </div>
+          ) : null}
+        </>
       ) : null}
       <ConfirmationDialog
         open={dismiss !== null}
