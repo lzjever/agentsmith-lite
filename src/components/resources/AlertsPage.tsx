@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Button, Selector, Spinner, Tab, TabList } from "@astryxdesign/core";
+import { Badge, Banner, Button, Selector, Spinner, Tab, TabList } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -344,8 +344,22 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           />
         </PageState>
       ) : null}
-      {state === "ready" && capabilitiesError ? <p className="mb-3 border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</p> : null}
-      {state === "ready" && error ? <p className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</p> : null}
+      {state === "ready" && capabilitiesError ? (
+        <Banner
+          className="mb-3"
+          status="warning"
+          title="Alert permissions unavailable"
+          description={capabilitiesError}
+        />
+      ) : null}
+      {state === "ready" && error ? (
+        <Banner
+          className="mb-3"
+          status="error"
+          title="Alert update failed"
+          description={error}
+        />
+      ) : null}
       {state === "ready" ? (
         <>
           <TabList value={view} onChange={(next) => setView(next as "instances" | "rules")} aria-label="Alerts view">
