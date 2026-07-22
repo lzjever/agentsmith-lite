@@ -1,5 +1,6 @@
 "use client";
 
+import { LayerProvider } from "@astryxdesign/core";
 import { LinkProvider } from "@astryxdesign/core/Link";
 import { Theme as AstryxTheme } from "@astryxdesign/core/theme";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
@@ -22,7 +23,7 @@ export function AppProviders({ children, initialThemeMode = "light" }: Readonly<
   }, []);
 
   const value = useMemo(() => ({ theme, setTheme }), [setTheme, theme]);
-  return <AstryxTheme theme={neutralTheme} mode={theme}><LinkProvider component={Link}><AppThemeContext value={value}>{children}</AppThemeContext></LinkProvider></AstryxTheme>;
+  return <AstryxTheme theme={neutralTheme} mode={theme}><LinkProvider component={Link}><LayerProvider><AppThemeContext value={value}>{children}</AppThemeContext></LayerProvider></LinkProvider></AstryxTheme>;
 }
 
 export function useAppTheme(): AppThemeContextValue {

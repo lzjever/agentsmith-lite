@@ -15,7 +15,6 @@ const { ShellNavigation } = await import("../../src/components/app-shell/Sidebar
 const { ThemeToggle } = await import("../../src/components/theme/ThemeToggle.js");
 const { AppProviders } = await import("../../src/app/providers.js");
 const { themeFromCookie } = await import("../../src/components/theme/theme.js");
-const { TooltipProvider } = await import("../../src/components/ui/tooltip.js");
 const { CreateProjectDialog } = await import("../../src/components/projects/CreateProjectDialog.js");
 const { AppShell } = await import("../../src/components/app-shell/AppShell.js");
 const { ApiError, apiClient } = await import("../../src/lib/api/client.js");
@@ -355,7 +354,7 @@ describe("workspace and shell interactions", () => {
   });
 
   it("marks the active retained route with an accessible navigation label", async () => {
-    const view = render(<TooltipProvider><ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed /></TooltipProvider>);
+    const view = render(<ShellNavigation workspace={workspace} project={workspace.projects[0]!} pathname="/workspaces/ws_1/projects/proj_1/tasks/task_1" collapsed />);
     const tasks = view.getByRole("link", { name: "Tasks" });
     assert.equal(tasks.getAttribute("aria-current"), "page");
   });
@@ -412,6 +411,7 @@ function installDom(): void {
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
   Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ get matches() { return systemDark; }, media: "(prefers-color-scheme: dark)", onchange: null, addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.add(listener), removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => themeListeners.delete(listener), addListener() {}, removeListener() {}, dispatchEvent: () => true }) });
+  Object.defineProperty(dom.window.HTMLCanvasElement.prototype, "getContext", { configurable: true, value: () => null });
   Object.assign(dom.window.HTMLElement.prototype, { attachEvent() {}, detachEvent() {} });
   Object.assign(dom.window.HTMLDialogElement.prototype, {
     showModal() { this.open = true; },

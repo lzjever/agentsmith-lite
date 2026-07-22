@@ -18,13 +18,19 @@ Object.assign(globalThis, {
   getComputedStyle: dom.window.getComputedStyle,
   requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
   cancelAnimationFrame: (id: number) => clearTimeout(id),
+  matchMedia: () => ({ matches: false, addEventListener: () => undefined, removeEventListener: () => undefined }),
   IS_REACT_ACT_ENVIRONMENT: true
 });
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
+Object.defineProperty(dom.window, "matchMedia", {
+  configurable: true,
+  value: globalThis.matchMedia
+});
 
 const React = await import("react");
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
 const { Link } = await import("@astryxdesign/core/Link");
+const { useToast } = await import("@astryxdesign/core");
 const { AppProviders } = await import("../../src/app/providers.js");
 
 test.afterEach(() => cleanup());
@@ -57,4 +63,15 @@ test("a server-supplied dark theme renders the same Astryx mode before and after
 
   assert.equal(document.documentElement.dataset.theme, "dark");
   assert.equal(document.querySelector("[data-astryx-theme]")?.getAttribute("data-theme"), "dark");
+});
+
+test("root providers expose Astryx layers for short-lived confirmations", () => {
+  function ConfirmationAction() {
+    const toast = useToast();
+    return <button onClick={() => toast({ type: "info", body: "Workspace created" })}>Create workspace</button>;
+  }
+
+  render(<AppProviders><ConfirmationAction /></AppProviders>);
+  fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+  assert.ok(screen.getByText("Workspace created"));
 });

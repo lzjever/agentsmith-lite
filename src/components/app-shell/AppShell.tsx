@@ -1,14 +1,10 @@
 "use client";
 
-import { AppShell as AstryxAppShell, MobileNav, Spinner } from "@astryxdesign/core";
-import Link from "next/link";
+import { AppShell as AstryxAppShell, Button, MobileNav, Spinner } from "@astryxdesign/core";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
-import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
-import { ToastContainer } from "../ui/toast";
-import { TooltipProvider } from "../ui/tooltip";
 import { ShellNavigation } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -112,7 +108,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   if (status === "loading") return <ShellLoadingFrame />;
   if (status === "login") {
     const returnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    return <ShellStatePage title="Sign in to continue" detail="Use your configured identity provider to access projects." action={<a className="inline-flex min-h-9 items-center justify-center rounded-sm border border-accent bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90" href={oidcStartUrlForReturnTo(returnTo)}>Sign in</a>} />;
+    return <ShellStatePage title="Sign in to continue" detail="Use your configured identity provider to access projects." action={<Button label="Sign in" variant="primary" href={oidcStartUrlForReturnTo(returnTo)} />} />;
   }
   if (status === "error") return <main className="grid min-h-screen place-items-center bg-background"><ErrorState title="Workspace unavailable" message="The product API could not load your session." onRetry={() => void loadIdentity()} /></main>;
   if (directoryState === "loading") return <ShellLoadingFrame />;
@@ -129,13 +125,13 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
         : <ShellRecoveryState title="Project unavailable" detail="This project does not exist in this workspace or you no longer have permission to access it." projectsHref={`/workspaces/${workspace.id}/projects`} retry={loadDirectory} />
       : null;
   const profileReturnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  return <TooltipProvider><AstryxAppShell
+  return <AstryxAppShell
     variant="section"
     height="auto"
     topNav={<Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} />}
     sideNav={<ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed} />}
     mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></MobileNav>}
-  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell><ToastContainer /></TooltipProvider>;
+  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell>;
 }
 
 function ShellLoadingFrame() {
@@ -147,9 +143,9 @@ function ShellStatePage({ title, detail, action }: { title: string; detail?: str
 }
 
 function DirectoryNotice({ onRetry }: { onRetry: () => Promise<void> }) {
-  return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-surface-low px-4 py-2 text-sm text-secondary" role="status"><span>Workspace navigation is unavailable. This page may still be used.</span><Button size="sm" variant="quiet" onClick={() => void onRetry()}>Retry navigation</Button></div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-surface-low px-4 py-2 text-sm text-secondary" role="status"><span>Workspace navigation is unavailable. This page may still be used.</span><Button label="Retry navigation" size="sm" variant="ghost" onClick={() => void onRetry()} /></div>;
 }
 
 function ShellRecoveryState({ title, detail, projectsHref, projectHref, retry }: { title: string; detail: string; projectsHref?: string; projectHref?: string; retry: () => Promise<void> }) {
-  return <section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><h1 className="type-section-heading">{title}</h1><p className="mt-3 text-sm text-secondary">{detail}</p><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Link className="inline-flex min-h-9 items-center rounded-md bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90" href={projectHref}>Open project</Link> : null}{projectsHref ? <Link className="inline-flex min-h-9 items-center rounded-md bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90" href={projectsHref}>View all projects</Link> : null}<Link className="inline-flex min-h-9 items-center rounded-md border border-border bg-surface px-3 text-sm text-secondary no-underline hover:text-foreground" href="/">Back to workspaces</Link><Button variant="quiet" onClick={() => void retry()}>Check access again</Button></div></div></section>;
+  return <section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><h1 className="type-section-heading">{title}</h1><p className="mt-3 text-sm text-secondary">{detail}</p><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Button label="Open project" variant="primary" href={projectHref} /> : null}{projectsHref ? <Button label="View all projects" variant="secondary" href={projectsHref} /> : null}<Button label="Back to workspaces" variant="secondary" href="/" /><Button label="Check access again" variant="ghost" onClick={() => void retry()} /></div></div></section>;
 }

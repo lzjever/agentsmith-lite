@@ -1,12 +1,11 @@
 "use client";
 
 import { ChevronDown, FolderKanban, Globe, List, Menu } from "lucide-react";
-import { TopNav as AstryxTopNav } from "@astryxdesign/core";
+import { IconButton, TopNav as AstryxTopNav } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, Workspace } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
 import { ThemeToggle } from "../theme/ThemeToggle";
-import { Button } from "../ui/button";
 import {
   DropdownContent,
   DropdownItem,
@@ -38,15 +37,13 @@ export function Topbar({
       className="min-h-[3.25rem] border-b border-border bg-surface/95 px-2 shadow-ambient backdrop-blur-sm sm:px-4 md:px-5"
       heading={
       <div className="flex shrink-0 items-center gap-1 sm:gap-2 [&_a>span:last-child]:hidden sm:[&_a>span:last-child]:inline">
-        <Button
-          variant="quiet"
-          size="icon"
+        <IconButton
+          label="Open navigation"
+          icon={<Menu size={18} />}
+          variant="ghost"
           className="md:hidden"
-          aria-label="Open navigation"
           onClick={onOpenNavigation}
-        >
-          <Menu size={18} />
-        </Button>
+        />
         <Logo />
       </div>
       }
