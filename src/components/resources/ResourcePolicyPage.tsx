@@ -15,7 +15,7 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import { Button, Selector, Spinner } from "@astryxdesign/core";
+import { Banner, Button, Selector, Spinner } from "@astryxdesign/core";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
@@ -189,9 +189,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       {state === "ready" && policy && draft ? (
         <form onSubmit={save} className="space-y-6">
           {capabilitiesError ? (
-            <p role="alert" className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-              {capabilitiesError}
-            </p>
+            <Banner
+              status="warning"
+              title="Policy permissions unavailable"
+              description={capabilitiesError}
+            />
           ) : null}
           {!canManage ? (
             <p className="flex items-center gap-2 text-sm text-secondary">
@@ -200,12 +202,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             </p>
           ) : null}
           {error ? (
-            <p
-              role="alert"
-              className="border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
-            >
-              {error}
-            </p>
+            <Banner
+              status="error"
+              title="Policy could not be saved"
+              description={error}
+            />
           ) : null}
           <section>
             <h2 className="type-title">Project limits</h2>
@@ -252,15 +253,22 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
               Each limit applies independently to every user over the selected rolling window.
             </p>
             {endpointState === "error" ? (
-              <div
-                className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2"
-                role="alert"
-              >
-                <span className="text-sm text-error">
-                  Endpoint windows could not be loaded: {endpointError}
-                </span>
-                <Button label="Retry" variant="ghost" size="md" icon={<RefreshCw size={15} />} isDisabled={saving} onClick={() => void load()} />
-              </div>
+              <Banner
+                className="mt-3"
+                status="error"
+                title="Endpoint windows unavailable"
+                description={`Endpoint windows could not be loaded: ${endpointError}`}
+                endContent={
+                  <Button
+                    label="Retry"
+                    variant="ghost"
+                    size="md"
+                    icon={<RefreshCw size={15} />}
+                    isDisabled={saving}
+                    onClick={() => void load()}
+                  />
+                }
+              />
             ) : null}
             {endpoints.map((endpoint) => (
               <fieldset
