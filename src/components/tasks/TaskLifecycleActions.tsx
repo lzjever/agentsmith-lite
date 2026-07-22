@@ -1,9 +1,9 @@
 "use client";
 
 import { Archive, Ellipsis, Pencil } from "lucide-react";
+import { Button as AstryxButton } from "@astryxdesign/core";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskCapabilities } from "../../lib/api/client";
-import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { DropdownContent, DropdownItem, DropdownMenu } from "../ui/dropdown-menu";
@@ -75,11 +75,11 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
   }
 
   return <>
-    <DropdownMenu.Root><DropdownMenu.Trigger asChild><Button variant="quiet" size="icon" aria-label="Task actions" title="Task actions" disabled={busy || disabled}><Ellipsis size={17} /></Button></DropdownMenu.Trigger><DropdownContent align="end">
+    <DropdownMenu.Root><DropdownMenu.Trigger asChild><AstryxButton label="Task actions" title="Task actions" variant="ghost" size="lg" isIconOnly icon={<Ellipsis size={17} />} isDisabled={busy || disabled} /></DropdownMenu.Trigger><DropdownContent align="end">
       {capabilities.editTask ? <DropdownItem className="gap-2" onSelect={openRename}><Pencil size={15} />Rename</DropdownItem> : null}
       {capabilities.archiveTask ? <><DropdownMenu.Separator className="my-1 h-px bg-subtle" /><DropdownItem className="gap-2" onSelect={() => setArchiveOpen(true)}><Archive size={15} />Archive</DropdownItem></> : null}
     </DropdownContent></DropdownMenu.Root>
-    <Dialog open={renameOpen} onOpenChange={(open) => !busy && !disabled && setRenameOpen(open)}><DialogContent><form onSubmit={(event) => void rename(event)}><DialogHeader title="Rename task" description="Use a concise title that makes this task easy to find." />{renameError ? <p className="mx-5 mt-4 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{renameError}</p> : null}<div className="px-5 py-5"><label className="grid gap-1.5 text-sm text-secondary">Task title<Input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} autoFocus disabled={busy || disabled} /></label></div><DialogFooter><Button type="button" variant="quiet" disabled={busy || disabled} onClick={() => setRenameOpen(false)}>Cancel</Button><Button type="submit" disabled={busy || disabled || !nextTitle || !titleChanged}>{renaming ? "Saving..." : "Save title"}</Button></DialogFooter></form></DialogContent></Dialog>
+    <Dialog open={renameOpen} onOpenChange={(open) => !busy && !disabled && setRenameOpen(open)}><DialogContent><form onSubmit={(event) => void rename(event)}><DialogHeader title="Rename task" description="Use a concise title that makes this task easy to find." />{renameError ? <p className="mx-5 mt-4 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{renameError}</p> : null}<div className="px-5 py-5"><label className="grid gap-1.5 text-sm text-secondary">Task title<Input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} autoFocus disabled={busy || disabled} /></label></div><DialogFooter><AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={busy || disabled} onClick={() => setRenameOpen(false)} /><AstryxButton label={renaming ? "Saving..." : "Save title"} type="submit" variant="primary" size="lg" isDisabled={busy || disabled || !nextTitle || !titleChanged} /></DialogFooter></form></DialogContent></Dialog>
     <ConfirmationDialog open={archiveOpen} onOpenChange={(open) => { if (!open || (!busy && !disabled)) setArchiveOpen(open); }} title="Archive task?" description="This removes the task from the active list while keeping its conversation, File Library files, and artifacts available." confirmText="Archive task" confirmDisabled={disabled} onConfirm={archive} errorContext="Task could not be archived" />
   </>;
 }
