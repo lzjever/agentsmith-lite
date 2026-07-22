@@ -2,7 +2,7 @@
 
 import { Save } from "lucide-react";
 import type { FormEvent } from "react";
-import { Button, CheckboxInput, Dialog, DialogHeader, Selector } from "@astryxdesign/core";
+import { Banner, Button, CheckboxInput, Dialog, DialogHeader, Selector } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
 import { Input } from "../ui/input";
@@ -36,7 +36,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
   return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={onSubmit}>
     <DialogHeader title={title} subtitle={description} onOpenChange={handleOpenChange} hasDivider />
     <div className="grid gap-4 px-5 py-5">
-      {error ? <p role="alert" className="rounded-sm border border-error/40 bg-error/5 px-3 py-2 text-sm text-error">{error}</p> : null}
+      {error ? <Banner status="error" title="Alert rule could not be saved" description={error} /> : null}
       <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>
       <Selector label="Alert type" options={alertRuleTypes.map((type) => ({ value: type.value, label: type.label }))} value={value.alertType} onChange={(alertType) => { const type = alertRuleType(alertType as ProjectAlertType); onChange({ ...value, alertType: type.value, metric: type.metric, windowSeconds: type.defaultWindowSeconds, scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" } }); }} isDisabled={saving} size="lg" />
       <Label className="grid gap-2 text-sm text-primary">Metric<Input aria-label="Metric" value={value.metric.replaceAll("_", " ")} readOnly /></Label>
