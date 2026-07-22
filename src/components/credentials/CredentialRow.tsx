@@ -1,6 +1,6 @@
 import { RotateCw, Trash2 } from "lucide-react";
+import { Button, IconButton } from "@astryxdesign/core";
 import type { ProjectCredential } from "../../lib/api/client";
-import { Button } from "../ui/button";
 
 export function CredentialRow({
   credential,
@@ -26,8 +26,8 @@ export function CredentialRow({
       </p>
     </div>
     {canManage ? <div className="flex gap-2">
-      <Button size="sm" variant="outline" disabled={busy} onClick={onRotate}><RotateCw size={15} />Rotate</Button>
-      <Button size="icon" variant="danger" aria-label={`Delete ${credential.name}`} disabled={busy} onClick={onDelete}><Trash2 size={15} /></Button>
+      <Button label="Rotate" size="sm" variant="secondary" icon={<RotateCw size={15} />} isDisabled={busy} onClick={onRotate}/>
+      <IconButton label={`Delete ${credential.name}`} variant="destructive" icon={<Trash2 size={15} />} isDisabled={busy} onClick={onDelete}/>
     </div> : null}
   </article>;
 }
