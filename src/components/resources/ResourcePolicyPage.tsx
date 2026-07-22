@@ -13,10 +13,9 @@ import {
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import { Spinner } from "@astryxdesign/core";
+import { Button, Spinner } from "@astryxdesign/core";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
@@ -161,14 +160,14 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
           subtitle="Project-wide gauges and lifetime provider budgets, with per-user endpoint rolling windows."
           actions={
             <Button
-              variant="quiet"
-              size="icon"
-              aria-label="Refresh policy"
-              disabled={saving}
+              label="Refresh policy"
+              variant="ghost"
+              size="lg"
+              isIconOnly
+              icon={<RefreshCw size={16} />}
+              isDisabled={saving}
               onClick={() => void load()}
-            >
-              <RefreshCw size={16} />
-            </Button>
+            />
           }
         />
       }
@@ -260,10 +259,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                 <span className="text-sm text-error">
                   Endpoint windows could not be loaded: {endpointError}
                 </span>
-                <Button variant="quiet" size="sm" disabled={saving} onClick={() => void load()}>
-                  <RefreshCw size={15} />
-                  Retry
-                </Button>
+                <Button label="Retry" variant="ghost" size="md" icon={<RefreshCw size={15} />} isDisabled={saving} onClick={() => void load()} />
               </div>
             ) : null}
             {endpoints.map((endpoint) => (
@@ -357,11 +353,12 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <div className="flex justify-end border-t border-subtle pt-4">
               <Button
                 type="submit"
-                disabled={saving || !dirty || draft.activeTasksLimit === null}
-              >
-                <Save size={16} />
-                {saving ? "Saving..." : "Save policy"}
-              </Button>
+                label={saving ? "Saving..." : "Save policy"}
+                variant="primary"
+                size="lg"
+                icon={<Save size={16} />}
+                isDisabled={saving || !dirty || draft.activeTasksLimit === null}
+              />
             </div>
           ) : null}
         </form>
