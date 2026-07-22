@@ -2,8 +2,8 @@
 
 import { Maximize2, RefreshCw, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { IconButton } from "@astryxdesign/core";
 import { apiClient } from "../../lib/api/client";
-import { Button } from "../ui/button";
 
 type TerminalState = "connecting" | "ready" | "closed" | "error";
 const AUTO_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
@@ -80,7 +80,7 @@ export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; a
   function fitTerminal(){fitInstance.current?.fit();sendSize(socketInstance.current,terminalInstance.current);terminalInstance.current?.focus();}
 
   return <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[#111315]" aria-label="Task terminal">
-    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-white/10 bg-[#181b1e] px-3 text-white"><div className="flex items-center gap-2"><TerminalSquare size={16}/><span className="text-sm">Task terminal</span><span className="font-mono text-[10px] uppercase text-white/55">{state}</span></div><div className="flex items-center gap-1"><Button variant="quiet" size="icon" aria-label="Fit terminal" title="Fit terminal" onClick={fitTerminal}><Maximize2 size={15}/></Button>{state==="closed"||state==="error"?<Button variant="quiet" size="icon" aria-label="Reconnect terminal" title="Reconnect terminal" onClick={()=>{reconnectAttempt.current=0;setError("");setState("connecting");setGeneration((value)=>value+1);}}><RefreshCw size={15}/></Button>:null}</div></div>
+    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-white/10 bg-[#181b1e] px-3 text-white"><div className="flex items-center gap-2"><TerminalSquare size={16}/><span className="text-sm">Task terminal</span><span className="font-mono text-[10px] uppercase text-white/55">{state}</span></div><div className="flex items-center gap-1"><IconButton label="Fit terminal" tooltip="Fit terminal" variant="ghost" icon={<Maximize2 size={15}/>} onClick={fitTerminal}/>{state==="closed"||state==="error"?<IconButton label="Reconnect terminal" tooltip="Reconnect terminal" variant="ghost" icon={<RefreshCw size={15}/>} onClick={()=>{reconnectAttempt.current=0;setError("");setState("connecting");setGeneration((value)=>value+1);}}/>:null}</div></div>
     {error?<p className="border-b border-error/30 bg-error/10 px-3 py-2 text-xs text-error" role="alert">{error}</p>:null}
     <div ref={viewport} className="min-h-0 w-full flex-1 p-2" />
   </section>;
