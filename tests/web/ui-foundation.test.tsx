@@ -27,6 +27,10 @@ const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@test
 const { createColumnHelper, getCoreRowModel, useReactTable } = await import("@tanstack/react-table");
 const { Button, Checkbox, ConfirmationDialog, DataTable, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, Tabs, TabsContent, TabsList, TabsTrigger, ToastContainer, toast } = await import("../../src/components/ui/index.js");
 const { PageState } = await import("../../src/components/layout/PageState.js");
+const { PageHeader } = await import("../../src/components/layout/PageHeader.js");
+const { ProjectModuleHeader } = await import("../../src/components/layout/ProjectModuleHeader.js");
+const { ErrorCard } = await import("../../src/components/ui/error-state.js");
+const { PageLoading } = await import("../../src/components/ui/loading.js");
 
 test.afterEach(() => cleanup());
 
@@ -35,6 +39,40 @@ test("shared page state preserves success and labels non-success states", () => 
   assert.equal(screen.getByTestId("page-state__success").textContent, "Ready content");
   rerender(<PageState state="empty"><p>Nothing here</p></PageState>);
   assert.equal(screen.getByTestId("page-state__empty").textContent, "Nothing here");
+});
+
+test("page framework uses one page-title baseline and a distinct compact workbench heading", () => {
+  render(<><PageHeader title="Projects" subtitle="Manage project access." /><ProjectModuleHeader title="Activity" /></>);
+  const pageTitle = screen.getByRole("heading", { level: 1, name: "Projects" });
+  assert.match(pageTitle.className, /type-display/);
+  const workbenchHeading = screen.getByRole("heading", { level: 2, name: "Activity" });
+  assert.match(workbenchHeading.className, /type-title/);
+  assert.equal(screen.getAllByRole("heading", { level: 1 }).length, 1);
+});
+
+test("page loading keeps a labelled local state instead of an unlabeled full-page spinner", () => {
+  render(<PageState state="loading"><PageLoading description="Loading projects..." /></PageState>);
+  const status = screen.getByRole("status", { name: "Loading projects..." });
+  const region = status.closest("section");
+  assert.equal(region?.getAttribute("aria-busy"), "true");
+  assert.match(region?.className ?? "", /min-h-48/);
+  assert.equal(region?.className.includes("min-h-\[400px\]"), false);
+});
+
+test("error cards persist until a user explicitly dismisses them", () => {
+  const originalSetTimeout = window.setTimeout;
+  let timeoutCalls = 0;
+  window.setTimeout = ((...args: Parameters<typeof window.setTimeout>) => {
+    timeoutCalls += 1;
+    return originalSetTimeout(...args);
+  }) as typeof window.setTimeout;
+  try {
+    render(<ErrorCard message="The request failed." onDismiss={() => undefined} />);
+    assert.equal(screen.getByRole("alert").textContent?.includes("The request failed."), true);
+    assert.equal(timeoutCalls, 0);
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
 });
 
 test("shared controls preserve hierarchy and accessible binary state", () => {
