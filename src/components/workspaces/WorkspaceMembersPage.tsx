@@ -1,7 +1,7 @@
 "use client";
 
 import { Plus, Search, Trash2, X } from "lucide-react";
-import { Badge, Button, IconButton, Selector } from "@astryxdesign/core";
+import { Badge, Button, IconButton, Selector, TextInput } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -217,7 +217,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
     {state === "error" ? <PageState state="error"><ErrorState title="Workspace members unavailable" message="The workspace members could not be loaded." onRetry={() => void load()} /></PageState> : null}
     {state === "ready" ? <section className="space-y-4" aria-label="Workspace members">
       {mutationError && !open ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}
-      <label className="relative block max-w-sm"><span className="sr-only">Search workspace members</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input className="h-9 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search members" /></label>
+      <TextInput label="Search workspace members" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} className="max-w-sm" placeholder="Search members" size="lg" />
       {filtered.length === 0 ? <PageState state="empty">No workspace members match this search.</PageState> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={mutationBusy} onChange={change} onRemove={setMemberToRemove} onView={setSelected} />)}</div>}
       {!canManage ? <p className="text-sm text-secondary">Your workspace access is read-only.</p> : null}
     </section> : null}
