@@ -3,9 +3,8 @@
 import { AlertCircle, Library, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Button, Selector } from "@astryxdesign/core";
+import { Button, Dialog, DialogHeader, Selector } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 
@@ -85,10 +84,14 @@ export function TaskCreateDialog({
 
   const busy = saving;
   const validLibrary = libraryMode === "create_new" ? Boolean(libraryName.trim()) : Boolean(libraryId);
-  return <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
-    <DialogContent className="max-h-[calc(100vh-2rem)] max-w-2xl overflow-y-auto">
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && !busy) onClose();
+  };
+
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" padding={0} aria-label="Create task">
+    <div className="overflow-y-auto">
       <form onSubmit={(event) => void submit(event)} aria-label="Create task">
-        <DialogHeader><div className="flex items-start justify-between gap-4"><div><DialogTitle className="type-title text-foreground">Create task</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Describe the work for the Botified sandbox.</DialogDescription></div><DialogClose asChild><Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} /></DialogClose></div></DialogHeader>
+        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider padding={5} endContent={<Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
         {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
         <div className="grid gap-5 px-5 py-5">
           {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
@@ -105,9 +108,9 @@ export function TaskCreateDialog({
             <label className="grid gap-1.5 text-sm text-secondary">Task prompt<Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-36 resize-y" placeholder="Describe the result you need" disabled={busy} /></label>
           </>}
         </div>
-        <DialogFooter><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></DialogFooter>
+        <footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></footer>
       </form>
-    </DialogContent>
+    </div>
   </Dialog>;
 
   function clearError() { setError(""); setErrorCode(""); }
