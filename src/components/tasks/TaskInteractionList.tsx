@@ -1,10 +1,10 @@
 "use client";
 
 import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Square, Wrench } from "lucide-react";
+import { Button } from "@astryxdesign/core";
 import { useState, type ReactNode } from "react";
 import type { TaskInteractionItem, TaskInteractionStreamEvent } from "../../lib/api/client";
 import { Markdown } from "../ui/markdown";
-import { Button } from "../ui/button";
 import { toast } from "../ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider } from "../ui/tooltip";
 import { TaskArtifactActions } from "./TaskArtifactActions";
@@ -74,7 +74,7 @@ function WorkItem({ item, icon, canStopWork, onStopWork }: { item: Extract<TaskI
     catch (reason) { setStopError(reason instanceof Error ? reason.message : "Work could not be stopped."); }
     finally { setStopping(false); }
   }
-  return <li><article className="border-l-2 border-warning/60 px-4 py-3"><div className="flex min-w-0 flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2 text-foreground">{icon}<div className="min-w-0"><p className="truncate text-sm font-medium">{workTitle(item)}</p><p className="mt-0.5 text-xs text-secondary">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</p></div></div>{canStop ? <Button variant="quiet" size="sm" disabled={stopping || stopRequested} onClick={() => void stop()}><Square size={14} />{stopping ? "Stopping work..." : stopRequested ? "Stop requested" : "Stop work"}</Button> : null}</div>{canStop && stopError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{stopError}</p> : null}<ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <p className={`mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-secondary ${item.kind === "tool" ? "font-mono" : ""}`}>{summary}</p> : null}{details ? <details className="mt-3"><summary className="cursor-pointer text-sm text-secondary">Execution details</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-high p-3 font-mono text-xs leading-5 text-secondary">{details}</pre></details> : null}</article></li>;
+  return <li><article className="border-l-2 border-warning/60 px-4 py-3"><div className="flex min-w-0 flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2 text-foreground">{icon}<div className="min-w-0"><p className="truncate text-sm font-medium">{workTitle(item)}</p><p className="mt-0.5 text-xs text-secondary">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</p></div></div>{canStop ? <Button variant="ghost" size="sm" isDisabled={stopping || stopRequested} icon={<Square size={14} />} label={stopping ? "Stopping work..." : stopRequested ? "Stop requested" : "Stop work"} onClick={() => void stop()} /> : null}</div>{canStop && stopError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{stopError}</p> : null}<ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <p className={`mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-secondary ${item.kind === "tool" ? "font-mono" : ""}`}>{summary}</p> : null}{details ? <details className="mt-3"><summary className="cursor-pointer text-sm text-secondary">Execution details</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-high p-3 font-mono text-xs leading-5 text-secondary">{details}</pre></details> : null}</article></li>;
 }
 
 function NoticeItem({ item, label }: { item: Extract<TaskInteractionItem, { kind: "task_question" | "task_notice" }>; label: string }) {
