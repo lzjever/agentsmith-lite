@@ -52,6 +52,8 @@ describe("personal and resource UI", () => {
       render(<AppRouterContext.Provider value={router()}><NotificationsPage /></AppRouterContext.Provider>);
       await screen.findByText("Task finished");
       assert.ok(screen.getByText("Validation project: task completed."));
+      assert.equal(screen.getByRole("button", { name: "Mark notification read" }).getAttribute("data-variant"), "ghost");
+      assert.equal(screen.getByRole("button", { name: "Dismiss notification" }).getAttribute("data-variant"), "ghost");
       fireEvent.click(screen.getByRole("button", { name: "Mark notification read" }));
       await screen.findByRole("alert");
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -335,7 +337,11 @@ function installDom() {
   Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
+  dom.window.HTMLCanvasElement.prototype.getContext = () => null;
   Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} });
+  const requestAnimationFrame = (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
+  Object.assign(globalThis, { requestAnimationFrame, cancelAnimationFrame: (id: number) => clearTimeout(id) });
+  Object.assign(dom.window, { requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, matchMedia: () => ({ matches: false, media: "", onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }) });
   if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
 }
 

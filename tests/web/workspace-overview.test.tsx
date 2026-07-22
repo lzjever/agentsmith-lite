@@ -41,6 +41,15 @@ describe("workspace overview", () => {
     const original = { workspaces: apiClient.workspaces, workspaceMembers: apiClient.workspaceMembers }; apiClient.workspaces = async () => [{ ...workspace, memberRole: "viewer", capabilities: { canCreateProject: false, canManageMembers: false } }];
     try { render(<AppRouterContext.Provider value={router()}><WorkspaceOverviewPage workspaceId={workspace.id} /></AppRouterContext.Provider>); await screen.findByText(/read-only/); assert.equal(screen.queryByRole("button", { name: "New project" }), null); assert.ok(screen.getByRole("link", { name: /View settings/ })); assert.ok(screen.getByText("View workspace metadata. Changes require owner or admin access.")); assert.ok(screen.getByRole("link", { name: /View members/ })); } finally { apiClient.workspaces = original.workspaces; apiClient.workspaceMembers = original.workspaceMembers; }
   });
+  it("uses the primary action treatment for a permitted project creation entry point", async () => {
+    const original = apiClient.workspaces;
+    apiClient.workspaces = async () => [{ ...workspace, lifecycleStatus: "active", capabilities: { canCreateProject: true, canManageMembers: true } }];
+    try {
+      render(<AppRouterContext.Provider value={router()}><WorkspaceOverviewPage workspaceId={workspace.id} /></AppRouterContext.Provider>);
+      const create = await screen.findByRole("button", { name: "New project" });
+      assert.equal(create.getAttribute("data-variant"), "primary");
+    } finally { apiClient.workspaces = original; }
+  });
   it("keeps workspace overview and projects as distinct shell destinations", () => {
     const view = render(<TooltipProvider><ShellNavigation workspace={workspace} pathname="/workspaces/ws_1" /></TooltipProvider>);
     assert.equal(view.getByRole("link", { name: "Overview" }).getAttribute("aria-current"), "page");
@@ -53,4 +62,4 @@ describe("workspace overview", () => {
   });
 });
 function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
-function installDom() { const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" }); Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Document: dom.window.Document, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true }); Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator }); Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent }); if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } }); }
+function installDom() { const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" }); const requestAnimationFrame = (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number; const matchMedia = () => ({ matches: false, media: "", onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }); Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Document: dom.window.Document, Node: dom.window.Node, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle, requestAnimationFrame, cancelAnimationFrame: (id: number) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true }); Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator }); Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent, requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, matchMedia }); dom.window.HTMLCanvasElement.prototype.getContext = () => null; if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } }); }

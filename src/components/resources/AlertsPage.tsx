@@ -52,6 +52,10 @@ function mergeLinkedAlert(items: ProjectAlert[], linked: ProjectAlert | null) {
     : items;
 }
 
+function alertItems(page: { items?: ProjectAlert[] }) {
+  return page.items ?? [];
+}
+
 function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
   const routeSearchParams = useSearchParams();
   const requestedAlertId =
@@ -114,7 +118,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       return;
     }
     const linked = linkedResult.status === "fulfilled" ? linkedResult.value : null;
-    setAlerts(mergeLinkedAlert(alertsResult.value.items, linked));
+    setAlerts(mergeLinkedAlert(alertItems(alertsResult.value), linked));
     setNextCursor(alertsResult.value.nextCursor);
     setActiveCount(alertsResult.value.activeCount);
     if (capabilitiesResult.status === "fulfilled") {
@@ -138,7 +142,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           : Promise.resolve(null),
       ]);
       if (!mounted.current || request !== loadRequest.current) return false;
-      setAlerts(mergeLinkedAlert(loaded.items, linked));
+      setAlerts(mergeLinkedAlert(alertItems(loaded), linked));
       setNextCursor(loaded.nextCursor);
       setActiveCount(loaded.activeCount);
       return true;
@@ -161,7 +165,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       if (!mounted.current || request !== loadRequest.current) return;
       setAlerts((current) => {
         const seen = new Set(current.map((alert) => alert.id));
-        return [...current, ...page.items.filter((alert) => !seen.has(alert.id))];
+        return [...current, ...alertItems(page).filter((alert) => !seen.has(alert.id))];
       });
       setNextCursor(page.nextCursor);
       setActiveCount(page.activeCount);

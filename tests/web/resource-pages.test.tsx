@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, it } from "node:test";
 import React from "react";
-import { ApiError, apiClient, type Endpoint, type ProjectAlert, type ProjectAuditEvent, type ProjectCapabilities, type ProjectPolicyInput, type ProjectPolicyUpdate, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageOverview } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type Endpoint, type ProjectAlert, type ProjectAlertPage, type ProjectAuditEvent, type ProjectCapabilities, type ProjectPolicyInput, type ProjectPolicyUpdate, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageOverview } from "../../src/lib/api/client.js";
 
 installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
@@ -16,6 +16,11 @@ const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManage
 const usage: ProjectResourceUsage = { projectId, activeTasks: 1, providerRequests: 4, providerTokens: 50, providerCost: 1.25, projectFileBytes: 2048, updatedAt: "2026-07-11T00:00:00.000Z" };
 const usageOverview: ProjectUsageOverview = { projectId, usage, limits: [{ metric: "activeTasks", current: 1, limit: 2, remaining: 1, window: { kind: "current_gauge", resetAt: null } }, { metric: "providerRequests", current: 4, limit: 10, remaining: 6, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerTokens", current: 50, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "providerCost", current: 1.25, limit: 3.5, remaining: 2.25, window: { kind: "project_lifetime", startedAt: "2026-07-01T00:00:00.000Z", resetAt: null } }, { metric: "projectFileBytes", current: 2048, limit: 2048, remaining: 0, window: { kind: "current_gauge", resetAt: null } }], daily: Array.from({ length: 30 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, "0")}`, requests: index === 29 ? 4 : 0, tokens: index === 29 ? 50 : 0, cost: index === 29 ? 1.25 : 0 })), trendTotals: { requests: 4, tokens: 50, cost: 1.25 }, endpoints: [{ endpointId: "endpoint_1", endpointName: "Primary", requests: 4, tokens: 50, cost: 1.25 }, { endpointId: "endpoint_2", endpointName: "Secondary", requests: 0, tokens: 0, cost: 0 }], selectedEndpointId: null, sandbox: { selectedUserId: "user_1", activeCount: 0, launches: 0, totalDurationSeconds: "0", cpuRequestSeconds: "0", memoryRequestByteSeconds: "0", rows: [] } };
 const endpoint: Endpoint = { id: "endpoint_1", projectId, name: "Primary", protocol: "openai_chat_completions", baseUrl: "https://provider.example/v1", model: "model", credentialId: "credential_1", capabilities: ["text"], requestTimeoutSecs: 30, hasCredentialRef: true, taskEligible: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
+const alertPage = (items: ProjectAlert[]): ProjectAlertPage => ({
+  items,
+  nextCursor: null,
+  activeCount: items.filter((alert) => alert.status === "active").length,
+});
 
 afterEach(() => {
   cleanup();
@@ -366,7 +371,7 @@ describe("project resource pages", () => {
   it("keeps a failed alert read distinct from an empty response and refreshes to current data", async () => {
     const original = snapshotClient();
     let attempts = 0;
-    apiClient.alerts = async () => { attempts++; if (attempts === 1) throw new Error("network unavailable"); return []; };
+    apiClient.alerts = async () => { attempts++; if (attempts === 1) throw new Error("network unavailable"); return alertPage([]); };
     apiClient.projectCapabilities = async () => capabilities;
     try {
       render(<AlertsPage projectId={projectId} />);
@@ -378,10 +383,21 @@ describe("project resource pages", () => {
     } finally { restoreClient(original); }
   });
 
+  it("treats an alert page without items as an empty instance list", async () => {
+    const original = snapshotClient();
+    apiClient.alerts = async () => ({ items: undefined, nextCursor: null, activeCount: 0 } as never);
+    apiClient.projectCapabilities = async () => capabilities;
+    try {
+      render(<AlertsPage projectId={projectId} />);
+      await screen.findByRole("heading", { name: "No alert instances" });
+      assert.equal(screen.queryByRole("heading", { name: "Alerts unavailable" }), null);
+    } finally { restoreClient(original); }
+  });
+
   it("keeps the newest alert refresh", async () => {
     const original = snapshotClient();
     const active: ProjectAlert = { id: "alert_refresh", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
-    const resolvers: Array<(value: ProjectAlert[]) => void> = [];
+    const resolvers: Array<(value: ProjectAlertPage) => void> = [];
     apiClient.alerts = async () => new Promise((resolve) => resolvers.push(resolve));
     apiClient.projectCapabilities = async () => capabilities;
     try {
@@ -389,9 +405,9 @@ describe("project resource pages", () => {
       await waitFor(() => assert.equal(resolvers.length, 1));
       fireEvent.click(screen.getByRole("button", { name: "Refresh alerts" }));
       await waitFor(() => assert.equal(resolvers.length, 2));
-      await act(async () => resolvers[1]!([{ ...active, status: "resolved", resolvedAt: policy.updatedAt }]));
+      await act(async () => resolvers[1]!(alertPage([{ ...active, status: "resolved", resolvedAt: policy.updatedAt }])));
       await screen.findByText("resolved");
-      await act(async () => resolvers[0]!([active]));
+      await act(async () => resolvers[0]!(alertPage([active])));
       assert.ok(screen.getByText("resolved"));
       assert.equal(screen.queryByText("active"), null);
     } finally { restoreClient(original); }
@@ -400,7 +416,7 @@ describe("project resource pages", () => {
   it("labels provider request alerts by their actual project or endpoint scope", async () => {
     const original = snapshotClient();
     const alert = (id: string, endpointId: string | null): ProjectAlert => ({ id, projectId, type:"provider_requests_limit", status:"active", deliveryStatus:"delivered", endpointId, createdAt:policy.createdAt, updatedAt:policy.updatedAt, resolvedAt:null, dismissedAt:null });
-    apiClient.alerts = async () => [alert("alert_project", null), alert("alert_endpoint", "endpoint_1")];
+    apiClient.alerts = async () => alertPage([alert("alert_project", null), alert("alert_endpoint", "endpoint_1")]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [endpoint];
     try {
@@ -415,12 +431,12 @@ describe("project resource pages", () => {
   it("routes each alert type to the operation that can investigate it", async () => {
     const original = snapshotClient();
     const alert = (id: string, type: ProjectAlert["type"], endpointId?: string): ProjectAlert => ({ id, projectId, type, status: "active", deliveryStatus: "delivered", ...(endpointId ? { endpointId } : {}), createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null });
-    apiClient.alerts = async () => [
+    apiClient.alerts = async () => alertPage([
       alert("endpoint_failure", "endpoint_failure", endpoint.id),
       alert("provider_failure", "provider_failure", endpoint.id),
       alert("task_failure", "task_failure", endpoint.id),
       alert("sandbox_failure", "sandbox_failure")
-    ];
+    ]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.endpoints = async () => [endpoint];
     try {
@@ -448,7 +464,7 @@ describe("project resource pages", () => {
       resolvedAt: null,
       dismissedAt: null,
     });
-    apiClient.alerts = async (requestedProjectId) => [projectAlert(requestedProjectId)];
+    apiClient.alerts = async (requestedProjectId) => alertPage([projectAlert(requestedProjectId)]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.transitionAlert = async () => new Promise((resolve) => { resolveTransition = resolve; });
     try {
@@ -468,7 +484,7 @@ describe("project resource pages", () => {
   it("keeps alert instances readable but disables actions when permissions cannot be loaded", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => { throw new ApiError(503, "Permissions unavailable"); };
     apiClient.alertRules = async () => [];
     try {
@@ -484,7 +500,7 @@ describe("project resource pages", () => {
   it("fails closed when the project is archived during alert management", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_denied", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.acknowledgeAlert = async () => { throw new ApiError(409, "Project is archived"); };
     try {
@@ -503,7 +519,7 @@ describe("project resource pages", () => {
     let removed = false;
     apiClient.alerts = async () => {
       if (removed) throw new ApiError(403, "Project access denied");
-      return [alert];
+      return alertPage([alert]);
     };
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.acknowledgeAlert = async () => { removed = true; throw new ApiError(403, "Project access denied"); };
@@ -521,7 +537,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const active: ProjectAlert = { id:"alert_changed",projectId,type:"task_failure",status:"active",deliveryStatus:"delivered",createdAt:policy.createdAt,updatedAt:policy.updatedAt,resolvedAt:null,dismissedAt:null };
     let reads=0;
-    apiClient.alerts=async()=>++reads===1?[active]:[{...active,status:"resolved",resolvedAt:policy.updatedAt}];
+    apiClient.alerts=async()=>alertPage(++reads===1?[active]:[{...active,status:"resolved",resolvedAt:policy.updatedAt}]);
     apiClient.projectCapabilities=async()=>capabilities;
     apiClient.acknowledgeAlert=async()=>{throw new ApiError(404,"Active project alert not found");};
     try {
@@ -537,7 +553,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_read_only", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     let capabilityReads = 0;
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => ++capabilityReads === 1 ? capabilities : { ...capabilities, canManagePolicy: false };
     apiClient.acknowledgeAlert = async () => { throw new ApiError(403, "Alert management is not allowed"); };
     try {
@@ -555,7 +571,7 @@ describe("project resource pages", () => {
   it("revokes alert management when the project is archived during a rule mutation", async () => {
     const original = snapshotClient();
     const rule = { id: "rule_denied", projectId, alertType: "task_failure" as const, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
-    apiClient.alerts = async () => [];
+    apiClient.alerts = async () => alertPage([]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [rule];
     apiClient.endpoints = async () => [];
@@ -577,7 +593,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_from_rule", projectId, type: "active_tasks_limit", status: "active", deliveryStatus: "delivered", ruleId: "rule_created", metric: "active_tasks", metricValue: 0, threshold: 0, endpointId: null, acknowledgedAt: null, acknowledgedBy: null, silencedUntil: null, createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     let alertReads = 0;
-    apiClient.alerts = async () => (++alertReads === 1 ? [] : [alert]);
+    apiClient.alerts = async () => alertPage(++alertReads === 1 ? [] : [alert]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [];
     apiClient.endpoints = async () => [];
@@ -599,7 +615,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const keys: string[] = [];
     let attempts = 0;
-    apiClient.alerts = async () => [];
+    apiClient.alerts = async () => alertPage([]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [];
     apiClient.endpoints = async () => [];
@@ -627,7 +643,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "alert_silence_retry", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", silencedUntil: null, createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     const attempts: Array<{ until: string | null; key: string }> = [];
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.silenceAlert = (async (_projectId: string, _alertId: string, until: string | null, key: string) => {
       attempts.push({ until, key });
@@ -647,7 +663,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const rule = { id: "rule_update_retry", projectId, alertType: "task_failure" as const, enabled: true, createdAt: policy.createdAt, updatedAt: policy.updatedAt };
     const keys: string[] = [];
-    apiClient.alerts = async () => [];
+    apiClient.alerts = async () => alertPage([]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.alertRules = async () => [rule];
     apiClient.endpoints = async () => [];
@@ -673,7 +689,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const usageCalls: Array<{ endpointId?: string; userId?: string }> = [];
     apiClient.usage = async (_projectId, query) => { usageCalls.push(query); return { ...usageOverview, selectedEndpointId: query.endpointId ?? null, daily: query.endpointId === "endpoint_2" ? usageOverview.daily.map((day) => ({ ...day, requests: 0, tokens: 0, cost: 0 })) : usageOverview.daily, trendTotals: query.endpointId === "endpoint_2" ? { requests: 0, tokens: 0, cost: 0 } : usageOverview.trendTotals }; };
-    apiClient.alerts = async () => alertTypes.map((type, index) => ({ id: `alert_${index}`, projectId, type, status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null }));
+    apiClient.alerts = async () => alertPage(alertTypes.map((type, index) => ({ id: `alert_${index}`, projectId, type, status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null })));
     apiClient.projectCapabilities = async () => capabilities;
     try {
       const usageView = render(<UsagePage projectId={projectId} />);
@@ -712,6 +728,7 @@ describe("project resource pages", () => {
     try {
       render(<UsagePage projectId={projectId} />);
       await screen.findByText("Project limits");
+      assert.equal(screen.getByRole("button", { name: "Refresh usage" }).getAttribute("data-variant"), "ghost");
       fireEvent.click(screen.getByRole("combobox", { name: "Usage scope endpoint" }));
       fireEvent.click(await screen.findByRole("option", { name: "Secondary" }));
       await waitFor(() => assert.equal(secondaryReads, 1));
@@ -897,7 +914,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "history_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", endpointId: "endpoint_1", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     const transitions: string[] = [];
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.transitionAlert = async (_projectId, alertId, status) => { transitions.push(`${alertId}:${status}`); return { ...alert, status, resolvedAt: policy.updatedAt, updatedAt: policy.updatedAt }; };
     try {
@@ -916,7 +933,7 @@ describe("project resource pages", () => {
   it("removes an alert deep link when the instance is not in this project", async () => {
     const original = snapshotClient();
     const alert: ProjectAlert = { id: "available_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
-    apiClient.alerts = async () => [alert];
+    apiClient.alerts = async () => alertPage([alert]);
     apiClient.projectCapabilities = async () => capabilities;
     try {
       window.history.pushState({}, "", "/workspaces/workspace_1/projects/project_1/alerts?alertId=other_project_alert#instances");
@@ -932,7 +949,7 @@ describe("project resource pages", () => {
     const original = snapshotClient();
     const active: ProjectAlert = { id: "active_1", projectId, type: "task_failure", status: "active", deliveryStatus: "delivered", createdAt: policy.createdAt, updatedAt: policy.updatedAt, resolvedAt: null, dismissedAt: null };
     const resolved: ProjectAlert = { ...active, id: "resolved_1", type: "provider_failure", status: "resolved", resolvedAt: policy.updatedAt };
-    apiClient.alerts = async () => [active, resolved];
+    apiClient.alerts = async () => alertPage([active, resolved]);
     apiClient.projectCapabilities = async () => capabilities;
     apiClient.transitionAlert = async () => { throw new ApiError(500, "transition unavailable"); };
     try {
@@ -940,11 +957,11 @@ describe("project resource pages", () => {
       await screen.findByText("Task failure");
       fireEvent.click(screen.getByRole("combobox", { name: "Alert status" }));
       fireEvent.click(await screen.findByRole("option", { name: "Resolved" }));
+      await screen.findByText("Provider failure");
       assert.equal(screen.queryByText("Task failure"), null);
-      assert.ok(screen.getByText("Provider failure"));
       fireEvent.click(screen.getByRole("combobox", { name: "Alert status" }));
       fireEvent.click(await screen.findByRole("option", { name: "Active" }));
-      fireEvent.click(screen.getByRole("button", { name: "Resolve alert" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Resolve alert" }));
       await screen.findByText("transition unavailable");
       assert.ok(screen.getAllByText("Task failure").length > 0);
       assert.equal(screen.queryByRole("heading", { name: "Alerts unavailable" }), null);
@@ -961,8 +978,12 @@ function installDom() {
   Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
+  dom.window.HTMLCanvasElement.prototype.getContext = () => ({ beginPath() {}, arc() {}, stroke() {}, lineCap: "", lineWidth: 0, strokeStyle: "", globalAlpha: 1 }) as unknown as CanvasRenderingContext2D;
   Object.assign(dom.window.HTMLElement.prototype, { scrollIntoView() {} });
-  Object.assign(globalThis, { requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number, cancelAnimationFrame: (id: number) => clearTimeout(id) });
-  Object.assign(dom.window, { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame });
+  Object.assign(globalThis, {
+    requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number,
+    cancelAnimationFrame: (id: number) => clearTimeout(id),
+  });
+  Object.assign(dom.window, { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, matchMedia: () => ({ matches: false, media: "", onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }) });
   if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
 }

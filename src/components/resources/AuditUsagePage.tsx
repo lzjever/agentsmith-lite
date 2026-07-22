@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
-import { Badge } from "@astryxdesign/core";
+import { Badge, IconButton } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -141,14 +141,12 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
           title="Usage"
           subtitle="Your provider activity with project-wide limits."
           actions={
-            <Button
-              variant="quiet"
-              size="icon"
-              aria-label="Refresh usage"
+            <IconButton
+              label="Refresh usage"
+              variant="ghost"
+              icon={<RefreshCw size={16} />}
               onClick={() => void load()}
-            >
-              <RefreshCw size={16} />
-            </Button>
+            />
           }
         />
       }
