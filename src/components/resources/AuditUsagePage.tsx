@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
-import { Badge, Button, IconButton, Selector } from "@astryxdesign/core";
+import { Badge, Button, Dialog, DialogHeader, IconButton, Selector } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -17,7 +17,6 @@ import {
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Dialog, DialogContent, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { UsageView } from "./UsageView";
@@ -727,42 +726,43 @@ function DetailDialog({
   onClose: () => void;
 }) {
   return (
-    <Dialog open={event !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        {event ? (
-          <>
-            <DialogHeader
-              title="Audit event detail"
-              description="Event metadata for this project activity."
+    <Dialog isOpen={event !== null} onOpenChange={(open) => !open && onClose()} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label="Audit event detail">
+      {event ? (
+        <>
+          <DialogHeader
+            title="Audit event detail"
+            subtitle="Event metadata for this project activity."
+            onOpenChange={(open) => !open && onClose()}
+            hasDivider
+            padding={5}
+          />
+          <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
+            <DT label="Timestamp" value={event.createdAt} />
+            <DT label="Action" value={auditActionLabel(event.action)} />
+            <DT label="Action ID" value={event.action} />
+            <DT
+              label="Actor"
+              value={
+                event.actorDisplayName ||
+                event.actorEmail ||
+                event.actorId ||
+                "System"
+              }
             />
-            <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
-              <DT label="Timestamp" value={event.createdAt} />
-              <DT label="Action" value={auditActionLabel(event.action)} />
-              <DT label="Action ID" value={event.action} />
+            <DT label="Resource user" value={subjectName(event, [])} />
+            <DT label="Resource type" value={auditResourceLabel(event.resourceKind)} />
+            <DT label="Resource ID" value={auditResourceIdentity(event.resourceKind, event.resourceId)} />
+            <DT label="Result" value={auditResultLabel(event.status)} />
+            {Object.entries(event.detail ?? {}).filter(([key, value]) => !(key === "releaseReason" && value === "expired")).map(([key, value]) => (
               <DT
-                label="Actor"
-                value={
-                  event.actorDisplayName ||
-                  event.actorEmail ||
-                  event.actorId ||
-                  "System"
-                }
+                label={auditDetailLabel(key)}
+                value={auditDetailValue(key, value)}
+                key={key}
               />
-              <DT label="Resource user" value={subjectName(event, [])} />
-              <DT label="Resource type" value={auditResourceLabel(event.resourceKind)} />
-              <DT label="Resource ID" value={auditResourceIdentity(event.resourceKind, event.resourceId)} />
-              <DT label="Result" value={auditResultLabel(event.status)} />
-              {Object.entries(event.detail ?? {}).filter(([key, value]) => !(key === "releaseReason" && value === "expired")).map(([key, value]) => (
-                <DT
-                  label={auditDetailLabel(key)}
-                  value={auditDetailValue(key, value)}
-                  key={key}
-                />
-              ))}
-            </dl>
-          </>
-        ) : null}
-      </DialogContent>
+            ))}
+          </dl>
+        </>
+      ) : null}
     </Dialog>
   );
 }
