@@ -2,7 +2,7 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
-import { Button, EmptyState, Spinner } from "@astryxdesign/core";
+import { Banner, Button, EmptyState, Spinner } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
@@ -60,7 +60,7 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
   return <PageLayout header={<PageHeader title="Projects" subtitle={workspace ? `${workspace.name} · Owner: ${workspace.owner?.displayName || workspace.owner?.email || "Workspace owner"} · Your access: ${roleLabel(workspace.memberRole)}` : "Projects keep endpoints, members, files, and tasks together."} actions={canCreateProject ? <Button label="New project" variant="primary" icon={<Plus size={16} />} isDisabled={state !== "ready"} onClick={() => setCreateOpen(true)} /> : undefined} />}>
     {state === "loading" ? <PageState state="loading"><Spinner label="Loading projects..." /></PageState> : null}
     {state === "error" ? <WorkspaceProjectsError message={error} onRetry={load} /> : null}
-    {state === "ready" && pinError ? <div className="mb-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">{pinError.message}</span><Button label="Retry" variant="ghost" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}/></div> : null}
+    {state === "ready" && pinError ? <Banner className="mb-4" status="error" title="Project pin could not be updated" description={pinError.message} endContent={<Button label="Retry" variant="ghost" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}/>} /> : null}
     {state === "ready" && workspace?.projects.length === 0 ? <ProjectsEmpty canCreateProject={canCreateProject} onCreate={() => setCreateOpen(true)} /> : null}
     {state === "ready" && workspace && workspace.projects.length > 0 ? <ProjectsTable workspaceId={workspace.id} projects={workspace.projects} pinBusyId={pinBusyId} onTogglePin={(projectId)=>void togglePin(projectId)} /> : null}
     {canCreateProject ? <CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} onAccessChanged={load} /> : null}
