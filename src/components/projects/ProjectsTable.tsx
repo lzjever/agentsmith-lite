@@ -6,13 +6,12 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { ArrowRight, FolderKanban, Pin, PinOff, Search } from "lucide-react";
-import { Badge } from "@astryxdesign/core";
+import { Badge, TextInput } from "@astryxdesign/core";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
 import { DataTable } from "../ui/data-table";
-import { Input } from "../ui/input";
 
 const columns = createColumnHelper<Project>();
 
@@ -121,16 +120,16 @@ export function ProjectsTable({
   }
   return (
     <section aria-label="Projects" className="space-y-4">
-      <label className="relative block max-w-sm">
-        <span className="sr-only">Search projects</span>
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" />
-        <Input
-          value={query}
-          onChange={(event) => changeQuery(event.target.value)}
-          className="h-9 pl-9"
-          placeholder="Search projects"
-        />
-      </label>
+      <TextInput
+        label="Search projects"
+        isLabelHidden
+        startIcon={<Search size={16} />}
+        value={query}
+        onChange={changeQuery}
+        className="max-w-sm"
+        placeholder="Search projects"
+        size="lg"
+      />
       <div className="hidden md:block">
         <DataTable table={table} testId="projects-table" />
       </div>
