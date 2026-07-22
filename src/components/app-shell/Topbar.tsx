@@ -1,16 +1,11 @@
 "use client";
 
-import { ChevronDown, FolderKanban, Globe, List, Menu } from "lucide-react";
-import { IconButton, TopNav as AstryxTopNav } from "@astryxdesign/core";
+import { FolderKanban, Globe, List, Menu } from "lucide-react";
+import { IconButton, Selector, TopNav as AstryxTopNav } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, Workspace } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
 import { ThemeToggle } from "../theme/ThemeToggle";
-import {
-  DropdownContent,
-  DropdownItem,
-  DropdownMenu,
-} from "../ui/dropdown-menu";
 import { Logo } from "./Logo";
 import { UserMenu } from "./UserMenu";
 import { NotificationBell } from "../notifications/NotificationBell";
@@ -91,25 +86,18 @@ function WorkspaceSwitcher({
   onSelect: (id: string) => void;
 }) {
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger className="inline-flex h-9 min-w-0 max-w-full items-center gap-2 rounded-md border border-transparent bg-transparent px-2 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:border-border hover:bg-surface-low hover:text-foreground md:max-w-64">
-        <Globe size={15} className="shrink-0 text-icon-default" />
-        <span className="min-w-0 truncate text-[13px] text-foreground">
-          {workspace.name}
-        </span>
-        <ChevronDown size={14} className="shrink-0 text-tertiary" />
-      </DropdownMenu.Trigger>
-      <DropdownContent align="start">
-        {workspaces.map((item) => (
-          <DropdownItem key={item.id} onSelect={() => onSelect(item.id)}>
-            {item.name}
-            {item.id === workspace.id ? (
-              <span className="ml-auto text-xs text-tertiary">Current</span>
-            ) : null}
-          </DropdownItem>
-        ))}
-      </DropdownContent>
-    </DropdownMenu.Root>
+    <div className="min-w-0 w-40 sm:w-56 md:w-64">
+      <Selector
+        label="Current workspace"
+        isLabelHidden
+        startIcon={<Globe size={15} />}
+        options={workspaces.map((item) => ({ value: item.id, label: item.name }))}
+        value={workspace.id}
+        onChange={onSelect}
+        size="lg"
+        width="100%"
+      />
+    </div>
   );
 }
 
@@ -127,31 +115,20 @@ export function ProjectSwitcher({
   onViewAll?: (() => void) | undefined;
 }) {
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger
-        className={
-          mobile
-            ? "flex w-full min-w-0 items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-left text-secondary hover:bg-surface-low hover:text-foreground"
-            : "hidden h-9 min-w-0 max-w-64 items-center gap-2 rounded-md border border-transparent bg-transparent px-2 text-left text-secondary transition-[background-color,border-color,color] duration-150 hover:border-border hover:bg-surface-low hover:text-foreground md:inline-flex"
-        }
-      >
-        <FolderKanban size={15} className="shrink-0 text-icon-default" />
-        <span className="min-w-0 truncate text-[13px] text-foreground">
-          {project.name}
-        </span>
-        <ChevronDown size={14} className="ml-auto shrink-0 text-tertiary" />
-      </DropdownMenu.Trigger>
-      <DropdownContent align="start">
-        {orderProjectsForDisplay(workspace.projects).map((item) => (
-          <DropdownItem key={item.id} onSelect={() => onSelect(item.id)}>
-            {item.name}
-            {item.id === project.id ? (
-              <span className="ml-auto text-xs text-tertiary">Current</span>
-            ) : null}
-          </DropdownItem>
-        ))}
-        {onViewAll ? <><DropdownMenu.Separator className="my-1 h-px bg-subtle" /><DropdownItem className="gap-2" onSelect={onViewAll}><List size={15} />View all projects</DropdownItem></> : null}
-      </DropdownContent>
-    </DropdownMenu.Root>
+    <div className={mobile ? "flex w-full min-w-0 items-center gap-1" : "hidden min-w-0 items-center gap-1 md:flex"}>
+      <div className={mobile ? "min-w-0 flex-1" : "min-w-0 w-64"}>
+        <Selector
+          label="Current project"
+          isLabelHidden
+          startIcon={<FolderKanban size={15} />}
+          options={orderProjectsForDisplay(workspace.projects).map((item) => ({ value: item.id, label: item.name }))}
+          value={project.id}
+          onChange={onSelect}
+          size="lg"
+          width="100%"
+        />
+      </div>
+      {onViewAll ? <IconButton label="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={onViewAll} /> : null}
+    </div>
   );
 }
