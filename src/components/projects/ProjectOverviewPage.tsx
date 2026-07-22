@@ -1,13 +1,13 @@
 "use client";
 
 import { ArrowLeft, ArrowRight, Server, Users, Wrench, type LucideIcon } from "lucide-react";
+import { Button } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type ProjectMember, type ProjectOverview, type ProjectOverviewAction } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 
 type NextStep = { href: string; label: string; icon: LucideIcon; description: string };
 
@@ -61,7 +61,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
 
   return <PageLayout header={header}>
     {state === "loading" ? <PageState><span className="text-secondary">Loading project overview...</span></PageState> : null}
-    {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Project overview unavailable</h2><p className="text-sm text-secondary">{error}</p><Button onClick={() => void load()}>Try again</Button></div></PageState> : null}
+    {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Project overview unavailable</h2><p className="text-sm text-secondary">{error}</p><Button label="Try again" variant="secondary" onClick={() => void load()} /></div></PageState> : null}
     {state === "ready" && overview ? <div className="space-y-7">
       <Link href={`/workspaces/${workspaceId}`} className="inline-flex items-center gap-2 text-sm text-secondary no-underline hover:text-foreground"><ArrowLeft size={16} />Back to workspace</Link>
       {lifecycleStatus !== "active" || workspaceLifecycleStatus !== "active" ? <p role="status" className="border-l-2 border-warning bg-warning-soft px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)}</p> : null}
