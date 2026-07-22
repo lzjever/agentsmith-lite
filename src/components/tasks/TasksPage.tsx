@@ -4,11 +4,11 @@ import { Plus, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { Button as AstryxButton } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { toast } from "../ui/toast";
 import { TaskCreateDialog, type TaskCreateValue } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
@@ -217,13 +217,13 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     loadCreateDependencies();
   }
 
-  return <PageLayout header={<PageHeader title="Tasks" subtitle={subtitle} actions={<><Button variant="quiet" size="icon" aria-label="Refresh tasks" title="Refresh tasks" onClick={refresh}><RefreshCw size={17} /></Button>{canCreate ? <Button onClick={() => setDialogOpen(true)} disabled={!createReady}><Plus size={17} />Create task</Button> : null}</>} />}>
+  return <PageLayout header={<PageHeader title="Tasks" subtitle={subtitle} actions={<><AstryxButton label="Refresh tasks" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} title="Refresh tasks" onClick={refresh} />{canCreate ? <AstryxButton label="Create task" variant="primary" icon={<Plus size={17} />} isDisabled={!createReady} onClick={() => setDialogOpen(true)} /> : null}</>} />}>
     {error ? <div className="border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}
     {endpointsState === "error" ? <DependencyError>{endpointsError} Task creation is disabled until endpoints can be loaded.</DependencyError> : null}
     {capabilitiesState === "error" ? <DependencyError>{capabilitiesError} Task creation is disabled until project permissions can be loaded.</DependencyError> : null}
     {librariesState === "error" ? <DependencyError>{librariesError} Task creation is disabled until File Libraries can be loaded.</DependencyError> : null}
     {state === "loading" ? <PageState>Loading tasks...</PageState> : null}
-    {state === "error" ? <PageState><Button onClick={() => void load()}>Try again</Button></PageState> : null}
+    {state === "error" ? <PageState><AstryxButton label="Try again" onClick={() => void load()} /></PageState> : null}
     {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <p className="mt-4 text-sm text-secondary">Your project access is read-only.</p> : null}{canCreate && endpointsState === "ready" && endpointGuidance ? <p className="mt-4 text-sm text-secondary">{endpointGuidance} <Link className="font-medium text-foreground hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}>Open endpoints</Link></p> : null}</> : null}
     <TaskCreateDialog policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} endpoints={compatibleEndpoints} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
