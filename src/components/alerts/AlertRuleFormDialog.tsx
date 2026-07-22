@@ -2,10 +2,9 @@
 
 import { Save } from "lucide-react";
 import type { FormEvent } from "react";
-import { Button, CheckboxInput, Selector } from "@astryxdesign/core";
+import { Button, CheckboxInput, Dialog, DialogHeader, Selector } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 
@@ -30,8 +29,12 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
   canSave: boolean;
   onOpenChange: (open: boolean) => void; onChange: (value: AlertRuleFormValue) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  return <Dialog open={open} onOpenChange={(next) => !saving && onOpenChange(next)}><DialogContent><form onSubmit={onSubmit}>
-    <DialogHeader title={editing ? "Edit alert rule" : "Create alert rule"} description="Monitor one project or endpoint metric and notify project administrators." />
+  const title = editing ? "Edit alert rule" : "Create alert rule";
+  const description = "Monitor one project or endpoint metric and notify project administrators.";
+  const handleOpenChange = (next: boolean) => !saving && onOpenChange(next);
+
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={onSubmit}>
+    <DialogHeader title={title} subtitle={description} onOpenChange={handleOpenChange} hasDivider padding={5} />
     <div className="grid gap-4 px-5 py-5">
       {error ? <p role="alert" className="rounded-sm border border-error/40 bg-error/5 px-3 py-2 text-sm text-error">{error}</p> : null}
       <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>
@@ -44,8 +47,8 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
       <Selector label="Scope" options={[{ value: "project", label: "Entire project" }, ...(supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => ({ value: endpoint.id, label: endpoint.name })) : [])]} value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} isDisabled={saving || !supportsEndpointScope(value.alertType)} size="lg" />
       <CheckboxInput label="Enabled" value={value.enabled} isDisabled={saving} onChange={(enabled) => onChange({ ...value, enabled })} />
     </div>
-    <DialogFooter><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => onOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></DialogFooter>
-  </form></DialogContent></Dialog>;
+    <footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => onOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></footer>
+  </form></Dialog>;
 }
 
 export function alertRuleType(alertType: ProjectAlertType) {
