@@ -2,13 +2,12 @@
 
 import { RefreshCw, Save, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { Button, IconButton } from "@astryxdesign/core";
+import { Button, CheckboxInput, IconButton, Selector } from "@astryxdesign/core";
 import type {
   EndpointCapability,
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -16,14 +15,6 @@ import {
   DialogHeader,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -128,11 +119,15 @@ export function EndpointDialog({
               />
             </label>
             <div className="grid gap-2">
-              <Label htmlFor="endpoint-credential">Credential</Label>
-              <Select
-                required
+              <Selector
+                label="Credential"
+                isRequired
+                options={credentials.map((credential) => ({
+                  value: credential.id,
+                  label: `${credential.name} (${credential.fingerprint})`,
+                }))}
                 value={input.credentialId}
-                onValueChange={(credentialId) => {
+                onChange={(credentialId) => {
                   const credential = credentials.find(
                     (item) => item.id === credentialId,
                   );
@@ -142,19 +137,10 @@ export function EndpointDialog({
                     ...(credential ? { baseUrl: credential.baseUrl } : {}),
                   });
                 }}
-                disabled={saving || discovering}
-              >
-                <SelectTrigger id="endpoint-credential">
-                  <SelectValue placeholder="Select credential" />
-                </SelectTrigger>
-                <SelectContent>
-                  {credentials.map((credential) => (
-                    <SelectItem key={credential.id} value={credential.id}>
-                      {credential.name} ({credential.fingerprint})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                placeholder="Select credential"
+                isDisabled={saving || discovering}
+                size="lg"
+              />
             </div>
             <label>
               Timeout
@@ -191,48 +177,36 @@ export function EndpointDialog({
                 }
               />
               {models.length > 0 ? (
-                <Select
+                <Selector
+                  label="Discovered models"
+                  isLabelHidden
+                  options={models.map((model) => ({ value: model, label: model }))}
                   value={models.includes(input.model) ? input.model : ""}
-                  onValueChange={(model) => set("model", model)}
-                  disabled={saving || discovering}
-                >
-                  <SelectTrigger
-                    aria-label="Discovered models"
-                    className="max-w-sm"
-                  >
-                    <SelectValue placeholder="Choose discovered model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {models.map((model) => (
-                      <SelectItem key={model} value={model}>
-                        {model}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  onChange={(model) => set("model", model)}
+                  placeholder="Choose discovered model"
+                  isDisabled={saving || discovering}
+                  size="lg"
+                  className="max-w-sm"
+                />
               ) : null}
             </div>
             <fieldset className="grid gap-2 sm:col-span-2">
               <legend className="text-sm text-primary">Capabilities</legend>
               <div className="flex flex-wrap gap-x-5 gap-y-2">
                 {endpointCapabilities.map((capability) => (
-                  <label
+                  <CheckboxInput
                     key={capability}
-                    className="flex items-center gap-2 text-sm text-secondary"
-                  >
-                    <Checkbox
-                      checked={input.capabilities.includes(capability)}
-                      disabled={
-                        saving ||
-                        (input.capabilities.length === 1 &&
-                          input.capabilities.includes(capability))
-                      }
-                      onChange={() => toggle(capability)}
-                    />
-                    {capability === "tool_calls"
+                    label={capability === "tool_calls"
                       ? "Tool calls"
                       : capability[0]!.toUpperCase() + capability.slice(1)}
-                  </label>
+                    value={input.capabilities.includes(capability)}
+                    isDisabled={
+                      saving ||
+                      (input.capabilities.length === 1 &&
+                        input.capabilities.includes(capability))
+                    }
+                    onChange={() => toggle(capability)}
+                  />
                 ))}
               </div>
             </fieldset>
