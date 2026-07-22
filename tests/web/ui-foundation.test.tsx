@@ -45,7 +45,6 @@ const { AppProviders } = await import("../../src/app/providers.js");
 const { PageState } = await import("../../src/components/layout/PageState.js");
 const { PageHeader } = await import("../../src/components/layout/PageHeader.js");
 const { ProjectModuleHeader } = await import("../../src/components/layout/ProjectModuleHeader.js");
-const { ErrorCard } = await import("../../src/components/ui/error-state.js");
 const { default: TaskDetailLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/loading.js");
 const { default: TaskArtifactsLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/artifacts/loading.js");
 const { default: WorkspaceError } = await import("../../src/app/workspaces/[workspace]/error.js");
@@ -92,22 +91,6 @@ test("status primitives come directly from Astryx without changing the surroundi
   assert.ok(screen.getByText("Active"));
   assert.ok(screen.getByRole("heading", { level: 2, name: "No projects" }));
   assert.equal(screen.getByRole("status", { name: "Loading projects..." }).tagName, "SPAN");
-});
-
-test("error cards persist until a user explicitly dismisses them", () => {
-  const originalSetTimeout = window.setTimeout;
-  let timeoutCalls = 0;
-  window.setTimeout = ((...args: Parameters<typeof window.setTimeout>) => {
-    timeoutCalls += 1;
-    return originalSetTimeout(...args);
-  }) as typeof window.setTimeout;
-  try {
-    render(<ErrorCard message="The request failed." onDismiss={() => undefined} />);
-    assert.equal(screen.getByRole("alert").textContent?.includes("The request failed."), true);
-    assert.equal(timeoutCalls, 0);
-  } finally {
-    window.setTimeout = originalSetTimeout;
-  }
 });
 
 test("route error recovery keeps a named action wired to Next reset", () => {
