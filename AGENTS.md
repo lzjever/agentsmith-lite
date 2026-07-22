@@ -33,6 +33,7 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 
 - Run the API and Next development servers directly for normal frontend, API, and business-logic work. Prefer in-place changes, hot reload, and focused checks.
 - Agent teams may work in parallel, but agents must not spawn subagents or start concurrent test/build tasks. Tests default to small, single-process runs scheduled serially by the coordinator. Do not run Postgres, image builds, containers, or heavy K8s tasks in parallel.
+- Leave the local runtime running for manual testing unless the task itself requires stopping it.
 - Do not rebuild images or redeploy the full K8s application by default after ordinary source changes.
 - Validate against local K8s only when a change crosses the K8s runtime boundary, such as pods, PVCs, RBAC, JuiceFS, sandbox containers, or explicit resource release.
 - Build images, import them into k3s, and perform a complete deployment only for relevant deployment changes, explicit stage acceptance, handoff, or release.
@@ -43,7 +44,7 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
-- Source JSDOM/TSX tests on this workstation must run inside a user `systemd-run --scope` memory limit with `node --test --import tsx`, never direct `node --import tsx`; individual tests remain serial.
+- Do not run source JSDOM/TSX tests by default. When one is genuinely necessary, run exactly one serial process in an explicit user scope with an explicit working directory: `systemd-run --user --scope --working-directory="$PWD" -p MemoryMax=1G -p MemorySwapMax=0 -p TasksMax=64 env NODE_OPTIONS=--max-old-space-size=768 node --test --import tsx <test-file>`. Do not run a dev server, build, browser, K8s work, or any parallel worker runtime command at the same time.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
 - Choose precise, narrow verification for the current change, selected deliberately by the developer.
 - Do not run broad unrelated suites by default.
