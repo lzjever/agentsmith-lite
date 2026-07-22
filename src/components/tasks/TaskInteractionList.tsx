@@ -1,12 +1,11 @@
 "use client";
 
 import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Square, Wrench } from "lucide-react";
-import { Button } from "@astryxdesign/core";
+import { Button, Tooltip } from "@astryxdesign/core";
 import { useState, type ReactNode } from "react";
 import type { TaskInteractionItem, TaskInteractionStreamEvent } from "../../lib/api/client";
 import { Markdown } from "../ui/markdown";
 import { toast } from "../ui/toast";
-import { Tooltip, TooltipContent, TooltipProvider } from "../ui/tooltip";
 import { TaskArtifactActions } from "./TaskArtifactActions";
 import { upsertTaskInteractions } from "./task-conversation-state";
 import { formatArtifactBytes, formatTaskDate } from "./task-ui";
@@ -17,7 +16,7 @@ export { upsertTaskInteractions } from "./task-conversation-state";
 
 export function TaskInteractionList({ taskId, items, preview, canStopWork, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: AssistantPreview; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
   if (items.length === 0 && !preview) return <div className="grid min-h-52 place-items-center border border-dashed border-border px-5 text-center"><div><Loader2 className="mx-auto size-5 animate-spin text-icon-default" /><p className="mt-2 text-sm text-secondary">Waiting for task messages.</p></div></div>;
-  return <TooltipProvider><ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} canStopWork={canStopWork} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol></TooltipProvider>;
+  return <ol className="space-y-3" aria-label="Task interactions">{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} canStopWork={canStopWork} onStopWork={onStopWork} />)}{preview ? <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><p className="mt-2 text-xs text-secondary">Preview only</p><div className="mt-2"><Markdown content={preview.body} /></div></article></li> : null}</ol>;
 }
 
 function TaskInteractionItemView({ taskId, item, canStopWork, onStopWork }: { taskId: string; item: TaskInteractionItem; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
@@ -53,7 +52,7 @@ function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind:
       toast.error("Message could not be copied");
     }
   }
-  const action = item.body ? <Tooltip.Root><Tooltip.Trigger asChild><button type="button" className="grid size-7 place-items-center text-tertiary opacity-0 transition-opacity hover:bg-hover hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100" aria-label="Copy message" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}</button></Tooltip.Trigger><TooltipContent>Copy message</TooltipContent></Tooltip.Root> : null;
+  const action = item.body ? <Tooltip content="Copy message" delay={350} hasHoverIndication={false}><button type="button" className="grid size-7 place-items-center text-tertiary opacity-0 transition-opacity hover:bg-hover hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100" aria-label="Copy message" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}</button></Tooltip> : null;
   return <li><article className="group border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={item.occurredAt} status={item.status} action={action} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
 }
 
