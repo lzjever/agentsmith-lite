@@ -3,8 +3,8 @@
 import { AlertCircle, Library, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import { Button } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
-import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -89,7 +89,7 @@ export function TaskCreateDialog({
   return <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
     <DialogContent className="max-h-[calc(100vh-2rem)] max-w-2xl overflow-y-auto">
       <form onSubmit={(event) => void submit(event)} aria-label="Create task">
-        <DialogHeader><div className="flex items-start justify-between gap-4"><div><DialogTitle className="type-title text-foreground">Create task</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Describe the work for the Botified sandbox.</DialogDescription></div><DialogClose asChild><Button variant="quiet" size="icon" aria-label="Close create task" disabled={busy}><X size={17} /></Button></DialogClose></div></DialogHeader>
+        <DialogHeader><div className="flex items-start justify-between gap-4"><div><DialogTitle className="type-title text-foreground">Create task</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Describe the work for the Botified sandbox.</DialogDescription></div><DialogClose asChild><Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} /></DialogClose></div></DialogHeader>
         {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
         <div className="grid gap-5 px-5 py-5">
           {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
@@ -106,7 +106,7 @@ export function TaskCreateDialog({
             <label className="grid gap-1.5 text-sm text-secondary">Task prompt<Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-36 resize-y" placeholder="Describe the result you need" disabled={busy} /></label>
           </>}
         </div>
-        <DialogFooter><Button type="button" variant="quiet" onClick={onClose} disabled={busy}>Cancel</Button><Button type="submit" disabled={!prompt.trim() || !endpointId || !validLibrary || busy}>{saving ? "Creating..." : "Create task"}</Button></DialogFooter>
+        <DialogFooter><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></DialogFooter>
       </form>
     </DialogContent>
   </Dialog>;
