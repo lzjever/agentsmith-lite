@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Spinner } from "@astryxdesign/core";
+import { Badge, Button, Spinner } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -27,7 +27,6 @@ import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
 import {
@@ -327,14 +326,14 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           subtitle="Monitor project activity and resource limits with in-app notifications."
           actions={
             <Button
-              variant="quiet"
-              size="icon"
-              aria-label="Refresh alerts"
-              disabled={busyId !== null}
+              label="Refresh alerts"
+              variant="ghost"
+              size="lg"
+              isIconOnly
+              icon={<RefreshCw size={16} />}
+              isDisabled={busyId !== null}
               onClick={() => void load()}
-            >
-              <RefreshCw size={16} />
-            </Button>
+            />
           }
         />
       }
@@ -565,16 +564,15 @@ function AlertInstances({
                     >
                       <span>Update failed.</span>
                       <Button
-                        variant="quiet"
-                        size="sm"
+                        label="Retry"
+                        variant="ghost"
+                        size="md"
                         onClick={() =>
                           retry.action === "ack"
                             ? onAck(alert)
                             : onSilence(alert, retry.silencedUntil)
                         }
-                      >
-                        Retry
-                      </Button>
+                      />
                     </div>
                   ) : null}
                 </div>
@@ -582,46 +580,46 @@ function AlertInstances({
                   <div className="flex gap-1">
                     {!alert.acknowledgedAt ? (
                       <Button
-                        variant="quiet"
-                        size="icon"
-                        aria-label="Acknowledge alert"
-                        disabled={busyId === alert.id}
+                        label="Acknowledge alert"
+                        variant="ghost"
+                        size="lg"
+                        isIconOnly
+                        icon={<Check size={15} />}
+                        isDisabled={busyId === alert.id}
                         onClick={() => onAck(alert)}
-                      >
-                        <Check size={15} />
-                      </Button>
+                      />
                     ) : null}
                     <Button
-                      variant="quiet"
-                      size="icon"
-                      aria-label={
+                      label={
                         silenced
                           ? "Clear alert silence"
                           : "Silence alert for one hour"
                       }
-                      disabled={busyId === alert.id}
+                      variant="ghost"
+                      size="lg"
+                      isIconOnly
+                      icon={<Clock size={15} />}
+                      isDisabled={busyId === alert.id}
                       onClick={() => onSilence(alert)}
-                    >
-                      <Clock size={15} />
-                    </Button>
+                    />
                     <Button
-                      variant="quiet"
-                      size="icon"
-                      aria-label="Resolve alert"
-                      disabled={busyId === alert.id}
+                      label="Resolve alert"
+                      variant="ghost"
+                      size="lg"
+                      isIconOnly
+                      icon={<CheckCircle2 size={15} />}
+                      isDisabled={busyId === alert.id}
                       onClick={() => onResolve(alert)}
-                    >
-                      <CheckCircle2 size={15} />
-                    </Button>
+                    />
                     <Button
-                      variant="quiet"
-                      size="icon"
-                      aria-label="Dismiss alert"
-                      disabled={busyId === alert.id}
+                      label="Dismiss alert"
+                      variant="ghost"
+                      size="lg"
+                      isIconOnly
+                      icon={<X size={15} />}
+                      isDisabled={busyId === alert.id}
                       onClick={() => onDismiss(alert)}
-                    >
-                      <X size={15} />
-                    </Button>
+                    />
                   </div>
                 ) : null}
               </li>
@@ -631,12 +629,12 @@ function AlertInstances({
           {nextCursor ? (
             <div className="flex justify-center pt-2">
               <Button
-                variant="outline"
-                disabled={loadingMore}
+                label={loadingMore ? "Loading..." : "Load more"}
+                variant="secondary"
+                size="lg"
+                isDisabled={loadingMore}
                 onClick={onLoadMore}
-              >
-                {loadingMore ? "Loading..." : "Load more"}
-              </Button>
+              />
             </div>
           ) : null}
         </>
