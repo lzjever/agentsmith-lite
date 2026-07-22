@@ -1,7 +1,7 @@
 "use client";
 
 import { Archive, ArrowLeft, CircleAlert, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
-import { Button as AstryxButton, IconButton } from "@astryxdesign/core";
+import { Button as AstryxButton, IconButton, Tab, TabList } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection } from "../../lib/api/client";
@@ -206,12 +206,24 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
 
   const showArtifacts = artifactsState !== "ready" || artifacts.length > 0;
   const terminalAvailable = capabilities.openTerminal;
+  const terminalDisabled = sandboxState.state === "release_requested" || (!terminalAvailable && !terminalStarted);
+  const selectWorkspaceMode = (next: string) => {
+    if (next === "terminal") {
+      if (terminalDisabled) return;
+      setTerminalStarted(true);
+    }
+    setMode(next as WorkspaceMode);
+  };
   return <PageLayout header={header} contentWidth="full">
     <Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>
     {taskRefreshError}
     {archivedNotice}
     {sandboxNotice}
-    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><AstryxButton label="Conversation" variant={mode === "conversation" ? "secondary" : "ghost"} size="md" role="tab" aria-selected={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</AstryxButton><AstryxButton label="Terminal" variant={mode === "terminal" ? "secondary" : "ghost"} size="md" role="tab" aria-selected={mode === "terminal"} isDisabled={sandboxState.state === "release_requested" || (!terminalAvailable && !terminalStarted)} onClick={() => { setTerminalStarted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</AstryxButton>{showArtifacts ? <AstryxButton label="Artifacts" variant={mode === "artifacts" ? "secondary" : "ghost"} size="md" className="xl:hidden" role="tab" aria-selected={mode === "artifacts"} onClick={() => setMode("artifacts")}>Artifacts</AstryxButton> : null}</div>
+    <TabList value={mode} onChange={selectWorkspaceMode} aria-label="Task workspace views" hasDivider className="shrink-0 flex-wrap">
+      <Tab value="conversation" label="Conversation" />
+      <Tab value="terminal" label="Terminal" icon={<TerminalSquare size={14} />} aria-disabled={terminalDisabled} />
+      {showArtifacts ? <Tab value="artifacts" label="Artifacts" className="xl:hidden" /> : null}
+    </TabList>
     <div className="grid h-[clamp(24rem,calc(100dvh-20rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden md:h-[clamp(24rem,calc(100dvh-12rem),48rem)] xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
       <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} currentTurn={currentTurn} sandboxState={sandboxState} capabilities={capabilities} onProjectionChange={handleProjectionChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
       {terminalStarted && sandboxState.state !== "release_requested" ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
