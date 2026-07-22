@@ -1,20 +1,22 @@
 "use client";
 
-import {
-  createColumnHelper,
-  getCoreRowModel,
-  useReactTable,
-} from "@tanstack/react-table";
 import { ArrowRight, FolderKanban, Pin, PinOff, Search } from "lucide-react";
-import { Badge, TextInput } from "@astryxdesign/core";
+import {
+  Badge,
+  Button,
+  IconButton,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+  TextInput,
+} from "@astryxdesign/core";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
-import { DataTable } from "../ui/data-table";
-
-const columns = createColumnHelper<Project>();
-
 export function ProjectsTable({
   workspaceId,
   projects,
@@ -48,72 +50,6 @@ export function ProjectsTable({
       ),
     [currentPage, filtered],
   );
-  const tableColumns = useMemo(
-    () => [
-      columns.accessor("name", {
-        header: "Project",
-        cell: ({ row }) => (
-          <Link
-            href={projectHref(workspaceId, row.original.id)}
-            className="flex items-center gap-3 text-foreground no-underline"
-          >
-            <span className="grid size-8 place-items-center rounded-sm bg-surface-high text-icon-default">
-              <FolderKanban size={16} />
-            </span>
-            <span className="font-medium">{row.original.name}</span>
-          </Link>
-        ),
-      }),
-      columns.accessor("taskConcurrencyLimit", {
-        header: "Task concurrency",
-        cell: (info) => info.getValue(),
-      }),
-      columns.display({
-        id: "lifecycleStatus",
-        header: "Status",
-        cell: ({ row }) => <ProjectLifecycleStatus project={row.original} />,
-      }),
-      columns.accessor("createdAt", {
-        header: "Created",
-        cell: (info) => formatDate(info.getValue()),
-      }),
-      ...(onTogglePin
-        ? [
-            columns.display({
-              id: "pin",
-              header: "",
-              cell: ({ row }) => (
-                <ButtonPin
-                  project={row.original}
-                  pinned={Boolean(row.original.pinnedAt)}
-                  busy={pinBusyId !== null && pinBusyId !== undefined}
-                  onTogglePin={onTogglePin}
-                />
-              ),
-            }),
-          ]
-        : []),
-      columns.display({
-        id: "open",
-        header: "",
-        cell: ({ row }) => (
-          <Link
-            href={projectHref(workspaceId, row.original.id)}
-            className="inline-flex items-center gap-1 text-sm text-secondary no-underline hover:text-foreground"
-          >
-            Open
-            <ArrowRight size={15} />
-          </Link>
-        ),
-      }),
-    ],
-    [onTogglePin, pinBusyId, workspaceId],
-  );
-  const table = useReactTable({
-    data: visible,
-    columns: tableColumns,
-    getCoreRowModel: getCoreRowModel(),
-  });
   function changeQuery(value: string) {
     setQuery(value);
     setPage(1);
@@ -131,7 +67,69 @@ export function ProjectsTable({
         size="lg"
       />
       <div className="hidden md:block">
-        <DataTable table={table} testId="projects-table" />
+        <Table
+          aria-label="Projects"
+          data-testid="projects-table"
+          density="balanced"
+          dividers="rows"
+          hasHover
+        >
+          <TableHeader>
+            <TableRow isHeaderRow>
+              <TableHeaderCell>Project</TableHeaderCell>
+              <TableHeaderCell>Task concurrency</TableHeaderCell>
+              <TableHeaderCell>Status</TableHeaderCell>
+              <TableHeaderCell>Created</TableHeaderCell>
+              {onTogglePin ? <TableHeaderCell /> : null}
+              <TableHeaderCell />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {visible.map((project) => (
+              <TableRow
+                data-row-id={project.id}
+                data-testid="projects-table__row"
+                key={project.id}
+              >
+                <TableCell>
+                  <Link
+                    href={projectHref(workspaceId, project.id)}
+                    className="flex items-center gap-3 text-foreground no-underline"
+                  >
+                    <span className="grid size-8 place-items-center rounded-sm bg-surface-high text-icon-default">
+                      <FolderKanban size={16} />
+                    </span>
+                    <span className="font-medium">{project.name}</span>
+                  </Link>
+                </TableCell>
+                <TableCell>{project.taskConcurrencyLimit}</TableCell>
+                <TableCell>
+                  <ProjectLifecycleStatus project={project} />
+                </TableCell>
+                <TableCell>{formatDate(project.createdAt)}</TableCell>
+                {onTogglePin ? (
+                  <TableCell>
+                    <ButtonPin
+                      project={project}
+                      pinned={Boolean(project.pinnedAt)}
+                      busy={pinBusyId !== null && pinBusyId !== undefined}
+                      onTogglePin={onTogglePin}
+                    />
+                  </TableCell>
+                ) : null}
+                <TableCell>
+                  <Link
+                    href={projectHref(workspaceId, project.id)}
+                    className="inline-flex items-center gap-1 text-sm text-secondary no-underline hover:text-foreground"
+                  >
+                    Open
+                    <ArrowRight size={15} />
+                  </Link>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       </div>
       <div className="divide-y divide-subtle border-y border-subtle md:hidden">
         {visible.map((project) => (
@@ -227,17 +225,16 @@ function ButtonPin({
   onTogglePin: (projectId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      className="grid size-8 shrink-0 place-items-center text-secondary hover:text-foreground"
-      aria-label={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
+    <IconButton
+      label={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
       title={pinned ? "Unpin project" : "Pin project"}
-      disabled={busy}
-      aria-busy={busy}
+      variant="ghost"
+      size="md"
+      className="shrink-0 text-secondary hover:text-foreground"
+      isDisabled={busy}
+      icon={pinned ? <PinOff size={16} /> : <Pin size={16} />}
       onClick={() => onTogglePin(project.id)}
-    >
-      {pinned ? <PinOff size={16} /> : <Pin size={16} />}
-    </button>
+    />
   );
 }
 function Pagination({
@@ -251,25 +248,23 @@ function Pagination({
 }) {
   return (
     <div className="flex items-center justify-end gap-2">
-      <button
-        type="button"
-        className="rounded-md border border-subtle bg-surface px-2 py-1 text-xs text-primary disabled:opacity-50"
-        disabled={page === 1}
+      <Button
+        label="Previous"
+        variant="secondary"
+        size="sm"
+        isDisabled={page === 1}
         onClick={() => onPageChange(page - 1)}
-      >
-        Previous
-      </button>
+      />
       <span className="text-xs text-tertiary">
         Page {page} of {pageCount}
       </span>
-      <button
-        type="button"
-        className="rounded-md border border-subtle bg-surface px-2 py-1 text-xs text-primary disabled:opacity-50"
-        disabled={page === pageCount}
+      <Button
+        label="Next"
+        variant="secondary"
+        size="sm"
+        isDisabled={page === pageCount}
         onClick={() => onPageChange(page + 1)}
-      >
-        Next
-      </button>
+      />
     </div>
   );
 }
