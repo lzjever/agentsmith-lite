@@ -370,7 +370,7 @@ export function taskTerminalWebSocketUrlForApiBase(basePath:string,taskId:string
   return url.toString();
 }
 
-export const oidcStartUrl = `${apiBasePath}/auth/oidc/start`;
+export const oidcStartUrl = `/${apiBasePath.replace(/^\/+/, "")}/auth/oidc/start`;
 
 export function oidcStartUrlForReturnTo(returnTo: string): string {
   return `${oidcStartUrl}?${new URLSearchParams({ returnTo }).toString()}`;
