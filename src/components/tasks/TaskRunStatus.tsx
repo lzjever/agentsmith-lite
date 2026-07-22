@@ -1,9 +1,9 @@
 "use client";
 
 import { CircleAlert, CircleCheck, CircleDot, Loader2, Square } from "lucide-react";
+import { Button as AstryxButton } from "@astryxdesign/core";
 import { useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
-import { Button } from "../ui/button";
 
 export function TaskRunStatus({ currentTurn, sandboxState, capabilities, aborting, onAbort }: { currentTurn: TaskDetail["currentTurn"]; sandboxState: TaskDetail["sandboxState"]; capabilities: TaskCapabilities; aborting: boolean; onAbort: () => Promise<void> }) {
   const [abortError, setAbortError] = useState("");
@@ -15,7 +15,7 @@ export function TaskRunStatus({ currentTurn, sandboxState, capabilities, abortin
   }
   const presentation = runStatePresentation(currentTurn, sandboxState);
   const Icon = presentation.icon;
-  return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Icon role="img" aria-label={presentation.iconLabel} className={`size-4 shrink-0 ${presentation.iconClass} ${presentation.spinning ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{presentation.label}</p></div>{capabilities.abortTurn ? <Button variant="quiet" size="sm" disabled={aborting} onClick={() => void abort()}><Square size={14} />{aborting ? "Stopping..." : "Stop current turn"}</Button> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
+  return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Icon role="img" aria-label={presentation.iconLabel} className={`size-4 shrink-0 ${presentation.iconClass} ${presentation.spinning ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{presentation.label}</p></div>{capabilities.abortTurn ? <AstryxButton label={aborting ? "Stopping..." : "Stop current turn"} variant="ghost" size="sm" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} /> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
 }
 
 export function TaskConnectionNotice({ connection, historyStatus, runtimeReachability, runtimeAvailable = true, error, onRetry }: { connection: "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered"; historyStatus: TaskInteractionSnapshot["historyStatus"]; runtimeReachability: TaskInteractionSnapshot["runtimeReachability"]; runtimeAvailable?: boolean; error: string; onRetry: () => void }) {
@@ -25,11 +25,11 @@ export function TaskConnectionNotice({ connection, historyStatus, runtimeReachab
   const showConnection = connection !== "connected" || historyStatus === "gap" || runtimeReachability === "unreachable";
   if (!showConnection) return null;
   const detail = historyStatus === "gap" ? "Some earlier interaction history is no longer available." : runtimeReachability === "unreachable" ? "The task runtime is temporarily unreachable. Saved interactions remain available." : connection === "disconnected" ? ["Conversation updates are temporarily disconnected.", error].filter(Boolean).join(" ") : connection === "recovered" ? "Conversation updates recovered." : connection === "reconnecting" ? "Reconnecting to conversation updates..." : "Connecting to conversation updates...";
-  return <div className={`flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3 text-sm ${connection === "disconnected" || historyStatus === "gap" || runtimeReachability === "unreachable" ? "border-warning/30 bg-warning/10 text-foreground" : "border-border bg-surface-low text-secondary"}`} role={connection === "disconnected" || historyStatus === "gap" ? "alert" : "status"}><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{detail}</span>{connection === "disconnected" || runtimeReachability === "unreachable" ? <Button variant="quiet" size="sm" onClick={onRetry}>Retry</Button> : null}</div>;
+  return <div className={`flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3 text-sm ${connection === "disconnected" || historyStatus === "gap" || runtimeReachability === "unreachable" ? "border-warning/30 bg-warning/10 text-foreground" : "border-border bg-surface-low text-secondary"}`} role={connection === "disconnected" || historyStatus === "gap" ? "alert" : "status"}><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{detail}</span>{connection === "disconnected" || runtimeReachability === "unreachable" ? <AstryxButton label="Retry" variant="ghost" size="sm" onClick={onRetry} /> : null}</div>;
 }
 
 export function TaskPreviewNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border bg-surface-low px-4 py-3 text-sm text-secondary" role="status"><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{message}</span><Button variant="quiet" size="sm" onClick={onRetry}>Retry preview</Button></div>;
+  return <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border bg-surface-low px-4 py-3 text-sm text-secondary" role="status"><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{message}</span><AstryxButton label="Retry preview" variant="ghost" size="sm" onClick={onRetry} /></div>;
 }
 
 function runStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
