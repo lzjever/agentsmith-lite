@@ -325,7 +325,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   }
 
   const needsCredential = credentialsState === "ready" && credentials.length === 0;
-  return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible model connections for this project." actions={<><AstryxButton label="Refresh endpoints" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} title="Refresh endpoints" isDisabled={mutationBusy} onClick={refresh} />{canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} isDisabled={mutationBusy} onClick={create} /> : null}</>} />}>
+  return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible model connections for this project." actions={<><AstryxButton label="Refresh endpoints" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} isDisabled={mutationBusy} onClick={create} /> : null}</>} />}>
     {credentialsState === "error" ? <DependencyError message={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
     {capabilitiesError ? <DependencyError message={capabilitiesError} /> : null}
     {state === "loading" ? <PageState><span className="text-secondary">Loading endpoints...</span></PageState> : null}

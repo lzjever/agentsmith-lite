@@ -217,7 +217,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     loadCreateDependencies();
   }
 
-  return <PageLayout header={<PageHeader title="Tasks" subtitle={subtitle} actions={<><AstryxButton label="Refresh tasks" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} title="Refresh tasks" onClick={refresh} />{canCreate ? <AstryxButton label="Create task" variant="primary" icon={<Plus size={17} />} isDisabled={!createReady} onClick={() => setDialogOpen(true)} /> : null}</>} />}>
+  return <PageLayout header={<PageHeader title="Tasks" subtitle={subtitle} actions={<><AstryxButton label="Refresh tasks" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} onClick={refresh} />{canCreate ? <AstryxButton label="Create task" variant="primary" icon={<Plus size={17} />} isDisabled={!createReady} onClick={() => setDialogOpen(true)} /> : null}</>} />}>
     {error ? <div className="border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}
     {endpointsState === "error" ? <DependencyError>{endpointsError} Task creation is disabled until endpoints can be loaded.</DependencyError> : null}
     {capabilitiesState === "error" ? <DependencyError>{capabilitiesError} Task creation is disabled until project permissions can be loaded.</DependencyError> : null}
