@@ -2,6 +2,7 @@
 
 import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
+import { Skeleton } from "@astryxdesign/core";
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -13,7 +14,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { Skeleton } from "../ui/skeleton";
 import { toast } from "../ui/toast";
 import { showFileDetails, sortFileEntries } from "./fileBrowserState";
 
@@ -486,7 +486,7 @@ function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBa
   return <section className="flex min-h-0 max-h-72 flex-col overflow-hidden rounded-md border border-subtle bg-surface lg:max-h-none" aria-label="File Libraries">
     <div className="flex min-h-12 items-center justify-between border-b border-subtle px-3"><div className="min-w-0"><h2 className="type-caption text-tertiary">File Libraries</h2><p className="mt-0.5 text-xs text-secondary">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</p></div>{canCreate ? <Button size="icon" variant="quiet" aria-label="Create library" title="Create library" onClick={onCreate} disabled={mutationBusy}><Plus size={16} /></Button> : null}</div>
     <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-      {state === "loading" ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : null}
+      {state === "loading" ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton height={48} /><Skeleton height={48} /></div> : null}
       {state === "error" ? <ErrorState title="Libraries unavailable" message={message} onRetry={() => void onRetry()} /> : null}
       {state === "ready" && libraries.length === 0 ? <p className="p-3 text-sm text-secondary">No File Libraries are available in this project.</p> : null}
       {state === "ready" ? libraries.map((library) => {
@@ -515,7 +515,7 @@ function InlineError({ message, onDismiss }: { message: string; onDismiss: () =>
 }
 
 function FileBrowserLoading() {
-  return <div className="space-y-2 p-3" aria-label="Loading files"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
+  return <div className="space-y-2 p-3" aria-label="Loading files"><Skeleton height={40} /><Skeleton height={40} /><Skeleton height={40} /></div>;
 }
 
 function FileBrowserError({ onRetry }: { onRetry: () => Promise<unknown> }) {

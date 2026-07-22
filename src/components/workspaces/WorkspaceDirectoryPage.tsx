@@ -2,6 +2,7 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
+import { Badge, EmptyState, Spinner } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -9,10 +10,8 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
-import { Badge } from "../ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
-import { EmptyState, PageLoading } from "../ui/loading";
 import { Input } from "../ui/input";
 import { toast } from "../ui/toast";
 
@@ -39,7 +38,7 @@ export function WorkspaceDirectoryPage() {
   useEffect(() => { void load(); }, []);
 
   return <PageLayout header={<PageHeader title="Workspaces" subtitle="Choose a workspace to continue into its projects." actions={<Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New workspace</Button>} />}>
-    {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
+    {state === "loading" ? <PageState state="loading"><Spinner label="Loading workspaces..." /></PageState> : null}
     {state === "error" ? <WorkspaceError message={error} onRetry={load} /> : null}
     {state === "ready" && workspaces.length === 0 ? <WorkspaceEmpty onCreate={() => setCreateOpen(true)} /> : null}
     {state === "ready" && workspaces.length > 0 ? <WorkspaceList workspaces={workspaces} /> : null}
@@ -54,11 +53,11 @@ function WorkspaceList({ workspaces }: { workspaces: Workspace[] }) {
 function WorkspaceLifecycleBadge({ workspace }: { workspace: Workspace }) {
   const status = workspace.lifecycleStatus ?? "active";
   if (status === "active") return null;
-  return <Badge className="shrink-0" variant={status === "archived" ? "warning" : "destructive"}>{status[0]!.toUpperCase() + status.slice(1)}</Badge>;
+  return <Badge className="shrink-0" variant={status === "archived" ? "warning" : "error"} label={status[0]!.toUpperCase() + status.slice(1)} />;
 }
 
 function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
-  return <PageState state="empty"><EmptyState icon={FolderKanban} title="No workspaces yet" description="Create a workspace to organize projects, endpoints, files, and tasks." action={{ label: "New workspace", onClick: onCreate }} /></PageState>;
+  return <PageState state="empty"><EmptyState icon={<FolderKanban />} title="No workspaces yet" description="Create a workspace to organize projects, endpoints, files, and tasks." actions={<Button onClick={onCreate}>New workspace</Button>} /></PageState>;
 }
 
 function WorkspaceError({ message, onRetry }: { message: string; onRetry: () => void }) {

@@ -1,5 +1,7 @@
+import { Spinner } from "@astryxdesign/core";
 import { PageLayout } from "../../../../../../../../components/layout/PageLayout";
 import { PageState } from "../../../../../../../../components/layout/PageState";
-import { PageLoading } from "../../../../../../../../components/ui/loading";
 
-export default function ArtifactsLoading() { return <PageLayout><PageState state="loading"><PageLoading description="Loading artifacts..." /></PageState></PageLayout>; }
+export default function ArtifactsLoading() {
+  return <PageLayout><PageState state="loading"><section className="flex min-h-48 items-center border-y border-subtle py-6" aria-busy="true"><Spinner size="sm" label="Loading artifacts..." /></section></PageState></PageLayout>;
+}

@@ -1,13 +1,12 @@
 "use client";
 
-import { AppShell as AstryxAppShell, MobileNav } from "@astryxdesign/core";
+import { AppShell as AstryxAppShell, MobileNav, Spinner } from "@astryxdesign/core";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
-import { PageLoading } from "../ui/loading";
 import { ToastContainer } from "../ui/toast";
 import { TooltipProvider } from "../ui/tooltip";
 import { ShellNavigation } from "./Sidebar";
@@ -140,7 +139,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
 }
 
 function ShellLoadingFrame() {
-  return <div className="min-h-screen bg-background"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><span className="font-display text-lg text-foreground">AgentSmith</span></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-[var(--sidebar-width)] border-r border-border bg-panel md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><PageLoading description="Loading workspace..." /></main></div></div>;
+  return <div className="min-h-screen bg-background"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><span className="font-display text-lg text-foreground">AgentSmith</span></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-[var(--sidebar-width)] border-r border-border bg-panel md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><Spinner label="Loading workspace..." /></main></div></div>;
 }
 
 function ShellStatePage({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {

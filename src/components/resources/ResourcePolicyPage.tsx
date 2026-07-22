@@ -16,7 +16,7 @@ import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import { PageLoading } from "../ui/loading";
+import { Spinner } from "@astryxdesign/core";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
@@ -175,7 +175,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     >
       {state === "loading" ? (
         <PageState state="loading">
-          <PageLoading />
+          <Spinner label="Loading policy..." />
         </PageState>
       ) : null}
       {state === "error" ? (

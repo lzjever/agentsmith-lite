@@ -1,3 +1,3 @@
+import { Spinner } from "@astryxdesign/core";
 import { PageState } from "../../../../../../components/layout/PageState";
-import { PageLoading } from "../../../../../../components/ui/loading";
-export default function Loading() { return <PageState state="loading"><PageLoading description="Loading credentials..." /></PageState>; }
+export default function Loading() { return <PageState state="loading"><Spinner label="Loading credentials..." /></PageState>; }

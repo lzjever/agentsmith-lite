@@ -6,12 +6,12 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { ArrowRight, FolderKanban, Pin, PinOff, Search } from "lucide-react";
+import { Badge } from "@astryxdesign/core";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
 import { orderProjectsForDisplay } from "../../lib/project-order";
 import { DataTable } from "../ui/data-table";
-import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 
 const columns = createColumnHelper<Project>();
@@ -214,7 +214,7 @@ export function ProjectCard({
 function ProjectLifecycleStatus({ project }: { project: Project }) {
   const status = project.lifecycleStatus ?? "active";
   const variant = status === "active" ? "success" : status === "archived" ? "secondary" : "warning";
-  return <Badge variant={variant}>{status[0]!.toUpperCase() + status.slice(1)}</Badge>;
+  return <Badge variant={variant === "secondary" ? "neutral" : variant} label={status[0]!.toUpperCase() + status.slice(1)} />;
 }
 function ButtonPin({
   project,

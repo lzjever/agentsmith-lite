@@ -1,13 +1,13 @@
 "use client";
 
 import { Plus, Search, Trash2, X } from "lucide-react";
+import { Badge } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
@@ -231,7 +231,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
 function WorkspaceMemberRow({ member, canManage, busy, onChange, onRemove, onView }: { member: WorkspaceMember; canManage: boolean; busy: boolean; onChange: (member: WorkspaceMember, role: Exclude<WorkspaceMemberRole, "owner">) => void; onRemove: (member: WorkspaceMember) => void; onView: (member: WorkspaceMember) => void }) {
   const label = memberLabel(member);
-  return <div className="flex flex-wrap items-center justify-between gap-3 py-3"><button type="button" className="min-w-0 text-left" onClick={() => onView(member)}><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm text-foreground">{label}</p>{member.role === "owner" ? <Badge variant="outline">Owner</Badge> : null}</div>{member.displayName ? <p className="truncate text-xs text-secondary">{member.email}</p> : null}{member.role !== "owner" ? <p className="mt-1 text-xs text-secondary">{roleLabel(member.role)}</p> : null}</button>{canManage && member.role !== "owner" ? <div className="flex gap-2"><Select value={member.role} disabled={busy} onValueChange={(value) => onChange(member, value as Exclude<WorkspaceMemberRole, "owner">)}><SelectTrigger aria-label={`Role for ${label}`} className="w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select><Button variant="danger" size="icon" aria-label={`Remove ${label}`} disabled={busy} onClick={() => void onRemove(member)}><Trash2 size={15} /></Button></div> : null}</div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3 py-3"><button type="button" className="min-w-0 text-left" onClick={() => onView(member)}><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm text-foreground">{label}</p>{member.role === "owner" ? <Badge variant="neutral" label="Owner" /> : null}</div>{member.displayName ? <p className="truncate text-xs text-secondary">{member.email}</p> : null}{member.role !== "owner" ? <p className="mt-1 text-xs text-secondary">{roleLabel(member.role)}</p> : null}</button>{canManage && member.role !== "owner" ? <div className="flex gap-2"><Select value={member.role} disabled={busy} onValueChange={(value) => onChange(member, value as Exclude<WorkspaceMemberRole, "owner">)}><SelectTrigger aria-label={`Role for ${label}`} className="w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="member">Member</SelectItem><SelectItem value="viewer">Viewer</SelectItem></SelectContent></Select><Button variant="danger" size="icon" aria-label={`Remove ${label}`} disabled={busy} onClick={() => void onRemove(member)}><Trash2 size={15} /></Button></div> : null}</div>;
 }
 
 function MutationNotice({ error, onDismiss }: { error: MutationError; onDismiss: () => void }) {

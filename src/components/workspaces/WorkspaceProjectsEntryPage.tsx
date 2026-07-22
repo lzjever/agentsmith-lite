@@ -2,6 +2,7 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
+import { EmptyState, Spinner } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
@@ -12,7 +13,6 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
-import { EmptyState, PageLoading } from "../ui/loading";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -59,7 +59,7 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
 
   const canCreateProject = workspace?.capabilities.canCreateProject === true;
   return <PageLayout header={<PageHeader title="Projects" subtitle={workspace ? `${workspace.name} · Owner: ${workspace.owner?.displayName || workspace.owner?.email || "Workspace owner"} · Your access: ${roleLabel(workspace.memberRole)}` : "Projects keep endpoints, members, files, and tasks together."} actions={canCreateProject ? <Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New project</Button> : undefined} />}>
-    {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
+    {state === "loading" ? <PageState state="loading"><Spinner label="Loading projects..." /></PageState> : null}
     {state === "error" ? <WorkspaceProjectsError message={error} onRetry={load} /> : null}
     {state === "ready" && pinError ? <div className="mb-4 flex items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2" role="alert"><span className="text-sm text-error">{pinError.message}</span><Button variant="quiet" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}>Retry</Button></div> : null}
     {state === "ready" && workspace?.projects.length === 0 ? <ProjectsEmpty canCreateProject={canCreateProject} onCreate={() => setCreateOpen(true)} /> : null}
@@ -69,7 +69,7 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
 }
 
 function ProjectsEmpty({ canCreateProject, onCreate }: { canCreateProject: boolean; onCreate: () => void }) {
-  return <PageState state="empty"><EmptyState icon={FolderKanban} title="No projects yet" description={canCreateProject ? "Create a project to configure an endpoint, add members, and start work." : "No projects are available in this workspace."} {...(canCreateProject ? { action: { label: "New project", onClick: onCreate } } : {})} /></PageState>;
+  return <PageState state="empty"><EmptyState icon={<FolderKanban />} title="No projects yet" description={canCreateProject ? "Create a project to configure an endpoint, add members, and start work." : "No projects are available in this workspace."} {...(canCreateProject ? { actions: <Button onClick={onCreate}>New project</Button> } : {})} /></PageState>;
 }
 
 function WorkspaceProjectsError({ message, onRetry }: { message: string; onRetry: () => void }) {

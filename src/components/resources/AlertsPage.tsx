@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Badge, Spinner } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -26,11 +27,9 @@ import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
-import { PageLoading } from "../ui/loading";
 import {
   Select,
   SelectContent,
@@ -338,7 +337,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     >
       {state === "loading" ? (
         <PageState state="loading">
-          <PageLoading />
+          <Spinner label="Loading alerts..." />
         </PageState>
       ) : null}
       {state === "error" ? (
@@ -509,21 +508,15 @@ function AlertInstances({
                     <strong className="text-sm text-foreground">
                       {alertLabel(alert)}
                     </strong>
-                    <Badge
-                      variant={
-                        alert.status === "active" ? "destructive" : "secondary"
-                      }
-                    >
-                      {alert.status}
-                    </Badge>
+                    <Badge variant={alert.status === "active" ? "error" : "neutral"} label={alert.status} />
                     {alert.acknowledgedAt ? (
-                      <Badge variant="outline">Acknowledged</Badge>
+                      <Badge variant="neutral" label="Acknowledged" />
                     ) : null}
                     {silenced ? (
-                      <Badge variant="outline">Silenced</Badge>
+                      <Badge variant="neutral" label="Silenced" />
                     ) : null}
                     {selectedAlertId === alert.id ? (
-                      <Badge variant="outline">Linked instance</Badge>
+                      <Badge variant="neutral" label="Linked instance" />
                     ) : null}
                   </div>
                   <p className="mt-1 text-sm text-secondary">

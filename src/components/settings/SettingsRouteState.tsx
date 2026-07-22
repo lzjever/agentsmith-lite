@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { PageState } from "../layout/PageState";
 import { ErrorState } from "../ui/error-state";
-import { PageLoading } from "../ui/loading";
+import { Spinner } from "@astryxdesign/core";
 
-export function SettingsRouteLoading() { return <PageState state="loading"><PageLoading description="Loading settings..." /></PageState>; }
+export function SettingsRouteLoading() { return <PageState state="loading"><Spinner label="Loading settings..." /></PageState>; }
 
 export function SettingsRouteError({ error, reset }: { error?: Error; reset: () => void }) {
   return <SettingsLoadError message={error?.message || "The settings page could not be loaded."} onRetry={reset} backHref={settingsParentPath()} backLabel="Back" />;

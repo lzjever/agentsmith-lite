@@ -4,10 +4,10 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { Button } from "../ui/button";
 import { ErrorState } from "../ui/error-state";
-import { PageLoading } from "../ui/loading";
+import { Spinner } from "@astryxdesign/core";
 
 export function ResourceRouteLoading({ label }: { label: string }) {
-  return <PageLayout><PageState state="loading"><PageLoading description={`Loading ${label}...`} /></PageState></PageLayout>;
+  return <PageLayout><PageState state="loading"><Spinner label={`Loading ${label}...`} /></PageState></PageLayout>;
 }
 
 export function ResourceRouteError({ title, reset }: { title: string; reset: () => void }) {

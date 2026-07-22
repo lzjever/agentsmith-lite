@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { EmptyState, Spinner } from "@astryxdesign/core";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
@@ -13,7 +14,6 @@ import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import { EmptyState, PageLoading } from "../ui/loading";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { toast } from "../ui/toast";
 import { memberIdentityLabel, memberMatchesQuery, removeMemberById } from "./members-page-utils";
@@ -249,9 +249,9 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const workspaceMembersHref = `/workspaces/${workspaceId}/members`;
   return <PageLayout header={<PageHeader title="Members" subtitle="People with access to this project and the role they hold." actions={canAdd ? <Button onClick={openInvite}><Plus size={16} />Add member</Button> : undefined} />}>
     {state === "ready" && capabilitiesError ? <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{capabilitiesError}</div> : null}
-    {state === "loading" ? <PageState state="loading"><PageLoading /></PageState> : null}
+    {state === "loading" ? <PageState state="loading"><Spinner label="Loading project members..." /></PageState> : null}
     {state === "error" ? <PageState state="error"><ErrorState title="Members unavailable" message={error} onRetry={() => void load()} /></PageState> : null}
-    {state === "ready" && members.length === 0 ? <PageState state="empty"><EmptyState icon={Users} title="No project members" description="Project access begins with a workspace member." {...(canAdd ? { action: { label: "Add member", onClick: openInvite } } : {})} /></PageState> : null}
+    {state === "ready" && members.length === 0 ? <PageState state="empty"><EmptyState icon={<Users />} title="No project members" description="Project access begins with a workspace member." {...(canAdd ? { actions: <Button onClick={openInvite}>Add member</Button> } : {})} /></PageState> : null}
     {state === "ready" && members.length > 0 ? <section className="space-y-4">
       {canManage && candidateState === "error" ? <div className="flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>Workspace members could not be loaded. Existing project access is still available.</span><span className="flex items-center gap-2"><Button variant="quiet" size="sm" onClick={() => void loadCandidates()}><RefreshCw size={14} />Retry</Button><Link className="text-sm underline underline-offset-4" href={workspaceMembersHref}>Manage workspace members</Link></span></div> : null}
       {canManage && candidateState === "ready" && eligible.length === 0 ? <p className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-3 text-sm text-secondary"><span>All workspace members already have project access.</span><Link className="text-foreground underline underline-offset-4" href={workspaceMembersHref}>Manage workspace members</Link></p> : null}

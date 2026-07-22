@@ -1,6 +1,7 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { Badge } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -16,7 +17,6 @@ import {
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
@@ -241,7 +241,7 @@ function SandboxUsageView({
                   )}
                   <p className="mt-1 truncate font-mono text-[11px] text-tertiary" title={row.runId}>Run {row.runId}</p>
                 </div>
-                <Badge variant={row.state === "live" ? "default" : "secondary"} className="w-fit">{row.state === "live" ? "Live" : "Settled"}</Badge>
+                <Badge variant={row.state === "live" ? "success" : "neutral"} label={row.state === "live" ? "Live" : "Settled"} className="w-fit" />
                 <SandboxTimestamp label="Started" value={row.startedAt} />
                 <SandboxTimestamp label="Released" value={row.releasedAt} />
                 <div><span className="text-tertiary">Duration</span><p className="mt-1 text-foreground">{formatDuration(row.durationSeconds)}</p></div>
@@ -643,15 +643,12 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
                 </span>
                 <span className="hidden truncate text-xs text-secondary sm:block" title={actorName(event)}>{actorName(event)}</span>
                 <span className="hidden truncate text-xs text-secondary sm:block" title={subjectName(event, members)}>{subjectName(event, members)}</span>
-                <span className="flex items-start justify-between gap-3 sm:block"><strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong><Badge className="shrink-0 sm:hidden" variant={event.status === "rejected" ? "destructive" : "secondary"}>{auditResultLabel(event.status)}</Badge></span>
+                <span className="flex items-start justify-between gap-3 sm:block"><strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong><Badge className="shrink-0 sm:hidden" variant={event.status === "rejected" ? "error" : "neutral"} label={auditResultLabel(event.status)} /></span>
                 <Badge
                   className="hidden justify-self-start sm:inline-flex"
-                  variant={
-                    event.status === "rejected" ? "destructive" : "secondary"
-                  }
-                >
-                  {auditResultLabel(event.status)}
-                </Badge>
+                  variant={event.status === "rejected" ? "error" : "neutral"}
+                  label={auditResultLabel(event.status)}
+                />
                 <span className="hidden break-all text-xs text-secondary sm:block">
                   {event.resourceId
                     ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}`

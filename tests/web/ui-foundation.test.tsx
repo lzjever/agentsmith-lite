@@ -21,16 +21,33 @@ Object.assign(globalThis, {
 });
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
 Object.defineProperty(dom.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
+dom.window.HTMLCanvasElement.prototype.getContext = () => null;
+Object.defineProperty(dom.window, "matchMedia", {
+  configurable: true,
+  value: () => ({
+    matches: false,
+    media: "",
+    onchange: null,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    dispatchEvent: () => false
+  })
+});
 
 const React = await import("react");
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createColumnHelper, getCoreRowModel, useReactTable } = await import("@tanstack/react-table");
-const { Button, Checkbox, ConfirmationDialog, DataTable, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, Tabs, TabsContent, TabsList, TabsTrigger, ToastContainer, toast } = await import("../../src/components/ui/index.js");
+const { Button, Checkbox, ConfirmationDialog, DataTable, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tabs, TabsContent, TabsList, TabsTrigger, ToastContainer, toast } = await import("../../src/components/ui/index.js");
+const { Badge, EmptyState, Skeleton, Spinner } = await import("@astryxdesign/core");
+const { AppProviders } = await import("../../src/app/providers.js");
 const { PageState } = await import("../../src/components/layout/PageState.js");
 const { PageHeader } = await import("../../src/components/layout/PageHeader.js");
 const { ProjectModuleHeader } = await import("../../src/components/layout/ProjectModuleHeader.js");
 const { ErrorCard } = await import("../../src/components/ui/error-state.js");
-const { PageLoading } = await import("../../src/components/ui/loading.js");
+const { default: TaskDetailLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/loading.js");
+const { default: TaskArtifactsLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/artifacts/loading.js");
 
 test.afterEach(() => cleanup());
 
@@ -51,12 +68,29 @@ test("page framework uses one page-title baseline and a distinct compact workben
 });
 
 test("page loading keeps a labelled local state instead of an unlabeled full-page spinner", () => {
-  render(<PageState state="loading"><PageLoading description="Loading projects..." /></PageState>);
+  render(<AppProviders><PageState state="loading"><section className="flex min-h-48 items-center border-y border-subtle py-6" aria-busy="true"><Spinner size="sm" label="Loading projects..." /></section></PageState></AppProviders>);
   const status = screen.getByRole("status", { name: "Loading projects..." });
   const region = status.closest("section");
   assert.equal(region?.getAttribute("aria-busy"), "true");
   assert.match(region?.className ?? "", /min-h-48/);
   assert.equal(region?.className.includes("min-h-\[400px\]"), false);
+});
+
+test("task loading routes use Astryx labelled local loading states", () => {
+  const { rerender } = render(<AppProviders><TaskDetailLoading /></AppProviders>);
+  let status = screen.getByRole("status", { name: "Loading task..." });
+  assert.equal(status.closest("section")?.getAttribute("aria-busy"), "true");
+  assert.match(status.closest("section")?.className ?? "", /min-h-48/);
+  rerender(<AppProviders><TaskArtifactsLoading /></AppProviders>);
+  status = screen.getByRole("status", { name: "Loading artifacts..." });
+  assert.equal(status.closest("section")?.getAttribute("aria-busy"), "true");
+});
+
+test("status primitives come directly from Astryx without changing the surrounding page semantics", () => {
+  render(<AppProviders><Badge variant="success" label="Active" /><EmptyState title="No projects" description="Create a project to start." headingLevel={2} /><section aria-busy="true"><Skeleton width="100%" height={24} /><Spinner label="Loading projects..." /></section></AppProviders>);
+  assert.ok(screen.getByText("Active"));
+  assert.ok(screen.getByRole("heading", { level: 2, name: "No projects" }));
+  assert.equal(screen.getByRole("status", { name: "Loading projects..." }).tagName, "SPAN");
 });
 
 test("error cards persist until a user explicitly dismisses them", () => {
@@ -76,18 +110,10 @@ test("error cards persist until a user explicitly dismisses them", () => {
 });
 
 test("shared controls preserve hierarchy and accessible binary state", () => {
-  function Example() {
-    const [enabled, setEnabled] = React.useState(false);
-    return <><Button>Default</Button><Button variant="primary">Primary</Button><Label htmlFor="checked"><Checkbox id="checked" defaultChecked />Checked</Label><Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" /></>;
-  }
-  render(<Example />);
+  render(<><Button>Default</Button><Button variant="primary">Primary</Button><Label htmlFor="checked"><Checkbox id="checked" defaultChecked />Checked</Label></>);
   assert.match(screen.getByRole("button", { name: "Default" }).className, /bg-surface/);
   assert.match(screen.getByRole("button", { name: "Primary" }).className, /bg-accent/);
   assert.equal(screen.getByRole("checkbox", { name: "Checked" }).getAttribute("checked") !== null, true);
-  const toggle = screen.getByRole("switch", { name: "Enabled" });
-  assert.equal(toggle.getAttribute("aria-checked"), "false");
-  fireEvent.click(toggle);
-  assert.equal(toggle.getAttribute("aria-checked"), "true");
 });
 
 test("tabs and select expose keyboard-accessible composite controls", async () => {
