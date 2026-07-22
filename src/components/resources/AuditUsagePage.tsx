@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
-import { Badge, IconButton } from "@astryxdesign/core";
+import { Badge, Button, IconButton } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -17,7 +17,6 @@ import {
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
@@ -267,7 +266,7 @@ function SandboxTimestamp({ label, value }: { label: string; value: string | nul
 
 function InlineUsageError({ error, onRetry }: { error: unknown; onRetry: () => Promise<void> }) {
   const copy = usageError(error);
-  return <div className="flex flex-wrap items-center justify-between gap-3 border-y border-error/40 bg-error/5 px-3 py-2 text-sm" role="alert"><span><strong>{copy.title}.</strong> {copy.message}</span><Button variant="quiet" size="sm" onClick={() => void onRetry()}>Retry</Button></div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3 border-y border-error/40 bg-error/5 px-3 py-2 text-sm" role="alert"><span><strong>{copy.title}.</strong> {copy.message}</span><Button label="Retry" variant="ghost" size="md" onClick={() => void onRetry()} /></div>;
 }
 
 function usageError(error: unknown): { title: string; message: string } {
@@ -473,14 +472,13 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
           title="Audit"
           subtitle="Review project activity by actor, resource, and result."
           actions={
-            <Button
-              variant="quiet"
-              size="icon"
-              aria-label="Refresh audit"
+            <IconButton
+              label="Refresh audit"
+              variant="ghost"
+              size="lg"
+              icon={<RefreshCw size={16} />}
               onClick={() => void load()}
-            >
-              <RefreshCw size={16} />
-            </Button>
+            />
           }
         />
       }
@@ -501,16 +499,15 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
               Showing events for {linkedResourceLabel(kind, resourceId)} <strong>{resourceId}</strong>.
             </p>
             <Button
-              variant="quiet"
-              size="sm"
+              label="Clear resource filter"
+              variant="ghost"
+              size="md"
+              icon={<X size={14} />}
               onClick={clearResource}
-            >
-              <X size={14} />
-              Clear resource filter
-            </Button>
+            />
           </div>
         ) : null}
-        <Button className="w-fit sm:hidden" variant="outline" aria-expanded={filtersOpen} aria-controls="audit-filters" onClick={() => setFiltersOpen((open) => !open)}><SlidersHorizontal size={16} />Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}</Button>
+        <Button label={`Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}`} className="w-fit sm:hidden" variant="secondary" size="lg" icon={<SlidersHorizontal size={16} />} aria-expanded={filtersOpen} aria-controls="audit-filters" onClick={() => setFiltersOpen((open) => !open)} />
         <div id="audit-filters" className={`${filtersOpen ? "grid" : "hidden"} gap-3 border-b border-subtle pb-4 sm:grid md:grid-cols-2 xl:grid-cols-5`}>
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Actor</span>
@@ -661,23 +658,21 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         ) : null}
         <div className="flex justify-end gap-2">
           <Button
-            variant="outline"
-            size="sm"
-            disabled={cursors.length === 1 || state === "loading"}
+            label="Previous"
+            variant="secondary"
+            size="md"
+            isDisabled={cursors.length === 1 || state === "loading"}
             onClick={() => setCursors((current) => current.slice(0, -1))}
-          >
-            Previous
-          </Button>
+          />
           <Button
-            variant="outline"
-            size="sm"
-            disabled={!next || state === "loading"}
+            label="Next"
+            variant="secondary"
+            size="md"
+            isDisabled={!next || state === "loading"}
             onClick={() =>
               next && setCursors((current) => [...current, next])
             }
-          >
-            Next
-          </Button>
+          />
         </div>
       </section>
       <DetailDialog event={selected} onClose={() => setSelected(null)} />
