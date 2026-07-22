@@ -13,6 +13,7 @@ const { useState } = await import("react");
 const { ProjectSwitcher } = await import("../../src/components/app-shell/Topbar.js");
 const { ShellNavigation } = await import("../../src/components/app-shell/Sidebar.js");
 const { ThemeToggle } = await import("../../src/components/theme/ThemeToggle.js");
+const { AppProviders } = await import("../../src/app/providers.js");
 const { TooltipProvider } = await import("../../src/components/ui/tooltip.js");
 const { CreateProjectDialog } = await import("../../src/components/projects/CreateProjectDialog.js");
 const { AppShell } = await import("../../src/components/app-shell/AppShell.js");
@@ -100,7 +101,7 @@ describe("workspace and shell interactions", () => {
 
   it("selects projects from the mobile switcher and changes the mobile theme", async () => {
     const selected: string[] = [];
-    const view = render(<><ProjectSwitcher workspace={workspace} project={workspace.projects[0]!} mobile onSelect={(projectId) => selected.push(projectId)} onViewAll={() => selected.push("all")} /><ThemeToggle mobile /></>);
+    const view = render(<AppProviders><ProjectSwitcher workspace={workspace} project={workspace.projects[0]!} mobile onSelect={(projectId) => selected.push(projectId)} onViewAll={() => selected.push("all")} /><ThemeToggle mobile /></AppProviders>);
     fireEvent.pointerDown(view.getByRole("button", { name: "Current project" }), { button: 0, ctrlKey: false });
     fireEvent.click(await view.findByRole("menuitem", { name: "Second project" }));
     assert.deepEqual(selected, ["proj_2"]);
@@ -126,7 +127,7 @@ describe("workspace and shell interactions", () => {
 
   it("follows system theme changes until the user saves a preference", async () => {
     setSystemDark(true);
-    const view = render(<ThemeToggle mobile />);
+    const view = render(<AppProviders><ThemeToggle mobile /></AppProviders>);
     await waitFor(() => assert.equal(document.documentElement.dataset.theme, "dark"));
     act(() => setSystemDark(false));
     await waitFor(() => assert.equal(document.documentElement.dataset.theme, "light"));
@@ -308,7 +309,7 @@ function renderShell(children: React.ReactNode, pathname: string, params: Record
 }
 
 function shell(children: React.ReactNode, pathname: string, params: Record<string, string>, workspaceId?: string) {
-  return <AppRouterContext.Provider value={router()}><PathnameContext.Provider value={pathname}><PathParamsContext.Provider value={params}><AppShell {...(workspaceId ? { workspaceId } : {})}>{children}</AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider>;
+  return <AppProviders><AppRouterContext.Provider value={router()}><PathnameContext.Provider value={pathname}><PathParamsContext.Provider value={params}><AppShell {...(workspaceId ? { workspaceId } : {})}>{children}</AppShell></PathParamsContext.Provider></PathnameContext.Provider></AppRouterContext.Provider></AppProviders>;
 }
 
 function router() { return { back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {} }; }
