@@ -44,9 +44,10 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 ## Testing
 
 - Use small unit/contract/behavior tests for the core logic you change.
-- Do not run source TSX/JSDOM tests for ordinary UI work. Use them only when core server behavior cannot be verified another way.
-- When one is necessary, run exactly one serial process in an explicit `systemd-run --user --scope` with an explicit working directory: `systemd-run --user --scope --working-directory="$PWD" -p MemoryMax=768M -p MemorySwapMax=0 -p TasksMax=32 env NODE_OPTIONS=--max-old-space-size=384 node --test --import tsx <test-file>`.
-- Test runners must not start persistent dev services or invoke `tsx` or `npm exec` outside that constrained scope. Do not overlap browser, build, or K8s work with it.
+- Do not add or run source TSX/JSDOM/component-render tests. They duplicate manual browser review, consume disproportionate memory, and do not verify server-side product behavior.
+- Do not add or run test scripts that start Next, a browser, Playwright, containers, or a local cluster. A manually selected browser review may use an already-running deployment only.
+- When a focused pure TypeScript core-logic test is useful, run exactly one serial process in an explicit `systemd-run --user --scope` with an explicit working directory: `systemd-run --user --scope --working-directory="$PWD" -p MemoryMax=512M -p MemorySwapMax=0 -p TasksMax=24 env NODE_OPTIONS=--max-old-space-size=256 node --test --test-concurrency=1 <test-file>`.
+- Do not overlap any browser, build, K8s, container, Postgres, or image task with a test process.
 - Never retry an OOM-killed command unchanged; change the approach first.
 - TDD is welcome for core behavior: write the smallest failing test, implement, keep it green.
 - Choose precise, narrow verification for the current change, selected deliberately by the developer.
