@@ -2,14 +2,13 @@
 
 import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Button, IconButton, Skeleton } from "@astryxdesign/core";
+import { Button, Dialog, DialogHeader, IconButton, Skeleton } from "@astryxdesign/core";
 import { type ChangeEvent, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -506,7 +505,10 @@ function NoLibrarySelected({ canCreate, onCreate }: { canCreate: boolean; onCrea
 
 function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onNameChange, onSubmit }: { mode: "create" | "rename"; open: boolean; name: string; error: string; pending: boolean; onOpenChange: (open: boolean) => void; onNameChange: (name: string) => void; onSubmit: (event: FormEvent) => void }) {
   const create = mode === "create";
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent aria-describedby={`${mode}-library-description`}><DialogHeader><div><DialogTitle>{create ? "Create File Library" : "Rename File Library"}</DialogTitle><DialogDescription id={`${mode}-library-description`} className="mt-1">{create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move."}</DialogDescription></div></DialogHeader>{error ? <div role="alert" className="mx-5 mt-4 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error md:mx-6">{error}</div> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><Label htmlFor={`${mode}-library-name`}>Library name</Label><Input id={`${mode}-library-name`} className="mt-2" value={name} onChange={(event) => onNameChange(event.target.value)} autoFocus maxLength={120} required /></form><DialogFooter><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => onOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" icon={pending ? <Loader2 className="size-4 animate-spin" /> : undefined} isDisabled={pending || !name.trim()} /></DialogFooter></DialogContent></Dialog>;
+  const title = create ? "Create File Library" : "Rename File Library";
+  const subtitle = create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move.";
+  const handleOpenChange = (next: boolean) => { if (!pending) onOpenChange(next); };
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider padding={5} />{error ? <div role="alert" className="mx-5 mt-4 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error md:mx-6">{error}</div> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><Label htmlFor={`${mode}-library-name`}>Library name</Label><Input id={`${mode}-library-name`} className="mt-2" value={name} onChange={(event) => onNameChange(event.target.value)} autoFocus maxLength={120} required /></form><footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => onOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" icon={pending ? <Loader2 className="size-4 animate-spin" /> : undefined} isDisabled={pending || !name.trim()} /></footer></Dialog>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) {
