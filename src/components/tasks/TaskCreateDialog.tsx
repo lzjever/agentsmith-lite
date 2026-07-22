@@ -3,11 +3,10 @@
 import { AlertCircle, Library, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Button } from "@astryxdesign/core";
+import { Button, Selector } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 
 export type TaskCreateValue = {
@@ -95,13 +94,13 @@ export function TaskCreateDialog({
           {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="grid gap-1.5 text-sm text-secondary">Title <span className="text-tertiary">(optional)</span><Input value={title} onChange={(event) => changeTitle(event.target.value)} maxLength={160} placeholder="Task title" autoFocus disabled={busy} /></label>
-              <label className="grid gap-1.5 text-sm text-secondary">Endpoint<Select value={endpointId} onValueChange={setEndpointId} disabled={busy}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{endpoints.map((endpoint) => <SelectItem key={endpoint.id} value={endpoint.id}>{endpoint.name} ({endpoint.model})</SelectItem>)}</SelectContent></Select></label>
+              <label className="grid gap-1.5 text-sm text-secondary">Endpoint<Selector label="Endpoint" isLabelHidden options={endpoints.map((endpoint) => ({ value: endpoint.id, label: `${endpoint.name} (${endpoint.model})` }))} value={endpointId} onChange={setEndpointId} isDisabled={busy} size="lg" /></label>
             </div>
             <fieldset className="grid gap-3"><legend className="text-sm text-secondary">File Library</legend>
               <label className={`flex cursor-pointer items-start gap-3 border px-3 py-3 ${libraryMode === "create_new" ? "border-foreground bg-surface-low" : "border-border"}`}><input type="radio" name="file-library-mode" value="create_new" checked={libraryMode === "create_new"} disabled={busy} onChange={() => setLibraryMode("create_new")} /><Plus className="mt-0.5 size-4 shrink-0 text-icon-default" /><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Create new library</span><span className="mt-1 block text-xs text-secondary">Start this task with its own workspace.</span></span></label>
               {libraryMode === "create_new" ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library name<Input value={libraryName} onChange={(event) => { setLibraryName(event.target.value); setLibraryNameEdited(true); }} maxLength={160} disabled={busy} /></label> : null}
               <label className={`flex cursor-pointer items-start gap-3 border px-3 py-3 ${libraryMode === "use_existing" ? "border-foreground bg-surface-low" : "border-border"}`}><input type="radio" name="file-library-mode" value="use_existing" checked={libraryMode === "use_existing"} disabled={busy || availableLibraries.length === 0} onChange={() => setLibraryMode("use_existing")} /><Library className="mt-0.5 size-4 shrink-0 text-icon-default" /><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Use existing library</span><span className="mt-1 block text-xs text-secondary">Choose an available library you can bind to this task.</span></span></label>
-              {libraryMode === "use_existing" ? librariesLoading ? <p className="ml-7 text-sm text-tertiary">Loading File Libraries...</p> : availableLibraries.length > 0 ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library<Select value={libraryId} onValueChange={setLibraryId} disabled={busy}><SelectTrigger aria-label="Existing File Library"><SelectValue /></SelectTrigger><SelectContent>{availableLibraries.map((library) => <SelectItem key={library.id} value={library.id}>{library.name}</SelectItem>)}</SelectContent></Select></label> : <p className="ml-7 text-sm text-tertiary">No unbound File Library is available.</p> : null}
+              {libraryMode === "use_existing" ? librariesLoading ? <p className="ml-7 text-sm text-tertiary">Loading File Libraries...</p> : availableLibraries.length > 0 ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library<Selector label="Existing File Library" isLabelHidden options={availableLibraries.map((library) => ({ value: library.id, label: library.name }))} value={libraryId} onChange={setLibraryId} isDisabled={busy} size="lg" /></label> : <p className="ml-7 text-sm text-tertiary">No unbound File Library is available.</p> : null}
             </fieldset>
             <label className="grid gap-1.5 text-sm text-secondary">Task prompt<Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-36 resize-y" placeholder="Describe the result you need" disabled={busy} /></label>
           </>}
