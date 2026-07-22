@@ -3,7 +3,7 @@
 import { KeyRound, Plus, RefreshCw, Server } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Button as AstryxButton } from "@astryxdesign/core";
+import { Banner, Button as AstryxButton } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
@@ -326,12 +326,12 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
 
   const needsCredential = credentialsState === "ready" && credentials.length === 0;
   return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible model connections for this project." actions={<><AstryxButton label="Refresh endpoints" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} isDisabled={mutationBusy} onClick={create} /> : null}</>} />}>
-    {credentialsState === "error" ? <DependencyError message={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
-    {capabilitiesError ? <DependencyError message={capabilitiesError} /> : null}
+    {credentialsState === "error" ? <Banner status="warning" title="Credentials unavailable" description={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
+    {capabilitiesError ? <Banner status="warning" title="Endpoint permissions unavailable" description={capabilitiesError} /> : null}
     {state === "loading" ? <PageState><span className="text-secondary">Loading endpoints...</span></PageState> : null}
     {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><AstryxButton label="Try again" onClick={() => void load()} /></div></PageState> : null}
     {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before creating a task." : "An administrator can add an endpoint before task work begins."}</p>{needsCredential ? <CredentialsLink workspaceId={workspaceId} projectId={projectId} /> : canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} onClick={create} /> : null}</div></PageState> : null}
-    {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <div className="flex flex-wrap items-center justify-between gap-3 border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning"><span>{canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."}</span><CredentialsLink workspaceId={workspaceId} projectId={projectId} /></div> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)}</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} credentials={credentials} canManage={canManage} canEdit={canConfigure} busy={mutationBusy} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
+    {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <Banner status="warning" title="Project credentials required" description={canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."} endContent={<CredentialsLink workspaceId={workspaceId} projectId={projectId} />} /> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)}</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} credentials={credentials} canManage={canManage} canEdit={canConfigure} busy={mutationBusy} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
     <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} canSave={(editing === undefined || endpointInputChanged(input, editing)) && !nameConflict} nameConflict={nameConflict} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { mutationKeys.clear("endpoint.create"); setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
     <DeleteEndpointDialog endpoint={deleting?.projectId === projectId ? deleting : undefined} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
   </PageLayout>;
@@ -340,10 +340,6 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
 function CredentialsLink({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
   const href = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}/credentials` : "../credentials";
   return <Link href={href} className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border-input bg-surface px-3.5 text-[13px] text-primary hover:bg-hover hover:text-foreground"><KeyRound size={15} />Project credentials</Link>;
-}
-
-function DependencyError({ message: detail }: { message: string }) {
-  return <div className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert">{detail}</div>;
 }
 
 function message(error: unknown) {
