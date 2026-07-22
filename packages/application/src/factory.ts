@@ -4,7 +4,6 @@ import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from 
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthService } from "./authService.js";
 import { AuthorizationService } from "./authorizationService.js";
-import { ChatService } from "./chatService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
 import { FileLibraryService } from "./fileLibraryService.js";
@@ -79,15 +78,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const providerClient = input.providerClient ?? new FetchOpenAICompatibleClient();
   const providerBroker = new OpenAIProviderBroker(providerClient, policies);
   const endpoints = new EndpointService(input.store, workspaces, credentials, providerBroker);
-  const chat = new ChatService(
-    input.store,
-    workspaces,
-    endpoints,
-    providerBroker,
-    credentials,
-    policies,
-    contexts
-  );
   const namespace = input.namespace ?? "agentsmith";
   const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
   let tasks: TaskService;
@@ -141,7 +131,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     workspaces,
     endpoints,
     providerBroker,
-    chat,
     files,
     fileLibraries,
     policies,

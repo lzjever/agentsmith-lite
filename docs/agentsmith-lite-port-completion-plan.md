@@ -88,7 +88,6 @@ BFF, compatibility layer, or second data model.
 | Tasks | Persistent workspace | MERGED_SINGLE_PATH | Exactly one exclusively bound File Library; no selected-file snapshot path. |
 | Task detail | Conversation, queued follow-up, connection, artifacts, Terminal, explicit Sandbox release | REQUIRED_PORT | Follow-ups stay in one Task/session; release preserves durable state. |
 | Task terminal | Interactive shell in the task workspace | MERGED_SINGLE_PATH | One browser terminal through AgentSmith API to the task's bash-executor sidecar. |
-| Chat | Star, edit/delete/branch, provider recovery | REQUIRED_PORT | Persistent threads/messages, one broker. |
 | Policy/usage | Endpoint windows, current-user usage, and Sandbox resource-time | REQUIRED_PORT | Provider plus per-Run Sandbox settlements. |
 | Alerts/notifications | Rules, instance context, acknowledge/silence/recovery | REQUIRED_PORT | In-product evaluated state. |
 | Audit | Exact safe audit list/detail and pagination | REQUIRED_PORT | Allowlisted project audit projection. |
@@ -110,7 +109,6 @@ artifact. Each row delivers the listed surface, final API, states, and tests.
 | Files | Project File Libraries | `components/files/FilesPage.tsx`, `files-page/FilesLibrariesPane.tsx`, `FilesBrowserPane.tsx`, `FileObjectDetailsPanel.tsx` | select/create/rename/delete Library; browse/upload/preview/download/delete file | file-libraries/files | normal, loading, empty, bound, conflict, preview error, forbidden |
 | Task lifecycle | Tasks list/create/detail header | `agent-tasks/TaskList.tsx`, `TaskCreateDialog.tsx`, `TaskPage.tsx`, `task-page/TaskPageStates.tsx` | atomic Library bind, idempotent create/edit/archive/delete and start delivery | tasks/libraries/runs/policy/Botified receipt | normal, loading, empty, dialog, ready/running/failed, forbidden |
 | Task detail | Conversation/artifacts/Terminal/Sandbox | `agent-tasks/TaskPageContent.tsx`, `ConversationPanel.tsx`, `ArtifactsPanel.tsx` | same-session stream/queue/abort, explicit release and cold resume | task turns/events/artifacts/Botified/Run | normal, starting, running, ready, releasing, released, error, forbidden |
-| Chat | Project Chat | `components/chat/ThreadsPane.tsx`, `ChatMainPane.tsx`, `MessageItem.tsx` | star, edit/delete/branch, Stop | chat threads/messages/broker | normal, loading, empty, streaming, provider error, forbidden |
 | Policy/usage | Project policy and usage | `resource-policy/ResourcePolicyTable.tsx`, `ResourcePolicyStatusBadge.tsx`, `audit-usage/UsagePage.tsx`, `UsageView.tsx` | set windows, inspect usage | policy/usage/settlements | normal, loading, empty, error, forbidden |
 | Alerts/notifications | Alerts and notification center | `alerts/AlertCenterPage.tsx`, `AlertRulesList.tsx`, `AlertRuleFormDialog.tsx`, `AlertNotificationsPanel.tsx`, `notifications/NotificationCenter.tsx` | rule test, ack, silence | alerts/notifications | normal, loading, empty, dialog, recovery, forbidden |
 | Audit | Project Audit | `audit-usage/AuditPage.tsx`, `AuditPageContent.tsx`, `AuditTable.tsx`, `AuditDetailDrawer.tsx` | filter/page/view safe detail | audit | normal, loading, empty, drawer, error, forbidden |
@@ -125,8 +123,7 @@ dependencies rather than leaving placeholders.
 | LLMUP, Codex runner core, JVS, WebDAV, local/remote mounts, AFSCP, ASBCP | Outside Lite runtime. |
 | Library versions, templates, savepoints, restore, recovery UI, and mount flows | Lite keeps independent Libraries and ordinary file operations only. |
 | Folder create/rename/move, multiselect/bulk file operations, file server pagination/search/sort | Approved files scope is list/upload/download/delete, safe preview, directory browsing. |
-| Generic chat attachment | Project Chat has no attachment channel; Task work uses its bound Library. |
-| Artifact picker as generic task/chat attachment | Artifacts remain Task outputs, not a generic attachment channel. |
+| Generic attachment | Task work uses its bound Library; artifacts remain Task outputs, not a generic attachment channel. |
 | Agent Runner management, selection, binding, badges, tests, terminal replay, and runner debug controls | Botified is selected server-side. The task workspace retains one interactive browser shell without exposing runner controls. |
 | Codex notices and SSE/debug transport UI | Runtime transport/debug controls are not product UI. |
 | Groups, join policies/requests, invitations, project-creator governance | Membership uses existing local OIDC identities. |
@@ -296,28 +293,7 @@ create/list/detail/Conversation/Terminal/Artifacts components named in the
 authoritative plan. Copy those files and remove i18n, templates, savepoints,
 restore, mounts, runner management, and governance dependencies.
 
-### 11. Project Chat
-
-**Reference CP source:** `components/chat/ThreadsPane.tsx`,
-`ThreadsPaneHeader.tsx`, `ChatMainPane.tsx`, `MessageItem.tsx`, the project chat
-page, and composer; omit `ChatDialogs.tsx`, `AddUrlDialog.tsx`, and attachment
-actions.
-
-**Owns:** chat thread/message contracts/auth/store/migrations/APIs/client/routes/
-dialogs/tests.
-
-**Implementation:** retain persistent threads, search, independent persistent pin
-and star actions, rename/delete, stream/Stop, Markdown/
-composer, edit/delete/branch, and provider endpoint failure recovery. Server
-validates history/version/order and settlement; browser never constructs
-arbitrary provider history. No file, artifact, URL, or generic attachments.
-Audit thread/message mutations safely.
-
-**Minimum verification:** versioned edit/delete/branch, independent pin/star persistence, history
-ordering, sanitized failure, thread actions, Stop composer/history, and endpoint
-recovery tests.
-
-### 12. Resource Policy and Usage
+### 11. Resource Policy and Usage
 
 **Reference CP source:** `components/resource-policy/ResourcePolicyTable.tsx`,
 `ResourcePolicyStatusBadge.tsx`, project

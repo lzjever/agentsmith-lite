@@ -7,22 +7,10 @@ import { ProductError } from "../../packages/domain/src/errors.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("endpoint deletion", () => {
-  it("keeps chat and settlement history while clearing their deleted endpoint binding", async () => {
+  it("keeps provider settlements while clearing their deleted endpoint binding", async () => {
     const { services, store, userId, projectId, credentialId } = await setup();
     const endpoint = await services.endpoints.createEndpoint(userId, projectId, endpointInput("Historical", credentialId));
-    const thread = await services.chat.createThread(userId, projectId, endpoint.id);
     const timestamp = "2026-07-12T12:00:00.000Z";
-    await store.appendProjectChatMessages([{
-      id: "chatmsg_endpoint_history",
-      threadId: thread.id,
-      sequence: 1,
-      version: 1,
-      deliveryStatus: "completed",
-      role: "user",
-      content: "Retain this message",
-      createdAt: timestamp,
-      updatedAt: timestamp
-    }]);
     assert.ok(await store.reserveProjectProviderSettlement({
       id: "settlement_endpoint_history",
       projectId,
@@ -43,8 +31,6 @@ describe("endpoint deletion", () => {
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
 
     assert.equal(await store.findEndpoint(endpoint.id), null);
-    assert.equal((await services.chat.listThreads(userId, projectId)).find((item) => item.id === thread.id)?.endpointId, null);
-    assert.deepEqual((await services.chat.listMessages(userId, projectId, thread.id)).map((message) => message.content), ["Retain this message"]);
     assert.equal((await store.listSettledProjectProviderSettlements(projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_history")?.endpointId, null);
     assert.equal((await store.listProjectAlertRules(projectId)).some((rule) => rule.id === scopedRule.id), false);
     const alerts = await store.listProjectAlerts(projectId);
@@ -53,16 +39,11 @@ describe("endpoint deletion", () => {
       alerts.filter((alert) => alert.id === "alert_endpoint_history_scoped").map((alert) => [alert.status, alert.ruleId, alert.endpointId, Boolean(alert.resolvedAt)]),
       [["resolved", null, null, true]]
     );
-    await assert.rejects(
-      () => services.chat.sendMessage(userId, projectId, thread.id, "Cannot continue"),
-      (error: unknown) => isConflict(error, "Chat thread endpoint has been deleted")
-    );
   });
 
   it("returns a 409 product conflict without unlinking anything when a task references the endpoint", async () => {
     const { services, store, userId, projectId, credentialId } = await setup();
     const endpoint = await services.endpoints.createEndpoint(userId, projectId, endpointInput("Task endpoint", credentialId));
-    const thread = await services.chat.createThread(userId, projectId, endpoint.id);
     const timestamp = "2026-07-12T12:00:00.000Z";
     const task = await services.tasks.createTask(userId, projectId, {
       prompt: "Keep endpoint",
@@ -76,12 +57,10 @@ describe("endpoint deletion", () => {
     );
 
     assert.equal((await store.findEndpoint(endpoint.id))?.id, endpoint.id);
-    assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, endpoint.id);
 
     await services.tasks.deleteTask(userId, task.id);
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
     assert.equal(await store.findEndpoint(endpoint.id), null);
-    assert.equal((await store.findProjectChatThread(thread.id))?.endpointId, null);
   });
 
   it("replays a successful deletion without returning not found or duplicating audit", async () => {

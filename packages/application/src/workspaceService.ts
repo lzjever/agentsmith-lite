@@ -85,10 +85,8 @@ export class WorkspaceService {
     const membership = memberships.find((candidate) => candidate.userId === userId);
     if (!membership) throw new ProductError("Project membership changed while loading the overview", 409);
 
-    const chatReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text")).length;
     const taskReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls")).length;
     const recommendedActions: ProjectOverviewAction[] = [];
-    if (capabilities.canSendChat && chatReadyEndpointCount > 0) recommendedActions.push("start_chat");
     if (capabilities.canCreateTasks && taskReadyEndpointCount > 0) recommendedActions.push("create_task");
     if (capabilities.canManageEndpoints && taskReadyEndpointCount === 0) recommendedActions.push("configure_endpoint");
     if (capabilities.canManageMembers) recommendedActions.push("add_collaborator");
@@ -100,7 +98,6 @@ export class WorkspaceService {
       capabilities,
       owner: owner ? { displayName: owner.displayName, email: owner.email } : null,
       memberRole: membership.role,
-      chatReadyEndpointCount,
       taskReadyEndpointCount,
       recommendedActions
     };

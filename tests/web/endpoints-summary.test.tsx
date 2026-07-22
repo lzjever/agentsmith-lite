@@ -4,7 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import React from "react";
 import { ApiError, apiClient, type Endpoint, type EndpointInput, type ProjectCapabilities } from "../../src/lib/api/client.js";
 installDom(); const {act,cleanup,fireEvent,render,screen,waitFor,within}=await import("@testing-library/react"); const {EndpointsPage}=await import("../../src/components/endpoints/EndpointsPage.js"); afterEach(()=>cleanup());
-const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"2026-07-12T00:00:00.000Z",updatedAt:"2026-07-12T00:00:00.000Z"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false,canSendChat:false};
+const endpoint:Endpoint={id:"endpoint_1",projectId:"project_1",name:"DeepSeek",protocol:"openai_chat_completions",baseUrl:"https://api.example.test/v1",model:"model",credentialId:"credential_1",capabilities:["text"],requestTimeoutSecs:30,health:{status:"healthy",checkedAt:"2026-07-12T00:00:00.000Z",errorCategory:null},hasCredentialRef:true,taskEligible:true,createdAt:"2026-07-12T00:00:00.000Z",updatedAt:"2026-07-12T00:00:00.000Z"}; const viewer:ProjectCapabilities={canManageEndpoints:false,canManageMembers:false,canManagePolicy:false,canWriteFiles:false,canCreateTasks:false};
 describe("endpoint summary",()=>it("shows configured summary and read-only health status",async()=>{const original={endpoints:apiClient.endpoints,credentials:apiClient.credentials,projectCapabilities:apiClient.projectCapabilities};apiClient.endpoints=async()=>[endpoint];apiClient.credentials=async()=>[credential];apiClient.projectCapabilities=async()=>viewer;try{render(<EndpointsPage projectId="project_1"/>);await screen.findByText("1 endpoint configured");assert.equal(screen.queryByText(/configured · 1 configured/),null);assert.ok(screen.getByText("Read-only access."));assert.ok(screen.getAllByText("Healthy").length>0);assert.ok(screen.getAllByText("Provider").length>0);assert.ok(screen.getAllByText("fingerprint").length>0);assert.ok(screen.getAllByText(/Last checked/).length>0);}finally{apiClient.endpoints=original.endpoints;apiClient.credentials=original.credentials;apiClient.projectCapabilities=original.projectCapabilities;}}));
 
 describe("endpoint credential binding", () => {
@@ -176,7 +176,7 @@ describe("endpoint dependencies", () => {
 
       await waitFor(()=>assert.equal((screen.getAllByRole("button",{name:"Delete DeepSeek"})[0] as HTMLButtonElement).disabled,false));
       fireEvent.click(screen.getAllByRole("button",{name:"Delete DeepSeek"})[0]!);
-      assert.match((await screen.findByRole("alertdialog",{name:"Delete endpoint"})).textContent??"",/rolling limits and endpoint alert rules.*chat history/i);
+      assert.match((await screen.findByRole("alertdialog",{name:"Delete endpoint"})).textContent??"",/rolling limits and endpoint alert rules.*active endpoint alerts/i);
       fireEvent.click(await screen.findByRole("button",{name:"Delete endpoint"}));
       await waitFor(()=>assert.equal(deleteAttempts,1));
       fireEvent.click(screen.getByRole("button",{name:"Delete endpoint"}));

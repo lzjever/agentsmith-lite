@@ -13,7 +13,7 @@ const { NotificationBell } = await import("../../src/components/notifications/No
 
 afterEach(() => { cleanup(); window.history.replaceState({}, "", "/"); });
 
-const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canSendChat: false };
+const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false };
 const members: ProjectMember[] = [{ projectId: "project_1", userId: "viewer_1", role: "viewer", displayName: "Viewer Person", email: "viewer@example.test", createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z" }, { projectId: "project_1", userId: "admin_1", role: "admin", displayName: null, email: "admin@example.test", createdAt: "2026-07-10T00:00:00.000Z", updatedAt: "2026-07-10T00:00:00.000Z" }];
 const notification: UserNotification = { id: "notice_1", type: "task", title: "Task finished", body: "Validation project: task completed.", projectId: "project_1", resourceKind: "task", resourceId: "task_1", linkPath: null, readAt: null, createdAt: "2026-07-12T00:00:00.000Z" };
 

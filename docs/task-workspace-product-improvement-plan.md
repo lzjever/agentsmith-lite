@@ -115,9 +115,6 @@ AgentSmith does not inspect the agent, terminal, or process list before acting.
 - A new repository, deployable file service, sandbox control plane, event bus,
   compatibility adapter, report, evidence bundle, rehearsal, or release gate.
 
-Project Chat remains a direct OpenAI-compatible conversation without Sandbox,
-tools, File Library binding, or Task lifecycle.
-
 ## 4. Domain Model and Invariants
 
 ### 4.1 File Library
@@ -660,7 +657,7 @@ Do not keep dual reads, dual writes, a compatibility read, backfill worker,
 migration ledger, report, legacy API field, or permanent migration path.
 
 The migration preserves identity, Workspace, Project, membership, endpoint,
-credential, context, chat, policy, and Project file content. It may discard only
+credential, context, policy, and Project file content. It may discard only
 local development Task runtime data whose semantics are being replaced.
 
 ## 11. Implementation Order

@@ -8,7 +8,7 @@ installDom();
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { ProjectFilesPage } = await import("../../src/components/files/ProjectFilesPage.js");
 
-const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canSendChat: true };
+const capabilities: ProjectCapabilities = { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true };
 const first = library("library_1", "Research");
 const second = library("library_2", "Design assets");
 const file: ProjectFile = { name: "brief.txt", path: "brief.txt", type: "file", size: 12, mediaType: "text/plain", updatedAt: "2026-07-19T00:00:00.000Z" };

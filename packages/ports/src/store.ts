@@ -3,8 +3,6 @@ import type {
   AgentTaskArtifact,
   TaskHistoryStatus,
   TaskInteractionItem,
-  ProjectChatMessage,
-  ProjectChatThread,
   AgentTaskStatus,
   AuthSession,
   EndpointHealth,
@@ -378,8 +376,6 @@ export type ManagedWorkspaceMembershipUpdateResult = WorkspaceMembership | "not_
 export type RevokeWorkspaceMembershipResult = { revokedProjectIds: string[] } | "not_found" | "owner" | "conflict";
 export type CreateWorkspaceMembershipResult = WorkspaceMembership | "already_exists";
 export type CreateProjectMembershipResult = ProjectMembership | "already_exists" | "not_workspace_member";
-export type AppendProjectChatMessageResult = "accepted" | "history_changed" | "request_running";
-export type DeleteProjectChatThreadResult = ProjectChatThread | "request_running" | null;
 export type FileLibraryBindingLookup =
   | { kind: "unbound" }
   | { kind: "bound"; task: FileLibraryTaskLink }
@@ -510,24 +506,6 @@ export interface ProductStore {
   deleteEndpoint(id: string): Promise<DeleteEndpointResult>;
   listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]>;
   findEndpoint(id: string): Promise<ModelEndpoint | null>;
-
-  createProjectChatThread(thread: ProjectChatThread): Promise<ProjectChatThread>;
-  createProjectChatBranch(thread: ProjectChatThread, messages: ProjectChatMessage[]): Promise<ProjectChatThread>;
-  findProjectChatThread(id: string): Promise<ProjectChatThread | null>;
-  listProjectChatThreads(projectId: string, ownerUserId: string): Promise<ProjectChatThread[]>;
-  searchProjectChatThreads(projectId: string, ownerUserId: string, query: string): Promise<ProjectChatThread[]>;
-  updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null>;
-  deleteProjectChatThread(id: string, deletedAt: string): Promise<DeleteProjectChatThreadResult>;
-  touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null>;
-  appendProjectChatMessageIfCurrent(threadId: string, afterMessageId: string | null, message: ProjectChatMessage, untitledThreadTitle?: string): Promise<AppendProjectChatMessageResult>;
-  appendProjectChatMessages(messages: ProjectChatMessage[]): Promise<void>;
-  listProjectChatMessages(threadId: string): Promise<ProjectChatMessage[]>;
-  updateProjectChatMessageDelivery(id: string, deliveryStatus: ProjectChatMessage["deliveryStatus"], updatedAt: string): Promise<ProjectChatMessage | null>;
-  claimProjectChatMessageRetry(messageId: string, expectedVersion: number, updatedAt: string): Promise<ProjectChatMessage | null>;
-  stageProjectChatResponse(userMessageId: string, assistantMessage: ProjectChatMessage): Promise<boolean>;
-  finalizeProjectChatResponse(userMessageId: string): Promise<ProjectChatMessage | null>;
-  editProjectChatMessageAndTruncate(threadId: string, messageId: string, expectedVersion: number, content: string, updatedAt: string): Promise<ProjectChatMessage | null>;
-  deleteProjectChatMessageAndFollowing(threadId: string, messageId: string, expectedVersion: number): Promise<boolean>;
 
   createTaskAtomically(input: AtomicTaskCreateInput): Promise<AtomicTaskCreateResult>;
   restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult>;
@@ -665,7 +643,7 @@ export interface TaskDeliveryFailureInput {
 
 export interface StoredTaskSummary { taskId: string; artifactCount: number; updatedAt: string; }
 
-export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.chat-thread.create" | "project.chat-thread.update" | "project.chat-thread.delete" | "project.chat-message.edit" | "project.chat-message.delete" | "project.chat-message.branch" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;

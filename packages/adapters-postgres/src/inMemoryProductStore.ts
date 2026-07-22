@@ -1,8 +1,6 @@
 import type {
   AgentTask,
   TaskInteractionItem,
-  ProjectChatMessage,
-  ProjectChatThread,
   AuthSession,
   EndpointHealth,
   FileLibrary,
@@ -121,9 +119,6 @@ export class InMemoryProductStore implements ProductStore {
   private readonly interactionChanges: PersistedTaskInteractionChange[] = [];
   private readonly interactionSync = new Map<string, { sourceCursor: string | null; historyStatus: "complete" | "gap"; lastSyncedAt: string | null }>();
   private readonly artifacts: PersistedTaskArtifact[] = [];
-  private readonly chatThreads = new Map<string, ProjectChatThread>();
-  private readonly chatMessages: ProjectChatMessage[] = [];
-  private readonly stagedChatResponses = new Map<string, ProjectChatMessage>();
   private readonly taskIdempotency = new Map<string, InMemoryTaskIdempotencyRecord>();
   private readonly profiles = new Map<string, UserProfilePreferences>(); private readonly notifications = new Map<string, UserNotification>(); private readonly notificationDedupe = new Map<string, string>(); private readonly credentials = new Map<string, StoredProjectCredential>(); private readonly contexts = new Map<string, ProjectContextEntry>(); private readonly alertRules = new Map<string, ProjectAlertRule>(); private readonly messages: PersistedTaskMessage[] = [];
 
@@ -328,10 +323,6 @@ export class InMemoryProductStore implements ProductStore {
     this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId)));
     this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId)));
     this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id));
-    const projectThreadIds=new Set([...this.chatThreads.values()].filter((thread)=>thread.projectId===id).map((thread)=>thread.id));
-    for(const threadId of projectThreadIds)this.chatThreads.delete(threadId);
-    this.chatMessages.splice(0,this.chatMessages.length,...this.chatMessages.filter((message)=>!projectThreadIds.has(message.threadId)));
-    for(const [messageId,response] of this.stagedChatResponses)if(projectThreadIds.has(response.threadId))this.stagedChatResponses.delete(messageId);
     for(const [key,value] of this.providerSettlements)if(value.projectId===id)this.providerSettlements.delete(key);
     for(const [key,value] of this.alerts)if(value.projectId===id)this.alerts.delete(key);
     for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key);
@@ -598,9 +589,6 @@ export class InMemoryProductStore implements ProductStore {
     if (!this.endpoints.has(id)) return "not_found";
     if ([...this.tasks.values()].some((task) => task.endpointId === id && !task.deletedAt)) return "referenced_by_tasks";
 
-    for (const [threadId, thread] of this.chatThreads) {
-      if (thread.endpointId === id) this.chatThreads.set(threadId, clone({ ...thread, endpointId: null }));
-    }
     for (const [settlementId, settlement] of this.providerSettlements) {
       if (settlement.endpointId === id) this.providerSettlements.set(settlementId, clone({ ...settlement, endpointId: null }));
     }
@@ -631,37 +619,6 @@ export class InMemoryProductStore implements ProductStore {
   async findEndpoint(id: string): Promise<ModelEndpoint | null> {
     return clone(this.endpoints.get(id) ?? null);
   }
-
-  async createProjectChatThread(thread: ProjectChatThread): Promise<ProjectChatThread> { this.chatThreads.set(thread.id, clone({ ...thread, title: thread.title ?? null, pinnedAt: thread.pinnedAt ?? null, starredAt: thread.starredAt ?? null, deletedAt: thread.deletedAt ?? null })); return clone(this.chatThreads.get(thread.id)!); }
-  async createProjectChatBranch(thread: ProjectChatThread, messages: ProjectChatMessage[]): Promise<ProjectChatThread> {
-    if (this.chatThreads.has(thread.id)) throw new Error("Chat thread already exists");
-    const messageIds = new Set(this.chatMessages.map((message) => message.id));
-    const sequences = new Set<number>();
-    for (const message of messages) {
-      if (message.threadId !== thread.id || messageIds.has(message.id) || sequences.has(message.sequence)) throw new Error("Chat branch messages are invalid");
-      messageIds.add(message.id);
-      sequences.add(message.sequence);
-    }
-    const created = clone({ ...thread, title: thread.title ?? null, pinnedAt: thread.pinnedAt ?? null, starredAt: thread.starredAt ?? null, deletedAt: thread.deletedAt ?? null });
-    this.chatThreads.set(thread.id, created);
-    this.chatMessages.push(...messages.map(clone));
-    return clone(created);
-  }
-  async findProjectChatThread(id: string): Promise<ProjectChatThread | null> { return clone(this.chatThreads.get(id) ?? null); }
-  async listProjectChatThreads(projectId: string, ownerUserId: string): Promise<ProjectChatThread[]> { return this.sortedChatThreads(projectId, ownerUserId); }
-  async searchProjectChatThreads(projectId: string, ownerUserId: string, query: string): Promise<ProjectChatThread[]> { const needle = query.trim().toLowerCase(); return this.sortedChatThreads(projectId, ownerUserId).filter((thread) => !needle || (thread.title ?? "").toLowerCase().includes(needle)); }
-  async updateProjectChatThreadMetadata(id: string, metadata: Pick<ProjectChatThread, "title" | "pinnedAt" | "starredAt">, updatedAt: string): Promise<ProjectChatThread | null> { const thread=this.chatThreads.get(id); if(!thread || thread.deletedAt) return null; const updated={...thread,title:metadata.title ?? null,pinnedAt:metadata.pinnedAt ?? null,starredAt:metadata.starredAt ?? null,updatedAt}; this.chatThreads.set(id,clone(updated)); return clone(updated); }
-  async deleteProjectChatThread(id: string, deletedAt: string): Promise<ProjectChatThread|"request_running"|null> { const thread=this.chatThreads.get(id); if(!thread || thread.deletedAt) return null;if(this.chatMessages.some((message)=>message.threadId===id&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return"request_running"; const updated={...thread,deletedAt,updatedAt:deletedAt}; this.chatThreads.set(id,clone(updated)); return clone(updated); }
-  async touchProjectChatThread(id: string, updatedAt: string): Promise<ProjectChatThread | null> { const thread = this.chatThreads.get(id); if (!thread) return null; const updated = { ...thread, updatedAt }; this.chatThreads.set(id, clone(updated)); return clone(updated); }
-  async appendProjectChatMessageIfCurrent(threadId:string,afterMessageId:string|null,message:ProjectChatMessage,untitledThreadTitle?:string):Promise<"accepted"|"history_changed"|"request_running">{const history=this.chatMessages.filter((item)=>item.threadId===threadId).sort((a,b)=>a.sequence-b.sequence);if(history.some((item)=>item.deliveryStatus==="pending"||item.deliveryStatus==="response_pending"))return"request_running";if((history.at(-1)?.id??null)!==afterMessageId)return"history_changed";this.chatMessages.push(clone(message));const thread=this.chatThreads.get(threadId);if(thread&&!thread.title&&untitledThreadTitle)this.chatThreads.set(threadId,clone({...thread,title:untitledThreadTitle,updatedAt:message.updatedAt}));return"accepted";}
-  async appendProjectChatMessages(messages: ProjectChatMessage[]): Promise<void> { this.chatMessages.push(...messages.map(clone)); }
-  async listProjectChatMessages(threadId: string): Promise<ProjectChatMessage[]> { return this.chatMessages.filter((message) => message.threadId === threadId).sort((a,b)=>a.sequence-b.sequence).map(clone); }
-  async updateProjectChatMessageDelivery(id: string, deliveryStatus: ProjectChatMessage["deliveryStatus"], updatedAt: string): Promise<ProjectChatMessage | null> { const index=this.chatMessages.findIndex((message)=>message.id===id);if(index<0)return null;const current=this.chatMessages[index]!;const updated={...current,deliveryStatus,updatedAt,version:current.version+1};this.chatMessages[index]=clone(updated);return clone(updated); }
-  async claimProjectChatMessageRetry(messageId:string,expectedVersion:number,updatedAt:string):Promise<ProjectChatMessage|null>{const index=this.chatMessages.findIndex((message)=>message.id===messageId&&message.role==="user");if(index<0)return null;const current=this.chatMessages[index]!;const history=this.chatMessages.filter((message)=>message.threadId===current.threadId).sort((a,b)=>a.sequence-b.sequence);if(current.version!==expectedVersion||!(current.deliveryStatus==="failed"||current.deliveryStatus==="stopped")||history.at(-1)?.id!==current.id||history.some((message)=>message.id!==current.id&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return null;const claimed={...current,deliveryStatus:"pending" as const,updatedAt,version:current.version+1};this.chatMessages[index]=clone(claimed);return clone(claimed);}
-  async stageProjectChatResponse(userMessageId:string,assistantMessage:ProjectChatMessage):Promise<boolean>{const index=this.chatMessages.findIndex((message)=>message.id===userMessageId&&message.role==="user");if(index<0)return false;const current=this.chatMessages[index]!;if(current.deliveryStatus==="completed")return this.chatMessages.some((message)=>message.id===assistantMessage.id);if(current.deliveryStatus==="response_pending"){return this.stagedChatResponses.get(userMessageId)?.id===assistantMessage.id;}this.stagedChatResponses.set(userMessageId,clone(assistantMessage));this.chatMessages[index]=clone({...current,deliveryStatus:"response_pending" as const,updatedAt:assistantMessage.updatedAt,version:current.version+1});return true;}
-  async finalizeProjectChatResponse(userMessageId:string):Promise<ProjectChatMessage|null>{const index=this.chatMessages.findIndex((message)=>message.id===userMessageId&&message.role==="user");if(index<0)return null;const current=this.chatMessages[index]!;const staged=this.stagedChatResponses.get(userMessageId);if(!staged)return current.deliveryStatus==="completed"?clone(this.chatMessages.find((message)=>message.threadId===current.threadId&&message.sequence===current.sequence+1&&message.role==="assistant")??null):null;if(!this.chatMessages.some((message)=>message.id===staged.id))this.chatMessages.push(clone(staged));this.chatMessages[index]=clone({...current,deliveryStatus:"completed" as const,updatedAt:staged.updatedAt,version:current.version+1});return clone(staged);}
-  async editProjectChatMessageAndTruncate(threadId:string,messageId:string,expectedVersion:number,content:string,updatedAt:string):Promise<ProjectChatMessage|null>{if(this.chatMessages.some((message)=>message.threadId===threadId&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return null;const index=this.chatMessages.findIndex((message)=>message.id===messageId&&message.threadId===threadId);if(index<0||this.chatMessages[index]!.version!==expectedVersion)return null;const target=this.chatMessages[index]!;const updated={...target,content,version:target.version+1,updatedAt};for(let cursor=this.chatMessages.length-1;cursor>=0;cursor--){const message=this.chatMessages[cursor]!;if(message.threadId===threadId&&message.sequence>target.sequence)this.chatMessages.splice(cursor,1);}this.chatMessages[index]=clone(updated);return clone(updated);}
-  async deleteProjectChatMessageAndFollowing(threadId:string,messageId:string,expectedVersion:number):Promise<boolean>{if(this.chatMessages.some((message)=>message.threadId===threadId&&(message.deliveryStatus==="pending"||message.deliveryStatus==="response_pending")))return false;const target=this.chatMessages.find((message)=>message.id===messageId&&message.threadId===threadId);if(!target||target.version!==expectedVersion)return false;for(let index=this.chatMessages.length-1;index>=0;index--){const message=this.chatMessages[index]!;if(message.threadId===threadId&&message.sequence>=target.sequence)this.chatMessages.splice(index,1);}return true;}
 
   async createTaskAtomically(input: AtomicTaskCreateInput) {
     if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
@@ -1109,7 +1066,6 @@ export class InMemoryProductStore implements ProductStore {
     }
   }
 
-  private sortedChatThreads(projectId: string, ownerUserId: string): ProjectChatThread[] { return [...this.chatThreads.values()].filter((thread) => thread.projectId === projectId && thread.ownerUserId === ownerUserId && !thread.deletedAt).sort((left, right) => Number(Boolean(right.starredAt)) - Number(Boolean(left.starredAt)) || (right.starredAt ?? "").localeCompare(left.starredAt ?? "") || Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt)) || (right.pinnedAt ?? "").localeCompare(left.pinnedAt ?? "") || right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)).map(clone); }
   private taskSummary(task: PersistedAgentTask): StoredTaskSummary { return { taskId: task.id, artifactCount: this.artifacts.filter((artifact) => artifact.taskId === task.id).length, updatedAt: task.updatedAt }; }
   private initializeTaskInteractionSync(taskId: string): void { this.interactionSync.set(taskId, { sourceCursor: null, historyStatus: "complete", lastSyncedAt: null }); }
 

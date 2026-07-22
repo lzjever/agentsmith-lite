@@ -621,30 +621,6 @@ async function routeApi(
         return sendJson(res, 200, { deleted: true });
       }
     }
-    if (segments[4] === "chat" && segments[5] === "threads") {
-      if (!segments[6] && method === "GET") {
-        assertOnlySearchParams(url, ["query"]);
-        const query = url.searchParams.get("query")?.trim();
-        return sendJson(res, 200, query ? await services.chat.searchThreads(user.id, projectId, query) : await services.chat.listThreads(user.id, projectId));
-      }
-      if (!segments[6] && method === "POST") {
-        assertOnlySearchParams(url, []);
-        const body = await readJson(req);
-        assertOnlyKeys(body,["endpointId"]);
-        return sendJson(res, 200, await services.chat.createThread(user.id, projectId, asString(body.endpointId), requireIdempotencyKey(req)));
-      }
-      if (segments[6] && !segments[7] && method === "PATCH") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title","pinned","starred"]); return sendJson(res,200,await services.chat.updateThreadMetadata(user.id,projectId,segments[6],{...(Object.hasOwn(body,"title")?{title:body.title===null?null:asString(body.title)}:{}),...(Object.hasOwn(body,"pinned")?{pinned:asBoolean(body.pinned,"pinned")}:{}) ,...(Object.hasOwn(body,"starred")?{starred:asBoolean(body.starred,"starred")}:{})},requireIdempotencyKey(req))); }
-      if (segments[6] && !segments[7] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.chat.deleteThread(user.id,projectId,segments[6],requireIdempotencyKey(req))); }
-      if (segments[6] && segments[7] === "messages") {
-        const threadId=segments[6];const messageId=segments[8];const action=segments[9];
-        if(messageId&&!action&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content","expectedVersion"]);return sendJson(res,200,await services.chat.editMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),asString(body.content),requireIdempotencyKey(req)));}
-        if(messageId&&!action&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.deleteMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
-        if(messageId&&action==="branch"&&!segments[10]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendJson(res,200,await services.chat.branchMessage(user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)));}
-        if(messageId&&action==="retry"&&!segments[10]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);return sendChatRetryStream(req,res,services,user.id,projectId,threadId,messageId,asPositiveInteger(body.expectedVersion,"expectedVersion"));}
-        if(!messageId&&method==="GET"){assertOnlySearchParams(url,[]);return sendJson(res,200,await services.chat.listMessages(user.id,projectId,threadId));}
-        if(!messageId&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content","afterMessageId"]);return sendChatStream(req,res,services,user.id,projectId,threadId,asString(body.content),body.afterMessageId===null?null:asString(body.afterMessageId));}
-      }
-    }
     if (segments[4] === "policy") {
       if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.policies.getPolicy(user.id, projectId)); }
       if (!segments[5] && method === "PATCH") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.policies.updatePolicy(user.id, projectId, asPolicyInput(await readJson(req)), requireIdempotencyKey(req))); }
@@ -1053,7 +1029,6 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||
     /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/chat\/threads(?:\/[^/]+(?:\/messages(?:\/[^/]+(?:\/(?:branch|retry))?)?)?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
@@ -1191,28 +1166,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function sendChatStream(req: IncomingMessage, res: ServerResponse, services: Services, userId: string, projectId: string, threadId: string, content: string,afterMessageId:string|null): Promise<void> {
-  const controller = new AbortController();
-  res.on("close", () => {
-    if (!res.writableEnded) controller.abort();
-  });
-  let started = false;
-  const start = () => {
-    if (started) return;
-    started = true;
-    res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-  };
-  const event = (type: string, value: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
-  try {
-    const result = await services.chat.streamMessage(userId, projectId, threadId, content,afterMessageId, controller.signal, (delta) => { start(); event("delta", { delta }); });
-    start();
-    event("done", result);
-  } catch (error) {
-    if (!started) throw error;
-    if (!controller.signal.aborted) event("error", { error: error instanceof Error ? error.message : "Chat request failed" });
-  } finally { if (started) res.end(); }
-}
-
 async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,services:Services,userId:string,taskId:string,url:URL):Promise<void>{
   const queryCursor=url.searchParams.get("cursor");
   const headerValue=req.headers["last-event-id"];
@@ -1309,11 +1262,6 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
 }
 
 function sleep(ms:number):Promise<void>{return new Promise((resolve)=>setTimeout(resolve,ms));}
-
-async function sendChatRetryStream(req:IncomingMessage,res:ServerResponse,services:Services,userId:string,projectId:string,threadId:string,messageId:string,expectedVersion:number):Promise<void>{
-  const controller=new AbortController();res.on("close",()=>{if(!res.writableEnded)controller.abort();});let started=false;const start=()=>{if(started)return;started=true;res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache",connection:"keep-alive","x-accel-buffering":"no"});};const event=(type:string,value:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
-  try{const result=await services.chat.retryMessage(userId,projectId,threadId,messageId,expectedVersion,controller.signal,(delta)=>{start();event("delta",{delta});});start();event("done",result);}catch(error){if(!started)throw error;if(!controller.signal.aborted)event("error",{error:error instanceof Error?error.message:"Chat retry failed"});}finally{if(started)res.end();}
-}
 
 function sendRedirect(res: ServerResponse, status: 302, location: string): void {
   res.writeHead(status, { location });

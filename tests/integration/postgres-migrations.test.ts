@@ -84,21 +84,23 @@ postgresDescribe("postgres migrations", () => {
       const interactionIndexes = await client.query<{ indexname:string }>("select indexname from pg_indexes where schemaname='public' and tablename='task_interaction_changes' order by indexname");
       for(const name of ["task_interaction_changes_latest_idx","task_interaction_changes_history_idx","task_interaction_changes_tool_call_idx","task_interaction_changes_work_task_idx","task_interaction_changes_callback_idx"]) assert.equal(interactionIndexes.rows.some((row)=>row.indexname===name),true);
 
-      const chatMessageUniqueConstraints = await client.query<{ definition: string }>(`
-        select pg_get_constraintdef(c.oid) as definition
-        from pg_constraint c
-        join pg_class t on t.oid = c.conrelid
-        where t.relname = 'project_chat_messages'
-          and c.contype = 'u'
+      const removedChatTables = await client.query<{ table_name: string }>(`
+        select table_name
+        from information_schema.tables
+        where table_schema = 'public'
+          and table_name in ('project_chat_threads', 'project_chat_messages')
       `);
-      assert.equal(
-        chatMessageUniqueConstraints.rows.some((row) => /UNIQUE \(thread_id, sequence\)/i.test(row.definition)),
-        true
-      );
-      assert.equal(
-        chatMessageUniqueConstraints.rows.some((row) => /UNIQUE \(sequence\)/i.test(row.definition)),
-        false
-      );
+      assert.deepEqual(removedChatTables.rows, []);
+
+      const finalAuditConstraints = await client.query<{ conname: string; definition: string }>(`
+        select conname, pg_get_constraintdef(oid) as definition
+        from pg_constraint
+        where conrelid = 'project_audit_events'::regclass
+          and conname in ('project_audit_events_action_check', 'project_audit_events_resource_kind_check')
+        order by conname
+      `);
+      assert.equal(finalAuditConstraints.rows.length, 2);
+      assert.equal(finalAuditConstraints.rows.every((row) => !/chat[._]/i.test(row.definition)), true);
 
       const executionMode = await client.query<{ is_nullable: string; column_default: string | null }>(`
         select is_nullable, column_default
@@ -122,28 +124,17 @@ postgresDescribe("postgres migrations", () => {
       `);
       assert.deepEqual(providerSettlementEndpoint.rows, [{ is_nullable: "YES" }]);
 
-      const chatThreadEndpoint = await client.query<{ is_nullable: string }>(`
-        select is_nullable
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'project_chat_threads'
-          and column_name = 'endpoint_id'
-      `);
-      assert.deepEqual(chatThreadEndpoint.rows, [{ is_nullable: "YES" }]);
-
       const endpointForeignKeys = await client.query<{ table_name: string; definition: string }>(`
         select t.relname as table_name, pg_get_constraintdef(c.oid) as definition
         from pg_constraint c
         join pg_class t on t.oid = c.conrelid
         where c.conname in (
           'agent_tasks_endpoint_id_fkey',
-          'project_chat_threads_endpoint_id_fkey',
           'project_provider_settlements_endpoint_id_fkey'
         )
         order by t.relname
       `);
       assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "agent_tasks")?.definition ?? "", /FOREIGN KEY \(endpoint_id\).*model_endpoints\(id\)(?!.*SET NULL)/i);
-      assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "project_chat_threads")?.definition ?? "", /ON DELETE SET NULL/i);
       assert.match(endpointForeignKeys.rows.find((row) => row.table_name === "project_provider_settlements")?.definition ?? "", /ON DELETE SET NULL/i);
       const endpointIndexes = await client.query<{ indexname: string; indexdef: string }>("select indexname,indexdef from pg_indexes where schemaname='public' and tablename='model_endpoints'");
       assert.match(endpointIndexes.rows.find((row) => row.indexname === "model_endpoints_project_name_unique")?.indexdef ?? "", /unique.*project_id.*lower\(btrim\(name\)\)/i);
@@ -326,60 +317,6 @@ postgresDescribe("postgres migrations", () => {
     }
   });
 
-  it("upgrades 043 endpoint history rows through 044 idempotently", async () => {
-    assert.ok(postgresUrl);
-    const client = new pg.Client({ connectionString: postgresUrl });
-    await client.connect();
-    try {
-      const migrations = await readPostgresMigrations();
-      const endpointDeletion = migrations.findIndex((migration) => migration.id === "044_endpoint_deletion_boundaries");
-      assert.ok(endpointDeletion >= 0);
-      const schema = `migration_endpoint_delete_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-      await client.query("begin");
-      await client.query(`create schema ${quoteIdentifier(schema)}`);
-      await client.query(`set local search_path to ${quoteIdentifier(schema)}, public`);
-      for (const migration of migrations.slice(0, endpointDeletion)) await client.query(migration.sql);
-
-      const ids = await insertProjectFixture(client, "endpoint_delete_upgrade");
-      const timestamp = "2026-07-12T00:00:00.000Z";
-      const endpointId = `endpoint_${ids.suffix}`;
-      await client.query(
-        `insert into model_endpoints (
-           id, project_id, name, protocol, base_url, model, api_key_secret_ref,
-           capabilities, request_timeout_secs, created_at, updated_at
-         ) values ($1, $2, 'Endpoint', 'openai_chat_completions', 'https://models.example.test/v1', 'model', 'secret/upgrade', '["text"]'::jsonb, 30, $3, $3)`,
-        [endpointId, ids.projectId, timestamp]
-      );
-      await client.query(
-        "insert into project_chat_threads (id, project_id, endpoint_id, title, created_at, updated_at) values ($1, $2, $3, 'Retained thread', $4, $4)",
-        [`thread_${ids.suffix}`, ids.projectId, endpointId, timestamp]
-      );
-      await client.query(
-        `insert into project_provider_settlements (
-           id, project_id, endpoint_id, status, reserved_tokens, reserved_cost,
-           reserved_at, expires_at, updated_at
-         ) values ($1, $2, $3, 'settled', 0, 0, $4, $5, $4)`,
-        [`settlement_${ids.suffix}`, ids.projectId, endpointId, timestamp, "2026-07-12T00:01:00.000Z"]
-      );
-
-      const migration = migrations[endpointDeletion]!;
-      await client.query(migration.sql);
-      await client.query(migration.sql);
-      await client.query("delete from model_endpoints where id = $1", [endpointId]);
-
-      const retained = await client.query<{ thread_endpoint_id: string | null; settlement_endpoint_id: string | null }>(
-        `select t.endpoint_id as thread_endpoint_id, s.endpoint_id as settlement_endpoint_id
-         from project_chat_threads t
-         join project_provider_settlements s on s.project_id = t.project_id
-         where t.id = $1 and s.id = $2`,
-        [`thread_${ids.suffix}`, `settlement_${ids.suffix}`]
-      );
-      assert.deepEqual(retained.rows, [{ thread_endpoint_id: null, settlement_endpoint_id: null }]);
-      await client.query("rollback");
-    } finally {
-      await client.end();
-    }
-  });
 });
 
 async function insertProjectFixture(client: pg.Client, prefix: string) {

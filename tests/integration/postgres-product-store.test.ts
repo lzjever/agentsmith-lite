@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
-import type { ModelEndpoint, Project, ProjectChatMessage, ProjectContextEntry, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
+import type { ModelEndpoint, Project, ProjectContextEntry, ProjectMembership, StoredUser, TaskAssistantMessageInteraction, Workspace } from "../../packages/contracts/src/api.js";
 import type { PersistedAgentTask, PersistedTaskArtifact } from "../../packages/ports/src/store.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -132,38 +132,6 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual(await store.listProjectPinsForUser("user_pin_member"),[]);
   });
 
-  it("atomically admits one chat send and one retry claim per history tail", async () => {
-    const timestamp="2026-07-18T00:00:00.000Z";
-    await store.createUser({id:"user_chat_claim",email:"chat-claim@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
-    await store.createWorkspace({id:"ws_chat_claim",name:"Chat claim",ownerUserId:"user_chat_claim",createdAt:timestamp,updatedAt:timestamp});
-    await store.createProject({id:"proj_chat_claim",workspaceId:"ws_chat_claim",name:"Chat claim",ownerUserId:"user_chat_claim",rootPath:"workspaces/ws_chat_claim/projects/proj_chat_claim",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
-    await createTestCredential(store,"proj_chat_claim","cred_chat_claim",timestamp);
-    await store.createEndpoint(endpointRecord("endpoint_chat_claim","proj_chat_claim","cred_chat_claim",timestamp));
-    await store.createProjectChatThread({id:"thread_chat_claim",projectId:"proj_chat_claim",ownerUserId:"user_chat_claim",endpointId:"endpoint_chat_claim",title:null,pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp});
-    const message=(id:string):ProjectChatMessage=>({id,threadId:"thread_chat_claim",sequence:1,version:1,deliveryStatus:"pending",role:"user",content:id,createdAt:timestamp,updatedAt:timestamp});
-
-    const admissions=await Promise.all([store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_one"),"First request"),store.appendProjectChatMessageIfCurrent("thread_chat_claim",null,message("chatmsg_claim_two"),"Second request")]);
-    assert.deepEqual(admissions.sort(),["accepted","request_running"]);
-    assert.equal(await store.deleteProjectChatThread("thread_chat_claim",timestamp),"request_running");
-    const saved=(await store.listProjectChatMessages("thread_chat_claim"))[0]!;
-    assert.equal((await store.findProjectChatThread("thread_chat_claim"))?.title,saved.id==="chatmsg_claim_one"?"First request":"Second request");
-    const failed=(await store.updateProjectChatMessageDelivery(saved.id,"failed",timestamp))!;
-    const claims=await Promise.all([store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp),store.claimProjectChatMessageRetry(failed.id,failed.version,timestamp)]);
-    assert.equal(claims.filter(Boolean).length,1);
-  });
-
-  it("rolls back a chat branch when any copied message cannot be stored", async () => {
-    const timestamp="2026-07-18T00:00:00.000Z";
-    await store.createUser({id:"user_chat_branch",email:"chat-branch@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
-    await store.createWorkspace({id:"ws_chat_branch",name:"Chat branch",ownerUserId:"user_chat_branch",createdAt:timestamp,updatedAt:timestamp});
-    await store.createProject({id:"proj_chat_branch",workspaceId:"ws_chat_branch",name:"Chat branch",ownerUserId:"user_chat_branch",rootPath:"workspaces/ws_chat_branch/projects/proj_chat_branch",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
-    const thread={id:"thread_chat_branch",projectId:"proj_chat_branch",ownerUserId:"user_chat_branch",endpointId:null,title:"Branch",pinnedAt:null,starredAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
-    const message:ProjectChatMessage={id:"chatmsg_duplicate",threadId:thread.id,sequence:1,version:1,deliveryStatus:"completed",role:"user",content:"one",createdAt:timestamp,updatedAt:timestamp};
-
-    await assert.rejects(()=>store.createProjectChatBranch(thread,[message,{...message,sequence:2,content:"two"}]));
-    assert.equal(await store.findProjectChatThread(thread.id),null);
-    assert.deepEqual(await store.listProjectChatMessages(thread.id),[]);
-  });
 
   it("atomically rejects duplicate context keys during creates and renames", async () => {
     const timestamp = "2026-07-15T00:00:00.000Z";
@@ -349,7 +317,7 @@ postgresDescribe("postgres product store", () => {
     assert.equal((await store.listProjectAuditEvents("proj_quota")).some((event) => event.action === "alert.resolve" && event.resourceKind === "alert"), true);
   });
 
-  it("atomically blocks endpoint deletion for tasks and unlinks retained chat and settlement history", async () => {
+  it("atomically blocks endpoint deletion for tasks and unlinks settlement history", async () => {
     const timestamp = "2026-07-12T00:00:00.000Z";
     await store.createUser({ id: "user_endpoint_delete", email: "endpoint-delete@example.test", emailVerified: false, passwordHash: "hash", createdAt: timestamp, updatedAt: timestamp });
     await store.createWorkspace({ id: "ws_endpoint_delete", name: "Endpoint delete", ownerUserId: "user_endpoint_delete", createdAt: timestamp, updatedAt: timestamp });
@@ -358,7 +326,6 @@ postgresDescribe("postgres product store", () => {
 
     const blockedEndpoint = endpointRecord("endpoint_delete_blocked", "proj_endpoint_delete", "cred_endpoint_delete", timestamp);
     await store.createEndpoint(blockedEndpoint);
-    const blockedThread = await store.createProjectChatThread({ id: "thread_endpoint_delete_blocked", projectId: blockedEndpoint.projectId, ownerUserId: "user_endpoint_delete", endpointId: blockedEndpoint.id, title: "Blocked history", createdAt: timestamp, updatedAt: timestamp });
     await settleProvider(store, "settlement_endpoint_delete_blocked", blockedEndpoint.projectId, blockedEndpoint.id, timestamp);
     await createTaskWithLibrary(store, {
       id: "task_endpoint_delete_blocked",
@@ -376,19 +343,16 @@ postgresDescribe("postgres product store", () => {
 
     assert.equal(await store.deleteEndpoint(blockedEndpoint.id), "referenced_by_tasks");
     assert.equal((await store.findEndpoint(blockedEndpoint.id))?.id, blockedEndpoint.id);
-    assert.equal((await store.findProjectChatThread(blockedThread.id))?.endpointId, blockedEndpoint.id);
     assert.equal((await store.listSettledProjectProviderSettlements(blockedEndpoint.projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_delete_blocked")?.endpointId, blockedEndpoint.id);
 
     const deletedEndpoint = endpointRecord("endpoint_delete_history", "proj_endpoint_delete", "cred_endpoint_delete", timestamp);
     await store.createEndpoint(deletedEndpoint);
-    const retainedThread = await store.createProjectChatThread({ id: "thread_endpoint_delete_history", projectId: deletedEndpoint.projectId, ownerUserId: "user_endpoint_delete", endpointId: deletedEndpoint.id, title: "Retained history", createdAt: timestamp, updatedAt: timestamp });
     await settleProvider(store, "settlement_endpoint_delete_history", deletedEndpoint.projectId, deletedEndpoint.id, timestamp);
     await store.upsertActiveProjectAlert({ id: "alert_endpoint_delete_generic", projectId: deletedEndpoint.projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: null, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
     await store.upsertActiveProjectAlert({ id: "alert_endpoint_delete_scoped", projectId: deletedEndpoint.projectId, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: deletedEndpoint.id, createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null });
 
     assert.equal(await store.deleteEndpoint(deletedEndpoint.id), "deleted");
     assert.equal(await store.findEndpoint(deletedEndpoint.id), null);
-    assert.equal((await store.findProjectChatThread(retainedThread.id))?.endpointId, null);
     assert.equal((await store.listSettledProjectProviderSettlements(deletedEndpoint.projectId, "2026-07-01T00:00:00.000Z")).find((item) => item.id === "settlement_endpoint_delete_history")?.endpointId, null);
     const endpointAlerts = await store.listProjectAlerts(deletedEndpoint.projectId);
     assert.equal(endpointAlerts.find((alert) => alert.id === "alert_endpoint_delete_generic")?.status, "active");

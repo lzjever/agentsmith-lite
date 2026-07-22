@@ -50,17 +50,15 @@ export interface ProjectCapabilities {
   canManagePolicy: boolean;
   canWriteFiles: boolean;
   canCreateTasks: boolean;
-  canSendChat: boolean;
 }
 
-export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
+export type ProjectOverviewAction = "configure_endpoint" | "create_task" | "add_collaborator";
 export interface ProjectOverviewProjection {
   project: Project;
   workspaceLifecycleStatus: "active" | "archived" | "deleting";
   capabilities: ProjectCapabilities;
   owner: MembershipIdentity | null;
   memberRole: ProjectMembershipRole;
-  chatReadyEndpointCount: number;
   taskReadyEndpointCount: number;
   recommendedActions: ProjectOverviewAction[];
 }
@@ -244,9 +242,9 @@ export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = f
 }
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
 export type ProjectAlertDeliveryStatus = "not_configured" | "pending" | "delivered" | "failed";
-export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","chat.thread.create","chat.thread.update","chat.thread.delete","chat.message.send","chat.message.retry","chat.message.stop","chat.message.edit","chat.message.delete","chat.message.branch","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.started","sandbox.failed","sandbox.release_requested","sandbox.released","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
+export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.started","sandbox.failed","sandbox.release_requested","sandbox.released","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
 export type ProjectAuditAction = typeof PROJECT_AUDIT_ACTIONS[number];
-export const PROJECT_AUDIT_RESOURCE_KINDS = ["project","credential","endpoint","member","chat_thread","chat_message","task","artifact","provider","file","file_quota","sandbox","alert"] as const;
+export const PROJECT_AUDIT_RESOURCE_KINDS = ["project","credential","endpoint","member","task","artifact","provider","file","file_quota","sandbox","alert"] as const;
 export type ProjectAuditResourceKind = typeof PROJECT_AUDIT_RESOURCE_KINDS[number];
 
 export interface ProjectAlert {
@@ -365,29 +363,6 @@ export type ChatRole = "system" | "user" | "assistant";
 export interface ChatMessage {
   role: ChatRole;
   content: string;
-}
-
-export interface ProjectChatThread {
-  id: string;
-  projectId: string;
-  ownerUserId: string;
-  endpointId: string | null;
-  title?: string | null;
-  pinnedAt?: ISODateString | null;
-  starredAt?: ISODateString | null;
-  deletedAt?: ISODateString | null;
-  createdAt: ISODateString;
-  updatedAt: ISODateString;
-}
-
-export interface ProjectChatMessage extends ChatMessage {
-  id: string;
-  threadId: string;
-  sequence: number;
-  version: number;
-  deliveryStatus: "pending" | "response_pending" | "completed" | "failed" | "stopped";
-  createdAt: ISODateString;
-  updatedAt: ISODateString;
 }
 
 export interface ChatResponse {

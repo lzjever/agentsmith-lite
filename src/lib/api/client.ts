@@ -1,6 +1,6 @@
 "use client";
 
-import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectChatThread as ApiProjectChatThread, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
@@ -71,9 +71,9 @@ export type MemberRole = "owner" | "admin" | "member" | "viewer";
 export interface ProjectMember { projectId: string; userId: string; role: MemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
 export type WorkspaceMemberRole = "owner" | "admin" | "member" | "viewer";
 export interface WorkspaceMember { workspaceId: string; userId: string; role: WorkspaceMemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
-export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; canSendChat: boolean; }
-export type ProjectOverviewAction = "configure_endpoint" | "start_chat" | "create_task" | "add_collaborator";
-export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; chatReadyEndpointCount: number; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
+export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; }
+export type ProjectOverviewAction = "configure_endpoint" | "create_task" | "add_collaborator";
+export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
 export type EndpointCapability = "text" | "image" | "tool_calls";
 export type Endpoint = PublicModelEndpoint;
 export interface EndpointModelDiscovery { models: string[]; health: { status: "healthy" | "unavailable" | "unknown"; checkedAt: string | null; errorCategory: "auth" | "network" | "upstream" | "timeout" | "rate_limit" | "unknown" | null }; }
@@ -86,19 +86,9 @@ export type Task = AgentTask;
 export type TaskDetail = TaskDetailProjection;
 export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
-export type ChatRole = "system" | "user" | "assistant";
-export interface ChatMessage { role: ChatRole; content: string; }
-export interface ChatResponse {
-  message: ChatMessage;
-  endpointSnapshot: Pick<Endpoint, "id" | "baseUrl" | "model" | "protocol">;
-  usage?: { requests?: number; tokens?: number; cost?: number; };
-}
-export type ProjectChatThread = ApiProjectChatThread;
 export type TaskListQuery = ApiTaskListQuery;
 export type TaskListPage = ApiTaskListPage;
 export type TaskListItem = TaskListPage["items"][number];
-export interface ProjectChatMessage extends ChatMessage { id: string; threadId: string; sequence:number;version:number;deliveryStatus:"pending"|"response_pending"|"completed"|"failed"|"stopped";createdAt: string;updatedAt:string; }
-export interface ProjectChatSendResponse { message: ProjectChatMessage; endpointSnapshot: Pick<Endpoint, "id" | "baseUrl" | "model" | "protocol">; }
 export type ContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
 export type ContextContentType = "text" | "json" | "markdown" | "yaml";
 export interface ContextEntry { id: string; workspaceId: string; projectId: string | null; ownerUserId: string | null; scope: ContextScope; contextKey: string; content: string; contentType: ContextContentType; version: number; createdAt: string; updatedAt: string; }
@@ -254,20 +244,6 @@ export const apiClient = {
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}/health`, "POST", idempotencyKey),
   deleteEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
     jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "DELETE", idempotencyKey),
-  chatThreads: (projectId: string, query?: string) => request<ProjectChatThread[]>(`/projects/${encodeURIComponent(projectId)}/chat/threads${query ? `?query=${encodeURIComponent(query)}` : ""}`),
-  createChatThread: (projectId: string, endpointId: string, idempotencyKey: string) => jsonIdempotent<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads`, "POST", idempotencyKey, { endpointId }),
-  updateChatThread: (projectId: string, threadId: string, input: { title?: string | null; pinned?: boolean;starred?:boolean }, idempotencyKey: string) => jsonIdempotent<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}`, "PATCH", idempotencyKey, input),
-  deleteChatThread: (projectId: string, threadId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}`, "DELETE", idempotencyKey),
-  chatMessages: (projectId: string, threadId: string) => request<ProjectChatMessage[]>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages`),
-  editChatMessage:(projectId:string,threadId:string,messageId:string,input:{content:string;expectedVersion:number},idempotencyKey:string)=>jsonIdempotent<ProjectChatMessage>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,"PATCH",idempotencyKey,input),
-  deleteChatMessage:(projectId:string,threadId:string,messageId:string,expectedVersion:number,idempotencyKey:string)=>jsonIdempotent<{deleted:true}>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,"DELETE",idempotencyKey,{expectedVersion}),
-  branchChatMessage:(projectId:string,threadId:string,messageId:string,expectedVersion:number,idempotencyKey:string)=>jsonIdempotent<ProjectChatThread>(`/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/branch`,"POST",idempotencyKey,{expectedVersion}),
-  async retryChatMessage(projectId:string,threadId:string,messageId:string,expectedVersion:number,signal:AbortSignal|undefined,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!csrfToken)await apiClient.currentIdentity();const response=observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/retry`,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrfToken??""},body:JSON.stringify({expectedVersion}),...(signal?{signal}:{})}));return readChatStream(response,onDelta);},
-  async sendChatMessage(projectId: string, threadId: string, content: string, afterMessageId:string|null,signal: AbortSignal | undefined, onDelta: (delta: string) => void): Promise<ProjectChatSendResponse> {
-    if (!csrfToken) await apiClient.currentIdentity();
-    const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/chat/threads/${encodeURIComponent(threadId)}/messages`, { method:"POST", credentials:"same-origin", headers:{"content-type":"application/json","x-csrf-token":csrfToken??""}, body:JSON.stringify({content,afterMessageId}), ...(signal ? { signal } : {}) }));
-    return readChatStream(response,onDelta);
-  },
   contexts: (input: { workspaceId: string; scope: ContextScope; projectId?: string }) => {
     const query = new URLSearchParams({ workspaceId: input.workspaceId, scope: input.scope });
     if (input.projectId) query.set("projectId", input.projectId);
@@ -497,5 +473,3 @@ function isNullableDeliveryStatus(value: unknown): value is "pending" | "deliver
 function isNullableString(value: unknown): value is string | null { return value === null || typeof value === "string"; }
 function isNullableNumber(value: unknown): value is number | null { return value === null || typeof value === "number"; }
 function isStringUnion<T extends string>(value: unknown, choices: readonly T[]): value is T { return typeof value === "string" && choices.some((choice) => choice === value); }
-
-async function readChatStream(response:Response,onDelta:(delta:string)=>void):Promise<ProjectChatSendResponse>{if(!response.ok||!response.body)throw await apiResponseError(response);const reader=response.body.getReader();const decoder=new TextDecoder();let buffer="";let done:ProjectChatSendResponse|undefined;while(true){const{done:ended,value}=await reader.read();if(ended)break;buffer+=decoder.decode(value,{stream:true});const frames=buffer.split("\n\n");buffer=frames.pop()??"";for(const frame of frames){const type=/event: (.+)/.exec(frame)?.[1];const data=/data: (.+)/.exec(frame)?.[1];if(!data)continue;const value=JSON.parse(data);if(type==="delta")onDelta(value.delta);else if(type==="done")done=value;else if(type==="error")throw new ApiError(502,value.error);}}if(!done)throw new ApiError(502,"Chat stream ended without a final message");return done;}

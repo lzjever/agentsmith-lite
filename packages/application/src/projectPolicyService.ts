@@ -348,8 +348,6 @@ function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind
   if (action.startsWith("credential.")) return "credential";
   if (action.startsWith("endpoint.")) return "endpoint";
   if (action.startsWith("membership.")) return "member";
-  if (action.startsWith("chat.thread.")) return "chat_thread";
-  if (action.startsWith("chat.message.")) return "chat_message";
   if (action.startsWith("alert.")) return "alert";
   if (action === "provider.request") return "provider";
   if (action.startsWith("task.")) return "task";

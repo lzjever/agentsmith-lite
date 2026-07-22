@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
-import type { ChatMessage, ChatResponse, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
 import type { OpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 
@@ -14,7 +13,6 @@ describe("api product workflow", () => {
   let closeServer: undefined | (() => Promise<void>);
   let dataRoot = "";
   let idempotencySequence = 0;
-  const chatCalls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }> = [];
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-api-"));
@@ -22,7 +20,7 @@ describe("api product workflow", () => {
       port: 0,
       dataRoot,
       builtinAdminPassword: "admin-password",
-      providerClient: fakeChatClient(chatCalls),
+      providerClient: fakeProviderClient(),
     });
     baseUrl = api.baseUrl;
     closeServer = api.close;
@@ -33,7 +31,7 @@ describe("api product workflow", () => {
     await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it("logs in and exercises workspace, project, endpoint, chat, file CRUD, and task resources", async () => {
+  it("logs in and exercises workspace, project, endpoint, file CRUD, and task resources", async () => {
     const health = await fetch(baseUrl + "/api/v1/health").then((response) => response.json());
     assert.equal(health.status, "ok");
 
@@ -69,7 +67,7 @@ describe("api product workflow", () => {
     assert.equal(endpoint.hasCredentialRef, true);
     assert.equal(endpoint.credentialId, credential.id);
     const readyOverview = await requestJson("GET", `/api/v1/projects/${project.id}/overview`, undefined, cookie);
-    assert.deepEqual(readyOverview.recommendedActions, ["start_chat", "create_task", "add_collaborator"]);
+    assert.deepEqual(readyOverview.recommendedActions, ["create_task", "add_collaborator"]);
     assert.equal(readyOverview.taskReadyEndpointCount, 1);
 
     const endpoints = await requestJson("GET", `/api/v1/projects/${project.id}/endpoints`, undefined, cookie);
@@ -120,17 +118,6 @@ describe("api product workflow", () => {
     }, cookie, csrf);
     assert.equal(reboundEndpoint.credentialId, replacementCredential.id);
     assertNoApiKeySecretRef(reboundEndpoint);
-    const disposableThread = await postJson(`/api/v1/projects/${project.id}/chat/threads`, { endpointId: disposableEndpoint.id }, cookie, csrf);
-    assert.deepEqual(
-      await requestJson("DELETE", `/api/v1/projects/${project.id}/endpoints/${disposableEndpoint.id}`, undefined, cookie, csrf),
-      { deleted: true }
-    );
-    const retainedThreads = await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads`, undefined, cookie);
-    assert.equal(retainedThreads.find((item: { id: string }) => item.id === disposableThread.id)?.endpointId, null);
-
-    const thread = await postJson(`/api/v1/projects/${project.id}/chat/threads`, { endpointId: endpoint.id }, cookie, csrf);
-    const chat = await postChatStream(`/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, { content: "hello", afterMessageId: null }, cookie, csrf);
-    const chatHistory = await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads/${thread.id}/messages`, undefined, cookie);
     const filePath = "docs/readme.md";
     const fileContent = Uint8Array.from([0x00, 0xff, 0x41, 0x0a]);
     const uploadedFile = await requestRawFile(project.id,library.id,filePath,fileContent,cookie,csrf);
@@ -191,18 +178,6 @@ describe("api product workflow", () => {
     assertNoApiKeySecretRef(dashboard);
     assert.equal(dashboard.endpoints[0]?.hasCredentialRef, true);
     assert.equal(dashboard.endpoints[0]?.credentialId, credential.id);
-    assert.equal(chat.message.content, "server-side fake chat response");
-    assert.deepEqual(chatHistory.map((message: { role: string; content: string }) => [message.role, message.content]), [["user", "hello"], ["assistant", "server-side fake chat response"]]);
-    assert.equal(chatCalls.length, 1);
-    assert.equal(chatCalls[0]?.endpoint.id, endpoint.id);
-    assert.deepEqual(chatCalls[0]?.messages, [{ role: "user", content: "hello" }]);
-    assert.equal(chatCalls[0]?.apiKey, "sk-from-api-workflow");
-    assert.deepEqual(chat.endpointSnapshot, {
-      id: endpoint.id,
-      baseUrl: "https://models.example.com/v1",
-      model: "updated-compatible",
-      protocol: "openai_chat_completions"
-    });
     const { updatedAt: uploadedAt, ...uploadedFileDetails } = uploadedFile;
     assert.deepEqual(uploadedFileDetails, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
     assert.equal(Number.isNaN(Date.parse(uploadedAt)), false);
@@ -234,9 +209,6 @@ describe("api product workflow", () => {
       409,
       "Endpoint cannot be deleted while tasks reference it"
     );
-    const threadAfterBlockedDelete = (await requestJson("GET", `/api/v1/projects/${project.id}/chat/threads`, undefined, cookie))
-      .find((item: { id: string }) => item.id === thread.id);
-    assert.equal(threadAfterBlockedDelete?.endpointId, endpoint.id);
 
     const traversal = await fetch(baseUrl + `/api/v1/projects/${project.id}/file-libraries/${library.id}/files?path=${encodeURIComponent("../secret.txt")}`, {
       method: "PUT",
@@ -317,15 +289,6 @@ describe("api product workflow", () => {
     return requestJson("POST", pathname, body, cookie, csrf);
   }
 
-  async function postChatStream(pathname: string, body: unknown, cookie: string, csrf: string) {
-    const response = await request("POST", pathname, body, cookie, csrf);
-    assert.equal(response.status, 200);
-    const frame = (await response.text()).split("\n\n").find((value) => value.startsWith("event: done"));
-    const data = frame ? /^data: (.+)$/m.exec(frame)?.[1] : undefined;
-    assert.ok(data);
-    return JSON.parse(data);
-  }
-
   async function requestJson(method: string, pathname: string, body: unknown, cookie: string, csrf?: string) {
     const response = await request(method, pathname, body, cookie, csrf);
     if (response.status !== 200) {
@@ -348,7 +311,7 @@ describe("api product workflow", () => {
     if (/\/projects\/[^/]+\/file-libraries\/[^/]+\/files$/.test(pathname) && ["POST", "PUT", "DELETE"].includes(method)) {
       headers["idempotency-key"] = `workflow-${++idempotencySequence}`;
     }
-    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|file-libraries)$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/chat\/threads$/.test(pathname))) {
+    if (method === "POST" && (pathname === "/api/v1/workspaces" || /^\/api\/v1\/workspaces\/[^/]+\/projects$/.test(pathname) || /^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|file-libraries)$/.test(pathname))) {
       headers["idempotency-key"] = crypto.randomUUID();
     }
     const requestInit: RequestInit = { method, headers };
@@ -423,13 +386,12 @@ describe("api product workflow", () => {
   }
 });
 
-function fakeChatClient(calls: Array<{ endpoint: ModelEndpoint; messages: ChatMessage[]; apiKey: string }>): OpenAICompatibleClient {
+function fakeProviderClient(): OpenAICompatibleClient {
   return {
     async validateEndpoint() {
       return { status: "healthy" };
     },
-    async completeChat(endpoint, messages, options): Promise<ChatResponse> {
-      calls.push({ endpoint, messages, apiKey: options.apiKey });
+    async completeChat(endpoint) {
       return {
         message: { role: "assistant", content: "server-side fake chat response" },
         endpointSnapshot: {

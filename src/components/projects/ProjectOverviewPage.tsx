@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, MessageSquare, Server, Users, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, Server, Users, Wrench, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type ProjectMember, type ProjectOverview, type ProjectOverviewAction } from "../../lib/api/client";
@@ -13,7 +13,6 @@ type NextStep = { href: string; label: string; icon: LucideIcon; description: st
 
 const actionSteps: Record<ProjectOverviewAction, NextStep> = {
   configure_endpoint: { href: "endpoints", label: "Configure an endpoint", description: "Add the model connection this project will use.", icon: Server },
-  start_chat: { href: "chat", label: "Start a chat", description: "Continue in a conversation with a configured model.", icon: MessageSquare },
   create_task: { href: "tasks", label: "Create a task", description: "Run a Botified task with a tool-capable endpoint.", icon: Wrench },
   add_collaborator: { href: "members", label: "Add collaborators", description: "Give existing users access to this project.", icon: Users }
 };
@@ -51,7 +50,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
   const steps = overview?.recommendedActions.map((action) => actionSteps[action]) ?? [];
   const [primaryStep, ...secondarySteps] = steps;
   const readOnly = overview !== undefined && !Object.values(overview.capabilities).some(Boolean);
-  const noUsableEndpoint = overview !== undefined && !readOnly && overview.chatReadyEndpointCount === 0;
+  const noUsableEndpoint = overview !== undefined && !readOnly && overview.taskReadyEndpointCount === 0;
   const lifecycleStatus = overview?.project.lifecycleStatus ?? (overview ? "active" : undefined);
   const workspaceLifecycleStatus = overview?.workspaceLifecycleStatus ?? "active";
   const workspaceReadOnly = lifecycleStatus === "active" && workspaceLifecycleStatus !== "active";
@@ -66,8 +65,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
     {state === "ready" && overview ? <div className="space-y-7">
       <Link href={`/workspaces/${workspaceId}`} className="inline-flex items-center gap-2 text-sm text-secondary no-underline hover:text-foreground"><ArrowLeft size={16} />Back to workspace</Link>
       {lifecycleStatus !== "active" || workspaceLifecycleStatus !== "active" ? <p role="status" className="border-l-2 border-warning bg-warning-soft px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)}</p> : null}
-      <section className="grid divide-y divide-subtle border-y border-subtle sm:grid-cols-3 sm:divide-x sm:divide-y-0" aria-label="Project availability">
-        <Availability label="Chat endpoints" value={overview.chatReadyEndpointCount} detail={overview.chatReadyEndpointCount === 1 ? "ready connection" : "ready connections"} />
+      <section className="grid divide-y divide-subtle border-y border-subtle sm:grid-cols-2 sm:divide-x sm:divide-y-0" aria-label="Project availability">
         <Availability label="Task endpoints" value={overview.taskReadyEndpointCount} detail={overview.taskReadyEndpointCount === 1 ? "tool-capable connection" : "tool-capable connections"} />
         <Availability label="Task capacity" value={overview.project.taskConcurrencyLimit} detail="concurrent sandboxes" />
       </section>
@@ -75,7 +73,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
         <div>
           <p className="type-caption text-tertiary">{primaryStep ? "Recommended next" : readOnly ? "Read-only access" : "Ready"}</p>
           <h2 className="type-section-heading mt-2 max-w-2xl">{primaryStep ? primaryStep.label : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Workspace archived" : "Workspace deletion in progress" : readOnly ? "Explore this project" : noUsableEndpoint ? "Connect a model to begin" : "Continue your work"}</h2>
-          <p className="type-body-ui mt-2 max-w-2xl text-secondary">{primaryStep ? primaryStep.description : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Restore the workspace before changing this project or starting new work." : "Workspace deletion must finish before this project is no longer available." : readOnly ? "You can inspect the project areas available to your role." : noUsableEndpoint ? "A project administrator needs to configure a healthy OpenAI-compatible endpoint." : "Chat with a model or start a sandbox task from the project navigation."}</p>
+          <p className="type-body-ui mt-2 max-w-2xl text-secondary">{primaryStep ? primaryStep.description : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Restore the workspace before changing this project or starting new work." : "Workspace deletion must finish before this project is no longer available." : readOnly ? "You can inspect the project areas available to your role." : noUsableEndpoint ? "A project administrator needs to configure a healthy OpenAI-compatible endpoint." : "Create or continue an agent task from the project navigation."}</p>
           {primaryStep ? <Link href={`${base}/${primaryStep.href}`} className="mt-5 inline-flex min-h-9 items-center gap-2 rounded-sm bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90"><primaryStep.icon size={16} />{primaryStep.label}<ArrowRight size={15} /></Link> : null}
         </div>
         <aside className="border-t border-subtle pt-5 xl:border-l xl:border-t-0 xl:pl-8 xl:pt-0">

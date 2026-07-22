@@ -4,7 +4,7 @@
 
 ## 产品边界
 
-AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、多个 Project-scoped File Library、task、artifact 和 chat。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
+AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、多个 Project-scoped File Library、task 和 artifact。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
 
 - Keycloak/OIDC 是唯一生产身份路径。服务端建立 session，并持久化本地 OIDC identity、English-only local profile、workspace/project 归属和 membership；不发放或接受 personal API key。
 - Web 保留原项目的 Next App Router、页面组织、样式体系和可复用 UI 组件；Next 不是 Lite 要删除的依赖。最终 Web 运行时只替换被明确排除的旧后端、BFF、mock 和业务实现，不重做用户可见的产品结构。
@@ -27,7 +27,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 - 保留 Next App Router、布局、路由和组件组织。运行时迁移只能在保持同等用户可见结构的前提下进行；当前任何 Vite/独立 SPA 实现均是过渡实现，不是最终架构基线。
 - 每个功能阶段同时交付服务端 API 和对应原页面的恢复范围。只有 API 而没有可到达的原工作台页面，不算该功能完成。
 - 删除的体验必须有明确的 Lite 产品理由：LLMUP、Codex runner、独立 Agent Runners 管理 UI、JVS/WebDAV/挂载、文件 savepoint/template/version/restore、全局 operator 控制面、治理 explainability、治理历史、report/gate 页面与流程。其余核心工作台体验默认保留。
-- 由于 Keycloak/OIDC-only identity 和唯一 OpenAI Chat Completions broker，明确不迁移 personal API keys，也不迁移旧 `use-guide` 的 personal-key、Anthropic、universal proxy 或 protocol-conversion 路径。
+- 由于 Keycloak/OIDC-only identity 和唯一 OpenAI-compatible completions broker，明确不迁移 personal API keys，也不迁移旧 `use-guide` 的 personal-key、Anthropic、universal proxy 或 protocol-conversion 路径。
 - 视觉恢复先完成共同基础，再迁业务页面：直接复用原字体资产、light/dark 主题令牌、全局排版、图标、按钮/输入/对话框/表格等基础组件，以及 topbar、workspace/project switcher、分组 sidebar、折叠和响应式行为。不得用一份 Lite 专用 CSS 对原设计做近似仿制。
 - `AgentSmith` 是 Lite 的产品名称；可保留原工作台的结构和视觉语言，但不继承原仓库内部的 MBOS 名称、已删除产品入口或与 Lite 无关的品牌文案。
 
@@ -42,7 +42,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 ### Web 完成标准
 
-以下工作台路径必须在原 Next 页面结构中可达，并使用最终 API：user profile；workspace/project shell、workspace settings、workspace/shared/personal context；project overview/settings、成员、credentials、endpoints、files、task list/create/detail、task summary、artifacts/preview、project chat、resource policy、usage、alerts/alert rules 和 light audit。它们应保留原页面的导航关系、详情层级、列表密度、加载/空/错误状态及关键编辑交互；不要求保留被明确排除的能力。
+以下工作台路径必须在原 Next 页面结构中可达，并使用最终 API：user profile；workspace/project shell、workspace settings、workspace/shared/personal context；project overview/settings、成员、credentials、endpoints、files、task list/create/detail、task summary、artifacts/preview、resource policy、usage、alerts/alert rules 和 light audit。它们应保留原页面的导航关系、详情层级、列表密度、加载/空/错误状态及关键编辑交互；不要求保留被明确排除的能力。
 
 共同视觉基础和每个保留页面都必须同时满足：
 
@@ -69,18 +69,18 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 **定向验证：** 在本地单节点 K8s 以 OIDC 用户完成登录、profile 读写、创建/修改 workspace/project、owner transfer、按角色访问或拒绝访问 context/settings、退出；确认 Next 工作台与 API 同源运行，并人工查看 shell 和共同组件的 desktop light/dark 与窄屏状态是否符合原工作台。
 
-### 阶段 2：Endpoint 与直接 Chat Completions Broker
+### 阶段 2：Endpoint 与 Task Completions Broker
 
 **交付：**
 
-- project-scoped endpoint CRUD、服务端凭据绑定，以及唯一的 OpenAI Chat Completions broker。应用保存 provider credentials；浏览器通过项目授权 API 路由调用，服务端完成 membership/task 授权后直接请求 provider 的 `/v1/chat/completions`。
+- project-scoped endpoint CRUD、服务端凭据绑定，以及唯一的 Task-internal OpenAI-compatible completions broker。应用保存 provider credentials；AgentSmith 服务端在授权 Task Run 中代表 Botified 请求 provider 的 `/v1/chat/completions`。
 - 恢复 project credential lifecycle：authorized user 可 list、create、rotate、delete 项目 provider credential，并由 endpoint 以 credential identifier 绑定；删除被 endpoint 使用的 credential 必须由服务端拒绝或要求先解除绑定。
 - Botified 仅获得 task-scoped credential，用于其被授权 task 的产品 API 调用；绝不获得 provider key。浏览器、Botified 和项目 API 响应均不暴露 provider key。
-- 不实现 adapter、fallback、legacy model path 或第二套 broker；chat 与 task 共用同一授权、broker 和资源策略路径。
+- 不实现 adapter、fallback、legacy model path 或第二套 broker；Task 是唯一的授权、broker 和资源策略路径。
 - Endpoint UI 按 `.reference/agentsmith/src/components/endpoints/` 的实际依赖顺序迁移：先复制 `endpoints-page-utils.tsx`、`EndpointStatusBadge.tsx`、`create-endpoint-dialog/EndpointBasicsForm.tsx`、`EndpointDialogFooter.tsx`；再适配 `CreateEndpointDialog.tsx`、`edit-endpoint-dialog/EditEndpointForm.tsx`、`EditEndpointDialog.tsx`；随后适配 `EndpointsToolbar.tsx`、`EndpointsHeaderActions.tsx`、`EndpointsContent.tsx`、`EndpointsDialogs.tsx`；最后接入原 Next 页面路由。所有数据和 mutation 直连 `/api/v1`。
 - 不迁移 `CustomEndpointWizard`、旧 BFF、mock 数据层、批量 import/export、catalog sync 或 agent-task model setting。保留 Next 和原样式/组件体系。
 
-**定向验证：** 在本地单节点 K8s 用 authorized project user 创建/轮换 provider credential、绑定 endpoint，并使用管理员本地环境提供的真实 DeepSeek OpenAI-compatible 配置完成一次浏览器 chat；用 task-scoped Botified credential 完成同一 endpoint 的真实 task 调用；确认未授权请求、credential 明文和 provider-key 暴露均被拒绝。mock/fake provider 只用于窄单元测试，不能代替该真实后端确认。
+**定向验证：** 在本地单节点 K8s 用 authorized project user 创建/轮换 provider credential、绑定 endpoint，并使用管理员本地环境提供的真实 DeepSeek OpenAI-compatible 配置完成一次 Task 调用；确认未授权请求、credential 明文和 provider-key 暴露均被拒绝。mock/fake provider 只用于窄单元测试，不能代替该真实后端确认。
 
 ### 阶段 3：File Library、持久 Task 与 Sandbox Run
 
@@ -93,7 +93,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 **定向验证：** 在本地单节点 K8s 创建两个 Library，分别绑定 Task 并验证文件和上下文隔离；在同一 Task 完成多轮对话，主动 release 正在工作的 Sandbox，确认只终止该 Run，并在下一次消息中恢复同一 session、Library 和已落盘文件。
 
-### 阶段 4：Task Detail 与 Chat
+### 阶段 4：Task Detail
 
 **交付：**
 
@@ -102,9 +102,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
   为准：Botified NDJSON 只存在于服务端 transport；AgentSmith Server 生成唯一 typed Interaction
   read model、message disposition、run state 和 capabilities；Web 不解析 timeline、不合并 lifecycle、
   不推断 action。Conversation 提供服务端持久化的 typed conversation history，但不公开 Botified raw transcript、NDJSON、transport events，也不提供独立 follow-up UI、Codex parser、adapter 或双 contract。
-- 从原项目 chat 页面恢复 thread create、rename、delete、search、message stream、stop、Markdown render 和 composer 体验，继续调用阶段 2 的直接 Chat Completions broker；不引入浏览器直连 provider、Anthropic/universal proxy 或额外模型路径。
-
-**定向验证：** 在本地单节点 K8s 查看运行任务的 Conversation updates、artifacts、summary 和 preview，下载授权 artifact，并完成 thread rename/delete/search、stream/stop 和 Markdown chat；viewer/member 权限按 API 返回的边界生效。
+**定向验证：** 在本地单节点 K8s 查看运行任务的 Conversation updates、artifacts、summary 和 preview，下载授权 artifact，并完成同一 Task 中的消息流、停止与 Markdown 呈现；viewer/member 权限按 API 返回的边界生效。
 
 ### 阶段 5：Policy、Usage、Alerts 与 Light Audit
 
@@ -121,4 +119,4 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 禁止默认 gate、evidence/report/rehearsal 产物、宽泛测试包装和云验收。也不实现 LLMUP、Codex runner core、JVS、WebDAV、AFSCP、ASBCP、本地或远程文件挂载、operator/全局控制面、全局资源 CLI，或浏览器直连 Kubernetes、数据库、Botified、provider。Next、原工作台信息架构和原 UI 组件体系不属于排除范围。
 
-最终完成判断只看本地单节点 K8s 中的真实产品行为：OIDC 登录、保留页面、真实 DeepSeek chat/task、多 File Library 和独占 Task 绑定、JuiceFS 文件和 artifact、显式 Sandbox release/恢复、Sandbox usage、成员授权、policy/alerts/audit。开发中发现缺陷立即在实现处修正；不为完成判断生成测试报告、证据目录、诊断文档或额外验收框架。
+最终完成判断只看本地单节点 K8s 中的真实产品行为：OIDC 登录、保留页面、真实 DeepSeek Task、多 File Library 和独占 Task 绑定、JuiceFS 文件和 artifact、显式 Sandbox release/恢复、Sandbox usage、成员授权、policy/alerts/audit。开发中发现缺陷立即在实现处修正；不为完成判断生成测试报告、证据目录、诊断文档或额外验收框架。

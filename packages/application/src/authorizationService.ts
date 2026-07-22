@@ -71,8 +71,7 @@ export class AuthorizationService {
         canManageMembers: false,
         canManagePolicy: false,
         canWriteFiles: false,
-        canCreateTasks: false,
-        canSendChat: false
+        canCreateTasks: false
       };
     }
     return {
@@ -80,8 +79,7 @@ export class AuthorizationService {
       canManageMembers: access.canAdmin,
       canManagePolicy: access.canAdmin,
       canWriteFiles: access.canWrite,
-      canCreateTasks: access.canWrite,
-      canSendChat: access.canWrite
+      canCreateTasks: access.canWrite
     };
   }
 

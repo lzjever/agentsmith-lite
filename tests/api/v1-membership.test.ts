@@ -156,7 +156,7 @@ describe("v1 project membership API", () => {
     const capabilities = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/capabilities`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });
-    assert.deepEqual(await capabilities.json(), { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false, canSendChat: false });
+    assert.deepEqual(await capabilities.json(), { canManageEndpoints: false, canManageMembers: false, canManagePolicy: false, canWriteFiles: false, canCreateTasks: false });
     const fileList = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${fileLibraryId}/files`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });

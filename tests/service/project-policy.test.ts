@@ -121,34 +121,6 @@ describe("project resource policy", () => {
     assert.equal(current.activeTasks, 1);
   });
 
-  it("atomically reserves provider requests and records token/cost overage alerts after the response", async () => {
-    let calls = 0;
-    const services = createApplicationServices({
-      store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy", builtinAdminPassword: "admin-password",
-      providerClient: {
-        async validateEndpoint() { return { status: "healthy" as const }; },
-        async completeChat(endpoint: ModelEndpoint): Promise<ChatResponse> { calls++; return { message: { role: "assistant", content: "ok" }, endpointSnapshot: endpoint, usage: { tokens: 4097, cost: 2 } }; }
-      } satisfies OpenAICompatibleClient,
-    });
-    const { user } = await services.auth.loginAfterBootstrap("admin-password");
-    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    const credential = await services.credentials.create(user.id, project.id, { name: "E credential", baseUrl: "https://models.example.test/v1", secret: "sk-policy-test" });
-    const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "E", protocol: "openai_chat_completions", baseUrl: "https://models.example.test/v1", model: "m", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
-    await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 2, providerTokensLimit: 4096, providerCostLimit: 1 });
-    const results = await Promise.allSettled([
-      sendThreadMessage(services, user.id, project.id, endpoint.id, "hi"),
-      sendThreadMessage(services, user.id, project.id, endpoint.id, "again")
-    ]);
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.deepEqual({ requests: current.providerRequests, tokens: current.providerTokens, cost: current.providerCost }, { requests: 2, tokens: 4097, cost: 2 });
-    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
-    assert.equal(calls, 1);
-    assert.deepEqual((await services.policies.alerts(user.id, project.id)).map((alert) => alert.type).sort(), ["provider_cost_limit", "provider_requests_limit", "provider_tokens_limit"]);
-    const providerAudit=(await services.policies.audit(user.id,project.id)).filter(event=>event.action==="provider.request");assert.equal(providerAudit.filter(event=>event.status==="rejected").length,1);assert.ok(providerAudit.filter(event=>event.status==="accepted").length>=1);
-  });
-
   it("expires stale provider reservations with conservative request accounting", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-provider-expiry", builtinAdminPassword: "admin-password" });
@@ -457,11 +429,6 @@ describe("project resource policy", () => {
     assert.equal(page.nextCursor, null);
   });
 });
-
-async function sendThreadMessage(services: ReturnType<typeof createApplicationServices>, userId: string, projectId: string, endpointId: string, content: string) {
-  const thread = await services.chat.createThread(userId, projectId, endpointId);
-  return services.chat.sendMessage(userId, projectId, thread.id, content);
-}
 
 function endpointRecord(projectId: string): ModelEndpoint {
   const timestamp = new Date().toISOString();

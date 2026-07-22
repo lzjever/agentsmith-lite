@@ -63,13 +63,6 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     assert.doesNotMatch(JSON.stringify(unavailable), /never-return-this|ciphertext|authTag|nonce|keyId/);
     const listedUnavailable = await getJson(api.baseUrl, `/api/v1/projects/${project.id}/endpoints`, cookie);
     assert.equal(listedUnavailable[0]?.taskEligible, false);
-    const blockedThread = await fetch(api.baseUrl + `/api/v1/projects/${project.id}/chat/threads`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": "blocked-thread-create" },
-      body: JSON.stringify({ endpointId: endpoint.id })
-    });
-    assert.equal(blockedThread.status, 409);
-
     available = true;
     const recovered = await json(api.baseUrl, `/api/v1/projects/${project.id}/endpoints/${endpoint.id}/health`, undefined, cookie, csrfToken);
     assert.equal(recovered.health.status, "healthy");

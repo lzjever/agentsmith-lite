@@ -12,7 +12,7 @@ let workspaceMode = "normal";
 let policyMode = "readonly";
 let alertsMode = "empty";
 let signedOut = false;
-let capabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true, canSendChat: true };
+let capabilities = { canManageEndpoints: true, canManageMembers: true, canManagePolicy: false, canWriteFiles: true, canCreateTasks: true };
 const server = spawn(process.execPath, ["./node_modules/next/dist/bin/next", "dev", "--port", String(port)], { cwd: process.cwd(), env: { ...process.env, APP_PUBLIC_BASE_URL: baseUrl }, stdio: ["ignore", "pipe", "pipe"], detached: true });
 let output = "";
 server.stdout.on("data", (chunk) => { output += chunk; });
@@ -40,7 +40,7 @@ try {
     if (pathname.endsWith("/alerts")) { if (alertsMode === "error") return route.fulfill({ status: 500, body: "alerts unavailable" }); return route.fulfill({ json: [] }); }
     if (pathname.endsWith("/audit")) return route.fulfill({ json: [] });
     if (pathname.endsWith("/usage")) return route.fulfill({ json: { projectId: project.id, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: project.updatedAt } });
-    if (pathname.endsWith("/endpoints") || pathname.endsWith("/tasks") || pathname.endsWith("/chat/threads") || pathname.endsWith("/members")) return route.fulfill({ json: [] });
+    if (pathname.endsWith("/endpoints") || pathname.endsWith("/tasks") || pathname.endsWith("/members")) return route.fulfill({ json: [] });
     return route.fulfill({ json: {} });
   });
 
@@ -87,8 +87,8 @@ try {
   await page.getByText("No audit events").waitFor();
 
   await page.getByRole("button", { name: "Open navigation" }).click();
-  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Chat" }).click();
-  await page.waitForURL(/\/chat$/);
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Tasks" }).click();
+  await page.waitForURL(/\/tasks$/);
   await page.getByRole("button", { name: "Open account menu" }).click();
   await page.getByText("Sign out").click();
   await page.waitForURL(`${baseUrl}/`);

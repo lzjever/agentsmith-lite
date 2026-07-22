@@ -78,7 +78,7 @@ export function EndpointDialog({
         <form onSubmit={onSubmit}>
           <DialogHeader
             title={editing ? "Edit endpoint" : "Create endpoint"}
-            description="Configure an OpenAI-compatible Chat Completions connection."
+            description="Configure an OpenAI-compatible model connection."
           />
           {error ? (
             <div

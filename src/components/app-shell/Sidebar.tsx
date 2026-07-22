@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Bell, ClipboardList, FileKey, FileText, FolderKanban, Gauge, LayoutDashboard, MessageSquare, NotebookTabs, Server, Settings, SlidersHorizontal, Users, Wrench } from "lucide-react";
+import { Bell, ClipboardList, FileKey, FileText, FolderKanban, Gauge, LayoutDashboard, NotebookTabs, Server, Settings, SlidersHorizontal, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { cn } from "../ui/cn";
 import { Tooltip, TooltipContent } from "../ui/tooltip";
@@ -31,7 +31,7 @@ function projectGroups(workspace: Workspace, project: Project): Array<{ label: s
   const item = (label: string, segment: string, icon: LucideIcon): NavItem => ({ label, href: `${base}/${segment}`, icon, active: (pathname) => pathname === `${base}/${segment}` || pathname.startsWith(`${base}/${segment}/`) });
   return [
     { label: "Home", items: [item("Overview", "overview", LayoutDashboard)] },
-    { label: "Use", items: [item("Chat", "chat", MessageSquare), item("Tasks", "tasks", Wrench), item("Files", "files", FileText), item("Context", "context", NotebookTabs), item("Usage", "usage", Gauge)] },
+    { label: "Use", items: [item("Tasks", "tasks", Wrench), item("Files", "files", FileText), item("Context", "context", NotebookTabs), item("Usage", "usage", Gauge)] },
     { label: "Develop", items: [item("Endpoints", "endpoints", Server), item("Credentials", "credentials", FileKey)] },
     { label: "Manage", items: [item("Members", "members", Users), item("Resource policy", "policy", SlidersHorizontal), item("Alerts", "alerts", Bell), item("Audit", "audit", ClipboardList), item("Settings", "settings", Settings)] }
   ];

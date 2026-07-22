@@ -338,8 +338,6 @@ const auditActionLabels: Record<(typeof PROJECT_AUDIT_ACTIONS)[number], string> 
   "endpoint.create": "Created endpoint", "endpoint.update": "Updated endpoint", "endpoint.delete": "Deleted endpoint", "endpoint.health_check": "Checked endpoint health", "endpoint.model_discover": "Discovered endpoint models",
   "membership.add": "Added project member", "membership.change": "Changed project member", "membership.remove": "Removed project member",
   "provider.request": "Called model provider",
-  "chat.thread.create": "Created conversation", "chat.thread.update": "Updated conversation", "chat.thread.delete": "Deleted conversation",
-  "chat.message.send": "Sent chat message", "chat.message.retry": "Retried chat message", "chat.message.stop": "Stopped chat message", "chat.message.edit": "Edited chat message", "chat.message.delete": "Deleted chat message", "chat.message.branch": "Branched conversation",
   "task.create": "Created task", "task.edit": "Edited task", "task.archive": "Archived task", "task.delete": "Deleted task",
   "task.message.create": "Sent task message", "task.message.edit": "Edited task message", "task.message.delete": "Deleted task message", "task.cancel": "Cancelled task", "task.completed": "Task completed", "task.failed": "Task failed", "task.expired": "Task expired", "task.cleaned": "Cleaned task resources",
   "artifact.project": "Projected task artifact", "sandbox.started": "Started sandbox", "sandbox.failed": "Sandbox failed", "sandbox.release_requested": "Requested sandbox release", "sandbox.released": "Released sandbox",
@@ -348,7 +346,7 @@ const auditActionLabels: Record<(typeof PROJECT_AUDIT_ACTIONS)[number], string> 
 };
 
 const auditResourceLabels: Record<(typeof PROJECT_AUDIT_RESOURCE_KINDS)[number], string> = {
-  project: "Project", credential: "Credential", endpoint: "Endpoint", member: "Project member", chat_thread: "Conversation", chat_message: "Chat message", task: "Task", artifact: "Task artifact", provider: "Model provider", file: "File", file_quota: "File quota", sandbox: "Sandbox", alert: "Alert"
+  project: "Project", credential: "Credential", endpoint: "Endpoint", member: "Project member", task: "Task", artifact: "Task artifact", provider: "Model provider", file: "File", file_quota: "File quota", sandbox: "Sandbox", alert: "Alert"
 };
 
 export function AuditPage({ projectId }: { projectId: string }) {
