@@ -39,8 +39,8 @@ Object.defineProperty(dom.window, "matchMedia", {
 const React = await import("react");
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createColumnHelper, getCoreRowModel, useReactTable } = await import("@tanstack/react-table");
-const { Button, Checkbox, ConfirmationDialog, DataTable, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tabs, TabsContent, TabsList, TabsTrigger, ToastContainer, toast } = await import("../../src/components/ui/index.js");
-const { Badge, EmptyState, Skeleton, Spinner } = await import("@astryxdesign/core");
+const { Checkbox, ConfirmationDialog, DataTable, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tabs, TabsContent, TabsList, TabsTrigger, ToastContainer, toast } = await import("../../src/components/ui/index.js");
+const { Badge, Button, EmptyState, Skeleton, Spinner } = await import("@astryxdesign/core");
 const { AppProviders } = await import("../../src/app/providers.js");
 const { PageState } = await import("../../src/components/layout/PageState.js");
 const { PageHeader } = await import("../../src/components/layout/PageHeader.js");
@@ -48,6 +48,7 @@ const { ProjectModuleHeader } = await import("../../src/components/layout/Projec
 const { ErrorCard } = await import("../../src/components/ui/error-state.js");
 const { default: TaskDetailLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/loading.js");
 const { default: TaskArtifactsLoading } = await import("../../src/app/workspaces/[workspace]/projects/[project]/tasks/[taskId]/artifacts/loading.js");
+const { default: WorkspaceError } = await import("../../src/app/workspaces/[workspace]/error.js");
 
 test.afterEach(() => cleanup());
 
@@ -109,10 +110,17 @@ test("error cards persist until a user explicitly dismisses them", () => {
   }
 });
 
-test("shared controls preserve hierarchy and accessible binary state", () => {
-  render(<><Button>Default</Button><Button variant="primary">Primary</Button><Label htmlFor="checked"><Checkbox id="checked" defaultChecked />Checked</Label></>);
-  assert.match(screen.getByRole("button", { name: "Default" }).className, /bg-surface/);
-  assert.match(screen.getByRole("button", { name: "Primary" }).className, /bg-accent/);
+test("route error recovery keeps a named action wired to Next reset", () => {
+  let resets = 0;
+  render(<AppProviders><WorkspaceError error={new Error("offline")} reset={() => { resets += 1; }} /></AppProviders>);
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  assert.equal(resets, 1);
+});
+
+test("shared controls preserve Astryx action semantics and accessible binary state", () => {
+  render(<AppProviders><Button label="Default" variant="secondary" /><Button label="Primary" variant="primary" /><Label htmlFor="checked"><Checkbox id="checked" defaultChecked />Checked</Label></AppProviders>);
+  assert.equal(screen.getByRole("button", { name: "Default" }).getAttribute("data-variant"), "secondary");
+  assert.equal(screen.getByRole("button", { name: "Primary" }).getAttribute("data-variant"), "primary");
   assert.equal(screen.getByRole("checkbox", { name: "Checked" }).getAttribute("checked") !== null, true);
 });
 

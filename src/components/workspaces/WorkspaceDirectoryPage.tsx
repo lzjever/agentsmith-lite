@@ -2,14 +2,13 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
-import { Badge, EmptyState, Spinner } from "@astryxdesign/core";
+import { Badge, Button, EmptyState, Spinner } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, apiClient, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
@@ -37,7 +36,7 @@ export function WorkspaceDirectoryPage() {
 
   useEffect(() => { void load(); }, []);
 
-  return <PageLayout header={<PageHeader title="Workspaces" subtitle="Choose a workspace to continue into its projects." actions={<Button disabled={state !== "ready"} onClick={() => setCreateOpen(true)}><Plus size={16} />New workspace</Button>} />}>
+  return <PageLayout header={<PageHeader title="Workspaces" subtitle="Choose a workspace to continue into its projects." actions={<Button label="New workspace" variant="primary" icon={<Plus size={16} />} isDisabled={state !== "ready"} onClick={() => setCreateOpen(true)} />} />}>
     {state === "loading" ? <PageState state="loading"><Spinner label="Loading workspaces..." /></PageState> : null}
     {state === "error" ? <WorkspaceError message={error} onRetry={load} /> : null}
     {state === "ready" && workspaces.length === 0 ? <WorkspaceEmpty onCreate={() => setCreateOpen(true)} /> : null}
@@ -57,7 +56,7 @@ function WorkspaceLifecycleBadge({ workspace }: { workspace: Workspace }) {
 }
 
 function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
-  return <PageState state="empty"><EmptyState icon={<FolderKanban />} title="No workspaces yet" description="Create a workspace to organize projects, endpoints, files, and tasks." actions={<Button onClick={onCreate}>New workspace</Button>} /></PageState>;
+  return <PageState state="empty"><EmptyState icon={<FolderKanban />} title="No workspaces yet" description="Create a workspace to organize projects, endpoints, files, and tasks." actions={<Button label="New workspace" variant="primary" onClick={onCreate} />} /></PageState>;
 }
 
 function WorkspaceError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -80,7 +79,7 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextName = name.trim();
-    if (!nextName) return;
+    if (saving || !nextName) return;
     const requestIdentity = nextName;
     setSaving(true);
     setError("");
@@ -97,7 +96,7 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
       setSaving(false);
     }
   }
-  return <Dialog open={open} onOpenChange={(next) => { if (!saving && !next) { mutationKeys.clear("workspace.create"); onClose(); } }}><DialogContent><form onSubmit={submit}><DialogHeader><p className="type-caption text-tertiary">Workspace</p><DialogTitle className="type-title mt-2 block">New workspace</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Create a home for one or more projects.</DialogDescription></DialogHeader><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><DialogClose asChild><Button variant="quiet" disabled={saving}>Cancel</Button></DialogClose><Button type="submit" disabled={saving || name.trim().length === 0}>{saving ? "Creating..." : "Create workspace"}</Button></footer></form></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={(next) => { if (!saving && !next) { mutationKeys.clear("workspace.create"); onClose(); } }}><DialogContent><form onSubmit={submit}><DialogHeader><p className="type-caption text-tertiary">Workspace</p><DialogTitle className="type-title mt-2 block">New workspace</DialogTitle><DialogDescription className="mt-1 text-sm text-secondary">Create a home for one or more projects.</DialogDescription></DialogHeader><div className="px-6 py-5"><label className="grid gap-2 text-sm text-primary">Name<Input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} disabled={saving} /></label>{error ? <p className="mt-3 text-sm text-error" role="alert">{error}</p> : null}</div><footer className="flex justify-end gap-2 border-t border-subtle px-6 py-4"><DialogClose asChild><Button label="Cancel" variant="ghost" isDisabled={saving} /></DialogClose><Button type="submit" label="Create workspace" variant="primary" isDisabled={name.trim().length === 0} isLoading={saving} /></footer></form></DialogContent></Dialog>;
 }
 
 function errorMessage(reason: unknown, fallback: string): string {

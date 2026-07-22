@@ -95,6 +95,22 @@ describe("workspace identity UX", () => {
     } finally { apiClient.workspaces = original; }
   });
 
+  it("keeps workspace creation visibly pending until the server confirms it", async () => {
+    const original = { workspaces: apiClient.workspaces, createWorkspace: apiClient.createWorkspace };
+    let finishCreate!: (workspace: Workspace) => void;
+    apiClient.workspaces = async () => [];
+    apiClient.createWorkspace = async () => new Promise((resolve) => { finishCreate = resolve; });
+    try {
+      render(<WorkspaceDirectoryPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "New workspace" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Workspace" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+      await waitFor(() => assert.equal(screen.getByRole("button", { name: "Create workspace" }).getAttribute("aria-busy"), "true"));
+      await act(async () => finishCreate(workspace));
+      await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "New workspace" }), null));
+    } finally { Object.assign(apiClient, original); }
+  });
+
   it("ignores a late project directory load after switching workspaces", async () => {
     const original = apiClient.workspaces;
     const secondProject = { id: "project_2", workspaceId: "workspace_2", name: "Second project", taskConcurrencyLimit: 2, createdAt: timestamp, updatedAt: timestamp };
@@ -523,9 +539,11 @@ function router(pushed: string[] = []) { return { back() {}, forward() {}, refre
 
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, HTMLFormElement: dom.window.HTMLFormElement, HTMLButtonElement: dom.window.HTMLButtonElement, HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Document: dom.window.Document, DocumentFragment: dom.window.DocumentFragment, Node: dom.window.Node, NodeFilter: dom.window.NodeFilter, Event: dom.window.Event, CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver, FormData: dom.window.FormData, getComputedStyle: dom.window.getComputedStyle, requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0), cancelAnimationFrame: (id: number) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
-  Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent });
+  const requestAnimationFrame = (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0);
+  Object.assign(globalThis, { requestAnimationFrame, cancelAnimationFrame: (id: number) => clearTimeout(id) });
+  Object.assign(dom.window, { PointerEvent: dom.window.MouseEvent, requestAnimationFrame, cancelAnimationFrame: (id: number) => clearTimeout(id), matchMedia: () => ({ matches: false, media: "", onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } }) });
   Object.assign(dom.window.HTMLElement.prototype, { hasPointerCapture() { return false; }, setPointerCapture() {}, releasePointerCapture() {}, scrollIntoView() {} });
   if (!("ResizeObserver" in globalThis)) Object.assign(globalThis, { ResizeObserver: class { observe() {} unobserve() {} disconnect() {} } });
 }
