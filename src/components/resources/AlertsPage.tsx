@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Button, Spinner } from "@astryxdesign/core";
+import { Badge, Button, Selector, Spinner } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -29,13 +29,6 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -453,22 +446,22 @@ function AlertInstances({
   }, [alerts, selectedAlertId]);
   return (
     <section className="mt-4 space-y-3">
-      <Select
+      <Selector
+        label="Alert status"
+        isLabelHidden
+        options={[
+          { value: "all", label: "All statuses" },
+          { value: "active", label: "Active" },
+          { value: "resolved", label: "Resolved" },
+          { value: "dismissed", label: "Dismissed" },
+        ]}
         value={status}
-        onValueChange={(value) =>
+        onChange={(value) =>
           onStatusChange(value as "all" | ProjectAlert["status"])
         }
-      >
-        <SelectTrigger className="w-48" aria-label="Alert status">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All statuses</SelectItem>
-          <SelectItem value="active">Active</SelectItem>
-          <SelectItem value="resolved">Resolved</SelectItem>
-          <SelectItem value="dismissed">Dismissed</SelectItem>
-        </SelectContent>
-      </Select>
+        size="lg"
+        className="w-48"
+      />
       {alerts.length === 0 ? (
         <PageState state="empty">
           {status === "all" ? (
