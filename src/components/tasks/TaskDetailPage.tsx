@@ -10,7 +10,6 @@ import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
-import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
 import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
@@ -212,7 +211,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     {taskRefreshError}
     {archivedNotice}
     {sandboxNotice}
-    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><WorkspaceTab active={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</WorkspaceTab><WorkspaceTab active={mode === "terminal"} disabled={sandboxState.state === "release_requested" || (!terminalAvailable && !terminalStarted)} onClick={() => { setTerminalStarted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</WorkspaceTab>{showArtifacts ? <WorkspaceTab active={mode === "artifacts"} onClick={() => setMode("artifacts")} className="xl:hidden">Artifacts</WorkspaceTab> : null}</div>
+    <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border pb-3" role="tablist" aria-label="Task workspace views"><AstryxButton label="Conversation" variant={mode === "conversation" ? "secondary" : "ghost"} size="md" role="tab" aria-selected={mode === "conversation"} onClick={() => setMode("conversation")}>Conversation</AstryxButton><AstryxButton label="Terminal" variant={mode === "terminal" ? "secondary" : "ghost"} size="md" role="tab" aria-selected={mode === "terminal"} isDisabled={sandboxState.state === "release_requested" || (!terminalAvailable && !terminalStarted)} onClick={() => { setTerminalStarted(true); setMode("terminal"); }}><TerminalSquare size={14} />Terminal</AstryxButton>{showArtifacts ? <AstryxButton label="Artifacts" variant={mode === "artifacts" ? "secondary" : "ghost"} size="md" className="xl:hidden" role="tab" aria-selected={mode === "artifacts"} onClick={() => setMode("artifacts")}>Artifacts</AstryxButton> : null}</div>
     <div className="grid h-[clamp(24rem,calc(100dvh-20rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden md:h-[clamp(24rem,calc(100dvh-12rem),48rem)] xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
       <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} currentTurn={currentTurn} sandboxState={sandboxState} capabilities={capabilities} onProjectionChange={handleProjectionChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
       {terminalStarted && sandboxState.state !== "release_requested" ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
@@ -244,10 +243,6 @@ function TaskDetailValue({ label, children }: { label: string; children: ReactNo
 
 function SectionError({ title, message: detail, onRetry }: { title: string; message: string; onRetry: () => Promise<void> }) {
   return <div className="border border-error/30 bg-error/10 px-3 py-3 text-sm" role="alert"><p className="font-medium text-foreground">{title}</p><p className="mt-1 break-words text-secondary">{detail}</p><AstryxButton label="Try again" className="mt-3" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={() => void onRetry()} /></div>;
-}
-
-function WorkspaceTab({ active, onClick, children, className, disabled = false }: { active: boolean; onClick: () => void; children: ReactNode; className?: string; disabled?: boolean }) {
-  return <Button variant={active ? "default" : "quiet"} size="sm" className={className} role="tab" aria-selected={active} disabled={disabled} onClick={onClick}>{children}</Button>;
 }
 
 function message(reason: unknown): string {
