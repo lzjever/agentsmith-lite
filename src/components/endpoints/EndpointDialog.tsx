@@ -3,6 +3,7 @@
 import { RefreshCw, Save, X } from "lucide-react";
 import type { FormEvent } from "react";
 import {
+  Banner,
   Button,
   CheckboxInput,
   Dialog,
@@ -94,20 +95,22 @@ export function EndpointDialog({
           content={
             <LayoutContent>
               {error ? (
-                <div
-                  className="mb-4 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
-                  role="alert"
-                >
-                  <span>{error}</span>
-                  <IconButton
-                    type="button"
-                    variant="ghost"
-                    size="lg"
-                    label="Dismiss endpoint error"
-                    icon={<X size={15} />}
-                    onClick={onDismissError}
-                  />
-                </div>
+                <Banner
+                  className="mb-4"
+                  status="error"
+                  title="Endpoint could not be saved"
+                  description={error}
+                  endContent={
+                    <IconButton
+                      type="button"
+                      variant="ghost"
+                      size="lg"
+                      label="Dismiss endpoint error"
+                      icon={<X size={15} />}
+                      onClick={onDismissError}
+                    />
+                  }
+                />
               ) : null}
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="grid gap-1">
