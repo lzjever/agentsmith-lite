@@ -1,10 +1,10 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Button } from "@astryxdesign/core/Button";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { Button } from "../ui/button";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { toast } from "../ui/toast";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
@@ -186,19 +186,19 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
   return <section className="mt-8 border-t border-subtle pt-6" aria-label="Alert rules">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="type-title">Alert rules</h2><p className="mt-1 text-sm text-secondary">Choose when project administrators should be notified.</p></div>
-      {canManage ? <Button disabled={busyRuleId !== null} onClick={openCreate}><Plus size={16} />Add rule</Button> : <span className="text-sm text-secondary">Read-only</span>}
+      {canManage ? <Button label="Add rule" variant="secondary" icon={<Plus size={16} />} isDisabled={busyRuleId !== null} onClick={openCreate} /> : <span className="text-sm text-secondary">Read-only</span>}
     </div>
     {state === "loading" ? <p className="mt-4 text-sm text-secondary">Loading alert rules...</p> : null}
-    {state === "error" ? <div className="mt-4 flex items-center justify-between gap-3 border-y border-subtle py-3" role="alert"><span className="text-sm text-error">Alert rules could not be loaded.</span><Button variant="quiet" onClick={() => void load()}><RefreshCw size={15} />Retry</Button></div> : null}
+    {state === "error" ? <div className="mt-4 flex items-center justify-between gap-3 border-y border-subtle py-3" role="alert"><span className="text-sm text-error">Alert rules could not be loaded.</span><Button label="Retry" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void load()} /></div> : null}
     {state === "ready" && rules.length === 0 ? <p className="mt-4 text-sm text-secondary">No alert rules configured.</p> : null}
     {state === "ready" && rules.length > 0 ? <ul className="mt-4 divide-y divide-subtle border-y border-subtle">
       {rules.map((rule) => <li className="flex items-center justify-between gap-3 py-3" key={rule.id}>
         <span className="min-w-0 text-sm text-foreground"><strong className="block truncate font-medium">{rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</strong><small className="mt-1 block text-secondary">Threshold {rule.threshold ?? 1} · {rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · {scopeLabel(rule, endpoints)}</small></span>
         <div className="flex items-center gap-2">
-          {canManage ? <Button variant="quiet" disabled={busyRuleId !== null} onClick={() => void toggle(rule)}>{rule.enabled ? "Enabled" : "Disabled"}</Button> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Test alert rule" disabled={busyRuleId !== null} onClick={() => void test(rule)}><FlaskConical size={16} /></Button> : null}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Edit alert rule" disabled={busyRuleId !== null} onClick={() => openEdit(rule)}><Pencil size={16} /></Button> : null}
-          {canManage ? <Button variant="quiet" size="icon" aria-label="Delete alert rule" disabled={busyRuleId !== null} onClick={() => setRemoving(rule)}><Trash2 size={16} /></Button> : null}
+          {canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
+          {canManage ? <Button label="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
+          {canManage ? <Button label="Edit alert rule" variant="ghost" icon={<Pencil size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => openEdit(rule)} /> : null}
+          {canManage ? <Button label="Delete alert rule" variant="ghost" icon={<Trash2 size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => setRemoving(rule)} /> : null}
         </div>
       </li>)}
     </ul> : null}
