@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
-import { Badge, Button, IconButton } from "@astryxdesign/core";
+import { Badge, Button, IconButton, Selector } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -20,13 +20,6 @@ import { PageState } from "../layout/PageState";
 import { Dialog, DialogContent, DialogHeader } from "../ui/dialog";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { UsageView } from "./UsageView";
 import { auditResourceIdentity } from "./audit-resource-identity";
 import {
@@ -152,15 +145,18 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
     >
       {canSelectUser && currentUserId ? (
         <div className="flex justify-end border-y border-border py-3">
-          <label className="grid gap-1 text-xs text-secondary">
+          <div className="grid gap-1 text-xs text-secondary">
             Sandbox member
-            <Select value={selectedUserId ?? currentUserId} onValueChange={changeUser}>
-              <SelectTrigger aria-label="Sandbox usage member" className="h-9 w-64 max-w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {members.map((member) => <SelectItem key={member.userId} value={member.userId}>{memberLabel(member)}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </label>
+            <Selector
+              label="Sandbox usage member"
+              isLabelHidden
+              options={members.map((member) => ({ value: member.userId, label: memberLabel(member) }))}
+              value={selectedUserId ?? currentUserId}
+              onChange={changeUser}
+              size="lg"
+              className="w-64 max-w-full"
+            />
+          </div>
         </div>
       ) : null}
       {state === "loading" && !visibleUsage ? (
@@ -511,37 +507,39 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
         <div id="audit-filters" className={`${filtersOpen ? "grid" : "hidden"} gap-3 border-b border-subtle pb-4 sm:grid md:grid-cols-2 xl:grid-cols-5`}>
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Actor</span>
-            <Select value={actorId} onValueChange={(value) => {
-              const query = browserQuery();
-              if (value === "all") query.delete("actorId");
-              else query.set("actorId", value);
-              replaceBrowserQuery(query);
-              setActorId(value);
-              reset();
-            }}>
-              <SelectTrigger aria-label="Actor"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All actors</SelectItem>
-                {auditActors(members, items, actorId).map((actor) => <SelectItem value={actor.id} key={actor.id}>{actor.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Selector
+              label="Actor"
+              isLabelHidden
+              options={[{ value: "all", label: "All actors" }, ...auditActors(members, items, actorId).map((actor) => ({ value: actor.id, label: actor.label }))]}
+              value={actorId}
+              onChange={(value) => {
+                const query = browserQuery();
+                if (value === "all") query.delete("actorId");
+                else query.set("actorId", value);
+                replaceBrowserQuery(query);
+                setActorId(value);
+                reset();
+              }}
+              size="lg"
+            />
           </div>
           <div className="grid gap-1">
             <span className="text-xs text-secondary">Resource user</span>
-            <Select value={subjectUserId} onValueChange={(value) => {
-              const query = browserQuery();
-              if (value === "all") query.delete("subjectUserId");
-              else query.set("subjectUserId", value);
-              replaceBrowserQuery(query);
-              setSubjectUserId(value);
-              reset();
-            }}>
-              <SelectTrigger aria-label="Resource user"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All resource users</SelectItem>
-                {auditSubjects(members, items, subjectUserId).map((subject) => <SelectItem value={subject.id} key={subject.id}>{subject.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <Selector
+              label="Resource user"
+              isLabelHidden
+              options={[{ value: "all", label: "All resource users" }, ...auditSubjects(members, items, subjectUserId).map((subject) => ({ value: subject.id, label: subject.label }))]}
+              value={subjectUserId}
+              onChange={(value) => {
+                const query = browserQuery();
+                if (value === "all") query.delete("subjectUserId");
+                else query.set("subjectUserId", value);
+                replaceBrowserQuery(query);
+                setSubjectUserId(value);
+                reset();
+              }}
+              size="lg"
+            />
           </div>
           <Filter
             label="Action"
@@ -706,20 +704,17 @@ function Filter({
   return (
     <div className="grid gap-1">
       <span className="text-xs text-secondary">{label}</span>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger aria-label={label}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {values.map((item) => (
-            <SelectItem value={item} key={item}>
-              {item === "all"
-                ? `All ${label.toLowerCase()}s`
-                : formatValue(item)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <Selector
+        label={label}
+        isLabelHidden
+        options={values.map((item) => ({
+          value: item,
+          label: item === "all" ? `All ${label.toLowerCase()}s` : formatValue(item),
+        }))}
+        value={value}
+        onChange={onChange}
+        size="lg"
+      />
     </div>
   );
 }
