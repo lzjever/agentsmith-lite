@@ -1,3 +1,4 @@
+import { Layout, LayoutContent, LayoutFooter, LayoutHeader } from "@astryxdesign/core";
 import type { ReactNode } from "react";
 
 export type PageLayoutProps = {
@@ -11,19 +12,50 @@ export type PageLayoutProps = {
 
 export function PageLayout({ header, toolbar, children, footer, density = "default", contentWidth = "wide" }: PageLayoutProps) {
   const immersive = density === "immersive";
-  const chrome = immersive
-    ? "gap-[var(--layout-gap-immersive)] px-[var(--layout-padding-immersive)] py-[var(--layout-padding-immersive)]"
-    : "gap-[var(--layout-gap)] px-[var(--layout-padding)] py-5 md:px-8 md:py-7";
-  const width = contentWidth === "full" ? "w-full" : contentWidth === "narrow" ? "mx-auto w-full max-w-5xl" : "mx-auto w-full max-w-[1480px]";
+  const contentWidthValue = contentWidth === "full" ? undefined : contentWidth === "narrow" ? "64rem" : "1480px";
+  const gutters = immersive
+    ? "px-[var(--layout-padding-immersive)]"
+    : "px-[var(--layout-padding)] md:px-8";
+  const topPadding = immersive
+    ? "pt-[var(--layout-padding-immersive)]"
+    : "pt-5 md:pt-7";
+  const bottomPadding = immersive
+    ? "pb-[var(--layout-padding-immersive)]"
+    : "pb-5 md:pb-7";
+  const gap = immersive ? "gap-[var(--layout-gap-immersive)]" : "gap-[var(--layout-gap)]";
+  const bodyTopPadding = header || toolbar
+    ? immersive ? "pt-[var(--layout-gap-immersive)]" : "pt-[var(--layout-gap)]"
+    : topPadding;
 
-  return <div data-testid="page-layout" className="flex h-full min-h-0 flex-col">
-    <div className={`flex min-h-0 flex-1 flex-col ${chrome}`}>
-      {header ? <div data-testid="page-layout__header"><div className={width}>{header}</div></div> : null}
-      {toolbar ? <div data-testid="page-layout__toolbar"><div className={width}>{toolbar}</div></div> : null}
-      <div data-testid="page-layout__body" className={`flex min-h-0 flex-1 flex-col ${immersive ? "gap-[var(--layout-gap-immersive)]" : "gap-[var(--layout-gap)]"}`}>
-        <div className={`${width} flex min-h-0 flex-1 flex-col`}>{children}</div>
-      </div>
-    </div>
-    {footer ? <div data-testid="page-layout__footer" className={immersive ? "px-[var(--layout-padding-immersive)] pb-[var(--layout-padding-immersive)]" : "px-[var(--layout-padding)] pb-[var(--layout-padding)]"}>{footer}</div> : null}
-  </div>;
+  return (
+    <Layout
+      data-testid="page-layout"
+      height="auto"
+      padding={0}
+      contentWidth={contentWidthValue}
+      header={header || toolbar ? (
+        <LayoutHeader padding={0}>
+          <div className={`flex flex-col ${gutters} ${topPadding} ${gap}`}>
+            {header ? <div data-testid="page-layout__header">{header}</div> : null}
+            {toolbar ? <div data-testid="page-layout__toolbar">{toolbar}</div> : null}
+          </div>
+        </LayoutHeader>
+      ) : null}
+      content={
+        <LayoutContent
+          data-testid="page-layout__body"
+          padding={0}
+          isScrollable={false}
+          className={`${gutters} ${bodyTopPadding} ${bottomPadding}`}
+        >
+          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+        </LayoutContent>
+      }
+      footer={footer ? (
+        <LayoutFooter data-testid="page-layout__footer" padding={0}>
+          <div className={`${gutters} ${bottomPadding}`}>{footer}</div>
+        </LayoutFooter>
+      ) : null}
+    />
+  );
 }
