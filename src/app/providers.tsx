@@ -7,6 +7,7 @@ import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 import Link from "next/link";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { saveThemeMode, type Theme } from "../components/theme/theme";
+import { ToastContainer } from "../components/ui/toast";
 
 type AppThemeContextValue = {
   theme: Theme;
@@ -23,7 +24,7 @@ export function AppProviders({ children, initialThemeMode = "light" }: Readonly<
   }, []);
 
   const value = useMemo(() => ({ theme, setTheme }), [setTheme, theme]);
-  return <AstryxTheme theme={neutralTheme} mode={theme}><LinkProvider component={Link}><LayerProvider><AppThemeContext value={value}>{children}</AppThemeContext></LayerProvider></LinkProvider></AstryxTheme>;
+  return <AstryxTheme theme={neutralTheme} mode={theme}><LinkProvider component={Link}><LayerProvider><AppThemeContext value={value}>{children}<ToastContainer /></AppThemeContext></LayerProvider></LinkProvider></AstryxTheme>;
 }
 
 export function useAppTheme(): AppThemeContextValue {
