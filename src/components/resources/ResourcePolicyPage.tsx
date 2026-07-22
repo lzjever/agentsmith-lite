@@ -15,7 +15,7 @@ import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ErrorState } from "../ui/error-state";
 import { Input } from "../ui/input";
-import { Button, Spinner } from "@astryxdesign/core";
+import { Button, Selector, Spinner } from "@astryxdesign/core";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
@@ -306,30 +306,33 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                               )
                             }
                           />
-                          <select
-                            aria-label={`${endpoint.name} ${metric.label} window`}
-                            disabled={saving || !current}
+                          <Selector
+                            label={`${endpoint.name} ${metric.label} window`}
+                            isLabelHidden
+                            options={[
+                              { value: "", label: "No window", disabled: true },
+                              ...(current && !endpointWindowOptions.some((option) => option.value === current.windowSeconds)
+                                ? [{ value: String(current.windowSeconds), label: windowLabel(current.windowSeconds) }]
+                                : []),
+                              ...endpointWindowOptions.map((option) => ({ value: String(option.value), label: option.label })),
+                            ]}
                             value={current ? String(current.windowSeconds) : ""}
-                            onChange={(event) =>
+                            onChange={(next) =>
                               setDraft((value) =>
                                 value
                                   ? updateEndpointWindow(
                                       value,
                                       endpoint.id,
                                       metric.value,
-                                      Number(event.target.value),
+                                      Number(next),
                                     )
                                   : value,
                               )
                             }
-                            className="h-9 rounded-sm border border-input bg-input px-2 text-sm"
-                          >
-                            <option value="" disabled>No window</option>
-                            {current && !endpointWindowOptions.some((option) => option.value === current.windowSeconds) ? (
-                              <option value={current.windowSeconds}>{windowLabel(current.windowSeconds)}</option>
-                            ) : null}
-                            {endpointWindowOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                          </select>
+                            isDisabled={saving || !current}
+                            size="lg"
+                            className="w-full"
+                          />
                         </>
                       ) : (
                         <strong className="text-sm">
