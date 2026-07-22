@@ -2,14 +2,12 @@
 
 import { Save } from "lucide-react";
 import type { FormEvent } from "react";
-import { Button } from "@astryxdesign/core";
+import { Button, CheckboxInput, Selector } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Checkbox } from "../ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "active_tasks_limit", label: "Task capacity", metric: "active_tasks", defaultWindowSeconds: null },
@@ -37,14 +35,14 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
     <div className="grid gap-4 px-5 py-5">
       {error ? <p role="alert" className="rounded-sm border border-error/40 bg-error/5 px-3 py-2 text-sm text-error">{error}</p> : null}
       <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>
-      <Label className="grid gap-2 text-sm text-primary">Alert type<Select value={value.alertType} onValueChange={(alertType) => { const type = alertRuleType(alertType as ProjectAlertType); onChange({ ...value, alertType: type.value, metric: type.metric, windowSeconds: type.defaultWindowSeconds, scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" } }); }} disabled={saving}><SelectTrigger aria-label="Alert type"><SelectValue /></SelectTrigger><SelectContent>{alertRuleTypes.map((type) => <SelectItem key={type.value} value={type.value}>{type.label}</SelectItem>)}</SelectContent></Select></Label>
+      <Selector label="Alert type" options={alertRuleTypes.map((type) => ({ value: type.value, label: type.label }))} value={value.alertType} onChange={(alertType) => { const type = alertRuleType(alertType as ProjectAlertType); onChange({ ...value, alertType: type.value, metric: type.metric, windowSeconds: type.defaultWindowSeconds, scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" } }); }} isDisabled={saving} size="lg" />
       <Label className="grid gap-2 text-sm text-primary">Metric<Input aria-label="Metric" value={value.metric.replaceAll("_", " ")} readOnly /></Label>
       <div className="grid gap-4 sm:grid-cols-2">
         <Label className="grid gap-2 text-sm text-primary">Threshold<Input aria-label="Threshold" type="number" min="0" step="any" value={value.threshold} required disabled={saving} onChange={(event) => onChange({ ...value, threshold: Number(event.target.value) })} /></Label>
-        <Label className="grid gap-2 text-sm text-primary">Window<Select value={value.windowSeconds === null ? "current" : String(value.windowSeconds)} onValueChange={(next) => next && onChange({ ...value, windowSeconds: next === "current" ? null : Number(next) })} disabled={saving}><SelectTrigger aria-label="Evaluation window"><SelectValue /></SelectTrigger><SelectContent>{value.metric !== "failure_count" ? <SelectItem value="current">Current value</SelectItem> : null}{value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds) ? <SelectItem value={String(value.windowSeconds)}>{value.windowSeconds} seconds (current)</SelectItem> : null}<SelectItem value="3600">Last hour</SelectItem><SelectItem value="86400">Last 24 hours</SelectItem><SelectItem value="604800">Last 7 days</SelectItem></SelectContent></Select></Label>
+        <Selector label="Window" options={[...(value.metric !== "failure_count" ? [{ value: "current", label: "Current value" }] : []), ...(value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds) ? [{ value: String(value.windowSeconds), label: `${value.windowSeconds} seconds (current)` }] : []), { value: "3600", label: "Last hour" }, { value: "86400", label: "Last 24 hours" }, { value: "604800", label: "Last 7 days" }]} value={value.windowSeconds === null ? "current" : String(value.windowSeconds)} onChange={(next) => onChange({ ...value, windowSeconds: next === "current" ? null : Number(next) })} isDisabled={saving} size="lg" />
       </div>
-      <Label className="grid gap-2 text-sm text-primary">Scope<Select value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onValueChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} disabled={saving || !supportsEndpointScope(value.alertType)}><SelectTrigger aria-label="Rule scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="project">Entire project</SelectItem>{supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => <SelectItem value={endpoint.id} key={endpoint.id}>{endpoint.name}</SelectItem>) : null}</SelectContent></Select></Label>
-      <Label className="flex items-center gap-3 text-sm text-primary"><Checkbox checked={value.enabled} disabled={saving} onChange={(event) => onChange({ ...value, enabled: event.target.checked })} />Enabled</Label>
+      <Selector label="Scope" options={[{ value: "project", label: "Entire project" }, ...(supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => ({ value: endpoint.id, label: endpoint.name })) : [])]} value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} isDisabled={saving || !supportsEndpointScope(value.alertType)} size="lg" />
+      <CheckboxInput label="Enabled" value={value.enabled} isDisabled={saving} onChange={(enabled) => onChange({ ...value, enabled })} />
     </div>
     <DialogFooter><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => onOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></DialogFooter>
   </form></DialogContent></Dialog>;
