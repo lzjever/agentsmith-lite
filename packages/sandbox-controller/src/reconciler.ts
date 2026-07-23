@@ -553,6 +553,16 @@ function terminalFailureForExpectedRunnerPod(
   if (status?.phase === "Failed") {
     return { reason: "pod_failed" };
   }
+  const containerStatuses = Array.isArray(status?.containerStatuses) ? status.containerStatuses : [];
+  const runnerStatus = containerStatuses
+    .map(asRecord)
+    .find((containerStatus) => containerStatus?.name === "botified-server");
+  const terminated = asRecord(asRecord(runnerStatus?.state)?.terminated);
+  if (terminated) {
+    return typeof terminated.exitCode === "number"
+      ? { reason: "runner_terminated", exitCode: terminated.exitCode }
+      : { reason: "runner_terminated" };
+  }
   return null;
 }
 

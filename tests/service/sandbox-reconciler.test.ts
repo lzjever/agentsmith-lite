@@ -37,6 +37,53 @@ describe("sandbox reconciler final Run states", () => {
     assert.equal(plan.actions.some((action)=>action.type==="delete_resource"),false);
   });
 
+  it("fails a Run when botified-server terminates while the Pod and bash-executor remain running", () => {
+    const run=sandboxRun({state:"active",startedAt:timestamp(1)});
+    const resources=createdResources(run);
+    const pod=resources.find((resource)=>resource.kind==="Pod");
+    assert.ok(pod);
+    pod.status={
+      phase:"Running",
+      containerStatuses:[
+        {name:"botified-server",state:{terminated:{exitCode:1,reason:"Error"}}},
+        {name:"bash-executor",state:{running:{startedAt:timestamp(1)}}}
+      ]
+    };
+
+    const plan=reconcileSandboxRuns({namespace:run.namespace,desiredRuns:[run],observedResources:resources,now:new Date(timestamp(2))});
+    const transition=plan.actions.find((action)=>action.type==="store_run_state"&&action.reason==="terminal_runner_failure");
+    assert.ok(transition&&transition.type==="store_run_state");
+    assert.equal(transition.run.state,"failed");
+    assert.equal(transition.run.failureCause,"Botified stopped unexpectedly");
+    assert.deepEqual(transition.run.terminalFailure,{reason:"runner_terminated",exitCode:1});
+    assert.equal(transition.run.releaseRequestedAt,timestamp(2));
+  });
+
+  it("does not fail for botified startup or when only bash-executor terminates", () => {
+    const run=sandboxRun({state:"active",startedAt:timestamp(1)});
+    const containerStatusCases=[
+      [
+        {name:"botified-server",state:{waiting:{reason:"ContainerCreating"}}},
+        {name:"bash-executor",state:{running:{startedAt:timestamp(1)}}}
+      ],
+      [
+        {name:"botified-server",state:{running:{startedAt:timestamp(1)}}},
+        {name:"bash-executor",state:{terminated:{exitCode:1,reason:"Error"}}}
+      ]
+    ];
+
+    for (const containerStatuses of containerStatusCases) {
+      const resources=createdResources(run);
+      const pod=resources.find((resource)=>resource.kind==="Pod");
+      assert.ok(pod);
+      pod.status={phase:"Running",containerStatuses};
+
+      const plan=reconcileSandboxRuns({namespace:run.namespace,desiredRuns:[run],observedResources:resources,now:new Date(timestamp(2))});
+      assert.equal(plan.actions.some((action)=>action.type==="store_run_state"&&action.reason==="terminal_runner_failure"),false);
+      assert.equal(plan.actions.some((action)=>action.type==="store_run_state"&&action.reason==="desired_observed"),true);
+    }
+  });
+
   it("deletes only exact Run resources and releases only after they are absent", () => {
     const run=sandboxRun({state:"release_requested",releaseReason:"requested",releaseRequestedAt:timestamp(2)});
     const resources=createdResources({...run,state:"active",startedAt:timestamp(1)});
