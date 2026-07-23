@@ -2,11 +2,9 @@
 
 import { Save } from "lucide-react";
 import type { FormEvent } from "react";
-import { Banner, Button, CheckboxInput, Dialog, DialogHeader, Selector } from "@astryxdesign/core";
+import { Banner, Button, CheckboxInput, Dialog, DialogHeader, NumberInput, Selector, TextInput } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "active_tasks_limit", label: "Task capacity", metric: "active_tasks", defaultWindowSeconds: null },
@@ -33,21 +31,21 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
   const description = "Monitor one project or endpoint metric and notify project administrators.";
   const handleOpenChange = (next: boolean) => !saving && onOpenChange(next);
 
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={onSubmit}>
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={onSubmit}>
     <DialogHeader title={title} subtitle={description} onOpenChange={handleOpenChange} hasDivider />
     <div className="grid gap-4 px-5 py-5">
       {error ? <Banner status="error" title="Alert rule could not be saved" description={error} /> : null}
-      <Label className="grid gap-2 text-sm text-primary">Name<Input aria-label="Rule name" value={value.name} maxLength={80} required disabled={saving} onChange={(event) => onChange({ ...value, name: event.target.value })} /></Label>
+      <TextInput label="Name" value={value.name} onChange={(name) => onChange({ ...value, name: name.slice(0, 80) })} isRequired isDisabled={saving} width="100%" />
       <Selector label="Alert type" options={alertRuleTypes.map((type) => ({ value: type.value, label: type.label }))} value={value.alertType} onChange={(alertType) => { const type = alertRuleType(alertType as ProjectAlertType); onChange({ ...value, alertType: type.value, metric: type.metric, windowSeconds: type.defaultWindowSeconds, scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" } }); }} isDisabled={saving} size="lg" />
-      <Label className="grid gap-2 text-sm text-primary">Metric<Input aria-label="Metric" value={value.metric.replaceAll("_", " ")} readOnly /></Label>
+      <TextInput label="Metric" value={value.metric.replaceAll("_", " ")} isDisabled disabledMessage="Metric is determined by the alert type." width="100%" />
       <div className="grid gap-4 sm:grid-cols-2">
-        <Label className="grid gap-2 text-sm text-primary">Threshold<Input aria-label="Threshold" type="number" min="0" step="any" value={value.threshold} required disabled={saving} onChange={(event) => onChange({ ...value, threshold: Number(event.target.value) })} /></Label>
+        <NumberInput label="Threshold" value={value.threshold} min={0} onChange={(threshold) => onChange({ ...value, threshold })} isRequired isDisabled={saving} size="lg" width="100%" />
         <Selector label="Window" options={[...(value.metric !== "failure_count" ? [{ value: "current", label: "Current value" }] : []), ...(value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds) ? [{ value: String(value.windowSeconds), label: `${value.windowSeconds} seconds (current)` }] : []), { value: "3600", label: "Last hour" }, { value: "86400", label: "Last 24 hours" }, { value: "604800", label: "Last 7 days" }]} value={value.windowSeconds === null ? "current" : String(value.windowSeconds)} onChange={(next) => onChange({ ...value, windowSeconds: next === "current" ? null : Number(next) })} isDisabled={saving} size="lg" />
       </div>
       <Selector label="Scope" options={[{ value: "project", label: "Entire project" }, ...(supportsEndpointScope(value.alertType) ? endpoints.map((endpoint) => ({ value: endpoint.id, label: endpoint.name })) : [])]} value={value.scope.kind === "project" ? "project" : value.scope.endpointId} onChange={(next) => onChange({ ...value, scope: next === "project" ? { kind: "project" } : { kind: "endpoint", endpointId: next } })} isDisabled={saving || !supportsEndpointScope(value.alertType)} size="lg" />
       <CheckboxInput label="Enabled" value={value.enabled} isDisabled={saving} onChange={(enabled) => onChange({ ...value, enabled })} />
     </div>
-    <footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => onOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></footer>
+    <footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={saving} onClick={() => handleOpenChange(false)} /><Button label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"} type="submit" variant="primary" size="lg" icon={<Save size={15} />} isDisabled={saving || !canSave} /></footer>
   </form></Dialog>;
 }
 

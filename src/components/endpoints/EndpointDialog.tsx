@@ -12,14 +12,15 @@ import {
   Layout,
   LayoutContent,
   LayoutFooter,
+  NumberInput,
   Selector,
+  TextInput,
 } from "@astryxdesign/core";
 import type {
   EndpointCapability,
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import { Input } from "../ui/input";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -69,14 +70,14 @@ export function EndpointDialog({
         : [...input.capabilities, capability],
     );
   const handleOpenChange = (next: boolean) => {
-    if (!saving) onOpenChange(next);
+    if (!saving && !discovering) onOpenChange(next);
   };
 
   return (
     <Dialog
       isOpen={open}
       onOpenChange={handleOpenChange}
-      purpose="info"
+      purpose="form"
       width="min(34rem, calc(100vw - 2rem))"
       maxHeight="calc(100dvh - 2rem)"
       padding={0}
@@ -113,73 +114,67 @@ export function EndpointDialog({
                 />
               ) : null}
               <div className="grid gap-4 sm:grid-cols-2">
-                <label className="grid gap-1">
-                  Name
-                  <Input
-                    required
-                    maxLength={160}
-                    disabled={saving}
-                    value={input.name}
-                    onChange={(event) => set("name", event.target.value)}
-                  />
-                  {nameConflict ? <span className="text-xs text-error">An endpoint already uses this name.</span> : null}
-                </label>
-                <label>
-                  Model
-                  <Input
-                    required
-                    disabled={saving}
-                    value={input.model}
-                    onChange={(event) => set("model", event.target.value)}
-                  />
-                </label>
-                <label className="sm:col-span-2">
-                  Base URL
-                  <Input
-                    required
-                    type="url"
-                    disabled={saving}
-                    readOnly
+                <TextInput
+                  label="Name"
+                  value={input.name}
+                  onChange={(value) => set("name", value.slice(0, 160))}
+                  isRequired
+                  isDisabled={saving}
+                  {...(nameConflict && { status: { type: "error", message: "An endpoint already uses this name." } as const })}
+                  width="100%"
+                />
+                <TextInput
+                  label="Model"
+                  value={input.model}
+                  onChange={(value) => set("model", value)}
+                  isRequired
+                  isDisabled={saving}
+                  width="100%"
+                />
+                <div className="sm:col-span-2">
+                  <TextInput
+                    label="Base URL"
                     value={input.baseUrl}
-                  />
-                </label>
-                <div className="grid gap-2">
-                  <Selector
-                    label="Credential"
                     isRequired
-                    options={credentials.map((credential) => ({
-                      value: credential.id,
-                      label: `${credential.name} (${credential.fingerprint})`,
-                    }))}
-                    value={input.credentialId}
-                    onChange={(credentialId) => {
-                      const credential = credentials.find(
-                        (item) => item.id === credentialId,
-                      );
-                      onChange({
-                        ...input,
-                        credentialId,
-                        ...(credential ? { baseUrl: credential.baseUrl } : {}),
-                      });
-                    }}
-                    placeholder="Select credential"
-                    isDisabled={saving || discovering}
-                    size="lg"
+                    isDisabled
+                    disabledMessage="Base URL is provided by the selected credential."
+                    width="100%"
                   />
                 </div>
-                <label>
-                  Timeout
-                  <Input
-                    required
-                    type="number"
-                    min="1"
-                    disabled={saving}
-                    value={input.requestTimeoutSecs}
-                    onChange={(event) =>
-                      set("requestTimeoutSecs", Number(event.target.value))
-                    }
-                  />
-                </label>
+                <Selector
+                  label="Credential"
+                  isRequired
+                  options={credentials.map((credential) => ({
+                    value: credential.id,
+                    label: `${credential.name} (${credential.fingerprint})`,
+                  }))}
+                  value={input.credentialId}
+                  onChange={(credentialId) => {
+                    const credential = credentials.find(
+                      (item) => item.id === credentialId,
+                    );
+                    onChange({
+                      ...input,
+                      credentialId,
+                      ...(credential ? { baseUrl: credential.baseUrl } : {}),
+                    });
+                  }}
+                  placeholder="Select credential"
+                  isDisabled={saving || discovering}
+                  size="lg"
+                  width="100%"
+                />
+                <NumberInput
+                  label="Timeout"
+                  value={input.requestTimeoutSecs}
+                  onChange={(value) => set("requestTimeoutSecs", value)}
+                  min={1}
+                  units="seconds"
+                  isRequired
+                  isDisabled={saving}
+                  size="lg"
+                  width="100%"
+                />
                 <div className="flex items-end gap-2 sm:col-span-2">
                   <Button
                     type="button"
@@ -204,7 +199,6 @@ export function EndpointDialog({
                   {models.length > 0 ? (
                     <Selector
                       label="Discovered models"
-                      isLabelHidden
                       options={models.map((model) => ({ value: model, label: model }))}
                       value={models.includes(input.model) ? input.model : ""}
                       onChange={(model) => set("model", model)}
@@ -247,7 +241,7 @@ export function EndpointDialog({
                   size="lg"
                   label="Cancel"
                   onClick={() => handleOpenChange(false)}
-                  isDisabled={saving}
+                  isDisabled={saving || discovering}
                 />
                 <Button
                   type="submit"
