@@ -26,6 +26,10 @@ export type AlertRuleMetric = "active_tasks" | "provider_requests" | "provider_t
 export type AlertRuleCondition = "greater_than_or_equal";
 export type AlertRuleScope = { kind: "project" } | { kind: "endpoint"; endpointId: string };
 export interface ProjectAlertRule { id: string; projectId: string; name?: string; alertType: ProjectAlertType; metric?: AlertRuleMetric; condition?: AlertRuleCondition; threshold?: number; windowSeconds?: number | null; scope?: AlertRuleScope; enabled: boolean; createdAt: ISODateString; updatedAt: ISODateString; }
+export interface ActiveProjectAlertRuleView extends ProjectAlertRule { retiredWasEnabled: null; }
+export interface HistoricalProjectAlertRuleView extends Omit<ProjectAlertRule, "alertType" | "enabled"> { alertType: "historical_task_failure"; enabled: false; retiredWasEnabled: boolean; }
+export type ProjectAlertRuleView = ActiveProjectAlertRuleView | HistoricalProjectAlertRuleView;
+export function isActiveProjectAlertRuleView(rule: ProjectAlertRuleView): rule is ActiveProjectAlertRuleView { return rule.alertType !== "historical_task_failure"; }
 
 export type ProjectMembershipRole = "owner" | "admin" | "member" | "viewer";
 export type ManagedProjectMembershipRole = Exclude<ProjectMembershipRole, "owner">;
@@ -189,7 +193,7 @@ export interface SandboxResourceSnapshot {
   memoryLimitBytes: string;
 }
 
-export type SandboxReleaseReason = "requested" | "failed" | "cleanup" | "legacy_cleaned";
+export type SandboxReleaseReason = "requested" | "failed" | "cleanup";
 
 export interface ProjectSandboxUsageRow {
   taskId: string;
@@ -225,8 +229,9 @@ export interface ProjectUsageOverview {
   sandbox: ProjectSandboxUsage;
 }
 
-export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure";
-export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = false): string {
+export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "sandbox_failure";
+export type ProjectAlertReadType = ProjectAlertType | "historical_task_failure";
+export function projectAlertTypeLabel(type: ProjectAlertReadType, endpointScoped = false): string {
   if (type === "provider_requests_limit" && endpointScoped) return "Endpoint request limit reached";
   return {
     active_tasks_limit: "Task capacity reached",
@@ -236,22 +241,21 @@ export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = f
     project_file_bytes_limit: "File quota reached",
     endpoint_failure: "Endpoint failure",
     provider_failure: "Provider failure",
-    task_failure: "Task failure",
     sandbox_failure: "Sandbox failure",
+    historical_task_failure: "Historical task failure",
   }[type];
 }
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
 export type ProjectAlertDeliveryStatus = "not_configured" | "pending" | "delivered" | "failed";
-export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.cancel","task.completed","task.failed","task.expired","task.cleaned","artifact.project","sandbox.started","sandbox.failed","sandbox.release_requested","sandbox.released","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
+export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","task.historical_terminal","artifact.project","sandbox.started","sandbox.failed","sandbox.release_requested","sandbox.released","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
 export type ProjectAuditAction = typeof PROJECT_AUDIT_ACTIONS[number];
+export type HistoricalTaskTerminalAction = "task.cancel" | "task.completed" | "task.failed" | "task.expired" | "task.cleaned";
 export const PROJECT_AUDIT_RESOURCE_KINDS = ["project","credential","endpoint","member","task","artifact","provider","file","file_quota","sandbox","alert"] as const;
 export type ProjectAuditResourceKind = typeof PROJECT_AUDIT_RESOURCE_KINDS[number];
 
-export interface ProjectAlert {
+interface ProjectAlertFields {
   id: string;
   projectId: string;
-  type: ProjectAlertType;
-  status: ProjectAlertStatus;
   deliveryStatus: ProjectAlertDeliveryStatus;
   ruleId?: string | null;
   metric?: AlertRuleMetric | null;
@@ -266,6 +270,11 @@ export interface ProjectAlert {
   resolvedAt: ISODateString | null;
   dismissedAt: ISODateString | null;
 }
+export interface ActiveProjectAlert extends ProjectAlertFields { type: ProjectAlertType; status: "active"; }
+export interface InactiveProjectAlert extends ProjectAlertFields { type: ProjectAlertType; status: "resolved" | "dismissed"; }
+export interface HistoricalProjectAlert extends ProjectAlertFields { type: "historical_task_failure"; status: "resolved" | "dismissed"; }
+export type ProjectAlert = ActiveProjectAlert | InactiveProjectAlert | HistoricalProjectAlert;
+export function isActiveProjectAlert(alert: ProjectAlert): alert is ActiveProjectAlert { return alert.status === "active"; }
 
 export interface ProjectAlertQuery {
   status?: ProjectAlertStatus;
@@ -291,8 +300,8 @@ export interface ProjectAuditEvent {
   detail?: ProjectAuditSafeDetail;
   createdAt: ISODateString;
 }
-export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; runId?: string; releaseReason?: SandboxReleaseReason; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "accepted" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
-export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","runId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.releaseReason==="string"&&["requested","failed","cleanup","legacy_cleaned"].includes(source.releaseReason))safe.releaseReason=source.releaseReason as SandboxReleaseReason;if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","accepted","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(isCanonicalLibraryAuditPath(source.filePath))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
+export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; runId?: string; releaseReason?: SandboxReleaseReason; messageId?: string; historicalAction?: HistoricalTaskTerminalAction; deliveryStatus?: "pending" | "dispatching" | "accepted" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; }
+export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","runId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.releaseReason==="string"&&["requested","failed","cleanup"].includes(source.releaseReason))safe.releaseReason=source.releaseReason as SandboxReleaseReason;if(typeof source.historicalAction==="string"&&["task.cancel","task.completed","task.failed","task.expired","task.cleaned"].includes(source.historicalAction))safe.historicalAction=source.historicalAction as HistoricalTaskTerminalAction;if(typeof source.metric==="string"&&["active_tasks","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","accepted","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(isCanonicalLibraryAuditPath(source.filePath))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
 function isCanonicalLibraryAuditPath(input:unknown):input is string{if(typeof input!=="string"||input.length>1024||input.includes("\\")||/[\u0000-\u001f]/.test(input))return false;const segments=input.split("/");return segments.length>=4&&segments[0]==="libraries"&&/^[A-Za-z0-9._:-]+$/.test(segments[1]??"")&&segments[2]==="home"&&segments.slice(3).every((segment)=>segment!==""&&segment!=="."&&segment!=="..");}
 
 export interface ProjectAuditEventView extends ProjectAuditEvent {
@@ -377,27 +386,6 @@ export interface ProviderUsage {
   cost?: number;
 }
 
-export type AgentTaskStatus =
-  | "queued"
-  | "starting"
-  | "running"
-  | "stopping"
-  | "completed"
-  | "failed"
-  | "expired"
-  | "cancelled"
-  | "cleaned";
-
-export type TaskExecutionMode = "dry-run" | "live";
-export type TaskTerminalReason = "completed" | "failed" | "cancelled" | "expired" | "not_executed" | "cleaned_legacy";
-export type TaskStartIntentStatus = "pending" | "dispatching" | "dispatched" | "failed";
-export type TaskArtifactProjectionStatus = "pending" | "draining" | "drained" | "failed";
-export type TaskCleanupStatus = "pending" | "running" | "completed" | "failed";
-
-export interface TaskSandboxSummary {
-  namespace: string;
-}
-
 export interface AgentTask {
   id: string;
   workspaceId: string;
@@ -406,22 +394,6 @@ export interface AgentTask {
   fileLibraryId: string;
   title?: string;
   prompt: string;
-  status: AgentTaskStatus;
-  runId: string;
-  executionMode: TaskExecutionMode;
-  sandbox: TaskSandboxSummary;
-  activeReservation?: boolean;
-  archivedAt?: ISODateString | null;
-  deletedAt?: ISODateString | null;
-  terminalReason?: TaskTerminalReason | null;
-  terminalizedAt?: ISODateString | null;
-  startIntentStatus?: TaskStartIntentStatus | null;
-  startSafeError?: string | null;
-  artifactProjectionStatus?: TaskArtifactProjectionStatus;
-  artifactProjectionError?: string | null;
-  cleanupStatus?: TaskCleanupStatus;
-  cleanupError?: string | null;
-  cleanupCompletedAt?: ISODateString | null;
   createdAt: ISODateString;
   updatedAt: ISODateString;
 }
@@ -458,13 +430,21 @@ export interface AgentTaskArtifact {
 }
 export interface TaskLifecycleProjection { state: "active" | "archived"; }
 export interface TaskCurrentTurnProjection { state: "ready" | "starting" | "queued" | "running" | "aborting"; }
-export interface TaskSandboxStateProjection { state: "starting" | "active" | "release_requested" | "released" | "failed"; runId: string; }
+export type SandboxFailureCode = "startup_failed" | "runtime_unreachable" | "runner_failed" | "cleanup_failed";
+export interface TaskSandboxFailureCause {
+  code: SandboxFailureCode;
+  message: string;
+}
+export interface TaskSandboxStateProjection {
+  state: "starting" | "active" | "release_requested" | "released" | "failed";
+  runId: string | null;
+  cause: TaskSandboxFailureCause | null;
+}
 export interface TaskStateProjection {
   lifecycle: TaskLifecycleProjection;
   currentTurn: TaskCurrentTurnProjection;
   sandboxState: TaskSandboxStateProjection;
 }
-export interface TaskSummary extends TaskStateProjection { taskId: string; artifactCount: number; updatedAt: ISODateString; }
 
 export type TaskInteractionKind =
   | "user_message"
@@ -596,6 +576,7 @@ export interface TaskCapabilities {
   sendMessage: boolean;
   editQueuedMessage: boolean;
   abortTurn: boolean;
+  stopWork: boolean;
   openTerminal: boolean;
   releaseSandbox: boolean;
   editTask: boolean;
@@ -605,16 +586,15 @@ export interface TaskCapabilities {
 
 export interface TaskSandboxReleaseReceipt {
   taskId: string;
-  sandboxState: TaskSandboxStateProjection;
-  capabilities: TaskCapabilities;
+  presentation: TaskPresentation;
 }
 
-export interface TaskDetailProjection extends TaskStateProjection {
+export interface TaskPresentation extends TaskStateProjection {
   task: AgentTask;
   capabilities: TaskCapabilities;
 }
+export type TaskDetailProjection = TaskPresentation;
 
-export type TaskRunState = "idle" | "starting" | "running" | "reconnecting" | "aborting" | "finalizing" | "terminal";
 export type TaskRuntimeReachability = "unknown" | "reachable" | "unreachable";
 export type TaskHistoryStatus = "complete" | "gap";
 
@@ -638,11 +618,10 @@ export interface TaskInteractionHistoryPage {
 
 export interface TaskInteractionState {
   queuedMessages: TaskQueuedMessage[];
-  runState: TaskRunState;
   runtimeReachability: TaskRuntimeReachability;
   lastSyncedAt: ISODateString | null;
   historyStatus: TaskHistoryStatus;
-  capabilities: TaskCapabilities;
+  presentation: TaskPresentation;
 }
 
 export interface TaskInteractionSnapshot extends TaskInteractionHistoryPage, TaskInteractionState {}
@@ -658,7 +637,7 @@ export interface TaskMessageReceipt {
   duplicate: boolean;
   queuedMessage: TaskQueuedMessage | null;
   interaction: TaskUserMessageInteraction | null;
-  capabilities: TaskCapabilities;
+  presentation: TaskPresentation;
   safeError?: string;
 }
 
@@ -666,8 +645,7 @@ export type TaskInteractionConnectionState = "connecting" | "reconnecting" | "co
 export type TaskAssistantPreviewStatus = "available" | "unavailable";
 export type TaskInteractionStreamEvent =
   | { type: "interaction"; cursor: string; item: TaskInteractionItem }
-  | { type: "state"; queuedMessages: TaskQueuedMessage[]; capabilities: TaskCapabilities }
-  | { type: "run_state"; runState: TaskRunState }
+  | { type: "state"; queuedMessages: TaskQueuedMessage[]; presentation: TaskPresentation }
   | { type: "connection"; connectionState: TaskInteractionConnectionState; runtimeReachability: TaskRuntimeReachability; historyStatus: TaskHistoryStatus; lastSyncedAt: ISODateString | null; message: string | null }
   | { type: "preview_status"; previewStatus: TaskAssistantPreviewStatus; message: string | null }
   | { type: "assistant_preview"; interactionId: string; body: string; occurredAt: ISODateString }
@@ -687,7 +665,7 @@ export interface TaskListQuery {
   limit?: number;
 }
 export interface TaskListPage {
-  items: Array<{ task: AgentTask } & TaskStateProjection>;
+  items: TaskPresentation[];
   nextCursor: string | null;
   total: number;
 }
@@ -717,7 +695,6 @@ export interface DashboardResponse {
   user: User;
   workspaces: WorkspaceWithProjects[];
   endpoints: PublicModelEndpoint[];
-  tasks: AgentTask[];
 }
 
 export interface CreateWorkspaceInput {

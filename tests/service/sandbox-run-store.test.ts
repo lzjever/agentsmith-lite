@@ -1,300 +1,360 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
-import type { SandboxRunState } from "../../packages/sandbox-controller/src/reconciler.js";
-import { normalizeSandboxResources, parseKubernetesCpuMillis, parseKubernetesMemoryBytes } from "../../packages/domain/src/kubernetesQuantity.js";
+import type { AtomicTaskMessageInput, PersistedSandboxRunState, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 
-describe("sandbox run store", () => {
-  it("normalizes Kubernetes quantities exactly and rounds positive memory sub-units up", () => {
-    assert.deepEqual(normalizeSandboxResources({cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1500m",memoryLimit:"2Gi"}),{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1500",memoryLimitBytes:"2147483648"});
-    assert.equal(parseKubernetesCpuMillis("1e-3"),"1");
-    assert.equal(parseKubernetesCpuMillis("2E3"),"2000000");
-    assert.equal(parseKubernetesCpuMillis("1e-4"),"1");
-    assert.equal(parseKubernetesCpuMillis("0.000001"),"1");
-    assert.equal(parseKubernetesCpuMillis("0.1m"),"1");
-    assert.equal(parseKubernetesCpuMillis("1n"),"1");
-    assert.equal(parseKubernetesCpuMillis("0e-1000"),"0");
-    assert.equal(parseKubernetesCpuMillis("0.0000m"),"0");
-    assert.equal(parseKubernetesMemoryBytes("1.1"),"2");
-    assert.equal(parseKubernetesMemoryBytes("1.1Ki"),"1127");
-    assert.equal(parseKubernetesMemoryBytes("1e-9"),"1");
-  });
-
-  it("rejects invalid, negative, and overflowing quantities",()=>{
-    for(const value of ["-1","1K","1foo","NaN"])assert.throws(()=>parseKubernetesMemoryBytes(value),/invalid/);
-    assert.throws(()=>parseKubernetesMemoryBytes("9223372036854775808"),/exceeds/);
-    assert.throws(()=>parseKubernetesCpuMillis("9223372036854775808"),/exceeds/);
-    assert.throws(()=>parseKubernetesMemoryBytes("1e100000000000000000"),/exponent exceeds/);
-  });
-  it("confirms sandbox start once and preserves the first timestamp on retry", async () => {
+describe("sandbox Run store", () => {
+  it("stores final Run states without using the JSON document store", async () => {
     const store = createLocalInMemoryProductStore();
     const run = sandboxRun();
-    await store.sandboxRuns.put(run);
-
-    const first = await store.confirmSandboxRunStarted({
-      runId: run.runId,
-      expectedFencingToken: run.fencingToken,
-      startedAt: "2026-07-04T00:01:00.000Z",
-      auditEvent: {
-        id: `audit_sandbox_started_${run.runId}`,
-        projectId: run.projectId,
-        actorId: null,
-        subjectUserId: run.startedByUserId,
-        action: "sandbox.started",
-        status: "accepted",
-        resourceKind: "sandbox",
-        resourceId: run.taskId,
-        detail: { taskId: run.taskId, runId: run.runId },
-        createdAt: "2026-07-04T00:01:00.000Z"
-      }
-    });
-    assert.notEqual(first.kind,"conflict");
-    if(first.kind==="conflict")return;
-    const retry = await store.confirmSandboxRunStarted({
-      runId: run.runId,
-      expectedFencingToken: first.run.fencingToken,
-      startedAt: "2026-07-04T00:02:00.000Z",
-      auditEvent: {
-        id: `audit_sandbox_started_${run.runId}`,
-        projectId: run.projectId,
-        actorId: null,
-        subjectUserId: run.startedByUserId,
-        action: "sandbox.started",
-        status: "accepted",
-        resourceKind: "sandbox",
-        resourceId: run.taskId,
-        detail: { taskId: run.taskId, runId: run.runId },
-        createdAt: "2026-07-04T00:02:00.000Z"
-      }
-    });
-
-    assert.equal(first.kind, "started");
-    assert.equal(retry.kind, "already_started");
-    assert.equal(retry.run.startedAt, "2026-07-04T00:01:00.000Z");
-    assert.equal((await store.listProjectAuditEvents(run.projectId)).filter((event) => event.action === "sandbox.started").length, 1);
-    await store.appendProjectAuditEvent({id:"audit_release_request",projectId:run.projectId,actorId:"admin1",subjectUserId:run.startedByUserId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-04T00:03:00.000Z"});
-    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{actorId:"admin1"})).items.map((event)=>event.id),["audit_release_request"]);
-    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{subjectUserId:run.startedByUserId})).items.map((event)=>event.id),["audit_release_request",`audit_sandbox_started_${run.runId}`]);
-  });
-
-  it("persists bounded terminal runner failure metadata without Kubernetes status text", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ terminalFailure: { reason: "runner_terminated", exitCode: 19 } });
-
-    await store.sandboxRuns.put(run);
-
-    assert.deepEqual((await store.sandboxRuns.get(run.runId))?.terminalFailure, {
-      reason: "runner_terminated",
-      exitCode: 19
-    });
-  });
-
-  it("rejects malformed persisted terminal failure metadata", async () => {
-    const store = createLocalInMemoryProductStore();
-
-    await assert.rejects(
-      () => store.sandboxRuns.put({
-        ...sandboxRun(),
-        terminalFailure: {
-          reason: "unknown_failure",
-          exitCode: 999,
-          syncAttempts: -1,
-          syncStatus: "forever"
-        }
-      } as unknown as SandboxRunState),
-      /terminalFailure/
-    );
-    assert.equal(await store.jsonDocs.get("sandbox_run_state", "run1"), null);
-  });
-
-  it("rejects incoherent terminal failure settlement combinations", async () => {
-    const store = createLocalInMemoryProductStore();
-    for (const terminalFailure of [
-      { reason: "pod_failed", syncAttempts: 3, syncStatus: "pending", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: "unavailable" },
-      { reason: "pod_failed", syncAttempts: 2, syncStatus: "unavailable", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: "unavailable" },
-      { reason: "pod_failed", syncStatus: "synced", lastSyncAt: "2026-07-04T00:00:00.000Z", lastSyncError: null }
-    ]) {
-      await assert.rejects(
-        () => store.sandboxRuns.put({ ...sandboxRun(), terminalFailure } as unknown as SandboxRunState),
-        /terminalFailure/
-      );
-    }
-  });
-
-  it("persists typed run state through the sandbox_run_state JSON collection", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun();
-    const cleaned = sandboxRun({
-      runId: "run-clean",
-      taskId: "task-clean",
-      phase: "cleaned",
-      cleanupStatus: "cleaned",
-      fencingToken: 3
-    });
 
     assert.deepEqual(await store.sandboxRuns.put(run), run);
-    await store.sandboxRuns.put(cleaned);
-
     assert.deepEqual(await store.sandboxRuns.get(run.runId), run);
-    assert.deepEqual((await store.sandboxRuns.list()).map((item) => item.runId), ["run1", "run-clean"]);
-    assert.deepEqual((await store.sandboxRuns.listActive()).map((item) => item.runId), ["run1"]);
-    assert.deepEqual(await store.jsonDocs.get("sandbox_run_state", run.runId), run as unknown as Record<string, unknown>);
+    assert.deepEqual((await store.sandboxRuns.listActive()).map((item) => item.runId), [run.runId]);
+    assert.equal(await store.jsonDocs.get("sandbox_runtime_state", run.runId), null);
   });
 
-  it("updates with fencing and rejects stale tokens", async () => {
-    const store = createLocalInMemoryProductStore();
-    const run = sandboxRun({ fencingToken: 7 });
-    await store.sandboxRuns.put(run);
-
-    const stale = await store.sandboxRuns.updateWithFencing(run.runId, 6, {
-      ...run,
-      phase: "running",
-      fencingToken: 8
-    });
-    assert.equal(stale, null);
-    assert.equal((await store.sandboxRuns.get(run.runId))?.phase, "starting");
-
-    const updated = await store.sandboxRuns.updateWithFencing(run.runId, 7, {
-      ...run,
-      phase: "running",
-      fencingToken: 8,
-      updatedAt: "2026-07-04T00:01:00.000Z"
-    });
-    assert.equal(updated?.phase, "running");
-    assert.equal(updated?.fencingToken, 8);
-    assert.equal((await store.sandboxRuns.get(run.runId))?.phase, "running");
+  it("allows only one unreleased Run for a Task", async () => {
+    const store=createLocalInMemoryProductStore();
+    const first=sandboxRun();
+    await store.sandboxRuns.put(first);
+    await assert.rejects(
+      store.sandboxRuns.put({...first,runId:"run_2",fencingToken:1}),
+      /one unreleased sandbox Run/
+    );
+    const releasedStore=createLocalInMemoryProductStore();
+    await releasedStore.sandboxRuns.put({...first,state:"released",releaseReason:"cleanup",releasedAt:runTimestamp(1),fencingToken:2,updatedAt:runTimestamp(1)});
+    const second={...first,runId:"run_2",fencingToken:1};
+    assert.deepEqual(await releasedStore.sandboxRuns.put(second),second);
   });
 
-  it("atomically activates the exact Task and Run with an idempotent concurrent loser",async()=>{
+  it("keeps the resource identity used by fenced release immutable", async () => {
     const store=createLocalInMemoryProductStore();
     const run=sandboxRun();
-    const timestamp=run.createdAt;
-    const task={
-      id:run.taskId,
-      workspaceId:run.workspaceId,
-      projectId:run.projectId,
-      endpointId:"endpoint1",
-      fileLibraryId:run.fileLibraryId,
-      createdByUserId:run.startedByUserId,
-      title:"Task",
-      prompt:"work",
-      status:"starting" as const,
-      runId:run.runId,
-      executionMode:"live" as const,
-      activeReservation:true,
-      sandbox:{namespace:run.namespace,resources:[]},
-      createdAt:timestamp,
-      updatedAt:timestamp
+    await store.sandboxRuns.put(run);
+
+    await assert.rejects(
+      store.sandboxRuns.updateWithFencing(run.runId,run.fencingToken,{
+        ...run,
+        resourceNames:{...run.resourceNames,pod:"foreign-pod"},
+        fencingToken:run.fencingToken+1
+      }),
+      /immutable attribution/
+    );
+  });
+
+  it("confirms readiness once and activates only the exact current Run", async () => {
+    const store = createLocalInMemoryProductStore();
+    const timestamp = runTimestamp(0);
+    await store.createUser({ id:"user_1",email:"user@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
+    await store.createWorkspace({ id:"workspace_1",name:"Workspace",ownerUserId:"user_1",createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"project_1",workspaceId:"workspace_1",name:"Project",ownerUserId:"user_1",rootPath:"workspaces/workspace_1/projects/project_1",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    const task = {
+      id:"task_1",workspaceId:"workspace_1",projectId:"project_1",endpointId:"endpoint_1",
+      fileLibraryId:"library_1",createdByUserId:"user_1",title:"Task",prompt:"Work",
+      agentContext:"",currentRunId:"run_1",archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp
     };
+    const run = sandboxRun();
     const created=await store.createTaskAtomically({
       task,
-      newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Task Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
-      reserveActive:false,
+      reserveActive:true,
+      newFileLibrary:{id:"library_1",workspaceId:"workspace_1",projectId:"project_1",name:"Library",rootSubPath:"libraries/library_1/home",createdByUserId:"user_1",createdAt:timestamp,updatedAt:timestamp},
       sandboxRun:run
     });
     assert.equal(created.kind,"created");
-    if(created.kind!=="created")return;
-    await store.updateTask({...created.task,activeReservation:true});
-    const started=await store.confirmSandboxRunStarted({
-      runId:run.runId,
-      expectedFencingToken:run.fencingToken,
-      startedAt:"2026-07-04T00:01:00.000Z",
-      auditEvent:{id:`audit_sandbox_started_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-04T00:01:00.000Z"}
+
+    const startupClaimToken="startup_claim_1";
+    assert.equal((await store.runSandboxStartupOperation({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:startupClaimToken,claimedAt:runTimestamp(0),leaseExpiresAt:runTimestamp(3)
+    },async()=>null)).kind,"applied");
+    const started = await store.confirmSandboxRunStarted({
+      runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,startedAt:runTimestamp(1),
+      auditEvent:{id:"audit_started",projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:runTimestamp(1)}
     });
     assert.notEqual(started.kind,"conflict");
     if(started.kind==="conflict")return;
-    const input={taskId:task.id,runId:run.runId,expectedFencingToken:started.run.fencingToken,activatedAt:"2026-07-04T00:02:00.000Z"};
+    assert.equal((await store.confirmSandboxRunStarted({
+      runId:run.runId,expectedFencingToken:started.run.fencingToken,startupClaimToken,startedAt:runTimestamp(2),
+      auditEvent:{id:"audit_started",projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:runTimestamp(2)}
+    })).kind,"already_started");
 
-    const results=await Promise.all([store.activateTaskSandboxRun(input),store.activateTaskSandboxRun(input)]);
-    const wrongTask=await store.activateTaskSandboxRun({...input,taskId:"task-other",expectedFencingToken:(await store.sandboxRuns.get(run.runId))!.fencingToken});
-    const runningTask=await store.findTask(task.id);
-    assert.ok(runningTask);
-    await store.updateTask({...runningTask,status:"queued",updatedAt:"2026-07-04T00:03:00.000Z"});
-    const queuedRetry=await store.activateTaskSandboxRun(input);
-    const queuedTask=await store.findTask(task.id);
-    assert.ok(queuedTask);
-    await store.updateTask({...queuedTask,activeReservation:false,updatedAt:"2026-07-04T00:04:00.000Z"});
-    const unreservedRetry=await store.activateTaskSandboxRun(input);
-
-    assert.deepEqual(results.map((result)=>result.kind).sort(),["activated","already_running"]);
-    assert.equal(wrongTask.kind,"conflict");
-    assert.equal(queuedRetry.kind,"already_running");
-    assert.equal(unreservedRetry.kind,"conflict");
-    assert.equal((await store.findTask(task.id))?.status,"queued");
-    assert.equal((await store.sandboxRuns.get(run.runId))?.phase,"running");
+    const activated=await store.activateTaskSandboxRun({taskId:run.taskId,runId:run.runId,expectedFencingToken:started.run.fencingToken,activatedAt:runTimestamp(2)});
+    assert.equal(activated.kind,"activated");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"active");
   });
 
-  it("rejects secret values in persisted sandbox run state", async () => {
+  it("claims failed cleanup with fencing and rejects a stale writer", async () => {
     const store = createLocalInMemoryProductStore();
+    const failed=sandboxRun({
+      state:"failed",failureCode:"runner_failed",failureCause:"Botified exited",releaseReason:"failed",
+      failedAt:runTimestamp(1),releaseRequestedAt:runTimestamp(1)
+    });
+    await store.sandboxRuns.put(failed);
 
-    await assert.rejects(
-      () =>
-        store.sandboxRuns.put({
-          ...sandboxRun(),
-          serviceKey: "bsk_real_service_key"
-        } as unknown as SandboxRunState),
-      /must not contain secret values/
-    );
+    const claimed=await store.sandboxRuns.claimForCleanup({
+      runId:failed.runId,expectedFencingToken:failed.fencingToken,claimedAt:runTimestamp(2)
+    });
+    assert.ok(claimed);
+    assert.equal(claimed.cleanupAttempts,1);
+    assert.equal(claimed.cleanupClaimedAt,runTimestamp(2));
+    assert.equal(await store.sandboxRuns.updateWithFencing(failed.runId,failed.fencingToken,{...claimed,updatedAt:runTimestamp(3)}),null);
+  });
 
-    await assert.rejects(
-      () =>
-        store.sandboxRuns.put({
-          ...sandboxRun(),
-          modelApiKey: "sk-real-model-key"
-        } as unknown as SandboxRunState),
-      /must not contain secret values/
-    );
+  it("recovers cleanup after a crashed startup lease expires", async () => {
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({
+      state:"release_requested",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),
+      startupClaimToken:"crashed_startup",startupLeaseExpiresAt:runTimestamp(3)
+    });
+    await createTaskWithRun(store,run);
+
+    assert.equal(await store.sandboxRuns.claimForCleanup({
+      runId:run.runId,expectedFencingToken:run.fencingToken,claimedAt:runTimestamp(2)
+    }),null);
+    assert.ok(await store.sandboxRuns.claimForCleanup({
+      runId:run.runId,expectedFencingToken:run.fencingToken,claimedAt:runTimestamp(3)
+    }));
+  });
+
+  it("serializes startup writes against release and makes explicit retry immediately cleanup-eligible",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun();
+    await createTaskWithRun(store,run);
+    let enter!:()=>void,unblock!:()=>void;
+    const entered=new Promise<void>((resolve)=>{enter=resolve;});
+    const blocked=new Promise<void>((resolve)=>{unblock=resolve;});
+    const startupInput={taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,claimToken:"startup_claim",claimedAt:runTimestamp(0),leaseExpiresAt:runTimestamp(3)};
+    const startup=store.runSandboxStartupOperation(startupInput,async()=>{enter();await blocked;return"created";});
+    await entered;
+
+    const first=await beginRelease(store,"first",run);
+    const release=store.requestTaskSandboxRelease(first);
+    unblock();
+    assert.equal((await startup).kind,"applied");
+    assert.equal(await release,"applied");
+    assert.equal((await store.runSandboxStartupOperation(startupInput,async()=>null)).kind,"conflict");
+
+    const requested=await store.sandboxRuns.get(run.runId);assert.ok(requested);
+    const claimed=await store.sandboxRuns.claimForCleanup({runId:run.runId,expectedFencingToken:requested.fencingToken,claimedAt:runTimestamp(2)});assert.ok(claimed);
+    assert.equal(await store.sandboxRuns.claimForCleanup({runId:run.runId,expectedFencingToken:claimed.fencingToken,claimedAt:runTimestamp(2)}),null);
+    const retry=await beginRelease(store,"retry",claimed);
+    assert.equal(await store.requestTaskSandboxRelease(retry),"already_requested");
+    const retried=await store.sandboxRuns.get(run.runId);assert.ok(retried);
+    assert.equal(retried.cleanupClaimedAt,null);
+    assert.ok(await store.sandboxRuns.claimForCleanup({runId:run.runId,expectedFencingToken:retried.fencingToken,claimedAt:runTimestamp(2)}));
+  });
+
+  it("atomically reserves only a first Run or a replacement for the exact released Run",async()=>{
+    const firstStore=createLocalInMemoryProductStore();
+    const firstTask=await createTaskWithoutRun(firstStore);
+    const firstRun=sandboxRun({runId:"run_first",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const firstInput={
+      expectedReleasedRunId:null,
+      task:{...firstTask,currentRunId:firstRun.runId,updatedAt:runTimestamp(1)},
+      runtimeState:{botifiedBaseUrl:"http://first-task"},
+      sandboxRun:firstRun,
+      reservedAt:runTimestamp(1)
+    };
+    assert.equal((await firstStore.restartTaskSandboxAtomically({
+      ...firstInput,
+      sandboxRun:{...firstRun,projectId:"project_other"}
+    })).kind,"conflict");
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,0);
+    assert.equal((await firstStore.restartTaskSandboxAtomically(firstInput)).kind,"restarted");
+    assert.equal((await firstStore.findTask(firstTask.id))?.currentRunId,firstRun.runId);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await firstStore.listTaskMessages(firstTask.id)).length,0);
+    assert.equal((await firstStore.restartTaskSandboxAtomically(firstInput)).kind,"conflict");
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    const capacityTask={...firstTask,id:"task_capacity",fileLibraryId:"library_capacity"};
+    assert.equal((await firstStore.createTaskAtomically({
+      task:capacityTask,
+      reserveActive:false,
+      newFileLibrary:{id:"library_capacity",workspaceId:capacityTask.workspaceId,projectId:capacityTask.projectId,name:"Capacity",rootSubPath:"libraries/library_capacity/home",createdByUserId:capacityTask.createdByUserId!,createdAt:capacityTask.createdAt,updatedAt:capacityTask.updatedAt}
+    })).kind,"created");
+    const capacityRun={...firstRun,taskId:capacityTask.id,runId:"run_capacity",fileLibraryId:"library_capacity",fileLibraryRootSubPath:"libraries/library_capacity/home"};
+    assert.equal((await firstStore.restartTaskSandboxAtomically({
+      ...firstInput,
+      task:{...capacityTask,currentRunId:capacityRun.runId},
+      sandboxRun:capacityRun
+    })).kind,"capacity_rejected");
+    assert.equal((await firstStore.findTask(capacityTask.id))?.currentRunId,null);
+    assert.equal(await firstStore.sandboxRuns.get(capacityRun.runId),null);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+
+    const restartStore=createLocalInMemoryProductStore();
+    const released=sandboxRun({state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2),fencingToken:2,updatedAt:runTimestamp(2)});
+    const restartTask=await createTaskWithRun(restartStore,released);
+    const replacementRun=sandboxRun({runId:"run_restarted",createdAt:runTimestamp(3),updatedAt:runTimestamp(3)});
+    const restartInput={
+      expectedReleasedRunId:released.runId,
+      task:{...restartTask,currentRunId:replacementRun.runId,updatedAt:runTimestamp(3)},
+      runtimeState:{botifiedBaseUrl:"http://restarted-task"},
+      sandboxRun:replacementRun,
+      reservedAt:runTimestamp(3)
+    };
+    assert.equal((await restartStore.restartTaskSandboxAtomically(restartInput)).kind,"restarted");
+    assert.equal((await restartStore.findTask(restartTask.id))?.currentRunId,replacementRun.runId);
+    assert.equal((await restartStore.findProjectResourceUsage(restartTask.projectId))?.activeTasks,1);
+    assert.equal((await restartStore.listTaskMessages(restartTask.id)).length,0);
+
+    const missingStore=createLocalInMemoryProductStore();
+    const missingTask=await createTaskWithoutRun(missingStore);
+    await missingStore.updateTask({...missingTask,currentRunId:"run_missing"});
+    assert.equal((await missingStore.restartTaskSandboxAtomically({
+      ...firstInput,
+      expectedReleasedRunId:"run_missing",
+      task:{...missingTask,currentRunId:"run_after_missing"},
+      sandboxRun:{...firstRun,runId:"run_after_missing"}
+    })).kind,"conflict");
+    assert.equal((await missingStore.findProjectResourceUsage(missingTask.projectId))?.activeTasks,0);
+
+    const staleStore=createLocalInMemoryProductStore();
+    const currentReleased=sandboxRun({runId:"run_current",state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2)});
+    const staleTask=await createTaskWithRun(staleStore,currentReleased);
+    const staleReleased={...currentReleased,runId:"run_stale",resourceNames:{...currentReleased.resourceNames,pod:"task-stale"}};
+    await staleStore.sandboxRuns.put(staleReleased);
+    assert.equal((await staleStore.restartTaskSandboxAtomically({
+      ...restartInput,
+      expectedReleasedRunId:staleReleased.runId,
+      task:{...staleTask,currentRunId:"run_after_stale"},
+      sandboxRun:{...replacementRun,runId:"run_after_stale"}
+    })).kind,"conflict");
+    assert.equal((await staleStore.findProjectResourceUsage(staleTask.projectId))?.activeTasks,0);
+
+    const runningStore=createLocalInMemoryProductStore();
+    const running=sandboxRun();
+    const runningTask=await createTaskWithRun(runningStore,running);
+    assert.equal((await runningStore.restartTaskSandboxAtomically({
+      ...restartInput,
+      expectedReleasedRunId:running.runId,
+      task:{...runningTask,currentRunId:"run_after_running"},
+      sandboxRun:{...replacementRun,runId:"run_after_running"}
+    })).kind,"conflict");
+    assert.equal((await runningStore.findProjectResourceUsage(runningTask.projectId))?.activeTasks,1);
+  });
+
+  it("reclaims a message lease with the persisted message identity and no duplicate audit",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const run=sandboxRun({runId:"run_message",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const first=atomicMessage(task,run,"message_original","message_candidate",runTimestamp(0),runTimestamp(1),"claim_first");
+
+    const created=await store.createTaskMessageAtomically(first);
+    assert.equal(created.kind,"created");
+    assert.equal(created.kind==="created"?created.message.id:null,"message_original");
+    assert.equal(created.kind==="created"?created.message.deliveryKey:null,"delivery_message_message_original");
+
+    const reclaimed=await store.createTaskMessageAtomically({
+      ...first,
+      message:{...first.message,id:"message_retry",deliveryKey:"delivery_message_message_retry"},
+      idempotency:{...first.idempotency,resourceId:"message_retry",claimToken:"claim_retry",now:runTimestamp(2),leaseExpiresAt:runTimestamp(3)}
+    });
+    assert.equal(reclaimed.kind,"created");
+    assert.equal(reclaimed.kind==="created"?reclaimed.message.id:null,"message_original");
+    assert.deepEqual((await store.listTaskMessages(task.id)).map((message)=>message.id),["message_original"]);
+    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.action==="task.message.create").length,1);
+  });
+
+  it("rejects archive and deletion while any Task Run remains unreleased",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const released=sandboxRun({state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2)});
+    const task=await createTaskWithRun(store,released);
+    await store.sandboxRuns.put(sandboxRun({runId:"run_orphan",taskId:task.id}));
+
+    assert.equal((await store.archiveTask(task.id,runTimestamp(3))).kind,"sandbox_not_released");
+    assert.equal((await store.beginTaskDeletion(task.id,runTimestamp(3))).kind,"sandbox_not_released");
   });
 });
 
-function sandboxRun(overrides: Partial<SandboxRunState> = {}): SandboxRunState {
+async function createTaskWithRun(store:ReturnType<typeof createLocalInMemoryProductStore>,run:PersistedSandboxRunState){
+  const timestamp=runTimestamp(0);
+  await store.createUser({id:run.startedByUserId,email:"runner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+  await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
+  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+  const task={id:run.taskId,workspaceId:run.workspaceId,projectId:run.projectId,endpointId:"endpoint_1",fileLibraryId:run.fileLibraryId,createdByUserId:run.startedByUserId,title:"Task",prompt:"Work",agentContext:"",currentRunId:run.runId,archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
+  const created=await store.createTaskAtomically({task,reserveActive:run.state!=="released",newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},sandboxRun:run});
+  assert.equal(created.kind,"created");
+  return task;
+}
+
+async function createTaskWithoutRun(store:ReturnType<typeof createLocalInMemoryProductStore>){
+  const run=sandboxRun();
+  const timestamp=runTimestamp(0);
+  await store.createUser({id:run.startedByUserId,email:"runner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+  await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
+  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+  const task={id:run.taskId,workspaceId:run.workspaceId,projectId:run.projectId,endpointId:"endpoint_1",fileLibraryId:run.fileLibraryId,createdByUserId:run.startedByUserId,title:"Task",prompt:"Work",agentContext:"",currentRunId:null,archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
+  const created=await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp}});
+  assert.equal(created.kind,"created");
+  return task;
+}
+
+async function beginRelease(store:ReturnType<typeof createLocalInMemoryProductStore>,key:string,current:PersistedSandboxRunState){
+  const now=runTimestamp(2),claimToken=`claim_${key}`,requestHash=`hash_${key}`;
+  const ownership={actorId:current.startedByUserId,projectId:current.projectId,operation:"release-sandbox" as const,key,requestHash,resourceId:current.runId,claimToken,now,leaseExpiresAt:runTimestamp(4)};
+  assert.equal((await store.beginTaskIdempotency(ownership)).kind,"claimed");
+  return{runId:current.runId,taskId:current.taskId,expectedFencingToken:current.fencingToken,run:{...current,state:"release_requested" as const,releaseReason:current.releaseReason??"requested",releaseRequestedAt:current.releaseRequestedAt??now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:now},auditEvent:{id:`audit_release_${key}`,projectId:current.projectId,actorId:current.startedByUserId,subjectUserId:current.startedByUserId,action:"sandbox.release_requested" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId},createdAt:now},idempotency:{actorId:ownership.actorId,projectId:ownership.projectId,operation:ownership.operation,key,requestHash,claimToken,responseStatus:200,responseBody:{ok:true},updatedAt:now}};
+}
+
+function sandboxRun(overrides: Partial<PersistedSandboxRunState> = {}): PersistedSandboxRunState {
   return {
-    workspaceId: "ws1",
-    projectId: "proj1",
-    taskId: "task1",
-    runId: "run1",
-    namespace: "agentsmith",
-    phase: "starting",
-    image: "agentsmith-lite/botified-runner:test",
-    pvcName: "agentsmith-lite-files",
-    projectSubPath: "workspaces/ws1/projects/proj1",
-    fileLibraryRootSubPath: "libraries/library-task1/home",
-    fileLibraryId: "library-task1",
-    startedByUserId: "user1",
-    startedAt: null,
-    botifiedPort: 3099,
-    resourceNames: {
-      pod: "asl-task-task1",
-      service: "asl-task-task1",
-      configMap: "asl-task-task1-config",
-      secret: "asl-botified-task1",
-      serviceAccount: "asl-task-task1",
-      networkPolicy: "asl-task-task1"
-    },
-    serviceKeySecretRef: {
-      name: "asl-botified-task1",
-      key: "BOTIFIED_SERVICE_KEY"
-    },
-    directories: {
-      libraryHome: "/workspace/project/libraries/library-task1/home",
-      botified: "/workspace/project/tasks/task1/botified"
-    },
-    resourceLimits: {
-      cpuRequest: "250m",
-      memoryRequest: "512Mi",
-      cpuLimit: "1",
-      memoryLimit: "1Gi"
-    },
-    resourceSnapshot: {
-      cpuRequestMillis:"250",
-      memoryRequestBytes:"536870912",
-      cpuLimitMillis:"1000",
-      memoryLimitBytes:"1073741824"
-    },
-    fencingToken: 1,
-    cleanupStatus: "active",
-    createdAt: "2026-07-04T00:00:00.000Z",
-    updatedAt: "2026-07-04T00:00:00.000Z",
-    ...overrides
+    workspaceId:"workspace_1",projectId:"project_1",taskId:"task_1",runId:"run_1",
+    namespace:"agentsmith",state:"starting",image:"agentsmith-lite/botified-runner:test",
+    pvcName:"agentsmith-lite-files",projectSubPath:"workspaces/workspace_1/projects/project_1",
+    fileLibraryRootSubPath:"libraries/library_1/home",fileLibraryId:"library_1",
+    startedByUserId:"user_1",startedAt:null,botifiedPort:3099,
+    resourceNames:{pod:"task-1",service:"task-1",configMap:"task-1-config",secret:"task-1-secret",serviceAccount:"task-1",networkPolicy:"task-1"},
+    serviceKeySecretRef:{name:"task-1-secret",key:"BOTIFIED_SERVICE_KEY"},
+    directories:{libraryHome:"/workspace/task/home",botified:"/workspace/task/botified"},
+    resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},
+    resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
+    failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,
+    releaseReason:null,releaseRequestedAt:null,failedAt:null,releasedAt:null,
+    createdAt:runTimestamp(0),updatedAt:runTimestamp(0),...overrides
   };
+}
+
+function atomicMessage(
+  task:Awaited<ReturnType<typeof createTaskWithoutRun>>,
+  run:PersistedSandboxRunState,
+  resourceId:string,
+  candidateId:string,
+  now:string,
+  leaseExpiresAt:string,
+  claimToken:string
+):AtomicTaskMessageInput {
+  const message:PersistedTaskMessage={
+    id:candidateId,
+    taskId:task.id,
+    actorId:run.startedByUserId,
+    content:"continue",
+    deliveryKey:`delivery_message_${candidateId}`,
+    requestHash:"delivery_hash",
+    claimToken:null,
+    receipt:null,
+    timelineCursor:null,
+    deliveryStatus:"pending",
+    claimedAt:null,
+    leaseExpiresAt:null,
+    attemptCount:0,
+    nextRetryAt:null,
+    safeError:null,
+    createdAt:now,
+    updatedAt:now,
+    deletedAt:null
+  };
+  return {
+    taskId:task.id,
+    expectedCurrentRunId:null,
+    message,
+    idempotency:{actorId:run.startedByUserId,projectId:task.projectId,operation:"message",key:"message-key",requestHash:"message-hash",resourceId,claimToken,now,leaseExpiresAt},
+    auditEvent:{id:`audit_task_message_create_${candidateId}`,projectId:task.projectId,actorId:run.startedByUserId,action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId:candidateId,deliveryStatus:"pending"},createdAt:now},
+    restart:{task:{...task,currentRunId:run.runId,updatedAt:run.updatedAt},runtimeState:{botifiedBaseUrl:"http://task"},sandboxRun:run,reservedAt:run.updatedAt}
+  };
+}
+
+function runTimestamp(minute:number):string {
+  return `2026-07-23T00:${String(minute).padStart(2,"0")}:00.000Z`;
 }

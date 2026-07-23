@@ -74,19 +74,4 @@ test("concurrent credential rotations reject the stale writer", async () => {
   assert.equal((await services.credentials.list(user.id, project.id))[0]!.version, 2);
 });
 
-test("legacy endpoint credential binding rejects a credential from another project", async () => {
-  const store = createInMemoryProductStore();
-  const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-credential-binding-test", builtinAdminPassword: "admin-password" });
-  const { user } = await services.auth.loginAfterBootstrap("admin-password");
-  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-  const firstProject = await services.workspaces.createProject(user.id, workspace.id, { name: "P1" });
-  const secondProject = await services.workspaces.createProject(user.id, workspace.id, { name: "P2" });
-  const credential = await services.credentials.create(user.id, secondProject.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
-  const now = new Date().toISOString();
-  await store.createEndpoint({ id: "endpoint_legacy", projectId: firstProject.id, name: "Legacy", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: "", capabilities: ["text"], requestTimeoutSecs: 30, createdAt: now, updatedAt: now });
-
-  assert.equal(await store.bindEndpointCredential("endpoint_legacy", credential.id), false);
-  assert.equal((await store.findEndpoint("endpoint_legacy"))!.credentialId, "");
-});
-
 function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }

@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createTestApiServer as createApiServer, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
+import type { CompleteTaskIdempotencyInput } from "../../packages/ports/src/store.js";
 
 describe("profile and settings API", () => {
   const store = createLocalInMemoryProductStore();
@@ -89,12 +90,37 @@ describe("profile and settings API", () => {
     assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}`, undefined, "project-delete"), { deleted: true });
 
     const failingProjectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Deletion failure" })).id;
-    const deleteProject = store.deleteProjectDependenciesAndProject.bind(store);
-    store.deleteProjectDependenciesAndProject = async (id) => id === failingProjectId ? false : deleteProject(id);
+    const deleteProject = store.finalizeProjectDeletion.bind(store);
+    Object.assign(store,{
+      finalizeProjectDeletion:async(id:string,completion?:CompleteTaskIdempotencyInput)=>id===failingProjectId?"not_ready":deleteProject(id,completion)
+    });
     const failed = await call("DELETE", `/api/v1/projects/${failingProjectId}`, undefined, "project-delete-failure");
     assert.equal(failed.response.status, 409);
-    assert.deepEqual(failed.body, { error: "Project deletion preparation is still pending" });
+    assert.deepEqual(failed.body, { error: "Project deletion is still pending" });
     assert.equal((await store.findProject(failingProjectId))?.lifecycleStatus, "deleting");
+
+    const retryProjectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Retry deletion" })).id;
+    let finalizeAttempts = 0;
+    Object.assign(store,{
+      finalizeProjectDeletion:async(id:string,completion?:CompleteTaskIdempotencyInput)=>{
+        if(id===retryProjectId&&++finalizeAttempts===1)throw new Error("unknown finalize failure");
+        return deleteProject(id,completion);
+      }
+    });
+    const unknownFailure = await call("DELETE", `/api/v1/projects/${retryProjectId}`, undefined, "project-delete-retry");
+    assert.equal(unknownFailure.response.status, 500);
+    assert.deepEqual(unknownFailure.body,{error:"Settings operation failed"});
+    const leased = await call("DELETE", `/api/v1/projects/${retryProjectId}`, undefined, "project-delete-retry");
+    assert.equal(leased.response.status,409);
+    assert.deepEqual(leased.body,{error:"Idempotent operation is still in progress",code:"idempotency_in_progress"});
+    const beginIdempotency=store.beginTaskIdempotency.bind(store);
+    store.beginTaskIdempotency=async(input)=>{
+      if(input.operation!=="project.delete"||input.key!=="project-delete-retry")return beginIdempotency(input);
+      const now=new Date(Date.parse(input.leaseExpiresAt)+1).toISOString();
+      return beginIdempotency({...input,now,leaseExpiresAt:new Date(Date.parse(now)+30_000).toISOString()});
+    };
+    assert.deepEqual(await json("DELETE", `/api/v1/projects/${retryProjectId}`, undefined, "project-delete-retry"),{deleted:true});
+    assert.deepEqual(await json("DELETE", `/api/v1/projects/${retryProjectId}`, undefined, "project-delete-retry"),{deleted:true});
   });
   it("rejects oversized JSON bodies before buffering them", async () => {
     const declared = await rawJsonRequest({ "content-length": String(1_048_577) });

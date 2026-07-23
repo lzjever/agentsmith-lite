@@ -18,6 +18,8 @@ import {
   type BotifiedUploadFileInput,
   type BotifiedUploadFileResult
 } from "../../packages/ports/src/botified.js";
+import { createApplicationServices } from "../../packages/application/src/factory.js";
+import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 import { WebSocket, WebSocketServer } from "ws";
 
 const validProductionSessionSecret = "production-session-secret-32-chars";
@@ -90,24 +92,23 @@ describe("task interactions API", () => {
     });
     const auth = await createProjectWithEndpoint(api.baseUrl);
 
-    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+    const createdTask = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
       prompt: "make notes",
       endpointId: auth.endpointId,
       fileLibrary:{mode:"create_new",name:"Task files"}
     });
-    assert.equal("startDeliveryKey" in task, false);
-    assert.equal("startReceipt" in task, false);
+    assert.equal("startDeliveryKey" in createdTask, false);
+    assert.equal("startReceipt" in createdTask, false);
+    const task=createdTask.task;
     const stored = await store.findTask(task.id as string);
     assert.ok(stored);
-    await store.updateTask({ ...stored, executionMode: "live", status: "running", terminalReason: null, terminalizedAt: null, startIntentStatus: "dispatched", artifactProjectionStatus: "pending", cleanupStatus: "pending", cleanupCompletedAt: null });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id as string, { botifiedBaseUrl: "http://botified.internal" });
+    await makeTaskRunActive(store, stored, "http://botified.internal");
     const interactions = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
     const artifacts = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/artifacts`);
     const leakedJson = JSON.stringify({ interactions, artifacts });
 
     assert.equal(interactions.items.some((item: { kind:string; artifactId?:string }) => item.kind === "file" && item.artifactId === artifacts[0].id), true);
     assert.equal(task.prompt, "make notes");
-    assert.equal(task.executionMode, "dry-run");
     assert.deepEqual(artifacts.map((artifact: { name: string; bytes: number; sha256?: string }) => [
       artifact.name,
       artifact.bytes,
@@ -138,6 +139,143 @@ describe("task interactions API", () => {
     assert.doesNotMatch(JSON.stringify(downloadHeaders), /api-service-key|botified\.internal|download_url|\/v1\/files/);
   });
 
+  it("keeps each Task on its own stable Botified session", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    api = await createApiServer({
+      port: 0,
+      dataRoot,
+      builtinAdminPassword: "admin-password",
+      botifiedClient: botified,
+      botifiedServiceKeyFactory: ({ taskId }) => taskId,
+      store
+    });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const firstCreated = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+      prompt: "first task",
+      endpointId: auth.endpointId,
+      fileLibrary: { mode: "create_new", name: "First files" }
+    });
+    const secondCreated = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+      prompt: "second task",
+      endpointId: auth.endpointId,
+      fileLibrary: { mode: "create_new", name: "Second files" }
+    });
+    const first = await store.findTask(firstCreated.task.id as string);
+    const second = await store.findTask(secondCreated.task.id as string);
+    assert.ok(first);
+    assert.ok(second);
+    await makeTaskRunActive(store, first, "http://botified.internal");
+    await makeTaskRunActive(store, second, "http://botified.internal");
+
+    await auth.requestJson("GET", `/api/v1/tasks/${first.id}/interactions`);
+    await auth.requestJson("GET", `/api/v1/tasks/${second.id}/interactions`);
+
+    assert.deepEqual(botified.readTimelineCalls.map(({ serviceKey }) => serviceKey), [first.id, second.id]);
+    assert.notEqual(first.id, second.id);
+  });
+
+  it("fails the fenced Run when Botified returns another Task session", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([{
+      status: "ok",
+      events: [{
+        version: "botified.timeline.v1",
+        cursor: "evt_wrong_1",
+        seq: 1,
+        time: "2026-07-23T00:00:00.000Z",
+        session_id: "wrong-task",
+        type: "assistant_message.completed",
+        trace: { cycle_id: "cycle-wrong" },
+        item: { id: "assistant-wrong", type: "assistant_message", status: "completed" },
+        data: { text: "wrong session" }
+      }],
+      nextCursor: "evt_wrong_1"
+    }]);
+    botified.timelineSessionId = "wrong-task";
+    api = await createApiServer({
+      port: 0,
+      dataRoot,
+      builtinAdminPassword: "admin-password",
+      botifiedClient: botified,
+      botifiedServiceKeyFactory: ({ taskId }) => taskId,
+      store
+    });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+      prompt: "session fence",
+      endpointId: auth.endpointId,
+      fileLibrary: { mode: "create_new", name: "Session fence" }
+    });
+    const task = await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
+
+    const firstResponse = await auth.request("GET", `/api/v1/tasks/${task.id}/interactions`);
+    assert.equal(firstResponse.status, 409);
+    assert.deepEqual(await firstResponse.json(), {
+      error: "Botified timeline session identity mismatch",
+      code: "botified_session_mismatch"
+    });
+
+    const run = await store.sandboxRuns.get((await store.findTask(task.id))!.currentRunId!);
+    assert.equal(run?.state, "failed");
+    assert.equal(run?.releaseReason, "failed");
+    assert.equal(run?.failureCode, "runtime_unreachable");
+    const failedAudits = (await store.listProjectAuditEvents(auth.projectId))
+      .filter((event) => event.action === "sandbox.failed");
+    assert.equal(failedAudits.length, 1);
+    assert.equal(failedAudits[0]?.detail?.taskId, task.id);
+    assert.equal(failedAudits[0]?.detail?.runId, run?.runId);
+
+    const detail = await auth.requestJson("GET", `/api/v1/tasks/${task.id}`);
+    assert.equal(detail.sandboxState.state, "failed");
+    assert.deepEqual(detail.capabilities, {
+      sendMessage: false,
+      editQueuedMessage: false,
+      abortTurn: false,
+      stopWork: false,
+      openTerminal: false,
+      releaseSandbox: true,
+      editTask: false,
+      archiveTask: false,
+      deleteTask: false
+    });
+
+    const secondResponse = await auth.request("GET", `/api/v1/tasks/${task.id}/interactions`);
+    assert.equal(secondResponse.status, 200);
+    const secondSnapshot = await secondResponse.json() as {
+      presentation: {
+        sandboxState: typeof detail.sandboxState;
+        capabilities: typeof detail.capabilities;
+      };
+    };
+    assert.deepEqual(secondSnapshot.presentation.sandboxState, detail.sandboxState);
+    assert.deepEqual(secondSnapshot.presentation.capabilities, detail.capabilities);
+    assert.equal((await store.sandboxRuns.get(run!.runId))?.state, "failed");
+    assert.equal(
+      (await store.listProjectAuditEvents(auth.projectId))
+        .filter((event) => event.action === "sandbox.failed").length,
+      1
+    );
+  });
+
+  it("fails closed when currentRunId cannot be resolved",async()=>{
+    const store=createLocalInMemoryProductStore();
+    api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",botifiedClient:new FakeBotifiedClient([]),store});
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"missing run",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Missing run"}});
+    const task=await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await store.updateTask({...task,currentRunId:"run_missing"});
+
+    const detail=await auth.requestJson("GET",`/api/v1/tasks/${task.id}`);
+
+    assert.equal(detail.sandboxState.state,"failed");
+    assert.equal(detail.sandboxState.runId,"run_missing");
+    assert.deepEqual(detail.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
+  });
+
   it("uses a safe download header for persisted artifact names with path and control characters", async () => {
     const artifactBytes = new TextEncoder().encode("persisted artifact bytes");
     const store = createLocalInMemoryProductStore();
@@ -151,11 +289,12 @@ describe("task interactions API", () => {
       store
     });
     const auth = await createProjectWithEndpoint(api.baseUrl);
-    const task = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+    const createdTask = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
       prompt: "download old artifact",
       endpointId: auth.endpointId,
       fileLibrary:{mode:"create_new",name:"Task files"}
     });
+    const task=createdTask.task;
     const artifact = {
       id: "art_header",
       taskId: task.id as string,
@@ -195,9 +334,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"background", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:"http://botified.internal" });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
     const interaction = { id:"interaction-work", revision:1, taskId:task.id, kind:"background_task" as const, title:"Background task", body:null, contentMode:"none" as const, position:1, occurredAt:task.createdAt, updatedAt:task.createdAt, executionStatus:"running" as const, deliveryStatus:null, label:"Compile", workSummary:null, result:null, error:null, detailsOmitted:false, canStop:true };
     await store.persistTaskInteractionMutation({ taskId:task.id, changes:[{ sourceKind:"botified", sourceId:"evt_test_1", sourceRevision:0, interaction, correlation:{workTaskId:"botified-work-1"} }] });
 
@@ -217,15 +355,14 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, terminalAccessRecheckMs:20, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal occupancy", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
     const terminalUrl = `${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`;
 
-    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).capabilities.openTerminal, true);
+    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
     const first = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
     await once(first, "open");
-    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).capabilities.openTerminal, false);
+    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, false);
 
     const secondStatus = await rejectedWebSocketStatus(terminalUrl, auth.cookie);
     assert.equal(secondStatus, 403);
@@ -236,7 +373,7 @@ describe("task interactions API", () => {
     const [code, reason] = await within(revoked, 500, "Terminal stayed open after workspace access changed");
     assert.equal(code, 1008);
     assert.equal(String(reason), "Task terminal access changed");
-    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).capabilities.openTerminal, false);
+    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, false);
 
     await store.setWorkspaceLifecycleStatus(auth.workspaceId, "active", new Date().toISOString());
     await waitForTerminalCapability(auth, task.id, true);
@@ -261,9 +398,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal input", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
     const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
     await once(client, "open");
@@ -290,9 +426,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal oversized input", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
     const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
     await once(client, "open");
@@ -316,9 +451,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal output", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:`http://127.0.0.1:${upstreamAddress.port}` });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
     const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
     const closeCode = new Promise<number>((resolve, reject) => {
@@ -335,46 +469,123 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"retained task history", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state",task.id,{botifiedBaseUrl:"http://botified.internal"});
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const initial = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
-    assert.equal(initial.capabilities.sendMessage,true);
-    assert.equal(initial.capabilities.openTerminal,true);
+    assert.equal(initial.presentation.capabilities.sendMessage,true);
+    assert.equal(initial.presentation.capabilities.openTerminal,true);
     assert.equal(initial.items.some((item:{body:string|null})=>item.body==="retained task history"),true);
 
     const endpoint = await store.findEndpoint(task.endpointId); assert.ok(endpoint);
     await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
     const endpointDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(endpointDisabled.items.length,initial.items.length);
-    assert.deepEqual(endpointDisabled.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,editTask:true,archiveTask:false,deleteTask:false});
+    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
     const owner = (await store.listProjectMemberships(task.projectId)).find((membership)=>membership.role==="owner"); assert.ok(owner);
     await store.updateProjectMembership({...owner,role:"viewer",updatedAt:new Date(Date.parse(owner.updatedAt)+1_000).toISOString()});
     const viewer = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(viewer.items.length,initial.items.length);
-    assert.deepEqual(viewer.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,editTask:false,archiveTask:false,deleteTask:false});
+    assert.deepEqual(viewer.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
 
     await store.updateProjectMembership(owner);
     const findCredential = store.findProjectCredential.bind(store);
     store.findProjectCredential = async (id) => id === endpoint.credentialId ? null : findCredential(id);
     const credentialDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(credentialDisabled.items.length,initial.items.length);
-    assert.equal(credentialDisabled.capabilities.sendMessage,false);
-    assert.equal(credentialDisabled.capabilities.openTerminal,false);
+    assert.equal(credentialDisabled.presentation.capabilities.sendMessage,false);
+    assert.equal(credentialDisabled.presentation.capabilities.openTerminal,false);
   });
 
-  it("streams independent typed state, run state, and connection changes without durable interactions", async () => {
+  it("replays a background-completed pending message from canonical state with current capabilities",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"background replay",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Replay files"}});
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const owner=(await store.listProjectMemberships(task.projectId)).find((membership)=>membership.role==="owner");assert.ok(owner);
+    const content="deliver after request interruption",key="background-message-key",messageId="message_background_replay";
+    const requestHash=createHash("sha256").update(JSON.stringify({content,taskId:task.id}),"utf8").digest("base64url");
+    const timestamp=new Date().toISOString();
+    const pending={
+      id:messageId,
+      taskId:task.id,
+      actorId:owner.userId,
+      content,
+      deliveryKey:`delivery_${messageId}`,
+      requestHash:createHash("sha256").update(content,"utf8").digest("base64url"),
+      claimToken:null,
+      receipt:null,
+      timelineCursor:null,
+      deliveryStatus:"pending" as const,
+      claimedAt:null,
+      leaseExpiresAt:null,
+      attemptCount:0,
+      nextRetryAt:null,
+      safeError:null,
+      createdAt:timestamp,
+      updatedAt:timestamp,
+      deletedAt:null
+    };
+    const persisted=await store.createTaskMessageAtomically({
+      taskId:task.id,
+      expectedCurrentRunId:current.currentRunId,
+      message:pending,
+      idempotency:{actorId:owner.userId,projectId:task.projectId,operation:"message",key,requestHash,resourceId:messageId,claimToken:"claim_background_replay",now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+60_000).toISOString()},
+      auditEvent:{id:"audit_background_replay",projectId:task.projectId,actorId:owner.userId,action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId,deliveryStatus:"pending"},createdAt:timestamp}
+    });
+    assert.equal(persisted.kind,"created");
+    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":key};
+    const inProgress=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
+    assert.equal(inProgress.status,409);
+    assert.deepEqual(await inProgress.json(),{error:"Idempotent task operation is still in progress",code:"idempotency_in_progress"});
+
+    const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password",botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
+    await background.tasks.syncActiveTasksOnce();
+    assert.deepEqual(await store.beginTaskIdempotency({actorId:owner.userId,projectId:task.projectId,operation:"message",key,requestHash,resourceId:"unused-replay-resource",claimToken:"unused-replay-claim",now:new Date().toISOString(),leaseExpiresAt:new Date(Date.now()+60_000).toISOString()}),{
+      kind:"replay",
+      resourceId:messageId,
+      responseStatus:200,
+      responseBody:{kind:"task_message",messageId,taskId:task.id,projectId:task.projectId,actorId:owner.userId}
+    });
+    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
+    assert.equal(replay.status,200);
+    const replayBody=await replay.json() as {duplicate:boolean;messageId:string;presentation:{sandboxState:{state:string;runId:string|null};capabilities:{sendMessage:boolean;releaseSandbox:boolean}}};
+    assert.equal(replayBody.duplicate,true);
+    assert.equal(replayBody.messageId,messageId);
+    assert.deepEqual(replayBody.presentation.sandboxState,{state:"active",runId:current.currentRunId,cause:null});
+    assert.equal(replayBody.presentation.capabilities.sendMessage,true);
+    assert.equal(replayBody.presentation.capabilities.releaseSandbox,true);
+    assert.equal((await store.listTaskMessages(task.id)).filter((message)=>message.content===content).length,1);
+    assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
+
+    const endpoint=await store.findEndpoint(task.endpointId);assert.ok(endpoint);
+    await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
+    const capabilityReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
+    assert.equal(capabilityReplay.status,200);
+    const capabilityBody=await capabilityReplay.json() as {duplicate:boolean;presentation:{task:{endpointId:string};capabilities:{sendMessage:boolean;openTerminal:boolean;releaseSandbox:boolean}}};
+    assert.equal(capabilityBody.duplicate,true);
+    assert.equal(capabilityBody.presentation.task.endpointId,endpoint.id);
+    assert.equal(capabilityBody.presentation.capabilities.sendMessage,false);
+    assert.equal(capabilityBody.presentation.capabilities.openTerminal,false);
+    assert.equal(capabilityBody.presentation.capabilities.releaseSandbox,true);
+    assert.equal((await store.listTaskMessages(task.id)).filter((message)=>message.content===content).length,1);
+    assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
+  });
+
+  it("streams independent typed state and connection changes without a duplicate Run event", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"state stream", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state",task.id,{botifiedBaseUrl:"http://botified.internal"});
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const response=await auth.request("GET",`/api/v1/tasks/${task.id}/interactions/stream`);assert.equal(response.status,200);
     const reader=response.body?.getReader();assert.ok(reader);const decoder=new TextDecoder();let stream="";
@@ -385,9 +596,8 @@ describe("task interactions API", () => {
     await reader.cancel();
 
     assert.match(stream,/event: state/);
-    assert.match(stream,/event: run_state\ndata: \{"runState":"running"\}/);
     assert.match(stream,/event: connection\ndata: \{"connectionState":"connected","runtimeReachability":"reachable","historyStatus":"complete","lastSyncedAt":"[^"]+","message":null\}/);
-    assert.match(stream,/"runState":"running"/);
+    assert.doesNotMatch(stream,/event: run_state|runState/);
     assert.match(stream,/"runtimeReachability":"reachable"/);
     assert.match(stream,/"historyStatus":"complete"/);
     assert.match(stream,/"lastSyncedAt":"[^"]+"/);
@@ -402,9 +612,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"preview failure", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:"http://botified.internal" });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const response = await auth.request("GET", `/api/v1/tasks/${task.id}/interactions/stream`);
     assert.equal(response.status, 200);
@@ -432,9 +641,8 @@ describe("task interactions API", () => {
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"preview disconnect", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.id as string); assert.ok(task);
-    await store.updateTask({ ...task, executionMode:"live", status:"running", terminalReason:null, startIntentStatus:"dispatched", cleanupStatus:"pending" });
-    await store.jsonDocs.put("sandbox_runtime_state", task.id, { botifiedBaseUrl:"http://botified.internal" });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const response = await auth.request("GET", `/api/v1/tasks/${task.id}/interactions/stream`);
     assert.equal(response.status, 200);
@@ -565,7 +773,7 @@ describe("task interactions API", () => {
     try{
       api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,store:createLocalInMemoryProductStore(),botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return structuredClone(resources);}}}});
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
-      const task=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"release through API",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}});
+      const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"release through API",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}})).task;
       assert.equal((await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`)).capabilities.releaseSandbox,true);
       assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).status,401);
       const baseHeaders={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf};
@@ -573,10 +781,110 @@ describe("task interactions API", () => {
       const headers={...baseHeaders,"idempotency-key":"release-api-key"};
       const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body:"{}"});const firstBody=await first.json();
       const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body:"{}"});const replayBody=await replay.json();
-      assert.equal(first.status,200);assert.equal(replay.status,200);assert.deepEqual(replayBody,firstBody);assert.equal((firstBody as {sandboxState:{state:string}}).sandboxState.state,"release_requested");
+      assert.equal(first.status,200);assert.equal(replay.status,200);assert.deepEqual(replayBody,firstBody);assert.equal((firstBody as {presentation:{sandboxState:{state:string}}}).presentation.sandboxState.state,"release_requested");
     }finally{if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;}
   });
 });
+
+async function makeTaskRunActive(
+  store: ReturnType<typeof createLocalInMemoryProductStore>,
+  task: PersistedAgentTask,
+  botifiedBaseUrl: string
+): Promise<void> {
+  const timestamp = task.updatedAt;
+  const project=await store.findProject(task.projectId);
+  const library=task.fileLibraryId?await store.findFileLibrary(task.fileLibraryId):null;
+  assert.ok(project);
+  assert.ok(library);
+  assert.ok(task.createdByUserId);
+  assert.equal(task.currentRunId,null);
+  const runId=`run_fixture_${task.id}`;
+  const run:PersistedSandboxRunState={
+    workspaceId:task.workspaceId,
+    projectId:task.projectId,
+    taskId:task.id,
+    runId,
+    namespace:"agentsmith",
+    state:"starting",
+    image:"agentsmith-lite/botified-runner:test",
+    pvcName:"agentsmith-lite-files",
+    projectSubPath:project.rootPath,
+    fileLibraryRootSubPath:library.rootSubPath,
+    fileLibraryId:library.id,
+    startedByUserId:task.createdByUserId,
+    startedAt:null,
+    botifiedPort:3099,
+    resourceNames:{
+      pod:`${task.id}-pod`,
+      service:`${task.id}-service`,
+      configMap:`${task.id}-config`,
+      secret:`${task.id}-secret`,
+      serviceAccount:`${task.id}-account`,
+      networkPolicy:`${task.id}-policy`
+    },
+    serviceKeySecretRef:{name:`${task.id}-secret`,key:"BOTIFIED_SERVICE_KEY"},
+    directories:{libraryHome:"/workspace/task/home",botified:"/workspace/task/botified"},
+    resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},
+    resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
+    failureCode:null,
+    failureCause:null,
+    fencingToken:1,
+    cleanupClaimedAt:null,
+    cleanupAttempts:0,
+    lastCleanupAt:null,
+    lastCleanupError:null,
+    releaseReason:null,
+    releaseRequestedAt:null,
+    failedAt:null,
+    releasedAt:null,
+    createdAt:timestamp,
+    updatedAt:timestamp
+  };
+  const reserved=await store.restartTaskSandboxAtomically({
+    expectedReleasedRunId:null,
+    task:{...task,currentRunId:runId},
+    runtimeState:{botifiedBaseUrl},
+    sandboxRun:run,
+    reservedAt:timestamp
+  });
+  assert.equal(reserved.kind,"restarted");
+  const startupClaimToken=`startup_claim_${task.id}`;
+  assert.equal((await store.runSandboxStartupOperation({
+    taskId:task.id,
+    runId,
+    expectedFencingToken:run.fencingToken,
+    claimToken:startupClaimToken,
+    claimedAt:timestamp,
+    leaseExpiresAt:new Date(Date.parse(timestamp)+60_000).toISOString()
+  },async()=>null)).kind,"applied");
+  const started=await store.confirmSandboxRunStarted({
+    runId,
+    expectedFencingToken:run.fencingToken,
+    startupClaimToken,
+    startedAt:timestamp,
+    auditEvent:{
+      id:`audit_started_${runId}`,
+      projectId:task.projectId,
+      actorId:null,
+      subjectUserId:task.createdByUserId,
+      action:"sandbox.started",
+      status:"accepted",
+      resourceKind:"sandbox",
+      resourceId:task.id,
+      detail:{taskId:task.id,runId},
+      createdAt:timestamp
+    }
+  });
+  assert.notEqual(started.kind,"conflict");
+  if(started.kind==="conflict")return;
+  const activated = await store.activateTaskSandboxRun({
+    taskId:task.id,
+    runId,
+    expectedFencingToken:started.run.fencingToken,
+    activatedAt:timestamp
+  });
+  assert.notEqual(activated.kind, "conflict");
+}
 
 async function createProjectWithEndpoint(baseUrl: string, password = "admin-password") {
   let idempotencySequence = 0;
@@ -669,7 +977,7 @@ async function within<T>(promise: Promise<T>, timeoutMs: number, message: string
 async function waitForTerminalCapability(auth:Awaited<ReturnType<typeof createProjectWithEndpoint>>,taskId:string,expected:boolean):Promise<void>{
   for(let attempt=0;attempt<20;attempt+=1){
     const snapshot=await auth.requestJson("GET",`/api/v1/tasks/${taskId}/interactions`);
-    if(snapshot.capabilities.openTerminal===expected)return;
+    if(snapshot.presentation.capabilities.openTerminal===expected)return;
     await new Promise<void>((resolve)=>setImmediate(resolve));
   }
   assert.fail(`Terminal capability did not become ${expected}`);
@@ -688,6 +996,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   previewFailure: unknown;
   previewSignal: AbortSignal | undefined;
   previewWaitForAbort = false;
+  timelineSessionId: string | undefined;
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
 
@@ -719,7 +1028,7 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     const next = this.timelineReads.shift();
     if (next) {
       if (next.status === "gap") return next;
-      return { ...next, events: next.events.map((event) => ({ ...(event as Record<string,unknown>), session_id: serviceKey })) };
+      return { ...next, events: next.events.map((event) => ({ ...(event as Record<string,unknown>), session_id: this.timelineSessionId??serviceKey })) };
     }
     const result: BotifiedTimelineReadResult = { status: "ok", events: [] };
     if (cursor !== undefined) {

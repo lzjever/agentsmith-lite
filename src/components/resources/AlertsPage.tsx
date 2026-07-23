@@ -659,9 +659,9 @@ function alertElementId(alertId: string) {
 }
 
 function alertInvestigation(alert: ProjectAlert, projectBasePath: string): { href: string; label: string } {
+  if (alert.type === "historical_task_failure") return { href: `${projectBasePath}/audit?action=task.historical_terminal`, label: "View historical task events" };
   if (alert.type === "endpoint_failure") return { href: `${projectBasePath}/endpoints`, label: "Open endpoints" };
   if (alert.type === "provider_failure") return { href: `${projectBasePath}/audit?action=provider.request&status=rejected`, label: "View provider failures" };
-  if (alert.type === "task_failure") return { href: `${projectBasePath}/tasks?status=failed`, label: "View failed tasks" };
   if (alert.type === "sandbox_failure") return { href: `${projectBasePath}/audit?action=sandbox.failed&status=accepted`, label: "View sandbox failures" };
   return {
     href: alert.endpointId ? `${projectBasePath}/usage?endpointId=${encodeURIComponent(alert.endpointId)}` : `${projectBasePath}/usage`,

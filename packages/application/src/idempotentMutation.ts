@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import type { ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
+import type { CompleteTaskIdempotencyInput, ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
 
 type ProductMutationOperation = Extract<TaskIdempotencyOperation, `${"workspace" | "project"}.${string}`>;
+interface IdempotentMutationRunContext {
+  completion(responseStatus: number, responseBody: unknown): CompleteTaskIdempotencyInput;
+}
 
 export async function runIdempotentMutation<T>(input: {
   store: ProductStore;
@@ -15,7 +18,7 @@ export async function runIdempotentMutation<T>(input: {
   resourceId: string;
   failureMessage: string;
   completeServerErrors?: boolean;
-  run: (resourceId: string) => Promise<T>;
+  run: (resourceId: string, context: IdempotentMutationRunContext) => Promise<T>;
 }): Promise<T> {
   const timestamp = nowIso();
   const requestHash = canonicalRequestHash(input.request);
@@ -41,7 +44,19 @@ export async function runIdempotentMutation<T>(input: {
     return begun.responseBody as T;
   }
   try {
-    const response = await input.run(begun.resourceId);
+    const response = await input.run(begun.resourceId, {
+      completion: (responseStatus, responseBody) => ({
+        actorId: input.actorId,
+        projectId: input.scopeId,
+        operation: input.operation,
+        key: input.key,
+        requestHash,
+        claimToken: begun.claimToken,
+        responseStatus,
+        responseBody,
+        updatedAt: nowIso()
+      })
+    });
     const completed = await input.store.completeTaskIdempotency({
       actorId: input.actorId,
       projectId: input.scopeId,

@@ -3,7 +3,7 @@
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule, type ProjectAlertType } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { toast } from "../ui/toast";
@@ -19,12 +19,12 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<ProjectAlertRule | null>(null);
+  const [editing, setEditing] = useState<ActiveAlertRule | null>(null);
   const [value, setValue] = useState<AlertRuleFormValue>(initialValue);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
   const [busyRuleId, setBusyRuleId] = useState<string | null>(null);
-  const [removing, setRemoving] = useState<ProjectAlertRule | null>(null);
+  const [removing, setRemoving] = useState<ActiveAlertRule | null>(null);
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
     setState("loading");
@@ -87,6 +87,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
   }
 
   function openEdit(rule: ProjectAlertRule) {
+    if (!isActiveRule(rule)) return;
     setEditing(rule);
     setValue(alertRuleFormValue(rule));
     setFormError("");
@@ -130,7 +131,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
   }
 
   async function toggle(rule: ProjectAlertRule) {
-    if (!canManage || busyRuleId !== null) return;
+    if (!canManage || busyRuleId !== null || !isActiveRule(rule)) return;
     setBusyRuleId(rule.id);
     try {
       const identity = `${rule.id}:toggle:${!rule.enabled}`;
@@ -155,7 +156,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       if (mounted.current) setBusyRuleId(null);
     }
   }
-  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null)return;setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
+  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null||!isActiveRule(rule))return;setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
 
   async function remove() {
     if (!removing || !canManage || busyRuleId !== null) return;
@@ -193,12 +194,12 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     {state === "ready" && rules.length === 0 ? <p className="mt-4 text-sm text-secondary">No alert rules configured.</p> : null}
     {state === "ready" && rules.length > 0 ? <ul className="mt-4 divide-y divide-subtle border-y border-subtle">
       {rules.map((rule) => <li className="flex items-center justify-between gap-3 py-3" key={rule.id}>
-        <span className="min-w-0 text-sm text-foreground"><strong className="block truncate font-medium">{rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</strong><small className="mt-1 block text-secondary">Threshold {rule.threshold ?? 1} · {rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · {scopeLabel(rule, endpoints)}</small></span>
+        <span className="min-w-0 text-sm text-foreground"><strong className="block truncate font-medium">{!isActiveRule(rule) ? "Historical task failure" : rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</strong><small className="mt-1 block text-secondary">{!isActiveRule(rule) ? `Read-only retained rule · previously ${rule.retiredWasEnabled ? "enabled" : "disabled"}` : `Threshold ${rule.threshold ?? 1} · ${rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · ${scopeLabel(rule, endpoints)}`}</small></span>
         <div className="flex items-center gap-2">
-          {canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
-          {canManage ? <Button label="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
-          {canManage ? <Button label="Edit alert rule" variant="ghost" icon={<Pencil size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => openEdit(rule)} /> : null}
-          {canManage ? <Button label="Delete alert rule" variant="ghost" icon={<Trash2 size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => setRemoving(rule)} /> : null}
+          {!isActiveRule(rule) ? <span className="text-sm text-secondary">Read-only</span> : canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
+          {canManage && isActiveRule(rule) ? <Button label="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
+          {canManage && isActiveRule(rule) ? <Button label="Edit alert rule" variant="ghost" icon={<Pencil size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => openEdit(rule)} /> : null}
+          {canManage && isActiveRule(rule) ? <Button label="Delete alert rule" variant="ghost" icon={<Trash2 size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => setRemoving(rule)} /> : null}
         </div>
       </li>)}
     </ul> : null}
@@ -208,7 +209,9 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
 function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpoints.find(endpoint=>endpoint.id===scope.endpointId)?.name??"Endpoint";}
-function alertRuleFormValue(rule: ProjectAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
-function alertRuleChanged(value: AlertRuleFormValue, rule: ProjectAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }
+type ActiveAlertRule=ProjectAlertRule&{alertType:ProjectAlertType;retiredWasEnabled:null};
+function isActiveRule(rule:ProjectAlertRule):rule is ActiveAlertRule{return rule.alertType!=="historical_task_failure"&&rule.retiredWasEnabled===null}
+function alertRuleFormValue(rule: ActiveAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
+function alertRuleChanged(value: AlertRuleFormValue, rule: ActiveAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }
 function isMissingRule(error:unknown):boolean{return error instanceof ApiError&&error.status===404&&error.message==="Alert rule not found";}
 function isRuleConflict(error:unknown):boolean{return error instanceof ApiError&&error.status===409&&error.message==="Alert rule changed elsewhere. Reload and try again.";}

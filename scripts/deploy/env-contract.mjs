@@ -290,7 +290,7 @@ function isSubstrateEnvKey(key) {
 }
 
 function isAppEnvKey(key) {
-  return appEnvKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_");
+  return appEnvKeys.has(key);
 }
 
 function isAnyAppEnvKey(key) {
@@ -302,7 +302,7 @@ function isProductSecretKey(key) {
 }
 
 function isAppSecretKey(key) {
-  return appSecretKeys.has(key) || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
+  return appSecretKeys.has(key);
 }
 
 function isSubstrateOnlyKey(key) {

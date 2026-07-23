@@ -60,7 +60,7 @@ describe("task interaction store", () => {
     assert.deepEqual((await store.listTaskInteractionChanges("task_interactions", 1, 10)).map((item) => item.changeSeq), [2,3]);
   });
 
-  it("looks up correlations and rolls artifact, lifecycle, and cursor updates back with a rejected revision", async () => {
+  it("looks up correlations and rolls artifact and cursor updates back with a rejected revision", async () => {
     const store = createLocalInMemoryProductStore();
     await store.createProject(project());
     await createTask(store);
@@ -72,13 +72,11 @@ describe("task interaction store", () => {
       taskId: "task_interactions",
       changes: [change("product", "conflicting-revision", 1, tool)],
       artifactProjections: [{ projectId:"project",artifact:{ id:"artifact-rollback",taskId:"task_interactions",fileId:"file-rollback",name:"rollback.txt",bytes:1,createdAt:timestamp(3) },auditEvent:{id:"audit-rollback",projectId:"project",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"artifact-rollback",createdAt:timestamp(3)},updatedAt:timestamp(3) }],
-      lifecycle: { kind:"active",expectedStatus:"running",status:"stopping",updatedAt:timestamp(3) },
       sourceSync: { expectedSourceCursor:"cursor:tool",sourceCursor:"cursor:rollback",historyStatus:"complete",lastSyncedAt:timestamp(3) }
     }), /revision is not monotonic/);
 
     assert.deepEqual(await store.listTaskArtifacts("task_interactions"), []);
     assert.equal((await store.findProjectResourceUsage("project"))?.projectFileBytes, 0);
-    assert.equal((await store.findTask("task_interactions"))?.status, "running");
     const snapshot = await store.readTaskInteractionSnapshot("task_interactions", null, 10);
     assert.equal(snapshot?.sourceCursor, "cursor:tool");
     assert.equal(snapshot?.latestChangeSeq, 1);
@@ -96,6 +94,24 @@ describe("task interaction store", () => {
     assert.deepEqual(await store.listTaskInteractionChanges("task_interactions",0,10),[]);
   });
 
+  it("completes resource idempotency only for the matching Project and operation",async()=>{
+    const store=createLocalInMemoryProductStore();
+    await store.createProject(project());
+    await store.createProject({...project(),id:"other-project",name:"Other Project",rootPath:"workspaces/workspace/projects/other-project"});
+    const resourceId="shared-message";
+    const records=[
+      {projectId:"project",operation:"message" as const,key:"target",requestHash:"target-hash",claimToken:"target-claim"},
+      {projectId:"project",operation:"message-edit" as const,key:"other-operation",requestHash:"other-operation-hash",claimToken:"other-operation-claim"},
+      {projectId:"other-project",operation:"message" as const,key:"other-project",requestHash:"other-project-hash",claimToken:"other-project-claim"}
+    ];
+    for(const record of records)assert.equal((await store.beginTaskIdempotency({actorId:"user",resourceId,now:timestamp(1),leaseExpiresAt:timestamp(5),...record})).kind,"claimed");
+    assert.equal(await store.completeTaskIdempotencyForResource({projectId:"project",operation:"message",resourceId,responseStatus:200,responseBody:{messageId:resourceId},updatedAt:timestamp(2)}),1);
+    const replayInputs={actorId:"user",resourceId,now:timestamp(2),leaseExpiresAt:timestamp(6)};
+    assert.deepEqual(await store.beginTaskIdempotency({...replayInputs,...records[0]!,claimToken:"target-replay"}),{kind:"replay",resourceId,responseStatus:200,responseBody:{messageId:resourceId}});
+    assert.deepEqual(await store.beginTaskIdempotency({...replayInputs,...records[1]!,claimToken:"other-operation-replay"}),{kind:"in_progress",resourceId});
+    assert.deepEqual(await store.beginTaskIdempotency({...replayInputs,...records[2]!,claimToken:"other-project-replay"}),{kind:"in_progress",resourceId});
+  });
+
   it("looks up an interaction directly after more than 1000 later changes", async () => {
     const store = createLocalInMemoryProductStore();
     await store.createProject(project());
@@ -108,7 +124,7 @@ describe("task interaction store", () => {
     assert.equal(oldest?.changeSeq,1);
   });
 
-  it("persists active turn lifecycle, interaction, artifact metadata, and source cursor together",async()=>{
+  it("persists interaction, artifact metadata, and source cursor together",async()=>{
     const store = createLocalInMemoryProductStore();
     await store.createProject(project());
     await createTask(store);
@@ -118,10 +134,8 @@ describe("task interaction store", () => {
       taskId:"task_interactions",
       changes:[change("product","turn-result",1,interaction("result",1,3,"assistant_message"))],
       artifactProjections:[{projectId:"project",artifact:{id:"turn-artifact",taskId:"task_interactions",fileId:"botified-file",name:"result.txt",bytes:1,createdAt:timestamp(3)},auditEvent:{id:"turn-artifact-audit",projectId:"project",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"turn-artifact",createdAt:timestamp(3)},updatedAt:timestamp(3)}],
-      lifecycle:{kind:"active",expectedStatus:"running",status:"queued",updatedAt:timestamp(3)},
       sourceSync:{expectedSourceCursor:null,sourceCursor:"turn-cursor",historyStatus:"complete",lastSyncedAt:timestamp(3)}
     });
-    assert.equal((await store.findTask("task_interactions"))?.status,"queued");
     assert.equal((await store.listTaskArtifacts("task_interactions"))[0]?.fileId,"botified-file");
     assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"turn-cursor");
     assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"pending");
@@ -129,17 +143,16 @@ describe("task interaction store", () => {
 
   it("defines authoritative state events without a durable interaction cursor", () => {
     const events: TaskInteractionStreamEvent[] = [
-      { type:"state", queuedMessages:[], capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false} },
-      { type:"run_state", runState:"running" },
+      { type:"state", queuedMessages:[], presentation:{task:{id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",createdAt:timestamp(0),updatedAt:timestamp(0)},lifecycle:{state:"active"},currentTurn:{state:"ready"},sandboxState:{state:"released",runId:null,cause:null},capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false}} },
       { type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:timestamp(3), message:null }
     ];
     assert.equal(events.every((event) => !("cursor" in event)),true);
-    assert.equal(events[0]?.type === "state" && events[0].capabilities.sendMessage,true);
+    assert.equal(events[0]?.type === "state" && events[0].presentation.capabilities.sendMessage,true);
   });
 });
 
 function task(): PersistedAgentTask {
-  return { id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",status:"running",runId:"run",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},createdAt:timestamp(0),updatedAt:timestamp(0) };
+  return { id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",currentRunId:null,archivedAt:null,deletedAt:null,createdAt:timestamp(0),updatedAt:timestamp(0) };
 }
 
 async function createTask(store:ReturnType<typeof createLocalInMemoryProductStore>):Promise<void>{

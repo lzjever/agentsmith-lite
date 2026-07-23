@@ -179,7 +179,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
       if (!active.current) return;
       mutationKeys.complete("task-create", identity);
       toast.success("Task created");
-      navigate(`${basePath}/${task.id}`);
+      navigate(`${basePath}/${task.task.id}`);
     } catch (reason) {
       if (!active.current) return;
       const detail = message(reason);

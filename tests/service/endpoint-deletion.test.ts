@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -58,7 +61,7 @@ describe("endpoint deletion", () => {
 
     assert.equal((await store.findEndpoint(endpoint.id))?.id, endpoint.id);
 
-    await services.tasks.deleteTask(userId, task.id);
+    await services.tasks.deleteTask(userId, task.task.id);
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id);
     assert.equal(await store.findEndpoint(endpoint.id), null);
   });
@@ -73,13 +76,104 @@ describe("endpoint deletion", () => {
     assert.equal(await store.findEndpoint(endpoint.id), null);
     assert.equal((await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "endpoint.delete" && event.resourceId === endpoint.id).length, 1);
   });
+
+  it("retries Task-owned filesystem cleanup before releasing Library and endpoint references",async()=>{
+    const dataRoot=await mkdtemp(path.join(tmpdir(),"agentsmith-lite-task-delete-"));
+    try{
+      const {services,store,userId,projectId,credentialId}=await setup(dataRoot);
+      const endpoint=await services.endpoints.createEndpoint(userId,projectId,endpointInput("Retry cleanup",credentialId));
+      const created=await services.tasks.createTask(userId,projectId,{
+        prompt:"Delete retry",
+        endpointId:endpoint.id,
+        fileLibrary:{mode:"create_new",name:"Retry files"}
+      });
+      const project=await store.findProject(projectId);
+      const library=await store.findFileLibrary(created.task.fileLibraryId);
+      assert.ok(project&&library);
+      const artifactPath=path.join(dataRoot,project.rootPath,library.rootSubPath,"workspace",".artifacts",created.task.id);
+      const userFile=path.join(dataRoot,project.rootPath,library.rootSubPath,"workspace","keep.txt");
+      await mkdir(path.join(artifactPath,"nested"),{recursive:true});
+      await writeFile(path.join(artifactPath,"nested","generated.bin"),"remove-these-bytes");
+      await writeFile(userFile,"keep");
+      await store.setProjectFileBytes(projectId,22,"2026-07-23T00:00:00.000Z");
+      const purge=store.purgeDeletedTaskData.bind(store);
+      let failPurge=true;
+      store.purgeDeletedTaskData=async(...args)=>{
+        if(failPurge){failPurge=false;return false;}
+        return purge(...args);
+      };
+
+      await assert.rejects(()=>services.tasks.deleteTask(userId,created.task.id,"delete-fails"));
+      const deleting=await store.findTask(created.task.id);
+      assert.equal(deleting?.deletedAt===null,false);
+      assert.equal(deleting?.fileLibraryId,library.id);
+      assert.equal((await store.findTaskBoundToFileLibrary(library.id)).kind,"bound");
+      assert.equal(await store.deleteEndpoint(endpoint.id),"referenced_by_tasks");
+      await assert.rejects(access(artifactPath));
+      assert.equal(await readFile(userFile,"utf8"),"keep");
+      assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,4);
+      await assert.rejects(
+        ()=>services.tasks.editTask(userId,created.task.id,"Cannot edit while deleting","edit-deleting"),
+        (error:unknown)=>error instanceof ProductError&&error.statusCode===404
+      );
+
+      await services.tasks.deleteTask(userId,created.task.id,"delete-retry");
+      assert.deepEqual(await services.tasks.deleteTask(userId,created.task.id,"delete-retry"),{deleted:true,taskId:created.task.id});
+      assert.equal(await store.findTask(created.task.id),null);
+      assert.equal((await store.listProjectAuditEvents(projectId)).filter((event)=>event.action==="task.delete"&&event.resourceId===created.task.id).length,1);
+      assert.equal(await store.deleteFileLibraryIfUnbound(projectId,library.id),"deleted");
+      assert.equal(await store.deleteEndpoint(endpoint.id),"deleted");
+    }finally{
+      await rm(dataRoot,{recursive:true,force:true});
+    }
+  });
+
+  it("rejects a symlinked Task artifact path without deleting its external target and retries safely",async()=>{
+    const dataRoot=await mkdtemp(path.join(tmpdir(),"agentsmith-lite-task-artifact-symlink-"));
+    try{
+      const {services,store,userId,projectId,credentialId}=await setup(dataRoot);
+      const endpoint=await services.endpoints.createEndpoint(userId,projectId,endpointInput("Symlink cleanup",credentialId));
+      const created=await services.tasks.createTask(userId,projectId,{
+        prompt:"Reject unsafe artifact cleanup",
+        endpointId:endpoint.id,
+        fileLibrary:{mode:"create_new",name:"Symlink files"}
+      });
+      const project=await store.findProject(projectId);
+      const library=await store.findFileLibrary(created.task.fileLibraryId);
+      assert.ok(project&&library);
+      const workspace=path.join(dataRoot,project.rootPath,library.rootSubPath,"workspace");
+      const artifactsRoot=path.join(workspace,".artifacts");
+      const outsideRoot=path.join(dataRoot,"outside-task-artifacts");
+      const marker=path.join(outsideRoot,created.task.id,"marker");
+      await rm(artifactsRoot,{recursive:true,force:true});
+      await mkdir(path.dirname(marker),{recursive:true});
+      await writeFile(marker,"must remain");
+      await symlink(path.relative(workspace,outsideRoot),artifactsRoot,"dir");
+
+      await assert.rejects(
+        ()=>services.tasks.deleteTask(userId,created.task.id,"delete-symlink"),
+        (error:unknown)=>error instanceof ProductError&&error.statusCode===409&&error.code==="task_artifact_path_invalid"
+      );
+      assert.equal(await readFile(marker,"utf8"),"must remain");
+      assert.ok((await store.findTask(created.task.id))?.deletedAt);
+
+      await rm(artifactsRoot,{force:true});
+      await mkdir(path.join(artifactsRoot,created.task.id),{recursive:true});
+      await services.tasks.deleteTask(userId,created.task.id,"delete-symlink-retry");
+
+      assert.equal(await store.findTask(created.task.id),null);
+      assert.equal(await readFile(marker,"utf8"),"must remain");
+    }finally{
+      await rm(dataRoot,{recursive:true,force:true});
+    }
+  });
 });
 
-async function setup() {
+async function setup(dataRoot="/tmp/agentsmith-lite-endpoint-deletion") {
   const store = createLocalInMemoryProductStore();
   const services = createApplicationServices({
     store,
-    dataRoot: "/tmp/agentsmith-lite-endpoint-deletion",
+    dataRoot,
     builtinAdminPassword: "admin-password",
     providerClient: healthyProvider
   });

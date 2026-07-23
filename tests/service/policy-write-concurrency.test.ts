@@ -22,7 +22,7 @@ describe("policy write concurrency", () => {
       conflict,
     );
 
-    const rule = await services.alertRules.create(user.id, project.id, { alertType: "task_failure" });
+    const rule = await services.alertRules.create(user.id, project.id, { alertType: "sandbox_failure" });
     const changedRule = await services.alertRules.update(user.id, project.id, rule.id, { threshold: 2, expectedUpdatedAt: rule.updatedAt });
     assert.equal(changedRule.threshold, 2);
     await assert.rejects(

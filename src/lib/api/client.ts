@@ -1,6 +1,6 @@
 "use client";
 
-import type { AgentTask, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
@@ -81,10 +81,9 @@ export interface EndpointInput {
   name: string; baseUrl: string; model: string; credentialId: string; capabilities: EndpointCapability[]; requestTimeoutSecs: number;
 }
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: string; lastRotatedAt: string | null; updatedAt: string; }
-export type TaskExecutionMode = "dry-run" | "live";
 export type Task = AgentTask;
 export type TaskDetail = TaskDetailProjection;
-export interface TaskArtifact { id: string; taskId: string; fileId: string; name: string; bytes: number; sha256?: string; mediaType?: string | null; previewText?: string | null; createdAt: string; }
+export type TaskArtifact = AgentTaskArtifact;
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
 export type TaskListQuery = ApiTaskListQuery;
 export type TaskListPage = ApiTaskListPage;
@@ -118,10 +117,10 @@ export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { k
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
 export interface ProjectUsageEndpoint { endpointId: string | null; endpointName: string; requests: number; tokens: number; cost: number;limits?:ProjectUsageLimit[]; }
-export interface ProjectAlert { id: string; projectId: string; type: "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "task_failure" | "sandbox_failure"; status: "active" | "resolved" | "dismissed"; deliveryStatus: "not_configured" | "pending" | "delivered" | "failed";ruleId?:string|null;metric?:string|null;metricValue?:number|null;threshold?:number|null;endpointId?:string|null;acknowledgedAt?:string|null;acknowledgedBy?:string|null;silencedUntil?:string|null; createdAt: string; updatedAt: string; resolvedAt: string | null; dismissedAt: string | null; }
+export type ProjectAlert = ApiProjectAlert;
 export interface ProjectAlertPage { items: ProjectAlert[]; nextCursor: string | null; activeCount: number; }
-export type ProjectAlertType = ProjectAlert["type"];
-export interface ProjectAlertRule { id: string; projectId: string;name?:string; alertType: ProjectAlertType;metric?:string;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string}; enabled: boolean; createdAt: string; updatedAt: string; }
+export type ProjectAlertType = ApiProjectAlertType;
+export type ProjectAlertRule = ApiProjectAlertRule;
 export interface UserNotification { id: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditEvent["resourceKind"] | null; resourceId: string | null; linkPath: string | null; readAt: string | null; createdAt: string; }
 export interface ProjectPolicyInput {
   activeTasksLimit?: number;
@@ -307,8 +306,8 @@ export const apiClient = {
     if (query.limit) params.set("limit", String(query.limit));
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
-  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<Task>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
-  task: (taskId: string) => request<Task>(`/tasks/${encodeURIComponent(taskId)}`),
+  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
+  task: (taskId: string) => request<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`),
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
   taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
@@ -354,8 +353,8 @@ export const apiClient = {
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
   releaseTaskSandbox: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskSandboxReleaseReceipt>(`/tasks/${encodeURIComponent(taskId)}/sandbox/release`, "POST", idempotencyKey, {}),
   stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
-  editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
-  archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
+  editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
+  archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
   artifactDownloadUrl: (taskId: string, artifactId: string) => taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId),
@@ -392,12 +391,11 @@ function isProjectAuditEvent(value: unknown): value is ProjectAuditEvent {
 
 function parseTaskInteractionStreamEvent(event: string, cursor: string | undefined, value: unknown): TaskInteractionStreamEvent {
   if (event === "interaction" && cursor && isTaskInteractionItem(value)) return { type: "interaction", cursor, item: value };
-  if (event === "state" && isRecord(value) && isTaskQueuedMessageArray(value.queuedMessages) && isTaskCapabilities(value.capabilities)) return {
+  if (event === "state" && isRecord(value) && isTaskQueuedMessageArray(value.queuedMessages) && isTaskPresentation(value.presentation)) return {
     type: "state",
     queuedMessages: value.queuedMessages,
-    capabilities: value.capabilities
+    presentation: value.presentation
   };
-  if (event === "run_state" && isRecord(value) && isTaskRunState(value.runState)) return { type: "run_state", runState: value.runState };
   if (event === "connection" && isRecord(value) && isConnectionState(value.connectionState) && isRuntimeReachability(value.runtimeReachability) && isHistoryStatus(value.historyStatus) && isNullableString(value.lastSyncedAt) && isNullableString(value.message)) return {
     type: "connection",
     connectionState: value.connectionState,
@@ -424,16 +422,24 @@ function isTaskInteractionSnapshot(value: unknown): value is TaskInteractionSnap
     && isTaskInteractionState(value);
 }
 
-function isTaskInteractionState(value: unknown): value is Pick<TaskInteractionSnapshot, "queuedMessages" | "runState" | "runtimeReachability" | "historyStatus" | "lastSyncedAt" | "capabilities"> & Record<string, unknown> {
+function isTaskInteractionState(value: unknown): value is Pick<TaskInteractionSnapshot, "queuedMessages" | "runtimeReachability" | "historyStatus" | "lastSyncedAt" | "presentation"> & Record<string, unknown> {
   return isRecord(value) && isTaskQueuedMessageArray(value.queuedMessages)
-    && isTaskRunState(value.runState) && isRuntimeReachability(value.runtimeReachability) && isHistoryStatus(value.historyStatus)
-    && isNullableString(value.lastSyncedAt) && isTaskCapabilities(value.capabilities);
+    && isRuntimeReachability(value.runtimeReachability) && isHistoryStatus(value.historyStatus)
+    && isNullableString(value.lastSyncedAt) && isTaskPresentation(value.presentation);
+}
+
+function isTaskPresentation(value:unknown):value is TaskPresentation{
+  return isRecord(value)&&isRecord(value.task)&&typeof value.task.id==="string"
+    &&isRecord(value.lifecycle)&&isStringUnion(value.lifecycle.state,["active","archived"])
+    &&isRecord(value.currentTurn)&&isStringUnion(value.currentTurn.state,["ready","starting","queued","running","aborting"])
+    &&isRecord(value.sandboxState)&&isStringUnion(value.sandboxState.state,["starting","active","release_requested","released","failed"])
+    &&isTaskCapabilities(value.capabilities);
 }
 
 function isTaskCapabilities(value: unknown): value is TaskCapabilities {
   return isRecord(value)
     && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
-    && typeof value.abortTurn === "boolean"
+    && typeof value.abortTurn === "boolean" && typeof value.stopWork === "boolean"
     && typeof value.openTerminal === "boolean" && typeof value.releaseSandbox === "boolean" && typeof value.editTask === "boolean"
     && typeof value.archiveTask === "boolean" && typeof value.deleteTask === "boolean";
 }
@@ -468,7 +474,6 @@ function isTaskInteractionBase(value: unknown): value is Record<string, unknown>
     && typeof value.position === "number" && typeof value.occurredAt === "string" && typeof value.updatedAt === "string";
 }
 
-function isTaskRunState(value: unknown): value is TaskInteractionSnapshot["runState"] { return isStringUnion(value, ["idle", "starting", "running", "reconnecting", "aborting", "finalizing", "terminal"]); }
 function isRuntimeReachability(value: unknown): value is TaskInteractionSnapshot["runtimeReachability"] { return isStringUnion(value, ["unknown", "reachable", "unreachable"]); }
 function isHistoryStatus(value: unknown): value is TaskInteractionSnapshot["historyStatus"] { return isStringUnion(value, ["complete", "gap"]); }
 function isConnectionState(value: unknown): value is Extract<TaskInteractionStreamEvent, { type: "connection" }>["connectionState"] { return isStringUnion(value, ["connecting", "reconnecting", "connected", "disconnected", "recovered"]); }

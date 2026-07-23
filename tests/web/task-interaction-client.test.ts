@@ -22,7 +22,7 @@ describe("task interaction API client", () => {
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input); calls.push({ url, init });
       if (url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "user@example.test" }, csrfToken: "csrf" });
-      return Response.json({ messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, capabilities: { sendMessage: true, editQueuedMessage: true, abortTurn: true, openTerminal: true, releaseSandbox:true, editTask:true, archiveTask:true, deleteTask: true } });
+      return Response.json({ messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, presentation:taskPresentation() });
     };
 
     await apiClient.currentIdentity();
@@ -63,17 +63,15 @@ describe("task interaction API client", () => {
   it("parses independent authoritative transient state events", async () => {
     const encoder = new TextEncoder();
     const queuedMessages = [{ id: "message_1", content: "Queued", deliveryStatus: "pending", editable: true, deletable: true, updatedAt: "2026-07-13T00:00:00.000Z" }];
-    const capabilities = { sendMessage: true, editQueuedMessage: true, abortTurn: false, openTerminal: true, releaseSandbox:true, editTask:true, archiveTask:true, deleteTask: true };
-    const state = { queuedMessages, capabilities };
-    const runState = { runState:"running" };
+    const state = { queuedMessages, presentation:taskPresentation({abortTurn:false}) };
     const connection = { connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:"2026-07-13T00:00:01.000Z", message:null };
     globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) {
-      controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(state)}\n\nevent: run_state\ndata: ${JSON.stringify(runState)}\n\nevent: connection\ndata: ${JSON.stringify(connection)}\n\n`));
+      controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(state)}\n\nevent: connection\ndata: ${JSON.stringify(connection)}\n\n`));
       controller.close();
     } }));
     const events: unknown[] = [];
     await apiClient.streamTaskInteractions("task_1", undefined, new AbortController().signal, (event) => events.push(event));
-    assert.deepEqual(events, [{ type:"state", ...state }, { type:"run_state", ...runState }, { type:"connection", ...connection }]);
+    assert.deepEqual(events, [{ type:"state", ...state }, { type:"connection", ...connection }]);
   });
 
   it("parses preview availability independently from the interaction connection", async () => {
@@ -99,3 +97,11 @@ describe("task interaction API client", () => {
     assert.deepEqual(events, [{ type:"assistant_preview_clear", interactionId:"preview_1" }]);
   });
 });
+
+function taskPresentation(capabilityOverrides:Record<string,boolean>={}){
+  return{
+    task:{id:"task_1",workspaceId:"workspace_1",projectId:"project_1",endpointId:"endpoint_1",fileLibraryId:"library_1",title:"Task",prompt:"Prompt",createdAt:"2026-07-13T00:00:00.000Z",updatedAt:"2026-07-13T00:00:00.000Z"},
+    lifecycle:{state:"active"},currentTurn:{state:"running"},sandboxState:{state:"active",runId:"run_1",cause:null},
+    capabilities:{sendMessage:true,editQueuedMessage:true,abortTurn:true,stopWork:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:true,deleteTask:true,...capabilityOverrides}
+  };
+}

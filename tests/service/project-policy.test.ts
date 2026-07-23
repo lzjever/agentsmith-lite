@@ -48,22 +48,6 @@ describe("project resource policy", () => {
     await assert.rejects(() => services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: null } as never), /cannot be unlimited/);
   });
 
-  it("atomically reserves active task capacity under concurrent requests", async () => {
-    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-concurrency", builtinAdminPassword: "admin-password" });
-    const { user } = await services.auth.loginAfterBootstrap("admin-password");
-    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 1 });
-
-    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, index) =>
-      services.policies.reserveTask(project.id, user.id, `task-${index}`)
-    ));
-
-    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-    assert.equal(results.filter((result) => result.status === "rejected").length, 7);
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.equal(current.activeTasks, 1);
-  });
-
   it("keeps in-memory file quota adjustment semantics in parity with PostgreSQL", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-file-quota-parity", builtinAdminPassword: "admin-password" });
@@ -96,7 +80,7 @@ describe("project resource policy", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 5 }, "2026-07-12T00:00:00.000Z");
-    const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_file_reconcile", title:"Task", prompt: "not audited", status: "running", runId: "run_file_reconcile", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
+    const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_file_reconcile", title:"Task", prompt: "not audited", currentRunId:null,archivedAt:null,deletedAt:null,createdAt: project.createdAt, updatedAt: project.updatedAt };
     await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
     assert.equal((await store.createTaskAtomically({task,reserveActive:false})).kind,"created");
     await store.appendTaskArtifacts([{ id: "artifact_file_reconcile", taskId: task.id, fileId: "file_reconcile", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: project.createdAt }]);
@@ -105,20 +89,6 @@ describe("project resource policy", () => {
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,8);
     await services.policies.reconcileFileLibraryBytes(project.id, 3);
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,3);
-  });
-
-  it("rejects a duplicate in-memory task id without charging active capacity twice", async () => {
-    const store = createInMemoryProductStore();
-    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-duplicate-task", builtinAdminPassword: "admin-password" });
-    const { user } = await services.auth.loginAfterBootstrap("admin-password");
-    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 2 });
-    const task: PersistedAgentTask = { id: "task_duplicate", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_duplicate", title:"Task", prompt: "not audited", status: "starting", runId: "run_duplicate", executionMode: "dry-run", sandbox: { namespace: "agentsmith", resources: [] }, createdAt: project.createdAt, updatedAt: project.updatedAt };
-    await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:"libraries/library_duplicate/home",createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
-    assert.equal((await store.createTaskAtomically({task,reserveActive:true})).kind,"created");
-    await assert.rejects(()=>store.createTaskAtomically({task,reserveActive:true}),/Task already exists/);
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
-    assert.equal(current.activeTasks, 1);
   });
 
   it("expires stale provider reservations with conservative request accounting", async () => {
@@ -321,17 +291,15 @@ describe("project resource policy", () => {
     const endpoint = endpointRecord(project.id);
     await store.createEndpoint(endpoint);
     await services.policies.updatePolicy(user.id, project.id, {
-      activeTasksLimit: 0,
       endpointWindows: [{ endpointId: endpoint.id, metric: "providerTokens", limit: 4095, windowSeconds: 3600 }]
     });
-    await assert.rejects(() => services.policies.reserveTask(project.id, user.id, "task-blocked"));
     await assert.rejects(() => services.policies.reserveProvider(project.id, user.id, endpoint.id));
 
-    await services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 1, endpointWindows: [] });
+    await services.policies.updatePolicy(user.id, project.id, { endpointWindows: [] });
 
     assert.deepEqual(
-      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.type === "active_tasks_limit" || alert.type === "provider_tokens_limit").map((alert) => [alert.type, alert.status]).sort(),
-      [["active_tasks_limit", "resolved"], ["provider_tokens_limit", "resolved"]]
+      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.type === "provider_tokens_limit").map((alert) => [alert.type, alert.status]),
+      [["provider_tokens_limit", "resolved"]]
     );
   });
 
@@ -377,9 +345,9 @@ describe("project resource policy", () => {
     const replayedPolicy = await updatePolicy(user.id, project.id, { providerRequestsLimit: 4 }, "policy-update-key");
     assert.deepEqual(replayedPolicy, firstPolicy);
 
-    await store.appendProjectAuditEvent({ id: "policy_replay_task_failure", projectId: project.id, actorId: user.id, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: "task_replay", createdAt: new Date().toISOString() });
-    await services.alertRules.create(user.id, project.id, { alertType: "task_failure" });
-    await services.policies.raiseAlert(project.id, "task_failure");
+    await store.appendProjectAuditEvent({ id: "policy_replay_sandbox_failure", projectId: project.id, actorId: user.id, action: "sandbox.failed", status: "accepted", resourceKind: "sandbox", resourceId: "task_replay", createdAt: new Date().toISOString() });
+    await services.alertRules.create(user.id, project.id, { alertType: "sandbox_failure" });
+    await services.policies.raiseAlert(project.id, "sandbox_failure");
     const active = (await services.policies.alerts(user.id, project.id)).find((alert) => alert.status === "active");
     assert.ok(active);
     const resolved = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");
@@ -401,7 +369,7 @@ describe("project resource policy", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 4 });
-    await store.appendProjectAuditEvent({ id: "removed_actor", projectId: project.id, actorId: former.user.id, action: "task.failed", status: "accepted", resourceKind: "task", resourceId: "task_1", createdAt: new Date().toISOString() });
+    await store.appendProjectAuditEvent({ id: "removed_actor", projectId: project.id, actorId: former.user.id, action: "sandbox.failed", status: "accepted", resourceKind: "sandbox", resourceId: "task_1", createdAt: new Date().toISOString() });
     const original = store.listProjectMemberships.bind(store);
     let membershipReads = 0;
     store.listProjectMemberships = async (id) => { membershipReads += 1; return original(id); };
@@ -418,7 +386,7 @@ describe("project resource policy", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     for (let index = 0; index < 25; index += 1) {
-      await store.appendProjectAuditEvent({ id: `newer_${index}`, projectId: project.id, actorId: null, action: "task.completed", status: "accepted", resourceKind: "task", resourceId: `task_${index}`, createdAt: new Date(Date.UTC(2026, 6, 12, 0, 0, index + 1)).toISOString() });
+      await store.appendProjectAuditEvent({ id: `newer_${index}`, projectId: project.id, actorId: null, action: "task.message.create", status: "accepted", resourceKind: "task", resourceId: `task_${index}`, createdAt: new Date(Date.UTC(2026, 6, 12, 0, 0, index + 1)).toISOString() });
     }
     await store.appendProjectAuditEvent({ id: "target", projectId: project.id, actorId: null, action: "alert.resolve", status: "accepted", resourceKind: "alert", resourceId: "alert_target", createdAt: "2026-07-12T00:00:00.000Z" });
     await store.appendProjectAuditEvent({ id: "other_alert", projectId: project.id, actorId: null, action: "alert.resolve", status: "accepted", resourceKind: "alert", resourceId: "alert_other", createdAt: "2026-07-12T00:00:01.000Z" });

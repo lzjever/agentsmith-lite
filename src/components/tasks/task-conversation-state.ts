@@ -1,4 +1,4 @@
-import type { TaskCapabilities, TaskInteractionItem, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../lib/api/client.js";
+import type { TaskDetail, TaskInteractionItem, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage } from "../../lib/api/client.js";
 
 export type TaskAssistantPreview = Extract<TaskInteractionStreamEvent, { type: "assistant_preview" }> | null;
 
@@ -19,11 +19,11 @@ export function retainedHistoryScrollTop(previousTop: number, previousHeight: nu
   return previousTop + Math.max(0, nextHeight - previousHeight);
 }
 
-export function applyTaskMessageReceipt(state: { items: TaskInteractionItem[]; queuedMessages: TaskQueuedMessage[]; capabilities: TaskCapabilities }, receipt: TaskMessageReceipt, applyCapabilities = true): { items: TaskInteractionItem[]; queuedMessages: TaskQueuedMessage[]; capabilities: TaskCapabilities } {
+export function applyTaskMessageReceipt(state: { items: TaskInteractionItem[]; queuedMessages: TaskQueuedMessage[]; presentation: TaskDetail }, receipt: TaskMessageReceipt, applyPresentation = true): { items: TaskInteractionItem[]; queuedMessages: TaskQueuedMessage[]; presentation: TaskDetail } {
   return {
     items: receipt.interaction ? upsertTaskInteractions(state.items, [receipt.interaction]) : state.items,
     queuedMessages: receipt.queuedMessage ? upsertQueuedMessage(state.queuedMessages, receipt.queuedMessage) : state.queuedMessages.filter((message) => message.id !== receipt.messageId),
-    capabilities: applyCapabilities ? receipt.capabilities : state.capabilities
+    presentation: applyPresentation ? receipt.presentation : state.presentation
   };
 }
 

@@ -30,8 +30,8 @@ describe("app manifest rendering", () => {
     });
     for (const manifest of manifests) {
       const phase = manifest.metadata.labels?.["agentsmith-lite.io/deploy-phase"];
-      assert.ok(["base","migration","upgrade","workload"].includes(phase??""));
-      const expected=manifest.kind==="Job"?(manifest.metadata.name==="agentsmith-lite-project-files-upgrade"?"upgrade":"migration"):manifest.kind==="Deployment"?"workload":"base";
+      assert.ok(["base","migration","workload"].includes(phase??""));
+      const expected=manifest.kind==="Job"?"migration":manifest.kind==="Deployment"?"workload":"base";
       assert.equal(phase,expected);
     }
   });
@@ -334,7 +334,6 @@ describe("app manifest rendering", () => {
         AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
         AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS: "deepseek.internal,10.0.0.8",
         BOTIFIED_RUNNER_IMAGE: "registry.example.com/agentsmith-lite/botified-runner:2026.07",
-        AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.com/v1",
         S3_ENDPOINT: "https://s3.example.com",
         S3_BUCKET: "agentsmith-lite-files",
         JUICEFS_SECRET_NAME: "agentsmith-lite-juicefs",
@@ -345,7 +344,7 @@ describe("app manifest rendering", () => {
         APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
         BUILTIN_ADMIN_INITIAL_PASSWORD: "admin-secret",
         OIDC_CLIENT_SECRET: "oidc-client-secret",
-        AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai",
+        APP_CREDENTIAL_ENCRYPTION_KEY: "credential-encryption-key",
         S3_ACCESS_KEY: "raw-access",
         S3_SECRET_KEY: "raw-secret",
         JUICEFS_META_URL: "postgresql://juicefs:secret@db/juicefs",
@@ -365,10 +364,8 @@ describe("app manifest rendering", () => {
     assert.match(serialized, /POSTGRES_APP_URL/);
     assert.match(serialized, /APP_SESSION_SECRET/);
     assert.doesNotMatch(serialized, /BUILTIN_ADMIN_INITIAL_PASSWORD/);
-    assert.match(serialized, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI/);
-    assert.match(serialized, /sk-openai/);
-    assert.match(serialized, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI/);
-    assert.match(serialized, /https:\/\/models\.example\.com\/v1/);
+    assert.match(serialized, /APP_CREDENTIAL_ENCRYPTION_KEY/);
+    assert.match(serialized, /credential-encryption-key/);
     assert.doesNotMatch(serialized, /S3_ACCESS_KEY/);
     assert.doesNotMatch(serialized, /S3_SECRET_KEY/);
     assert.doesNotMatch(serialized, /JUICEFS_META_URL/);
@@ -394,14 +391,12 @@ describe("app manifest rendering", () => {
     assert.equal(secretData?.OIDC_ISSUER_URL, undefined);
     assert.equal(secretData?.OIDC_BACKCHANNEL_BASE_URL, undefined);
     assert.equal(secretData?.OIDC_CLIENT_ID, undefined);
-    assert.equal(configMapData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, "https://models.example.com/v1");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
     assert.equal(configMapData?.AGENTSMITH_LITE_RUNTIME_TICK_MS, "1000");
     assert.equal(configMapData?.AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS, "deepseek.internal,10.0.0.8");
     assert.equal(configMapData?.AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT, String(DEFAULT_SANDBOX_NAMESPACE_LIMIT));
     assert.equal(configMapData?.BOTIFIED_RUNNER_IMAGE, "registry.example.com/agentsmith-lite/botified-runner:2026.07");
-    assert.equal(secretData?.AGENTSMITH_LITE_MODEL_API_KEY_OPENAI, "sk-openai");
-    assert.equal(secretData?.AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI, undefined);
+    assert.equal(secretData?.APP_CREDENTIAL_ENCRYPTION_KEY, "credential-encryption-key");
   });
 
   it("mounts an optional model CA ConfigMap into the API pod without embedding raw PEM config", () => {
@@ -410,12 +405,9 @@ describe("app manifest rendering", () => {
       imageTag: "dev",
       env: {
         AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: "local-model-ca",
-        AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: "provider-ca.pem",
-        AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.local.test/v1"
+        AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: "provider-ca.pem"
       },
-      secrets: {
-        AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-openai"
-      }
+      secrets: {}
     });
 
     const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config");
@@ -688,45 +680,79 @@ describe("app manifest rendering", () => {
     }
   });
 
-  it("renders a fixed schema bootstrap Job with bounded retries and only app-owned secrets", () => {
+  it("renders the schema bootstrap Job on the API identity and live JuiceFS data root", () => {
     const manifests = renderAppManifests({
-      namespace: "agentsmith",
+      namespace: "agentsmith-cutover",
       imageTag: "dev",
-      env: {},
+      env: {
+        AGENTSMITH_LITE_DATA_DIR: "/var/lib/agentsmith-lite",
+        AGENTSMITH_LITE_SANDBOX_MODE: "live",
+        JUICEFS_PVC_NAME: "agentsmith-lite-cutover-files",
+        S3_ENDPOINT: "https://s3.example.test",
+        S3_BUCKET: "agentsmith-lite-files",
+        JUICEFS_SECRET_NAME: "agentsmith-lite-juicefs"
+      },
       secrets: {
         POSTGRES_APP_URL: "postgresql://app:secret@db/app",
         APP_SESSION_SECRET: "app-session-secret-at-least-32-chars",
-        S3_SECRET_KEY: "raw-secret"
+        S3_ACCESS_KEY: "raw-access",
+        S3_SECRET_KEY: "raw-secret",
+        JUICEFS_META_URL: "postgresql://juicefs:secret@db/juicefs"
       }
     });
     const job = manifests.find((manifest) => manifest.kind === "Job" && manifest.metadata.name === "agentsmith-lite-schema-bootstrap") as
       | JobResource
       | undefined;
+    const config = manifests.find(
+      (manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config"
+    ) as { data?: Record<string, string> } | undefined;
+    const api = manifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
 
     assert.ok(job, "fixed schema bootstrap Job should be rendered for delete-before-apply readiness");
-    assert.equal(job.metadata.namespace, "agentsmith");
+    assert.equal(job.metadata.namespace, "agentsmith-cutover");
     assert.equal(job.spec.backoffLimit, 2);
     assert.equal(job.spec.activeDeadlineSeconds, 300);
     assert.equal(job.spec.ttlSecondsAfterFinished, 600);
     assert.equal(job.spec.template.spec.restartPolicy, "OnFailure");
+    assert.equal(job.metadata.namespace, api?.metadata.namespace);
+    assert.equal(job.spec.template.spec.serviceAccountName, api?.spec.template.spec.serviceAccountName);
+    assert.equal(job.spec.template.spec.serviceAccountName, "agentsmith-lite-api");
 
     const container = job.spec.template.spec.containers.find((candidate) => candidate.name === "schema-bootstrap");
     assert.ok(container, "schema bootstrap container should be rendered");
-    assert.deepEqual(container.envFrom, [{ secretRef: { name: "agentsmith-lite-app-secrets" } }]);
+    const schemaMount = container.volumeMounts?.find((mount) => mount.name === "project-files");
+    assert.ok(schemaMount, "schema bootstrap should mount project files");
+    const apiContainer = api?.spec.template.spec.containers.find((candidate) => candidate.name === "api");
+    const apiMount = apiContainer?.volumeMounts.find((mount) => mount.name === "project-files");
+    const apiVolume = api?.spec.template.spec.volumes.find((volume) => volume.name === "project-files");
+    assert.deepEqual(container.envFrom, [
+      { configMapRef: { name: "agentsmith-lite-config" } },
+      { secretRef: { name: "agentsmith-lite-app-secrets" } }
+    ]);
+    assert.deepEqual(container.volumeMounts, [
+      { name: "project-files", mountPath: "/var/lib/agentsmith-lite", readOnly: false }
+    ]);
+    assert.deepEqual(job.spec.template.spec.volumes, [
+      { name: "project-files", persistentVolumeClaim: { claimName: "agentsmith-lite-cutover-files" } }
+    ]);
+    assert.deepEqual(container.volumeMounts?.[0], apiMount);
+    assert.deepEqual(job.spec.template.spec.volumes[0], apiVolume);
+    assert.equal(schemaMount.readOnly, false);
+    assert.equal(config?.data?.AGENTSMITH_LITE_DATA_DIR, "/var/lib/agentsmith-lite");
+    assert.equal(config?.data?.AGENTSMITH_LITE_SANDBOX_MODE, "live");
+    assert.equal(config?.data?.KUBE_NAMESPACE, "agentsmith-cutover");
+    assert.equal(config?.data?.JUICEFS_PVC_NAME, "agentsmith-lite-cutover-files");
 
     const serializedJob = JSON.stringify(job);
     assert.match(serializedJob, /agentsmith-lite-app-secrets/);
+    assert.doesNotMatch(serializedJob, /S3_ACCESS_KEY/);
     assert.doesNotMatch(serializedJob, /S3_SECRET_KEY/);
+    assert.doesNotMatch(serializedJob, /JUICEFS_META_URL/);
+    assert.doesNotMatch(serializedJob, /raw-access/);
     assert.doesNotMatch(serializedJob, /raw-secret/);
-
-    const upgrade=manifests.find((manifest)=>manifest.kind==="Job"&&manifest.metadata.name==="agentsmith-lite-project-files-upgrade") as JobResource|undefined;
-    assert.ok(upgrade);
-    assert.equal(upgrade.metadata.labels?.["agentsmith-lite.io/deploy-phase"],"upgrade");
-    const upgradeContainer=upgrade.spec.template.spec.containers[0];
-    assert.deepEqual(upgradeContainer?.command,["node","dist/packages/api-entry-node/src/upgradeProjectFiles.js"]);
-    assert.deepEqual(upgradeContainer?.envFrom,[{configMapRef:{name:"agentsmith-lite-config"}},{secretRef:{name:"agentsmith-lite-app-secrets"}}]);
-    assert.deepEqual(upgradeContainer?.volumeMounts,[{name:"project-files",mountPath:"/agentsmith-lite"}]);
-    assert.equal(upgrade.spec.template.spec.volumes[0]?.persistentVolumeClaim.claimName,"agentsmith-lite-files");
+    assert.doesNotMatch(serializedJob, /postgresql:\/\/juicefs/);
   });
 });
 
@@ -798,13 +824,14 @@ interface JobResource {
     template: {
       spec: {
         restartPolicy: string;
+        serviceAccountName?:string;
         containers: Array<{
           name: string;
           command?:string[];
           envFrom?:Array<{secretRef?:{name:string};configMapRef?:{name:string}}>;
-          volumeMounts?:Array<{name:string;mountPath:string}>;
+          volumeMounts?:Array<{name:string;mountPath:string;readOnly?:boolean}>;
         }>;
-        volumes:Array<{persistentVolumeClaim:{claimName:string}}>;
+        volumes:Array<{name:string;persistentVolumeClaim:{claimName:string}}>;
       };
     };
   };
@@ -820,6 +847,7 @@ interface DeploymentResource {
   spec: {
     template: {
       spec: {
+        serviceAccountName?: string;
         containers: Array<{
           name: string;
           env?: Array<{ name: string; value: string }>;
@@ -837,6 +865,9 @@ interface DeploymentResource {
           configMap?: {
             name: string;
             items?: Array<{ key: string; path: string }>;
+          };
+          persistentVolumeClaim?: {
+            claimName: string;
           };
         }>;
       };

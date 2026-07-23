@@ -341,13 +341,12 @@ describe("deploy env contract", () => {
         "AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT=7",
         "AGENTSMITH_LITE_RUNTIME_TICK_MS=1000",
         "AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS='deepseek.internal,10.0.0.8'",
-        "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI='https://models.example.test/v1'",
         "AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP=local-model-ca",
         "AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY=provider-ca.pem",
         ""
       ].join("\n")
     );
-    writeFileSync(appSecretsFile, "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI='sk-from-overlay'\n");
+    writeFileSync(appSecretsFile, "APP_CREDENTIAL_ENCRYPTION_KEY='credential-encryption-key'\n");
 
     const result = runContract(["export", "--env", envFile, "--secrets", secretsFile, "--app-env", appEnvFile, "--app-secrets", appSecretsFile]);
 
@@ -368,10 +367,9 @@ describe("deploy env contract", () => {
       AGENTSMITH_LITE_SANDBOX_NAMESPACE_LIMIT: "7",
       AGENTSMITH_LITE_RUNTIME_TICK_MS: "1000",
       AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS: "deepseek.internal,10.0.0.8",
-      AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https://models.example.test/v1",
       AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: "local-model-ca",
       AGENTSMITH_LITE_MODEL_CA_CONFIG_KEY: "provider-ca.pem",
-      AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-from-overlay"
+      APP_CREDENTIAL_ENCRYPTION_KEY: "credential-encryption-key"
     });
     assert.doesNotMatch(result.stdout + result.stderr, /DO_NOT_PRINT/);
   });
@@ -394,8 +392,8 @@ describe("deploy env contract", () => {
       {
         name: "secret in app env",
         file: "app.env",
-        contents: "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=DO_NOT_PRINT_MODEL_SECRET\n",
-        error: /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI/,
+        contents: "APP_CREDENTIAL_ENCRYPTION_KEY=DO_NOT_PRINT_MODEL_SECRET\n",
+        error: /APP_CREDENTIAL_ENCRYPTION_KEY/,
         leakedValue: /DO_NOT_PRINT_MODEL_SECRET/
       },
       {

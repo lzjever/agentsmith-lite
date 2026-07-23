@@ -10,7 +10,6 @@ export interface KubectlCommand {
 }
 
 export const APP_DEPLOY_SCHEMA_BOOTSTRAP_JOB = "agentsmith-lite-schema-bootstrap";
-export const APP_DEPLOY_PROJECT_FILES_UPGRADE_JOB="agentsmith-lite-project-files-upgrade";
 export const APP_DEPLOY_API_DEPLOYMENT = "agentsmith-lite-api";
 export const APP_DEPLOY_WEB_DEPLOYMENT = "agentsmith-lite-web";
 export const DEFAULT_APP_DEPLOY_NAMESPACE = "agentsmith";
@@ -25,19 +24,16 @@ export function createAppDeployPlan(input: AppDeployPlanInput): KubectlCommand[]
     kubectl(globalArgs,["delete",`deployment/${APP_DEPLOY_API_DEPLOYMENT}`,"--ignore-not-found"]),
     kubectl(globalArgs,["delete","pod","--selector=app.kubernetes.io/component=api","--ignore-not-found","--wait=true",`--timeout=${timeout}`]),
     kubectl(globalArgs, ["delete", `job/${APP_DEPLOY_SCHEMA_BOOTSTRAP_JOB}`, "--ignore-not-found"]),
-    kubectl(globalArgs,["delete",`job/${APP_DEPLOY_PROJECT_FILES_UPGRADE_JOB}`,"--ignore-not-found"]),
     applyPhase(globalArgs, input.out, "base"),
     applyPhase(globalArgs, input.out, "migration"),
     kubectl(globalArgs, ["wait", "--for=condition=complete", `job/${APP_DEPLOY_SCHEMA_BOOTSTRAP_JOB}`, `--timeout=${timeout}`]),
-    applyPhase(globalArgs,input.out,"upgrade"),
-    kubectl(globalArgs,["wait","--for=condition=complete",`job/${APP_DEPLOY_PROJECT_FILES_UPGRADE_JOB}`,`--timeout=${timeout}`]),
     applyPhase(globalArgs, input.out, "workload"),
     kubectl(globalArgs, ["rollout", "status", `deploy/${APP_DEPLOY_API_DEPLOYMENT}`, `--timeout=${timeout}`]),
     kubectl(globalArgs, ["rollout", "status", `deploy/${APP_DEPLOY_WEB_DEPLOYMENT}`, `--timeout=${timeout}`])
   ];
 }
 
-function applyPhase(globalArgs: string[], out: string, phase: "base" | "migration" | "upgrade" | "workload"): KubectlCommand {
+function applyPhase(globalArgs: string[], out: string, phase: "base" | "migration" | "workload"): KubectlCommand {
   return kubectl(globalArgs, ["apply", "-f", out, "--selector", `${APP_DEPLOY_PHASE_LABEL}=${phase}`]);
 }
 

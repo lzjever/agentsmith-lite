@@ -283,8 +283,21 @@ timeout into Task failure or invents cleanup completion.
   Task-owned Botified state. Preserve identity, Workspace, Project, membership,
   credential, endpoint, context, policy, alert, audit, and File Library rows,
   plus Library user files.
-- While the app remains stopped, run only the minimal filesystem cleanup needed
-  for discarded Task-owned Botified/runtime paths. Do not alter Library files.
+- Removing active `task_failure` and Task terminal lifecycle semantics does not
+  delete existing alert, rule, or audit rows. Normalize `task_failure` alerts
+  and rules to read-only `historical_task_failure`, resolve any active historical
+  alert, and disable every historical rule while retaining its prior enabled
+  state for display. Normalize terminal audit actions to
+  `task.historical_terminal` and retain the prior action for display. These
+  historical classifications are excluded from runtime evaluation and mutation
+  and do not describe a current Sandbox failure.
+- While the app remains stopped, pending migration `066` preflights every
+  cleanup path, removes canonically labeled Sandbox resources with observed UID
+  fences in live mode, confirms them absent, and then deletes only Project
+  `tasks/` and each File Library `workspace/.artifacts`. Keep Library
+  home/workspace user files and all other Project files. SQL, path, Kubernetes,
+  or filesystem failure rolls the ledger transaction back; retries are
+  idempotent, and an already-applied `066` never repeats the cutover.
 - Remove obsolete Task status, terminal, finalization, and cleanup columns and
   constraints in that cutover. Do not add dual read/write, adapters, or
   compatibility transforms.

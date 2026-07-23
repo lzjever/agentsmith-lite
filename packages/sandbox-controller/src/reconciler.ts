@@ -1,14 +1,14 @@
-import type { KubernetesResource, SandboxReleaseReason, SandboxResourceSnapshot } from "../../contracts/src/api.js";
+import type { KubernetesResource, SandboxFailureCode, SandboxReleaseReason, SandboxResourceSnapshot } from "../../contracts/src/api.js";
 import type { SandboxIdentity } from "./labels.js";
 import { sandboxIdentityLabels as identityLabels } from "./labels.js";
+import { SANDBOX_LABEL_KEYS, SANDBOX_MANAGED_BY } from "./labels.js";
 import { renderSandboxResources } from "./manifestRenderer.js";
 import { sandboxResourceNamesForTask } from "./resourceNames.js";
 
 export { sandboxIdentityLabels } from "./labels.js";
 
 export type SandboxCoreResourceKind = "Secret" | "ConfigMap" | "ServiceAccount" | "NetworkPolicy" | "Service" | "Pod";
-export type SandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
-export type SandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
+export type SandboxRunStateValue = "starting" | "active" | "release_requested" | "failed" | "released";
 export type SandboxTerminalFailureReason = "pod_failed" | "runner_terminated" | "runner_crash_loop_back_off";
 
 export interface SandboxTerminalFailure {
@@ -50,7 +50,7 @@ export interface SandboxRunModelCaReference {
 
 export interface SandboxRunState extends SandboxIdentity {
   namespace: string;
-  phase: SandboxRunPhase;
+  state: SandboxRunStateValue;
   image: string;
   pvcName: string;
   projectSubPath: string;
@@ -68,9 +68,13 @@ export interface SandboxRunState extends SandboxIdentity {
   modelCa?: SandboxRunModelCaReference;
   timelineCursor?: string | null;
   terminalFailure?: SandboxTerminalFailure | null;
+  failureCode: SandboxFailureCode | null;
+  failureCause: string | null;
   fencingToken: number;
-  cleanupStatus: SandboxCleanupStatus;
   resumeUnfinished?: boolean;
+  startupClaimToken?: string | null;
+  startupLeaseExpiresAt?: string | null;
+  cleanupClaimedAt?: string | null;
   cleanupAttempts?: number;
   lastCleanupAt?: string | null;
   lastCleanupError?: {
@@ -78,6 +82,9 @@ export interface SandboxRunState extends SandboxIdentity {
     target: string;
     message: string;
   } | null;
+  releaseRequestedAt: string | null;
+  failedAt: string | null;
+  releasedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -85,12 +92,14 @@ export interface SandboxRunState extends SandboxIdentity {
 export interface SandboxReconcileInput {
   namespace: string;
   desiredRuns: SandboxRunState[];
+  persistedRunIds?: readonly string[];
   observedResources: KubernetesResource[];
   now: Date;
 }
 
 export interface SandboxReconcileResult {
   actions: SandboxReconcileAction[];
+  errors: string[];
 }
 
 export type SandboxReconcileAction =
@@ -157,10 +166,10 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
 
   for (const run of input.desiredRuns) {
     if (shouldCleanup(run)) {
-      actions.push(...cleanupRunResources(run, observedResources));
+      actions.push(...cleanupRunResources(run, observedResources, input.now.toISOString()));
       continue;
     }
-    if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") {
+    if (run.state === "released") {
       continue;
     }
     const terminalFailure = run.terminalFailure ?? terminalFailureForExpectedRunnerPod(run, observedResources);
@@ -168,17 +177,19 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
       actions.push({
         type: "store_run_state",
         run: nextRunState(run, {
-          phase: "stopping",
-          cleanupStatus: "cleanup_requested",
+          state: "failed",
           terminalFailure,
-          releaseReason: "failed"
+          releaseReason: "failed",
+          failureCode:"runner_failed",
+          failureCause:terminalFailureLabel(terminalFailure),
+          failedAt:input.now.toISOString(),
+          releaseRequestedAt:input.now.toISOString(),
+          cleanupClaimedAt:null
         }),
         reason: "terminal_runner_failure"
       });
       continue;
     }
-    if (run.phase === "stopping" || run.phase === "expired") continue;
-
     for (const resource of renderSandboxRunCoreResources(run)) {
       const kind = asCoreKind(resource.kind);
       const labels = identityLabels(run);
@@ -211,7 +222,14 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
     });
   }
 
-  return { actions };
+  const orphanPlan = input.persistedRunIds
+    ? reconcileOrphanedResources(
+        observedResources,
+        new Set([...input.persistedRunIds, ...input.desiredRuns.map((run) => run.runId)])
+      )
+    : { actions: [], errors: [] };
+  actions.push(...orphanPlan.actions);
+  return { actions, errors: orphanPlan.errors };
 }
 
 export function applySandboxReconcileActions(
@@ -246,7 +264,8 @@ export function applySandboxReconcileActions(
 
 function cleanupRunResources(
   run: SandboxRunState,
-  observedResources: KubernetesResource[]
+  observedResources: KubernetesResource[],
+  timestamp: string
 ): SandboxReconcileAction[] {
   const actions: SandboxReconcileAction[] = [];
   const observed = observedCoreResourcesForRun(run, observedResources).filter((resource) =>
@@ -255,7 +274,7 @@ function cleanupRunResources(
   if (observed.length === 0) {
     actions.push({
       type: "store_run_state",
-      run: nextRunState(run, { phase: "cleaned", cleanupStatus: "cleaned" }),
+      run: nextRunState(run, { state: "released", releasedAt:timestamp, cleanupClaimedAt:null }),
       reason: "cleanup_complete"
     });
     return actions;
@@ -279,10 +298,7 @@ function cleanupRunResources(
 
   actions.push({
     type: "store_run_state",
-    run: nextRunState(run, {
-      phase: run.phase,
-      cleanupStatus: "deleting"
-    }),
+    run: structuredClone(run),
     reason: "cleanup_in_progress"
   });
   return actions;
@@ -358,22 +374,166 @@ function observedCoreResourcesForRun(
   );
 }
 
+function reconcileOrphanedResources(
+  observedResources: KubernetesResource[],
+  persistedRunIds: ReadonlySet<string>
+): SandboxReconcileResult {
+  const groups = new Map<string, {
+    identity: SandboxIdentity | null;
+    resources: KubernetesResource[];
+    invalid: boolean;
+    resourceKeys: Set<string>;
+  }>();
+  const errors: string[] = [];
+
+  for (const resource of observedResources) {
+    if (!isObservedSandboxCandidate(resource)) {
+      continue;
+    }
+    const runId = nonEmptyLabel(resource, SANDBOX_LABEL_KEYS.runId);
+    if (!runId) {
+      errors.push(`Orphan sandbox resource has incomplete identity: ${boundedResourceRef(resource)}`);
+      continue;
+    }
+    const group = groups.get(runId) ?? {
+      identity: null,
+      resources: [],
+      invalid: false,
+      resourceKeys: new Set<string>()
+    };
+    groups.set(runId, group);
+
+    const identity = observedSandboxIdentity(resource);
+    const key = resourceKey(resource);
+    if (
+      !identity ||
+      !resourceUid(resource) ||
+      group.resourceKeys.has(key) ||
+      (group.identity !== null && !sameIdentity(group.identity, identity))
+    ) {
+      group.invalid = true;
+    } else if (group.identity === null) {
+      group.identity = identity;
+    }
+    group.resourceKeys.add(key);
+    group.resources.push(resource);
+  }
+
+  const actions: SandboxReconcileAction[] = [];
+  for (const [runId, group] of [...groups.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (group.invalid || group.identity === null) {
+      errors.push(`Orphan sandbox resource group ${boundedIdentifier(runId)} has incomplete or mismatched ownership`);
+      continue;
+    }
+    if (persistedRunIds.has(runId)) {
+      continue;
+    }
+    const labels = identityLabels(group.identity);
+    for (const kind of DELETE_ORDER) {
+      const resources = group.resources
+        .filter((resource) => resource.kind === kind)
+        .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
+      for (const resource of resources) {
+        actions.push({
+          type: "delete_resource",
+          runId,
+          kind,
+          name: resource.metadata.name,
+          labels,
+          resource: structuredClone(resource)
+        });
+      }
+    }
+  }
+
+  return { actions, errors: errors.slice(0, 20) };
+}
+
+function isObservedSandboxCandidate(resource: KubernetesResource): boolean {
+  return DELETE_ORDER.some((kind) => resource.kind === kind) && (
+    resource.metadata.labels["app.kubernetes.io/component"] === "sandbox" ||
+    SANDBOX_IDENTITY_LABEL_KEYS.some((key) => nonEmptyLabel(resource, key) !== null)
+  );
+}
+
+function observedSandboxIdentity(resource: KubernetesResource): SandboxIdentity | null {
+  if (
+    resource.metadata.labels["app.kubernetes.io/name"] !== "agentsmith-lite" ||
+    resource.metadata.labels["app.kubernetes.io/part-of"] !== "agentsmith-lite" ||
+    resource.metadata.labels["app.kubernetes.io/managed-by"] !== SANDBOX_MANAGED_BY ||
+    resource.metadata.labels["app.kubernetes.io/component"] !== "sandbox" ||
+    resource.metadata.labels[SANDBOX_LABEL_KEYS.managedBy] !== SANDBOX_MANAGED_BY
+  ) {
+    return null;
+  }
+  const workspaceId = nonEmptyLabel(resource, SANDBOX_LABEL_KEYS.workspaceId);
+  const projectId = nonEmptyLabel(resource, SANDBOX_LABEL_KEYS.projectId);
+  const taskId = nonEmptyLabel(resource, SANDBOX_LABEL_KEYS.taskId);
+  const runId = nonEmptyLabel(resource, SANDBOX_LABEL_KEYS.runId);
+  return workspaceId && projectId && taskId && runId
+    ? { workspaceId, projectId, taskId, runId }
+    : null;
+}
+
+function nonEmptyLabel(resource: KubernetesResource, key: string): string | null {
+  const value = resource.metadata.labels[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function sameIdentity(left: SandboxIdentity, right: SandboxIdentity): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.projectId === right.projectId &&
+    left.taskId === right.taskId &&
+    left.runId === right.runId;
+}
+
+function resourceUid(resource: KubernetesResource): string | null {
+  const value = resource.metadata.uid;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function boundedResourceRef(resource: KubernetesResource): string {
+  return `${boundedIdentifier(resource.kind)}/${boundedIdentifier(resource.metadata.name)}`;
+}
+
+function boundedIdentifier(value: string): string {
+  return value.slice(0, 80);
+}
+
+const SANDBOX_IDENTITY_LABEL_KEYS = [
+  SANDBOX_LABEL_KEYS.workspaceId,
+  SANDBOX_LABEL_KEYS.projectId,
+  SANDBOX_LABEL_KEYS.taskId,
+  SANDBOX_LABEL_KEYS.runId
+] as const;
+
 function shouldCleanup(run: SandboxRunState): boolean {
-  return run.cleanupStatus === "cleanup_requested" || run.cleanupStatus === "deleting";
+  return run.state === "release_requested" || run.state === "failed";
 }
 
 function nextRunState(
   run: SandboxRunState,
-  updates: Pick<SandboxRunState, "phase" | "cleanupStatus"> &
-    Partial<Pick<SandboxRunState, "terminalFailure" | "releaseReason">>
+  updates: Pick<SandboxRunState, "state"> &
+    Partial<Pick<SandboxRunState, "terminalFailure" | "releaseReason" | "failureCode" | "failureCause" | "failedAt" | "releasedAt" | "releaseRequestedAt" | "cleanupClaimedAt">>
 ): SandboxRunState {
   return {
     ...structuredClone(run),
-    phase: updates.phase,
-    cleanupStatus: updates.cleanupStatus,
+    state: updates.state,
     ...(updates.terminalFailure ? { terminalFailure: updates.terminalFailure } : {}),
-    ...(updates.releaseReason !== undefined ? { releaseReason: updates.releaseReason } : {})
+    ...(updates.releaseReason !== undefined ? { releaseReason: updates.releaseReason } : {}),
+    ...(updates.failureCode !== undefined ? { failureCode:updates.failureCode } : {}),
+    ...(updates.failureCause !== undefined ? { failureCause:updates.failureCause } : {}),
+    ...(updates.failedAt !== undefined ? { failedAt:updates.failedAt } : {}),
+    ...(updates.releasedAt !== undefined ? { releasedAt:updates.releasedAt } : {}),
+    ...(updates.releaseRequestedAt !== undefined ? { releaseRequestedAt:updates.releaseRequestedAt } : {}),
+    ...(updates.cleanupClaimedAt !== undefined ? { cleanupClaimedAt:updates.cleanupClaimedAt } : {})
   };
+}
+
+function terminalFailureLabel(failure:SandboxTerminalFailure):string {
+  return failure.reason === "pod_failed" ? "Sandbox Pod stopped unexpectedly"
+    : failure.reason === "runner_terminated" ? "Botified stopped unexpectedly"
+    : "Botified could not remain running";
 }
 
 function terminalFailureForExpectedRunnerPod(

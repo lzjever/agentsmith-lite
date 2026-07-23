@@ -2,7 +2,7 @@ import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type Proj
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
-import type { PersistedAgentTask, PersistedSandboxRunState, ProductStore, SandboxUsageSettlement } from "../../ports/src/store.js";
+import type { PersistedAgentTask, PersistedSandboxRunState, ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
@@ -10,8 +10,7 @@ import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, reco
 type Limit = ProjectAlertType;
 const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: nowIso() });
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
-function ownedRunMatchesTask(run:PersistedSandboxRunState,task:PersistedAgentTask):boolean{return run.runId===task.runId&&run.taskId===task.id&&run.projectId===task.projectId&&run.workspaceId===task.workspaceId&&run.fileLibraryId===task.fileLibraryId&&run.startedByUserId===(task.createdByUserId??null)}
-function ownedSettlementMatchesTask(value:SandboxUsageSettlement,task:PersistedAgentTask):boolean{return value.runId===task.runId&&value.taskId===task.id&&value.projectId===task.projectId&&value.workspaceId===task.workspaceId&&value.fileLibraryId===task.fileLibraryId&&value.startedByUserId===(task.createdByUserId??null)}
+function ownedRunMatchesTask(run:PersistedSandboxRunState,task:PersistedAgentTask):boolean{return run.runId===task.currentRunId&&run.taskId===task.id&&run.projectId===task.projectId&&run.workspaceId===task.workspaceId&&run.fileLibraryId===task.fileLibraryId}
 
 export class ProjectPolicyService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
@@ -57,13 +56,12 @@ export class ProjectPolicyService {
   }
   private async sandboxUsage(projectId:string,selectedUserId:string):Promise<import("../../contracts/src/api.js").ProjectSandboxUsage>{
     const [tasks,runs,settlements]=await Promise.all([this.store.listTasksForProject(projectId),this.store.sandboxRuns.list(),this.store.listSandboxUsageSettlements(projectId,selectedUserId)]);
-    const projectRuns=runs.filter((run)=>run.projectId===projectId&&run.startedByUserId===selectedUserId),runsById=new Map(projectRuns.map((run)=>[run.runId,run])),settlementsById=new Map(settlements.map((value)=>[value.runId,value]));
-    const ownedTasks=tasks.filter((task)=>!task.deletedAt&&task.executionMode==="live"&&(task.createdByUserId??null)===selectedUserId),tasksByRun=new Map(ownedTasks.map((task)=>[task.runId,task]));
+    const projectRuns=runs.filter((run)=>run.projectId===projectId&&run.startedByUserId===selectedUserId),settlementsById=new Map(settlements.map((value)=>[value.runId,value]));
+    const tasksByRun=new Map(tasks.filter((task)=>!task.deletedAt).flatMap((task)=>task.currentRunId?[[task.currentRunId,task] as const]:[]));
     const availableTaskIds=new Set(tasks.filter((task)=>!task.deletedAt).map((task)=>task.id));
-    for(const task of ownedTasks){const run=runsById.get(task.runId),settlement=settlementsById.get(task.runId);if(!(run&&ownedRunMatchesTask(run,task))&&!(settlement&&ownedSettlementMatchesTask(settlement,task)))throw new ProductError("Sandbox usage is unavailable because an owned run or settlement is missing or mismatched",503,"sandbox_usage_unavailable");if(run&&(run.cleanupStatus==="cleaned"||run.phase==="cleaned")&&!settlement)throw new ProductError("Sandbox usage is unavailable because a cleaned run settlement is missing",503,"sandbox_usage_unavailable");}
-    for(const run of projectRuns){if(run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"){const task=tasksByRun.get(run.runId);if(!task||!ownedRunMatchesTask(run,task))throw new ProductError("Sandbox usage is unavailable because an owned run is missing or mismatched",503,"sandbox_usage_unavailable");}}
+    for(const run of projectRuns){if(run.state==="released"){if(!settlementsById.has(run.runId))throw new ProductError("Sandbox usage is unavailable because a released Run settlement is missing",503,"sandbox_usage_unavailable");continue;}const task=tasksByRun.get(run.runId);if(!task||!ownedRunMatchesTask(run,task))throw new ProductError("Sandbox usage is unavailable because an owned Run is missing or mismatched",503,"sandbox_usage_unavailable");}
     const measuredAt=Date.now();
-    const rows:import("../../contracts/src/api.js").ProjectSandboxUsageRow[]=[...settlements.map((value)=>({taskId:value.taskId,taskAvailable:availableTaskIds.has(value.taskId),runId:value.runId,fileLibraryId:value.fileLibraryId,state:"settled" as const,startedAt:value.startedAt,releasedAt:value.releasedAt,durationSeconds:value.durationSeconds,resources:structuredClone(value.resources),releaseReason:value.releaseReason})),...projectRuns.filter((run)=>run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned").map((run)=>({taskId:run.taskId,taskAvailable:true,runId:run.runId,fileLibraryId:run.fileLibraryId,state:"live" as const,startedAt:run.startedAt,releasedAt:null,durationSeconds:run.startedAt?Math.max(0,(measuredAt-Date.parse(run.startedAt))/1000):0,resources:structuredClone(run.resourceSnapshot),releaseReason:null}))].sort((a,b)=>(b.startedAt??b.releasedAt??"").localeCompare(a.startedAt??a.releasedAt??"")||b.runId.localeCompare(a.runId));
+    const rows:import("../../contracts/src/api.js").ProjectSandboxUsageRow[]=[...settlements.map((value)=>({taskId:value.taskId,taskAvailable:availableTaskIds.has(value.taskId),runId:value.runId,fileLibraryId:value.fileLibraryId,state:"settled" as const,startedAt:value.startedAt,releasedAt:value.releasedAt,durationSeconds:value.durationSeconds,resources:structuredClone(value.resources),releaseReason:value.releaseReason})),...projectRuns.filter((run)=>run.state!=="released").map((run)=>({taskId:run.taskId,taskAvailable:availableTaskIds.has(run.taskId),runId:run.runId,fileLibraryId:run.fileLibraryId,state:"live" as const,startedAt:run.startedAt,releasedAt:null,durationSeconds:run.startedAt?Math.max(0,(measuredAt-Date.parse(run.startedAt))/1000):0,resources:structuredClone(run.resourceSnapshot),releaseReason:null}))].sort((a,b)=>(b.startedAt??b.releasedAt??"").localeCompare(a.startedAt??a.releasedAt??"")||b.runId.localeCompare(a.runId));
     let totalDurationMs=0n,cpuRequestMillisMs=0n,memoryRequestByteMs=0n;
     for(const row of rows){const roundedDurationMs=Math.round(row.durationSeconds*1000);if(!Number.isSafeInteger(roundedDurationMs)||roundedDurationMs<0)throw new ProductError("Sandbox usage is unavailable because a duration is outside the supported range",503,"sandbox_usage_unavailable");const durationMs=BigInt(roundedDurationMs);totalDurationMs+=durationMs;cpuRequestMillisMs+=BigInt(row.resources.cpuRequestMillis)*durationMs;memoryRequestByteMs+=BigInt(row.resources.memoryRequestBytes)*durationMs;}
     return{selectedUserId,activeCount:rows.filter((row)=>row.state==="live"&&row.startedAt!==null).length,launches:rows.filter((row)=>row.startedAt!==null).length,totalDurationSeconds:formatDecimal(totalDurationMs,3),cpuRequestSeconds:formatDecimal(cpuRequestMillisMs,6),memoryRequestByteSeconds:formatDecimal(memoryRequestByteMs,3),rows};
@@ -100,6 +98,7 @@ export class ProjectPolicyService {
       await this.auditEvent(projectId, userId, action, "rejected", alertId, "alert");
       throw error;
     }
+    if((await this.store.findProjectAlert(projectId,alertId))?.type==="historical_task_failure")throw new ProductError("Historical alerts are read-only",409,"historical_alert_read_only");
     const transition = async () => {
       let alert: ProjectAlert;
       try {
@@ -171,16 +170,21 @@ export class ProjectPolicyService {
     if (!idempotencyKey) return update();
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.policy.update", key: idempotencyKey, request: input, resourceId: projectId, failureMessage: "Project policy could not be updated", run: update });
   }
-  async reserveTask(projectId: string, actorId: string, taskId: string): Promise<void> { await this.change(projectId, actorId, "task.create", taskId, { activeTasks: 1 }, "active_tasks_limit"); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); }
   async recordTaskReservationRejected(projectId: string, actorId: string, taskId: string): Promise<void> {
     await this.openAlert(projectId, "active_tasks_limit");
     await this.auditEvent(projectId, actorId, "task.create", "rejected", taskId);
+  }
+  async refreshActiveTaskAlerts(projectId:string):Promise<void>{
+    await evaluateProjectAlertRules(this.store,projectId,"active_tasks_limit");
+    await recoverProjectAlerts(this.store,projectId,"active_tasks_limit");
+  }
+  async refreshSandboxFailureAlerts(projectId:string,endpointId?:string):Promise<void>{
+    await emitProjectAlert(this.store,projectId,"sandbox_failure",endpointId?{endpointId}:{});
   }
   async recordOperation(projectId: string, actorId: string | null, action: ProjectAuditAction, status: "accepted" | "rejected", resourceId: string | null, resourceKind = auditResourceKind(action), detail?: import("../../contracts/src/api.js").ProjectAuditSafeDetail): Promise<void> {
     await this.auditEvent(projectId, actorId, action, status, resourceId, resourceKind, detail);
   }
   async raiseAlert(projectId: string, type: ProjectAlertType): Promise<void> { await this.openAlert(projectId, type); }
-  async evaluateTaskFailure(projectId:string,endpointId:string):Promise<void>{await emitProjectAlert(this.store,projectId,"task_failure",{endpointId});await recoverProjectAlerts(this.store,projectId,"task_failure");}
   async recordProviderFailure(projectId:string,actorId:string|null,endpointId:string|null,errorCategory:EndpointHealthErrorCategory):Promise<void>{
     const timestamp=nowIso();
     await recordProjectFailure(this.store,"provider_failure",{
@@ -188,7 +192,6 @@ export class ProjectPolicyService {
       detail:{...(endpointId?{endpointId}:{}),errorCategory},createdAt:timestamp
     },endpointId?{endpointId}:{});
   }
-  async releaseTask(projectId: string, taskId: string): Promise<void> { await this.change(projectId, null, "task.cleaned", taskId, { activeTasks: -1 }, undefined); await evaluateProjectAlertRules(this.store, projectId, "active_tasks_limit"); await recoverProjectAlerts(this.store,projectId,"active_tasks_limit"); }
   async reserveProvider(projectId: string, actorId: string | null, endpointId: string | null, taskId: string | null = null, reservation: Readonly<{ tokens: number; cost: number }> = DEFAULT_PROVIDER_RESERVATION): Promise<string> {
     const reservedAt = nowIso();
     const policy = await this.requirePolicy(projectId);

@@ -6,18 +6,23 @@ Live mode also starts a single-replica runtime tick. On startup and then each in
 
 ## Run State
 
-Desired sandbox state is represented by the pure `SandboxRunState` input to the reconciler and persisted through the typed `ProductStore.sandboxRuns` port. The backing storage is the existing `postgres_json_docs` table using the `sandbox_run_state` collection; there is no dedicated `sandbox_runs` table or migration. It records:
+Desired sandbox state is represented by the pure `SandboxRunState` input to the reconciler and persisted through the typed `ProductStore.sandboxRuns` port. Production storage is the relational `sandbox_runs` table. It records:
 
 - workspace/project/task/run ids and namespace.
-- phase and cleanup status.
+- state: `starting`, `active`, `release_requested`, `failed`, or `released`.
 - pod/service/configmap/secret names.
 - Botified service key secret ref.
 - task home, artifacts, and Botified data directories.
 - runner image, PVC/project subPath, port, and resource requests/limits.
-- ready/release timestamps, the user who started the Run, and the release reason.
-- timeline cursor, fencing token, and minimal metadata for fenced store updates.
+- ready, failure, release-request, and released timestamps; the user who started
+  the Run; and the release reason.
+- a safe failure cause, cleanup claim/attempt/error, timeline cursor, fencing
+  token, and resource sizing used for Usage.
 
-The run state document stores resource names, Secret key references, directories, limits, phase, cleanup status, and timestamps. It must not store real Botified service keys or model API keys; those values only appear in live Kubernetes Secret apply bodies. State transitions are emitted as idempotent `store_run_state` actions and are persisted only after cleanup mutations succeed.
+The Run row stores resource names, Secret key references, directories, limits,
+state, and timestamps. It must not store real Botified service keys or model
+API keys; those values only appear in live Kubernetes Secret apply bodies.
+Task rows do not carry a shadow execution, cleanup, or finalization lifecycle.
 
 ## Rendered Resources
 
@@ -60,4 +65,6 @@ TaskService live startup uses this action applier only when `AGENTSMITH_LITE_SAN
 
 ## Explicit Release
 
-`SandboxLifecycleService.reapSandboxRunsOnce({ apply: true })` finishes a previously persisted explicit release or deletion intent. It never executes `create_resource`; TaskService owns new-Run startup. It executes exact-identity delete actions, re-observes the resources, and only then marks the Run released with fencing and settles that Run's Usage once. A Sandbox release never deletes Task HOME, Botified session data, File Library files, or artifacts. Those durable paths let the next message or Terminal open create a new Run for the same Task, session, and File Library. Cleanup failure leaves the release intent pending for a later retry and does not free the active-Sandbox reservation.
+`SandboxLifecycleService.reapSandboxRunsOnce({ apply: true })` finishes a previously persisted explicit release, failed-Run cleanup, or deletion intent. It never executes `create_resource`; TaskService owns new-Run startup. It executes exact-identity delete actions, re-observes the resources, and only then marks the Run released with fencing and settles that Run's Usage once. A Sandbox release never deletes Task HOME, Botified session data, File Library files, or artifacts. Those durable paths let the next message or Terminal open create a new Run for the same Task, session, and File Library. Cleanup failure keeps the Run unreleased, clears the short cleanup claim for retry, exposes only a safe Run-owned cause, and does not free capacity.
+
+The global namespace tick also removes migration-orphaned core sandbox resources when every observed resource in a Run group has the complete canonical sandbox identity and an observed UID, and no persisted Run has that ID. Incomplete, conflicting, or unowned groups are left untouched and surfaced as bounded reconciliation errors. Orphan cleanup does not create Usage settlement because the discarded Run no longer exists.

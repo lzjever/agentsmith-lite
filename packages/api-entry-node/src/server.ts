@@ -47,7 +47,6 @@ interface CommonApiServerOptions {
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   taskDeliveryLeaseMs?: number;
-  taskMaintenanceLeaseMs?: number;
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
   terminalAccessRecheckMs?: number;
@@ -123,7 +122,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
     ...(options.taskDeliveryLeaseMs !== undefined ? { taskDeliveryLeaseMs: options.taskDeliveryLeaseMs } : {}),
-    ...(options.taskMaintenanceLeaseMs !== undefined ? { taskMaintenanceLeaseMs: options.taskMaintenanceLeaseMs } : {}),
     ...(options.taskRetryDelayMs !== undefined ? { taskRetryDelayMs: options.taskRetryDelayMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
@@ -133,7 +131,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
   const services = createApplicationServices(serviceOptions);
   const terminalAccessRecheckMs=options.terminalAccessRecheckMs??1_000;
   if(!Number.isFinite(terminalAccessRecheckMs)||terminalAccessRecheckMs<=0)throw new Error("terminalAccessRecheckMs must be positive");
-  await services.credentials.importLegacyAliasesFromEnvironment(process.env);
   const appBasePath = appBasePathFromOptions(options.publicBaseUrl, options.publicBasePath);
 
   const server = http.createServer(async (req, res) => {
@@ -525,7 +522,7 @@ async function routeApi(
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "projects" && segments[3]) {
     const projectId = segments[3];
     if (segments.length === 4 && method === "DELETE") {
-      const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),()=>services.deletion.deleteProject(user.id,projectId));
+      const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),(completion)=>services.deletion.deleteProject(user.id,projectId,completion));
       return sendJson(res, 200, result);
     }
     if (segments[4] === "pin" && !segments[5] && method === "PUT") {
@@ -685,7 +682,6 @@ async function routeApi(
       }
     }
     if (segments[4] === "tasks") {
-      if (segments[5] === "summaries" && !segments[6] && method === "GET") { assertOnlySearchParams(url, []);return sendJson(res,200,await services.tasks.listTaskSummaries(user.id,projectId)); }
       if (!segments[5] && method === "GET") {
         assertOnlySearchParams(url, ["search", "archived", "sort", "direction", "cursor", "limit"]);
         return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId, asTaskListQuery(url.searchParams)));
@@ -711,7 +707,6 @@ async function routeApi(
     if (segments[4] === "detail" && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTaskDetail(user.id,taskId)); }
     if (!segments[4] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
     if (!segments[4] && method === "DELETE") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));}
-    if (segments[4] === "summary" && method === "GET") { assertOnlySearchParams(url, []); return sendJson(res,200,await services.tasks.getTaskSummary(user.id,taskId)); }
     if (segments[4] === "messages") {
       if(!segments[5]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
       if(segments[5]&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
@@ -1029,10 +1024,9 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||
     /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
-    /^\/api\/v1\/projects\/[^/]+\/tasks\/summaries$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|summary|archive|sandbox\/release|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|archive|sandbox\/release|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1180,22 +1174,14 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
   res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache","connection":"keep-alive","x-accel-buffering":"no"});
   const event=(type:string,value:unknown,id?:string)=>{if(closed||res.writableEnded)return;res.write(`${id?`id: ${id}\n`:""}event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);};
   let lastState="";
-  let lastRunState="";
   let lastConnection="";
   let lastPreviewStatus="";
   const state=(value:typeof page.state,force=false)=>{
-    const payload={queuedMessages:value.queuedMessages,capabilities:value.capabilities};
+    const payload={queuedMessages:value.queuedMessages,presentation:value.presentation};
     const serialized=JSON.stringify(payload);
     if(!force&&serialized===lastState)return;
     lastState=serialized;
     event("state",payload);
-  };
-  const runState=(value:typeof page.state,force=false)=>{
-    const payload={runState:value.runState};
-    const serialized=JSON.stringify(payload);
-    if(!force&&serialized===lastRunState)return;
-    lastRunState=serialized;
-    event("run_state",payload);
   };
   const connection=(value:typeof page.state,connectionState:"connected"|"disconnected"|"recovered",message:string|null=null,force=false)=>{
     const payload={connectionState,runtimeReachability:value.runtimeReachability,historyStatus:value.historyStatus,lastSyncedAt:value.lastSyncedAt,message};
@@ -1213,7 +1199,6 @@ async function sendTaskInteractionStream(req:IncomingMessage,res:ServerResponse,
   };
   const transientState=(value:typeof page.state,connectionState:"connected"|"disconnected"|"recovered",message:string|null=null,force=false)=>{
     state(value,force);
-    runState(value,force);
     connection(value,connectionState,message,force);
   };
   const previewController=new AbortController();

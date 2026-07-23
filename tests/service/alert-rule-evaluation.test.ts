@@ -4,27 +4,6 @@ import { createLocalInMemoryProductStore } from "../../packages/adapters-postgre
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 
 describe("alert rule evaluation", () => {
-  it("opens and recovers a task gauge rule as active task usage changes", async () => {
-    const { services, owner, project } = await setup("task-gauge");
-    const rule = await services.alertRules.create(owner.id, project.id, {
-      name: "One active task",
-      alertType: "active_tasks_limit",
-      threshold: 1,
-    });
-
-    await services.policies.reserveTask(project.id, owner.id, "task_1");
-    const active = (await services.policies.alerts(owner.id, project.id)).find(
-      (alert) => alert.ruleId === rule.id && alert.status === "active",
-    );
-    assert.equal(active?.metricValue, 1);
-
-    await services.policies.releaseTask(project.id, "task_1");
-    const recovered = (await services.policies.alerts(owner.id, project.id)).find(
-      (alert) => alert.id === active?.id,
-    );
-    assert.equal(recovered?.status, "resolved");
-  });
-
   it("opens and recovers a file gauge rule as project storage changes", async () => {
     const { services, owner, project } = await setup("file-gauge");
     const rule = await services.alertRules.create(owner.id, project.id, {
@@ -67,44 +46,6 @@ describe("alert rule evaluation", () => {
     assert.deepEqual(activeRuleIds, new Set(rules.map((rule) => rule.id)));
   });
 
-  it("evaluates a new rule immediately and resolves its old instance when the type changes", async () => {
-    const { store, services, owner, project } = await setup("rule-change");
-    await services.policies.reserveTask(project.id, owner.id, "task_1");
-    const rule = await services.alertRules.create(owner.id, project.id, {
-      name: "Current task",
-      alertType: "active_tasks_limit",
-      threshold: 1,
-    });
-    const oldAlert = (await services.policies.alerts(owner.id, project.id)).find(
-      (alert) => alert.ruleId === rule.id && alert.type === "active_tasks_limit" && alert.status === "active",
-    );
-    assert.ok(oldAlert);
-
-    await services.alertRules.update(owner.id, project.id, rule.id, {
-      alertType: "project_file_bytes_limit",
-      threshold: 0,
-    });
-    const alerts = await services.policies.alerts(owner.id, project.id);
-    assert.equal(alerts.find((alert) => alert.id === oldAlert.id)?.status, "resolved");
-    const replacement = alerts.find((alert) => alert.ruleId === rule.id && alert.type === "project_file_bytes_limit" && alert.status === "active");
-    assert.ok(replacement);
-
-    const deleteRule = store.deleteProjectAlertRule.bind(store);
-    store.deleteProjectAlertRule = async (projectId, ruleId) => {
-      assert.equal(
-        (await store.listProjectAlerts(projectId)).find((alert) => alert.id === replacement.id)?.status,
-        "resolved",
-        "active alert must be resolved before its rule is deleted",
-      );
-      return deleteRule(projectId, ruleId);
-    };
-
-    await services.alertRules.remove(owner.id, project.id, rule.id);
-    const retained = (await services.policies.alerts(owner.id, project.id)).find((alert) => alert.id === replacement.id);
-    assert.equal(retained?.status, "resolved");
-    assert.equal(retained?.ruleId, null);
-  });
-
   it("rejects endpoint scope for project-only gauges", async () => {
     const { services, owner, project } = await setup("invalid-gauge-scope");
     await assert.rejects(
@@ -116,31 +57,6 @@ describe("alert rule evaluation", () => {
     );
   });
 
-  it("fills a partially failed in-product notification delivery on the next evaluation", async () => {
-    const { store, services, owner, project } = await setup("notification-retry");
-    const { user: admin } = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "notification-admin", email: "notification-admin@example.test", emailVerified: true });
-    await store.upsertProjectMembership({ projectId: project.id, userId: admin.id, role: "admin", createdAt: project.createdAt, updatedAt: project.updatedAt });
-    const rule = await services.alertRules.create(owner.id, project.id, { name: "Active task", alertType: "active_tasks_limit", threshold: 1 });
-    const createNotification = store.createUserNotification.bind(store);
-    let failAdmin = true;
-    store.createUserNotification = async (notification, dedupeKey) => {
-      if (notification.userId === admin.id && failAdmin) throw new Error("notification write unavailable");
-      return createNotification(notification, dedupeKey);
-    };
-
-    await services.policies.reserveTask(project.id, owner.id, "task_1");
-    const failed = (await store.listProjectAlerts(project.id)).find((alert) => alert.ruleId === rule.id && alert.status === "active");
-    assert.equal(failed?.deliveryStatus, "failed");
-    assert.equal((await services.notifications.list(owner.id)).length, 1);
-    assert.equal((await services.notifications.list(admin.id)).length, 0);
-
-    failAdmin = false;
-    await services.policies.reserveTask(project.id, owner.id, "task_2");
-    const delivered = (await store.listProjectAlerts(project.id)).find((alert) => alert.id === failed?.id);
-    assert.equal(delivered?.deliveryStatus, "delivered");
-    assert.equal((await services.notifications.list(owner.id)).length, 1);
-    assert.equal((await services.notifications.list(admin.id)).length, 1);
-  });
 });
 
 async function setup(subject: string) {

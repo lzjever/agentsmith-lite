@@ -115,17 +115,20 @@ describe("durable failure alerts", () => {
     const setup = await sandboxSetup("sandbox-write-failure-secret");
     await setup.services.alertRules.create(setup.userId, setup.projectId, { alertType: "sandbox_failure", threshold: 1, windowSeconds: 3600 });
     const measurements = countMeasurements(setup.store);
-    failNextAudit(setup.store, (event) => event.action === "sandbox.failed");
+    failNextSandboxRunFailure(setup.store);
 
     const failed = await setup.lifecycle.reapSandboxRunsOnce({ runId: setup.run.runId, apply: true });
 
     assert.match(failed.errors.join("\n"), /audit append unavailable/);
+    assert.equal((await setup.store.sandboxRuns.get(setup.run.runId))?.state, "active");
     assert.equal(measurements(), 0);
     assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "sandbox_failure").length, 0);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 0);
 
     await setup.lifecycle.reapSandboxRunsOnce({ runId: setup.run.runId, apply: true });
 
+    const releasedRun = await setup.store.sandboxRuns.get(setup.run.runId);
+    assert.deepEqual([releasedRun?.state, releasedRun?.releaseReason, releasedRun?.failureCode], ["released", "failed", "runner_failed"]);
     assert.equal(measurements(), 1);
     assert.equal((await setup.store.listProjectAuditEvents(setup.projectId)).filter((item) => item.action === "sandbox.failed").length, 1);
     assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "sandbox_failure" && item.metricValue === 1).length, 1);
@@ -150,18 +153,15 @@ async function createEndpoint(setup: Awaited<ReturnType<typeof projectSetup>>, s
 async function sandboxSetup(secret: string) {
   const setup = await projectSetup();
   const timestamp = new Date().toISOString();
-  const run = sandboxRun(setup.workspaceId, setup.projectId, setup.project.rootPath, timestamp);
+  const run = {...sandboxRun(setup.workspaceId, setup.projectId, setup.project.rootPath, timestamp),startedByUserId:setup.userId};
   const task: PersistedAgentTask = {
     id: run.taskId,
     workspaceId: setup.workspaceId,
     projectId: setup.projectId,
     endpointId: "endpoint-sandbox-alert",
     fileLibraryId: `library-${run.taskId}`,
-    prompt: `sandbox failed with ${secret}`,
-    status: "running",
-    runId: run.runId,
-    executionMode: "live",
-    sandbox: { namespace: run.namespace, resources: [] },
+    prompt: `sandbox failed with ${secret}`,title:"Sandbox alert",createdByUserId:setup.userId,agentContext:"",
+    currentRunId: run.runId,archivedAt:null,deletedAt:null,
     createdAt: timestamp,
     updatedAt: timestamp
   };
@@ -177,20 +177,18 @@ async function sandboxSetup(secret: string) {
       createdAt: timestamp,
       updatedAt: timestamp
     },
-    reserveActive: false
+    reserveActive: true,
+    sandboxRun:run
   });
   assert.equal(created.kind, "created");
-  await setup.store.sandboxRuns.put(run);
   const resources = resourcesForRun(run);
   const pod = resources.find((resource) => resource.kind === "Pod");
   assert.ok(pod);
   pod.status = { phase: "Failed" };
   const lifecycle = new SandboxLifecycleService(setup.store, {
     namespace: run.namespace,
-    dataRoot: "/tmp/agentsmith-failure-alerts",
     port: new FailureLifecyclePort(resources),
-    now: () => new Date(timestamp),
-    runtimeDirectoryCleaner: { async removeRuntimePath() {} }
+    now: () => new Date(timestamp)
   });
   return { ...setup, task, run, lifecycle };
 }
@@ -203,7 +201,7 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     taskId,
     runId: "run-sandbox-alert",
     namespace: "agentsmith",
-    phase: "running",
+    state: "active",
     image: "agentsmith-lite/botified-runner:test",
     pvcName: "agentsmith-lite-files",
     projectSubPath,
@@ -217,8 +215,8 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     directories: { libraryHome: `/tmp/agentsmith-failure-alerts/${projectSubPath}/libraries/library-${taskId}/home`, botified: `/tmp/agentsmith-failure-alerts/${projectSubPath}/tasks/${taskId}/botified` },
     resourceLimits: { cpuRequest: "250m", memoryRequest: "512Mi", cpuLimit: "1", memoryLimit: "1Gi" },
     resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},
-    fencingToken: 1,
-    cleanupStatus: "active",
+    failureCode:null,failureCause:null,fencingToken: 1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,
+    releaseReason:null,releaseRequestedAt:null,failedAt:null,releasedAt:null,
     createdAt: timestamp,
     updatedAt: timestamp
   };
@@ -252,6 +250,18 @@ function failNextAudit(store: ReturnType<typeof createLocalInMemoryProductStore>
       throw new Error("audit append unavailable");
     }
     await append(event);
+  };
+}
+
+function failNextSandboxRunFailure(store: ReturnType<typeof createLocalInMemoryProductStore>): void {
+  const fail = store.failSandboxRun.bind(store);
+  let failed = false;
+  store.failSandboxRun = async (input) => {
+    if (!failed && input.auditEvent.action === "sandbox.failed") {
+      failed = true;
+      throw new Error("audit append unavailable");
+    }
+    return fail(input);
   };
 }
 

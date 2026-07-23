@@ -98,7 +98,7 @@ export class RuntimeService {
   }
 }
 
-function emptySandboxReapResult():SandboxReapResult{return{namespace:"",activeTaskCount:0,runCounts:{total:0,active:0,cleanupRequested:0,deleting:0,cleaned:0,starting:0,running:0,stopping:0,expired:0},observedResourceCounts:{},cleanupPlan:{targets:[],recentFailures:[]},recentCleanupFailures:[],actionSummary:[],errors:["Sandbox reap failed"],dryRun:false,storedRunIds:[]};}
+function emptySandboxReapResult():SandboxReapResult{return{namespace:"",activeTaskCount:0,runCounts:{total:0,starting:0,active:0,releaseRequested:0,failed:0,released:0},observedResourceCounts:{},cleanupPlan:{targets:[],recentFailures:[]},recentCleanupFailures:[],actionSummary:[],errors:["Sandbox reap failed"],dryRun:false,storedRunIds:[]};}
 
 function defaultSetInterval(callback: () => void, intervalMs: number): RuntimeTimerHandle {
   return setInterval(callback, intervalMs);

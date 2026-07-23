@@ -302,7 +302,7 @@ describe("Botified Chat Completions broker", () => {
       endpointId: endpoint.id,
       fileLibrary: { mode: "create_new", name: `Task files ${name}` }
     }, cookie, csrf, `task-${name}`);
-    const activeTask = await waitForActiveTask(task.id, cookie);
+    const activeTask = await waitForActiveTask(task.task.id, cookie);
     return {
       task: activeTask,
       projectId: project.id,
@@ -313,18 +313,18 @@ describe("Botified Chat Completions broker", () => {
 
   async function waitForActiveTask(taskId: string, cookie: string): Promise<any> {
     const deadline = Date.now() + 2_000;
-    let lastTask: { status?: unknown; safeError?: unknown } | undefined;
+    let lastState: unknown;
     while (Date.now() < deadline) {
-      const response = await fetch(`${baseUrl}/app/api/v1/tasks/${taskId}`, { headers: { cookie } });
+      const response = await fetch(`${baseUrl}/app/api/v1/tasks/${taskId}/detail`, { headers: { cookie } });
       assert.equal(response.status, 200);
-      const task = await response.json();
-      lastTask = task;
-      if (task.status === "running") {
-        return task;
+      const detail = await response.json();
+      lastState = detail.sandboxState;
+      if (detail.sandboxState?.state === "active" && typeof detail.sandboxState.runId === "string") {
+        return { ...detail.task, runId:detail.sandboxState.runId };
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify({ status: lastTask?.status, safeError: lastTask?.safeError })}`);
+    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify(lastState)}`);
   }
 
   async function post(pathname: string, body: unknown, cookie: string, csrf: string, idempotencyKey: string): Promise<any> {

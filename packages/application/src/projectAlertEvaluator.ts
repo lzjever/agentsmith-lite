@@ -1,4 +1,4 @@
-import { projectAlertTypeLabel, sanitizeProjectAuditDetail, type AlertRuleMetric, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
+import { isActiveProjectAlertRuleView, projectAlertTypeLabel, sanitizeProjectAuditDetail, type ActiveProjectAlert, type AlertRuleMetric, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 
@@ -13,7 +13,7 @@ export async function evaluateProjectAlertRules(
 ): Promise<number> {
   const timestamp = nowIso();
   const rules = await store.listProjectAlertRules(projectId);
-  const configured = rules.filter((rule) =>
+  const configured = rules.filter(isActiveProjectAlertRuleView).filter((rule) =>
     rule.enabled &&
     rule.alertType === type &&
     (rule.scope?.kind !== "endpoint" || rule.scope.endpointId === context.endpointId)
@@ -90,7 +90,6 @@ export async function emitProjectAlert(
 ): Promise<void> {
   if (await evaluateProjectAlertRules(store, projectId, type, context)) return;
   const timestamp = nowIso();
-  if (type === "task_failure") return;
   if (isFailureAlertType(type) && await store.measureProjectAlertRule({
     projectId,
     alertType: type,
@@ -115,7 +114,7 @@ export async function recoverProjectAlerts(
   configuredOnly = false,
 ): Promise<void> {
   const timestamp = nowIso();
-  const rules = new Map((await store.listProjectAlertRules(projectId)).map((rule) => [rule.id, rule]));
+  const rules = new Map((await store.listProjectAlertRules(projectId)).filter(isActiveProjectAlertRuleView).map((rule) => [rule.id, rule]));
   for (const alert of await store.listActiveProjectAlerts(projectId)) {
     if (alert.type !== type || (endpointId !== undefined && (alert.endpointId ?? null) !== endpointId)) continue;
     const rule = alert.ruleId ? rules.get(alert.ruleId) : undefined;
@@ -159,12 +158,12 @@ export function defaultAlertMetric(type: ProjectAlertType) {
     : "failure_count" as const;
 }
 
-function ruleStillOwnsAlert(rule: ProjectAlertRule, alert: ProjectAlert): boolean {
+function ruleStillOwnsAlert(rule: ProjectAlertRule, alert: ActiveProjectAlert): boolean {
   const endpointId = rule.scope?.kind === "endpoint" ? rule.scope.endpointId : null;
   return rule.enabled && rule.alertType === alert.type && endpointId === (alert.endpointId ?? null);
 }
 
-async function resolveAlert(store: ProductStore, alert: ProjectAlert, timestamp: string) {
+async function resolveAlert(store: ProductStore, alert: ActiveProjectAlert, timestamp: string) {
   const resolved = await store.transitionProjectAlert(alert.projectId, alert.id, "resolved", timestamp);
   if (resolved) await store.appendProjectAuditEvent({
     id: newId("audit"), projectId: alert.projectId, actorId: null, action: "alert.resolve", status: "accepted",

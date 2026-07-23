@@ -141,6 +141,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const handleProjectionChange = useCallback(() => {
     void loadTask(true);
   }, [loadTask]);
+  const handlePresentationChange=useCallback((presentation:TaskDetailProjection)=>{setDetail(presentation);},[]);
 
   async function deleteTask() {
     if (!detail?.capabilities.deleteTask || deleting || releasing || lifecycleBusy) return;
@@ -171,7 +172,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       const receipt = await apiClient.releaseTaskSandbox(taskId, mutationKeys.key("task-sandbox-release", taskId));
       mutationKeys.complete("task-sandbox-release", taskId);
       if (!mounted.current) return;
-      setDetail((current) => current ? { ...current, sandboxState:receipt.sandboxState, capabilities:receipt.capabilities } : current);
+      setDetail(receipt.presentation);
       await loadTask(true);
     } catch (reason) {
       if (!mounted.current) return;
@@ -188,18 +189,22 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void loadTask()} />;
   if (!detail) return null;
 
-  const presentedDetail = releasing ? releasePendingDetail(detail) : detail;
-  const { task, capabilities, lifecycle, currentTurn, sandboxState } = presentedDetail;
+  const { task, capabilities, lifecycle, sandboxState } = detail;
   const mutationBusy = deleting || releasing || lifecycleBusy;
-  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(presentedDetail)} · ${task.id}`} actions={<><IconButton label="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label="Release sandbox" variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
+  const releaseLabel=sandboxState.state==="failed"||sandboxState.state==="release_requested"?"Retry release":"Release sandbox";
+  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(detail)} · ${task.id}`} actions={<><IconButton label="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label={releaseLabel} variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadTask(true)} /> : null;
   const archivedNotice = lifecycle.state === "archived" ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3"><Archive className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">This task is archived. Its conversation, files, and artifacts remain available.</p></div> : null;
   const sandboxNotice = sandboxState.state === "released"
     ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3" role="status"><CircleCheck className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">Sandbox resources were released. Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available.</p></div>
+    : sandboxState.state === "failed"
+      ? <div className="border border-error/30 bg-error/10 px-4 py-3 text-sm" role="alert"><p className="font-medium text-foreground">Sandbox failed</p><p className="mt-1 text-secondary">{sandboxState.cause?.message??"The sandbox could not continue."}</p></div>
+    : sandboxState.state === "release_requested" && sandboxState.cause
+      ? <div className="border border-warning/30 bg-warning/10 px-4 py-3 text-sm" role="status"><p className="font-medium text-foreground">Sandbox cleanup pending</p><p className="mt-1 text-secondary">{sandboxState.cause.message}</p></div>
     : null;
 
-  const releaseDialog = <ConfirmationDialog open={releaseOpen} onOpenChange={setReleaseOpen} title="Release sandbox?" description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." confirmText="Release sandbox" onConfirm={releaseSandbox} errorContext="Sandbox could not be released" />;
+  const releaseDialog = <ConfirmationDialog open={releaseOpen} onOpenChange={setReleaseOpen} title={`${releaseLabel}?`} description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." confirmText={releaseLabel} onConfirm={releaseSandbox} errorContext="Sandbox could not be released" />;
 
   if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{taskRefreshError}{archivedNotice}{sandboxNotice}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section>{releaseDialog}</PageLayout>;
 
@@ -224,7 +229,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       {showArtifacts ? <Tab value="artifacts" label="Artifacts" className="xl:hidden" /> : null}
     </TabList>
     <div className="grid h-[clamp(24rem,calc(100dvh-20rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden md:h-[clamp(24rem,calc(100dvh-12rem),48rem)] xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
-      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} currentTurn={currentTurn} sandboxState={sandboxState} capabilities={capabilities} onProjectionChange={handleProjectionChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
+      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} presentation={detail} onPresentationChange={handlePresentationChange} onProjectionChange={handleProjectionChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
       {terminalStarted && sandboxState.state !== "release_requested" ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
       {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
@@ -245,7 +250,7 @@ function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMe
 }
 
 function TaskWorkspaceSummary({ task, filesHref }: { task: Task; filesHref: string }) {
-  return <div><h3 className="type-caption text-tertiary">Workspace</h3><dl className="mt-2 grid gap-2 text-sm"><TaskDetailValue label="File Library"><Link className="break-all font-mono text-xs text-foreground hover:underline" href={filesHref}>{task.fileLibraryId}</Link></TaskDetailValue><TaskDetailValue label="Endpoint"><span className="break-all font-mono text-xs">{task.endpointId}</span></TaskDetailValue><TaskDetailValue label="Sandbox"><span className="break-all font-mono text-xs">{task.sandbox.namespace}</span></TaskDetailValue></dl></div>;
+  return <div><h3 className="type-caption text-tertiary">Workspace</h3><dl className="mt-2 grid gap-2 text-sm"><TaskDetailValue label="File Library"><Link className="break-all font-mono text-xs text-foreground hover:underline" href={filesHref}>{task.fileLibraryId}</Link></TaskDetailValue><TaskDetailValue label="Endpoint"><span className="break-all font-mono text-xs">{task.endpointId}</span></TaskDetailValue></dl></div>;
 }
 
 function TaskDetailValue({ label, children }: { label: string; children: ReactNode }) {
@@ -258,19 +263,4 @@ function SectionError({ title, message: detail, onRetry }: { title: string; mess
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : "The task request could not be completed.";
-}
-
-function releasePendingDetail(detail: TaskDetailProjection): TaskDetailProjection {
-  return {
-    ...detail,
-    sandboxState:{ state:"release_requested", runId:detail.sandboxState.runId },
-    capabilities:{
-      ...detail.capabilities,
-      sendMessage:false,
-      editQueuedMessage:false,
-      abortTurn:false,
-      openTerminal:false,
-      releaseSandbox:false
-    }
-  };
 }

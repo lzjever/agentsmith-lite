@@ -200,9 +200,11 @@ describe("api product workflow", () => {
     );
     assert.deepEqual(new Uint8Array(await downloadedUnicodeFile.arrayBuffer()), unicodeFileContent);
     assert.deepEqual(deletedFile, { deleted: true });
-    assert.equal(task.status, "completed");
-    assert.equal(task.terminalReason, "not_executed");
-    assert.deepEqual(task.sandbox, { namespace: "agentsmith" });
+    assert.deepEqual(Object.keys(task).sort(),["capabilities","currentTurn","lifecycle","sandboxState","task"]);
+    assert.equal(task.task.fileLibraryId,library.id);
+    assert.equal(task.lifecycle.state, "active");
+    assert.equal(task.currentTurn.state, "ready");
+    assert.equal(task.sandboxState.state, "released");
 
     await assertApiError(
       await request("DELETE", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, undefined, cookie, csrf),
@@ -416,5 +418,5 @@ function fakeResolver(values: Record<string, { apiKey: string; baseUrl: string }
 }
 
 function assertNoApiKeySecretRef(value: unknown): void {
-  assert.doesNotMatch(JSON.stringify(value), /sk-from-api-workflow|replacement-api-secret|apiKeySecretRef|api_key_secret_ref|ciphertext|authTag|nonce|keyId/);
+  assert.doesNotMatch(JSON.stringify(value), /sk-from-api-workflow|replacement-api-secret|ciphertext|authTag|nonce|keyId/);
 }

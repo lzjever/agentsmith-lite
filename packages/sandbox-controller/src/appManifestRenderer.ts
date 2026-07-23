@@ -39,9 +39,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
   };
   const apiLabels = { ...labels, "app.kubernetes.io/component": "api" };
   const webLabels = { ...labels, "app.kubernetes.io/component": "web" };
-  const modelBaseUrlConfig = Object.fromEntries(
-    Object.entries(input.env).filter(([key]) => key.startsWith("AGENTSMITH_LITE_MODEL_BASE_URL_"))
-  );
   const appSecretData: Record<string, string> = {};
   const appSecretKeys = Object.keys(input.secrets).filter((key) => auth.secretKeys.has(key) || isAppRuntimeSecretKey(key));
   for (const key of appSecretKeys) {
@@ -72,7 +69,6 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
         ...(privateProviderHosts ? { AGENTSMITH_LITE_PRIVATE_PROVIDER_HOSTS: privateProviderHosts } : {}),
         BOTIFIED_RUNNER_IMAGE: runnerImage,
         ...auth.configMapData,
-        ...modelBaseUrlConfig,
         ...(modelCa
           ? {
               AGENTSMITH_LITE_MODEL_CA_CONFIG_MAP: modelCa.configMapName,
@@ -167,7 +163,8 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
                 volumeMounts: [
                   {
                     name: "project-files",
-                    mountPath: appDataRoot
+                    mountPath: appDataRoot,
+                    readOnly: false
                   },
                   ...(modelCa
                     ? [
@@ -232,38 +229,33 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
           metadata: { labels },
           spec: {
             restartPolicy: "OnFailure",
+            serviceAccountName: "agentsmith-lite-api",
             containers: [
               {
                 name: "schema-bootstrap",
                 image: appImage,
                 command: ["node", "scripts/db/apply-migrations.mjs"],
-                envFrom: [{ secretRef: { name: "agentsmith-lite-app-secrets" } }]
+                envFrom: [
+                  { configMapRef: { name: "agentsmith-lite-config" } },
+                  { secretRef: { name: "agentsmith-lite-app-secrets" } }
+                ],
+                volumeMounts: [
+                  {
+                    name: "project-files",
+                    mountPath: appDataRoot,
+                    readOnly: false
+                  }
+                ]
+              }
+            ],
+            volumes: [
+              {
+                name: "project-files",
+                persistentVolumeClaim: {
+                  claimName: input.env.JUICEFS_PVC_NAME ?? "agentsmith-lite-files"
+                }
               }
             ]
-          }
-        }
-      }
-    },
-    {
-      apiVersion:"batch/v1",
-      kind:"Job",
-      metadata:{name:"agentsmith-lite-project-files-upgrade",namespace:input.namespace,labels},
-      spec:{
-        backoffLimit:2,
-        activeDeadlineSeconds:300,
-        ttlSecondsAfterFinished:600,
-        template:{
-          metadata:{labels},
-          spec:{
-            restartPolicy:"OnFailure",
-            containers:[{
-              name:"project-files-upgrade",
-              image:appImage,
-              command:["node","dist/packages/api-entry-node/src/upgradeProjectFiles.js"],
-              envFrom:[{configMapRef:{name:"agentsmith-lite-config"}},{secretRef:{name:"agentsmith-lite-app-secrets"}}],
-              volumeMounts:[{name:"project-files",mountPath:appDataRoot}]
-            }],
-            volumes:[{name:"project-files",persistentVolumeClaim:{claimName:input.env.JUICEFS_PVC_NAME??"agentsmith-lite-files"}}]
           }
         }
       }
@@ -335,7 +327,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       labels: {
         ...resource.metadata.labels,
         [DEPLOY_PHASE_LABEL]: resource.kind === "Job"
-          ? resource.metadata.name === "agentsmith-lite-project-files-upgrade" ? "upgrade" : "migration"
+          ? "migration"
           : resource.kind === "Deployment" ? "workload" : "base"
       }
     }
@@ -524,8 +516,7 @@ function resolveAuthConfig(input: AppManifestInput): {
 
 function isAppRuntimeSecretKey(key: string): boolean {
   return key === "APP_CREDENTIAL_ENCRYPTION_KEY"
-    || key === "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS"
-    || key.startsWith("AGENTSMITH_LITE_MODEL_API_KEY_");
+    || key === "APP_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS";
 }
 
 function requireAuthConfig(value: string | undefined, key: string): string {

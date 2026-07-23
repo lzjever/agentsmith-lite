@@ -14,7 +14,6 @@ export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; met
   { value: "project_file_bytes_limit", label: "File storage", metric: "project_file_bytes", defaultWindowSeconds: null },
   { value: "endpoint_failure", label: "Endpoint failure", metric: "failure_count", defaultWindowSeconds: 3600 },
   { value: "provider_failure", label: "Provider failure", metric: "failure_count", defaultWindowSeconds: 3600 },
-  { value: "task_failure", label: "Task failure", metric: "failure_count", defaultWindowSeconds: 3600 },
   { value: "sandbox_failure", label: "Sandbox failure", metric: "failure_count", defaultWindowSeconds: 3600 },
 ];
 

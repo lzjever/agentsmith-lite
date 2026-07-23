@@ -1,5 +1,4 @@
 import type {
-  AgentTask,
   TaskInteractionItem,
   AuthSession,
   EndpointHealth,
@@ -8,6 +7,8 @@ import type {
   ManagedProjectMembershipRole,
   Project,
   ProjectMembership, ProjectMembershipView,
+  ActiveProjectAlert,
+  ActiveProjectAlertRuleView,
   ProjectAlert,
   ProjectAuditEvent,
   ProjectResourcePolicy,
@@ -19,11 +20,12 @@ import type {
   User,
   Workspace,
   ManagedWorkspaceMembershipRole,
-  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
+  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertRuleView, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
-import { sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
+import { strictStructuralEqual } from "./strictStructuralEqual.js";
 import type {
   AcquireLeaseInput,
   AcquireLeaseResult,
@@ -40,18 +42,24 @@ import type {
   AtomicTaskCreateInput,
   AtomicTaskSandboxRestartInput,
   AtomicTaskSandboxRestartResult,
+  AtomicTaskMessageInput,
+  AtomicTaskMessageResult,
+  AtomicTaskMessageEditInput,
+  AtomicTaskMessageEditResult,
+  AtomicTaskMessageDeleteInput,
+  AtomicTaskMessageDeleteResult,
   TaskStoreListQuery,
   TaskStoreListPage,
   TaskDeliveryClaimInput,
   TaskDeliveryReclaimInput,
-  TaskStartReceiptInput,
   TaskMessageReceiptInput,
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
-  StoredTaskSummary,
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
+  CompleteTaskIdempotencyForResourceInput,
+  TaskIdempotencyResourceLookupInput,
   TaskSandboxReleaseMutationInput,
   TaskSandboxReleaseMutationResult,
   ConfirmSandboxRunStartedInput,
@@ -60,10 +68,13 @@ import type {
   ActivateTaskSandboxRunResult,
   CompleteSandboxRunReleaseInput,
   CompleteSandboxRunReleaseResult,
+  SandboxRunFailureInput,
+  SandboxStartupOperationInput,
   SandboxUsageSettlement,
   PersistTaskArtifactProjectionInput,
   DeleteEndpointResult,
   DeleteProjectCredentialResult,
+  FinalizeProjectDeletionResult,
   ManagedProjectMembershipDeleteResult,
   ManagedProjectMembershipUpdateResult,
   ManagedWorkspaceMembershipUpdateResult,
@@ -81,7 +92,6 @@ import type {
   TaskInteractionStoreSnapshot
 } from "../../ports/src/store.js";
 import { createPostgresProductStore } from "./postgresProductStore.js";
-import { prepareSandboxRunDocument, sandboxRunFromDocument } from "./sandboxRunDocuments.js";
 
 export function createInMemoryProductStore(): ProductStore {
   const connectionString = process.env.POSTGRES_APP_URL?.trim();
@@ -100,7 +110,7 @@ export class InMemoryProductStore implements ProductStore {
 
   readonly jsonDocs: PostgresJsonDocStore = new InMemoryJsonDocStore();
   readonly leases: PostgresLeaseStore = new InMemoryLeaseStore();
-  readonly sandboxRuns = new InMemorySandboxRunStore(this.jsonDocs);
+  readonly sandboxRuns = new InMemorySandboxRunStore();
 
   private readonly users = new Map<string, StoredUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -122,7 +132,8 @@ export class InMemoryProductStore implements ProductStore {
   private readonly interactionSync = new Map<string, { sourceCursor: string | null; historyStatus: "complete" | "gap"; lastSyncedAt: string | null }>();
   private readonly artifacts: PersistedTaskArtifact[] = [];
   private readonly taskIdempotency = new Map<string, InMemoryTaskIdempotencyRecord>();
-  private readonly profiles = new Map<string, UserProfilePreferences>(); private readonly notifications = new Map<string, UserNotification>(); private readonly notificationDedupe = new Map<string, string>(); private readonly credentials = new Map<string, StoredProjectCredential>(); private readonly contexts = new Map<string, ProjectContextEntry>(); private readonly alertRules = new Map<string, ProjectAlertRule>(); private readonly messages: PersistedTaskMessage[] = [];
+  private taskMutationTail: Promise<void> = Promise.resolve();
+  private readonly profiles = new Map<string, UserProfilePreferences>(); private readonly notifications = new Map<string, UserNotification>(); private readonly notificationDedupe = new Map<string, string>(); private readonly credentials = new Map<string, StoredProjectCredential>(); private readonly contexts = new Map<string, ProjectContextEntry>(); private readonly alertRules = new Map<string, ProjectAlertRuleView>(); private readonly messages: PersistedTaskMessage[] = [];
 
   async countUsers(): Promise<number> {
     return this.users.size;
@@ -228,7 +239,7 @@ export class InMemoryProductStore implements ProductStore {
     return clone(this.workspaces.get(id) ?? null);
   }
   async updateWorkspaceName(workspaceId:string,name:string,updatedAt:string,expectedName:string){const current=this.workspaces.get(workspaceId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.workspaces.set(workspaceId,clone(updated));return clone(updated)}
-  async beginWorkspaceDeletion(id:string, updatedAt:string, expectedOwnerUserId?:string){const value=this.workspaces.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};const projects=[...this.projects.values()].filter((project)=>project.workspaceId===id),uncertain:Project[]=[];for(const project of projects)if(!await this.projectSandboxesConfirmedCleaned(project.id))uncertain.push(project);const unownedManifest=(await this.sandboxRuns.list()).some((run)=>run.workspaceId===id&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned"&&!projects.some((project)=>project.id===run.projectId));if(uncertain.length||unownedManifest){if(value.lifecycleStatus==="deleting"){this.workspaces.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));for(const affected of uncertain)if(affected.lifecycleStatus==="deleting")this.projects.set(affected.id,clone({...affected,lifecycleStatus:"active" as const,updatedAt}));}return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.workspaces.set(id,clone(updated));for(const project of projects)this.projects.set(project.id,clone({...project,lifecycleStatus:"deleting" as const,updatedAt}));return{kind:"ready" as const,value:clone(updated)}}
+  async beginWorkspaceDeletion(id:string, updatedAt:string, expectedOwnerUserId?:string){const value=this.workspaces.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};const projects=[...this.projects.values()].filter((project)=>project.workspaceId===id),uncertain:Project[]=[];for(const project of projects)if(await this.projectHasLiveBusinessReservations(project.id))uncertain.push(project);const unownedRun=(await this.sandboxRuns.list()).some((run)=>run.workspaceId===id&&run.state!=="released"&&!projects.some((project)=>project.id===run.projectId));if(uncertain.length||unownedRun){if(value.lifecycleStatus==="deleting"){this.workspaces.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));for(const affected of uncertain)if(affected.lifecycleStatus==="deleting")this.projects.set(affected.id,clone({...affected,lifecycleStatus:"active" as const,updatedAt}));}return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.workspaces.set(id,clone(updated));for(const project of projects)this.projects.set(project.id,clone({...project,lifecycleStatus:"deleting" as const,updatedAt}));return{kind:"ready" as const,value:clone(updated)}}
   async setWorkspaceLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.workspaces.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.workspaces.set(id,clone(updated));return clone(updated)}
   async transferWorkspaceOwner(workspaceId:string,fromUserId:string,toUserId:string,updatedAt:string){const workspace=this.workspaces.get(workspaceId),target=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,toUserId));if(!workspace||workspace.ownerUserId!==fromUserId||fromUserId===toUserId||!target||workspace.lifecycleStatus!==undefined&&workspace.lifecycleStatus!=="active")return null;const from=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,fromUserId));if(!from)return null;this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,fromUserId),clone({...from,role:"admin",updatedAt}));this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...workspace,ownerUserId:toUserId,updatedAt};this.workspaces.set(workspaceId,clone(updated));return clone(updated)}
   async deleteWorkspaceAfterProjects(id:string){const workspace=this.workspaces.get(id);if(!workspace||workspace.lifecycleStatus!=="deleting"||[...this.projects.values()].some((project)=>project.workspaceId===id))return false;for(const [key,entry] of this.contexts)if(entry.workspaceId===id)this.contexts.delete(key);for(const [key,membership] of this.workspaceMemberships)if(membership.workspaceId===id)this.workspaceMemberships.delete(key);return this.workspaces.delete(id)}
@@ -309,39 +320,91 @@ export class InMemoryProductStore implements ProductStore {
   async deleteFileLibraryIfUnbound(projectId:string,id:string){
     const current=this.fileLibraries.get(id);
     if(!current||current.projectId!==projectId)return"not_found" as const;
-    if([...this.tasks.values()].some((task)=>!task.deletedAt&&task.fileLibraryId===id))return"bound" as const;
+    if([...this.tasks.values()].some((task)=>task.fileLibraryId===id))return"bound" as const;
     this.fileLibraries.delete(id);return"deleted" as const;
   }
-  async findTaskBoundToFileLibrary(fileLibraryId:string){const task=[...this.tasks.values()].find((candidate)=>!candidate.deletedAt&&candidate.fileLibraryId===fileLibraryId);return task?{kind:"bound" as const,task:{id:task.id,title:task.title??null}}:{kind:"unbound" as const}}
+  async findTaskBoundToFileLibrary(fileLibraryId:string){const task=[...this.tasks.values()].find((candidate)=>candidate.fileLibraryId===fileLibraryId);return task?{kind:"bound" as const,task:{id:task.id,title:task.title??null}}:{kind:"unbound" as const}}
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string){const current=this.projects.get(projectId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
-  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};if(!await this.projectSandboxesConfirmedCleaned(id)){if(value.lifecycleStatus==="deleting")this.projects.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return{kind:"ready" as const,value:clone(updated)}}
+  async beginProjectDeletion(id:string,updatedAt:string,expectedOwnerUserId?:string){return this.atomicTaskMessageMutation([],async()=>{const value=this.projects.get(id);if(!value||(expectedOwnerUserId!==undefined&&value.ownerUserId!==expectedOwnerUserId))return{kind:"not_found_or_forbidden" as const};if(await this.projectHasLiveBusinessReservations(id)){if(value.lifecycleStatus==="deleting")this.projects.set(id,clone({...value,lifecycleStatus:"active" as const,updatedAt}));return{kind:"sandbox_not_released" as const};}if(value.lifecycleStatus==="deleting")return{kind:"ready" as const,value:clone(value)};const updated={...value,lifecycleStatus:"deleting" as const,updatedAt};this.projects.set(id,clone(updated));return{kind:"ready" as const,value:clone(updated)}})}
   async setProjectLifecycleStatus(id:string,status:"active"|"archived",updatedAt:string){const value=this.projects.get(id);if(!value||value.lifecycleStatus==="deleting")return null;const updated={...value,lifecycleStatus:status,updatedAt};this.projects.set(id,clone(updated));return clone(updated)}
   async transferProjectOwner(projectId:string,fromUserId:string,toUserId:string,updatedAt:string){const project=this.projects.get(projectId),target=this.memberships.get(membershipKey(projectId,toUserId));if(!project||project.ownerUserId!==fromUserId||fromUserId===toUserId||!target||project.lifecycleStatus!==undefined&&project.lifecycleStatus!=="active")return null;const from=this.memberships.get(membershipKey(projectId,fromUserId));if(!from)return null;this.memberships.set(membershipKey(projectId,fromUserId),clone({...from,role:"admin",updatedAt}));this.memberships.set(membershipKey(projectId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...project,ownerUserId:toUserId,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
-  async deleteProjectDependenciesAndProject(id:string){
+  async finalizeProjectDeletion(id:string,completion?:CompleteTaskIdempotencyInput):Promise<FinalizeProjectDeletionResult>{
+    return this.atomicTaskMessageMutation([],async()=>{
     const project=this.projects.get(id);
-    if(!project||project.lifecycleStatus!=="deleting")return false;
-    for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);}
-    this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>this.tasks.has(value.interaction.taskId)));
-    this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>this.tasks.has(value.taskId)));
-    this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>this.tasks.has(value.taskId)));
-    this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id));
-    for(const [key,value] of this.providerSettlements)if(value.projectId===id)this.providerSettlements.delete(key);
-    for(const [key,value] of this.alerts)if(value.projectId===id)this.alerts.delete(key);
-    for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key);
-    for(const [key,value] of this.memberships)if(value.projectId===id){this.memberships.delete(key);this.projectPins.delete(key);}
-    for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key);
-    for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key);
-    for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key);
-    for(const [key,value] of this.fileLibraries)if(value.projectId===id)this.fileLibraries.delete(key);
-    for(const [notificationId,notification] of this.notifications)if(notification.projectId===id){
-      this.notifications.delete(notificationId);
-      for(const [dedupeKey,dedupedId] of this.notificationDedupe)if(dedupedId===notificationId)this.notificationDedupe.delete(dedupeKey);
+    if(!project||project.lifecycleStatus!=="deleting"||await this.projectHasLiveBusinessReservations(id))return"not_ready" as const;
+    const completionKey=completion?taskIdempotencyKey(completion):null;
+    const deletionReceipt=completionKey?this.taskIdempotency.get(completionKey):null;
+    if(completion&&(
+      !isSuccessfulProjectDeletionCompletion(id,completion)
+      || !deletionReceipt
+      || deletionReceipt.status!=="in_progress"
+      || deletionReceipt.requestHash!==completion.requestHash
+      || deletionReceipt.claimToken!==completion.claimToken
+      || deletionReceipt.resourceId!==id
+    ))return"not_ready" as const;
+    const taskIds=new Set([...this.tasks.values()].filter((task)=>task.projectId===id).map((task)=>task.id));
+    const endpointIds=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===id).map((endpoint)=>endpoint.id);
+    const documents=await Promise.all([
+      ...[...taskIds].map(async(taskId)=>["sandbox_runtime_state",taskId,await this.jsonDocs.get("sandbox_runtime_state",taskId)] as const),
+      ["project_settings",id,await this.jsonDocs.get("project_settings",id)] as const,
+      ...endpointIds.map(async(endpointId)=>["endpoint_snapshots",endpointId,await this.jsonDocs.get("endpoint_snapshots",endpointId)] as const)
+    ]);
+    const previous={
+      projects:snapshotMap(this.projects),fileLibraries:snapshotMap(this.fileLibraries),memberships:snapshotMap(this.memberships),
+      projectPins:snapshotMap(this.projectPins),policies:snapshotMap(this.policies),usage:snapshotMap(this.usage),
+      providerSettlements:snapshotMap(this.providerSettlements),sandboxUsageSettlements:snapshotMap(this.sandboxUsageSettlements),
+      alerts:snapshotMap(this.alerts),auditEvents:this.auditEvents.map(clone),endpoints:snapshotMap(this.endpoints),tasks:snapshotMap(this.tasks),
+      interactionChanges:this.interactionChanges.map(clone),interactionSync:snapshotMap(this.interactionSync),artifacts:this.artifacts.map(clone),
+      taskIdempotency:snapshotMap(this.taskIdempotency),notifications:snapshotMap(this.notifications),
+      notificationDedupe:snapshotMap(this.notificationDedupe),credentials:snapshotMap(this.credentials),contexts:snapshotMap(this.contexts),
+      alertRules:snapshotMap(this.alertRules),messages:this.messages.map(clone),sandboxRuns:this.sandboxRuns.snapshot()
+    };
+    try{
+      for(const [collection,documentId] of documents)await this.jsonDocs.delete(collection,documentId);
+      for(const [key,task] of this.tasks)if(task.projectId===id){this.tasks.delete(key);this.interactionSync.delete(key);}
+      this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((value)=>!taskIds.has(value.interaction.taskId)));
+      this.artifacts.splice(0,this.artifacts.length,...this.artifacts.filter((value)=>!taskIds.has(value.taskId)));
+      this.messages.splice(0,this.messages.length,...this.messages.filter((value)=>!taskIds.has(value.taskId)));
+      this.auditEvents.splice(0,this.auditEvents.length,...this.auditEvents.filter((value)=>value.projectId!==id));
+      for(const [key,value] of this.providerSettlements)if(value.projectId===id)this.providerSettlements.delete(key);
+      for(const [key,value] of this.sandboxUsageSettlements)if(value.projectId===id)this.sandboxUsageSettlements.delete(key);
+      for(const [key,value] of this.taskIdempotency)if(value.projectId===id&&key!==completionKey)this.taskIdempotency.delete(key);
+      this.sandboxRuns.deleteForProject(id);
+      for(const [key,value] of this.alerts)if(value.projectId===id)this.alerts.delete(key);
+      for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key);
+      for(const [key,value] of this.memberships)if(value.projectId===id){this.memberships.delete(key);this.projectPins.delete(key);}
+      for(const [key,value] of this.contexts)if(value.projectId===id)this.contexts.delete(key);
+      for(const [key,value] of this.credentials)if(value.projectId===id)this.credentials.delete(key);
+      for(const [key,value] of this.alertRules)if(value.projectId===id)this.alertRules.delete(key);
+      for(const [key,value] of this.fileLibraries)if(value.projectId===id)this.fileLibraries.delete(key);
+      for(const [notificationId,notification] of this.notifications)if(notification.projectId===id){
+        this.notifications.delete(notificationId);
+        for(const [dedupeKey,dedupedId] of this.notificationDedupe)if(dedupedId===notificationId)this.notificationDedupe.delete(dedupeKey);
+      }
+      this.policies.delete(id);
+      this.usage.delete(id);
+      if(completion&&completionKey&&deletionReceipt)this.taskIdempotency.set(completionKey,{
+        ...deletionReceipt,status:"completed",responseStatus:completion.responseStatus,
+        responseBody:clone(completion.responseBody),updatedAt:completion.updatedAt
+      });
+      this.projects.delete(id);
+      return"deleted" as const;
+    }catch(error){
+      restoreMap(this.projects,previous.projects);restoreMap(this.fileLibraries,previous.fileLibraries);restoreMap(this.memberships,previous.memberships);
+      restoreMap(this.projectPins,previous.projectPins);restoreMap(this.policies,previous.policies);restoreMap(this.usage,previous.usage);
+      restoreMap(this.providerSettlements,previous.providerSettlements);restoreMap(this.sandboxUsageSettlements,previous.sandboxUsageSettlements);
+      restoreMap(this.alerts,previous.alerts);restoreArray(this.auditEvents,previous.auditEvents);restoreMap(this.endpoints,previous.endpoints);
+      restoreMap(this.tasks,previous.tasks);restoreArray(this.interactionChanges,previous.interactionChanges);
+      restoreMap(this.interactionSync,previous.interactionSync);restoreArray(this.artifacts,previous.artifacts);
+      restoreMap(this.taskIdempotency,previous.taskIdempotency);restoreMap(this.notifications,previous.notifications);
+      restoreMap(this.notificationDedupe,previous.notificationDedupe);restoreMap(this.credentials,previous.credentials);
+      restoreMap(this.contexts,previous.contexts);restoreMap(this.alertRules,previous.alertRules);restoreArray(this.messages,previous.messages);
+      this.sandboxRuns.restore(previous.sandboxRuns);
+      for(const [collection,documentId,document] of documents)if(document)await this.jsonDocs.put(collection,documentId,document);
+      throw error;
     }
-    this.policies.delete(id);
-    this.usage.delete(id);
-    return true;
+    });
   }
-  async deleteProjectAfterDependencies(id:string){const project=this.projects.get(id);if(!project||project.lifecycleStatus!=="deleting"||[...this.tasks.values()].some((task)=>task.projectId===id))return false;return this.projects.delete(id)}
 
   async listProjectsForUser(userId: string): Promise<Project[]> {
     return [...this.projects.values()]
@@ -434,6 +497,9 @@ export class InMemoryProductStore implements ProductStore {
     return clone(next);
   }
   async reserveProjectProviderSettlement(input: ReserveProjectProviderSettlementInput): Promise<ProjectProviderSettlement | null> {
+    return this.atomicTaskMessageMutation([],async()=>{
+    const project=this.projects.get(input.projectId);
+    if(!project||(project.lifecycleStatus??"active")!=="active")return null;
     const policy = this.policies.get(input.projectId);
     const usage = this.usage.get(input.projectId);
     if (!policy || !usage || providerReservationExceedsPolicy(policy, usage, input)) return null;
@@ -442,6 +508,7 @@ export class InMemoryProductStore implements ProductStore {
     this.usage.set(input.projectId, clone({ ...usage, providerRequests: usage.providerRequests + 1, providerTokens: usage.providerTokens + input.reservedTokens, providerCost: usage.providerCost + input.reservedCost, updatedAt: input.reservedAt }));
     const settlement: ProjectProviderSettlement = { ...input, status: "reserved", dispatchedAt: null, deliveredAt: null, settledAt: null, updatedAt: input.reservedAt };
     this.providerSettlements.set(input.id, clone(settlement)); return clone(settlement);
+    });
   }
   async markProjectProviderSettlementDispatched(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> { return this.transitionSettlement(id, ["reserved"], "dispatched", updatedAt, "dispatchedAt"); }
   async markProjectProviderSettlementDelivered(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null> { return this.transitionSettlement(id, ["dispatched","unknown"], "delivered", updatedAt, "deliveredAt"); }
@@ -479,7 +546,7 @@ export class InMemoryProductStore implements ProductStore {
   async pruneProjectProviderSettlements(before: string, limit: number): Promise<number> { let count = 0; for (const [id, value] of this.providerSettlements) if (count < limit && value.updatedAt < before && ["settled", "unknown", "failed"].includes(value.status)) { this.providerSettlements.delete(id); count += 1; } return count; }
   async listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]> { return [...this.providerSettlements.values()].filter((value) => value.projectId === projectId && value.status === "settled" && value.settledAt !== null && value.settledAt >= since && (endpointId === undefined || value.endpointId === endpointId)).sort((left, right) => left.settledAt!.localeCompare(right.settledAt!)).map(clone); }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&(value.actorId??null)===input.actorId&&value.status!=="failed"&&value.reservedAt>=input.since).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||left.id.localeCompare(right.id));return{current:settlements.reduce((sum,value)=>sum+providerWindowValue(value,input.metric),0),oldestReservedAt:settlements[0]?.reservedAt??null};}
-  async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlert["type"]; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
+  async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlertType; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
     const usage=this.usage.get(input.projectId);
     if(input.metric==="active_tasks")return usage?.activeTasks??0;
     if(input.metric==="project_file_bytes")return usage?.projectFileBytes??0;
@@ -489,27 +556,27 @@ export class InMemoryProductStore implements ProductStore {
   }
   private transitionSettlement(id: string, allowed: ProjectProviderSettlement["status"][], status: ProjectProviderSettlement["status"], updatedAt: string, timestamp?: "dispatchedAt" | "deliveredAt"): ProjectProviderSettlement | null { const current = this.providerSettlements.get(id); if (!current) return null; if (current.status === status) return clone(current); if (!allowed.includes(current.status)) return null; const updated = { ...current, status, ...(timestamp ? { [timestamp]: updatedAt } : {}), updatedAt } as ProjectProviderSettlement; this.providerSettlements.set(id, clone(updated)); return clone(updated); }
   private settlementResult(settlement: ProjectProviderSettlement): ProjectProviderUsageSettlement | null { const policy = this.policies.get(settlement.projectId); const usage = this.usage.get(settlement.projectId); if (!policy || !usage) return null; return { usage: clone(usage), endpointId: settlement.endpointId, exceededLimits: [...(policy.providerTokensLimit !== null && usage.providerTokens > policy.providerTokensLimit ? ["provider_tokens_limit" as const] : []), ...(policy.providerCostLimit !== null && usage.providerCost > policy.providerCostLimit ? ["provider_cost_limit" as const] : [])] }; }
-  async upsertActiveProjectAlert(alert: ProjectAlert): Promise<ProjectAlert> {
-    const normalized: ProjectAlert = { ...alert, metric: alert.metric ?? null, metricValue: alert.metricValue ?? null, threshold: alert.threshold ?? null };
-    const existing = [...this.alerts.values()].find((value) => value.projectId === normalized.projectId && value.type === normalized.type && (value.ruleId??null)===(normalized.ruleId??null) && (value.endpointId??null)===(normalized.endpointId??null) && value.status === "active");
-    const stored: ProjectAlert = existing ? { ...existing, metric: normalized.metric ?? null, metricValue: normalized.metricValue ?? null, threshold: normalized.threshold ?? null, updatedAt: normalized.updatedAt } : normalized;
+  async upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert> {
+    const normalized: ActiveProjectAlert = { ...alert, metric: alert.metric ?? null, metricValue: alert.metricValue ?? null, threshold: alert.threshold ?? null };
+    const existing = [...this.alerts.values()].find((value) => isActiveProjectAlert(value) && value.projectId === normalized.projectId && value.type === normalized.type && (value.ruleId??null)===(normalized.ruleId??null) && (value.endpointId??null)===(normalized.endpointId??null));
+    const stored: ActiveProjectAlert = existing ? { ...existing, type: normalized.type, status: "active", metric: normalized.metric ?? null, metricValue: normalized.metricValue ?? null, threshold: normalized.threshold ?? null, updatedAt: normalized.updatedAt } : normalized;
     this.alerts.set(stored.id, clone(stored)); return clone(stored);
   }
-  async listActiveProjectAlerts(projectId: string): Promise<ProjectAlert[]> { return [...this.alerts.values()].filter((alert) => alert.projectId === projectId && alert.status === "active").map(clone); }
+  async listActiveProjectAlerts(projectId: string): Promise<ActiveProjectAlert[]> { return [...this.alerts.values()].filter(isActiveProjectAlert).filter((alert)=>alert.projectId===projectId).map(clone); }
   async listProjectAlerts(projectId: string): Promise<ProjectAlert[]> { return [...this.alerts.values()].filter((alert) => alert.projectId === projectId).sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).map(clone); }
   async queryProjectAlerts(projectId: string, query: import("../../contracts/src/api.js").ProjectAlertQuery) { const limit=Math.min(100,Math.max(1,query.limit??20));const filtered=[...this.alerts.values()].filter((alert)=>alert.projectId===projectId&&(!query.status||alert.status===query.status)&&(!query.cursor||`${alert.createdAt}|${alert.id}`<query.cursor)).sort((left,right)=>right.createdAt.localeCompare(left.createdAt)||right.id.localeCompare(left.id));const items=filtered.slice(0,limit);return{items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
   async findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null> { const alert=this.alerts.get(id);return alert?.projectId===projectId?clone(alert):null; }
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.status !== "active") return null; const next = { ...alert, status, updatedAt, ...(status === "resolved" ? { resolvedAt: updatedAt } : { dismissedAt: updatedAt }) }; this.alerts.set(id, clone(next)); return clone(next); }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const alert=this.alerts.get(id);if(!alert||alert.projectId!==projectId||alert.status!=="active")return null;const next={...alert,...input,updatedAt};this.alerts.set(id,clone(next));return clone(next)}
-  async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId) return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
-  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
+  async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.type === "historical_task_failure") return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
+  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(event.action==="task.historical_terminal")throw new Error("Historical audit events are read-only");if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
   async listProjectAuditEvents(projectId:string){return this.auditEvents.filter(event=>event.projectId===projectId).map(clone)}
   async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
   async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{
     return this.sandboxRuns.confirmStarted(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
   }
   async activateTaskSandboxRun(input:ActivateTaskSandboxRunInput):Promise<ActivateTaskSandboxRunResult>{
-    return this.sandboxRuns.activateTask(input,()=>this.tasks.get(input.taskId),(task)=>this.tasks.set(task.id,clone(task)));
+    return this.sandboxRuns.activateTask(input,()=>this.tasks.get(input.taskId));
   }
   async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{
     try{return await this.sandboxRuns.completeRelease(input,(replay)=>{
@@ -522,9 +589,15 @@ export class InMemoryProductStore implements ProductStore {
         if(!taskMatchesActiveSandboxRun(task,project,input.run))throw new Error("Sandbox usage task conflict");
       }
       if(!existing)this.sandboxUsageSettlements.set(input.runId,clone(input.settlement));
-      if(!replay)this.releaseReservationForCleanedRun(input.run);
+      if(!replay)this.releaseActiveTask(input.run.projectId,input.run.releasedAt!);
       if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
     });}catch(error){if(error instanceof Error&&(error.message==="Sandbox usage settlement conflict"||error.message==="Sandbox usage task conflict"))return"conflict";throw error}
+  }
+  async failSandboxRun(input:SandboxRunFailureInput):Promise<PersistedSandboxRunState|null>{
+    return this.sandboxRuns.fail(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
+  }
+  async runSandboxStartupOperation<T>(input:SandboxStartupOperationInput,operation:()=>Promise<T>):Promise<{kind:"applied";value:T}|{kind:"conflict"}>{
+    return this.sandboxRuns.runStartupOperation(input,()=>this.tasks.get(input.taskId),operation);
   }
   async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{return[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===projectId&&value.startedByUserId===startedByUserId).sort((a,b)=>b.releasedAt.localeCompare(a.releasedAt)||b.runId.localeCompare(a.runId)).map(clone)}
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }
@@ -532,13 +605,11 @@ export class InMemoryProductStore implements ProductStore {
   async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
   async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v));for(const [id,endpoint] of this.endpoints){if(endpoint.credentialId===v.id)this.endpoints.set(id,clone({...endpoint,health:{status:"unknown",checkedAt:null,errorCategory:null},updatedAt:v.updatedAt}))}return publicCredential(v); }
   async deleteProjectCredential(id:string,projectId:string,expectedVersion:number): Promise<DeleteProjectCredentialResult> { const current=this.credentials.get(id);if(!current||current.projectId!==projectId)return "not_found";if(current.version!==expectedVersion)return "version_conflict";if([...this.endpoints.values()].some(endpoint=>endpoint.credentialId===id))return "referenced_by_endpoints";this.credentials.delete(id);return "deleted"; }
-  async listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>> { return []; }
-  async bindEndpointCredential(endpointId:string, credentialId:string): Promise<boolean> { const endpoint=this.endpoints.get(endpointId); const credential=this.credentials.get(credentialId); if(!endpoint||endpoint.credentialId||!credential||credential.projectId!==endpoint.projectId) return false; this.endpoints.set(endpointId,{...endpoint,credentialId}); return true; }
   async createProjectContextEntry(v:ProjectContextEntry){if(this.contextKeyExists(v))return null;this.contexts.set(v.id,clone(v));return clone(v)} async updateProjectContextEntry(v:ProjectContextEntry,expectedVersion:number){const current=this.contexts.get(v.id);if(!current||current.version!==expectedVersion||this.contextKeyExists(v,v.id))return null;this.contexts.set(v.id,clone(v));return clone(v)} async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null){return [...this.contexts.values()].filter(v=>v.workspaceId===workspaceId&&v.projectId===projectId&&v.scope===scope&&v.ownerUserId===ownerUserId).map(clone)} async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId"|"version">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId||current.version!==v.version)return false;return this.contexts.delete(v.id)}
-  async createProjectAlertRule(v:ProjectAlertRule){this.alertRules.set(v.id,clone(v));return clone(v)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId||(expectedUpdatedAt!==undefined&&current.updatedAt!==expectedUpdatedAt))return null;this.alertRules.set(v.id,clone(v));return clone(v)}
+  async createProjectAlertRule(v:ProjectAlertRule){const stored:ActiveProjectAlertRuleView={...v,retiredWasEnabled:null};this.alertRules.set(v.id,clone(stored));return clone(stored)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId||!isActiveProjectAlertRuleView(current)||(expectedUpdatedAt!==undefined&&current.updatedAt!==expectedUpdatedAt))return null;const stored:ActiveProjectAlertRuleView={...v,retiredWasEnabled:null};this.alertRules.set(v.id,clone(stored));return clone(stored)}
   async deleteProjectAlertRule(projectId:string,id:string){
     const current=this.alertRules.get(id);
-    if(!current||current.projectId!==projectId)return false;
+    if(!current||current.projectId!==projectId||!isActiveProjectAlertRuleView(current))return false;
     this.alertRules.delete(id);
     for(const [alertId,alert] of this.alerts){
       if(alert.ruleId===id)this.alerts.set(alertId,clone({...alert,ruleId:null}));
@@ -592,7 +663,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async deleteEndpoint(id: string): Promise<DeleteEndpointResult> {
     if (!this.endpoints.has(id)) return "not_found";
-    if ([...this.tasks.values()].some((task) => task.endpointId === id && !task.deletedAt)) return "referenced_by_tasks";
+    if ([...this.tasks.values()].some((task) => task.endpointId === id)) return "referenced_by_tasks";
 
     for (const [settlementId, settlement] of this.providerSettlements) {
       if (settlement.endpointId === id) this.providerSettlements.set(settlementId, clone({ ...settlement, endpointId: null }));
@@ -626,12 +697,16 @@ export class InMemoryProductStore implements ProductStore {
   }
 
   async createTaskAtomically(input: AtomicTaskCreateInput) {
+    return this.atomicTaskMessageMutation([input],async()=>{
     if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
+    validateTaskRunReservation(input);
+    const project=this.projects.get(input.task.projectId);
+    if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"project_unavailable" as const};
     let library=input.task.fileLibraryId?this.fileLibraries.get(input.task.fileLibraryId):undefined;
     if(input.newFileLibrary){if(library||await this.createFileLibrary(input.newFileLibrary)===null)return{kind:"library_name_conflict" as const};library=input.newFileLibrary;}
     if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_not_found" as const};}
-    if([...this.tasks.values()].some((task)=>!task.deletedAt&&task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
-    const task = normalizeStoredTask(input.task, input.reserveActive);
+    if([...this.tasks.values()].some((task)=>task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
+    const task = normalizeStoredTask(input.task);
     if (input.reserveActive && !this.reserveActiveTask(task.projectId, task.updatedAt)) { if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id); return{kind:"capacity_rejected" as const}; }
     this.tasks.set(task.id, clone(task));
     this.initializeTaskInteractionSync(task.id);
@@ -639,6 +714,7 @@ export class InMemoryProductStore implements ProductStore {
       if (input.runtimeState) await this.jsonDocs.put("sandbox_runtime_state", task.id, input.runtimeState);
       if (input.sandboxRun) await this.sandboxRuns.put(input.sandboxRun);
       if(input.initialMessage)await this.createTaskMessage(input.initialMessage);
+      if(input.auditEvent&&!this.auditEvents.some((event)=>event.id===input.auditEvent!.id))await this.appendProjectAuditEvent(input.auditEvent);
       return{kind:"created" as const,task:clone(task)};
     } catch (error) {
       this.tasks.delete(task.id);
@@ -646,35 +722,131 @@ export class InMemoryProductStore implements ProductStore {
       this.interactionSync.delete(task.id);
       if (input.reserveActive) this.releaseActiveTask(task.projectId, task.updatedAt);
       await this.jsonDocs.delete("sandbox_runtime_state", task.id);
-      if (input.sandboxRun) await this.jsonDocs.delete("sandbox_run_state", input.sandboxRun.runId);
+      if (input.sandboxRun) this.sandboxRuns.delete(input.sandboxRun.runId);
       if(input.initialMessage){const index=this.messages.findIndex((message)=>message.id===input.initialMessage!.id);if(index>=0)this.messages.splice(index,1);}
+      throw error;
+    }
+    });
+  }
+
+  async restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult> {
+    return this.atomicTaskMessageMutation([{task:input.task,reserveActive:true,runtimeState:input.runtimeState,sandboxRun:input.sandboxRun}],async()=>{
+      const project=this.projects.get(input.task.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"conflict" as const};
+      const current=this.tasks.get(input.task.id);
+      if(!current||current.deletedAt||current.archivedAt)return{kind:"conflict" as const};
+      if(current.currentRunId!==input.expectedReleasedRunId)return{kind:"conflict" as const};
+      if(input.expectedReleasedRunId!==null){
+        const released=await this.sandboxRuns.get(input.expectedReleasedRunId);
+        if(!released||!taskRunScopeMatches(current,released)||released.state!=="released")return{kind:"conflict" as const};
+      }
+      if(!sandboxRestartIdentityMatches(current,input))return{kind:"conflict" as const};
+      if(!this.reserveActiveTask(current.projectId,input.reservedAt))return{kind:"capacity_rejected" as const};
+      const restarted=normalizeStoredTask({...current,currentRunId:input.sandboxRun.runId,updatedAt:input.reservedAt});
+      this.tasks.set(restarted.id,clone(restarted));
+      await this.jsonDocs.put("sandbox_runtime_state",restarted.id,input.runtimeState);
+      await this.sandboxRuns.put(input.sandboxRun);
+      return{kind:"restarted",task:clone(restarted)};
+    });
+  }
+
+  async createTaskMessageAtomically(input:AtomicTaskMessageInput):Promise<AtomicTaskMessageResult>{
+    return this.atomicTaskMessageMutation(input.restart?[{task:input.restart.task,reserveActive:true,runtimeState:input.restart.runtimeState,sandboxRun:input.restart.sandboxRun}]:[],async()=>{
+      const project=this.projects.get(input.idempotency.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"conflict"};
+      const key=taskIdempotencyKey(input.idempotency);
+      let record=this.taskIdempotency.get(key);
+      if(record){
+        if(record.requestHash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
+        if(record.status==="completed")return{kind:"replay",responseStatus:record.responseStatus!,responseBody:clone(record.responseBody)};
+        if(record.claimToken!==input.idempotency.claimToken){
+          if(record.leaseExpiresAt>input.idempotency.now)return{kind:"in_progress"};
+          record={...record,claimToken:input.idempotency.claimToken,leaseExpiresAt:input.idempotency.leaseExpiresAt,updatedAt:input.idempotency.now};
+          this.taskIdempotency.set(key,record);
+        }
+      }else{
+        record={...input.idempotency,status:"in_progress",responseStatus:null,responseBody:null,updatedAt:input.idempotency.now};
+        this.taskIdempotency.set(key,record);
+      }
+      let task=this.tasks.get(input.taskId);
+      if(!task||task.deletedAt||task.archivedAt||task.projectId!==input.idempotency.projectId)return{kind:"conflict"};
+      const message=canonicalTaskMessage(input.message,record.resourceId);
+      const existing=this.messages.find((candidate)=>candidate.id===message.id);
+      if(existing)return{kind:"created",task:clone(task),message:clone(existing),restarted:false};
+      let run=task.currentRunId?await this.sandboxRuns.get(task.currentRunId):null;
+      let restarted=false;
+      if(!(run&&taskRunScopeMatches(task,run)&&["starting","active"].includes(run.state))){
+        if(task.currentRunId!==input.expectedCurrentRunId||!input.restart)return{kind:"conflict"};
+        if(input.expectedCurrentRunId===null){
+          if(run!==null)return{kind:"conflict"};
+        }else if(!run||!taskRunScopeMatches(task,run)||run.state!=="released"){
+          return{kind:"conflict"};
+        }
+        const restartInput:AtomicTaskSandboxRestartInput={expectedReleasedRunId:input.expectedCurrentRunId,task:input.restart.task,runtimeState:input.restart.runtimeState,sandboxRun:input.restart.sandboxRun,reservedAt:input.restart.reservedAt};
+        if(!sandboxRestartIdentityMatches(task,restartInput))return{kind:"conflict"};
+        if(!this.reserveActiveTask(task.projectId,input.restart.reservedAt))return{kind:"capacity_rejected"};
+        task=normalizeStoredTask(input.restart.task);
+        this.tasks.set(task.id,clone(task));
+        await this.jsonDocs.put("sandbox_runtime_state",task.id,input.restart.runtimeState);
+        await this.sandboxRuns.put(input.restart.sandboxRun);
+        run=input.restart.sandboxRun;
+        restarted=true;
+      }
+      const created=await this.createTaskMessage(message);
+      const audit=canonicalMessageAuditEvent(input.auditEvent,created,task.projectId);
+      if(!this.auditEvents.some((event)=>event.id===audit.id))await this.appendProjectAuditEvent(audit);
+      return{kind:"created",task:clone(task),message:created,restarted};
+    });
+  }
+
+  async editTaskMessageAtomically(input:AtomicTaskMessageEditInput):Promise<AtomicTaskMessageEditResult>{
+    try{return await this.atomicTaskMessageMutation([],async()=>{
+      const project=this.projects.get(input.idempotency.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active")throw new AtomicTaskMessageConflict();
+      const claimed=this.claimAtomicTaskMessageMutation(input.idempotency);
+      if(claimed.kind!=="claimed")return claimed;
+      if(claimed.resourceId!==input.messageId)throw new AtomicTaskMessageConflict();
+      const task=this.tasks.get(input.taskId);
+      const index=this.messages.findIndex((message)=>message.id===input.messageId&&message.taskId===input.taskId);
+      const current=this.messages[index];
+      if(!task||task.projectId!==input.idempotency.projectId||task.deletedAt||task.archivedAt||!current||current.deletedAt||(current.deliveryStatus??"pending")!=="pending"||(current.updatedAt??current.createdAt)!==input.expectedUpdatedAt)throw new AtomicTaskMessageConflict();
+      const updated=normalizeStoredMessage({...current,content:input.content,requestHash:input.requestHash,updatedAt:input.updatedAt});
+      this.messages[index]=clone(updated);
+      this.appendInteractionChanges(input.taskId,[input.interactionChange]);
+      if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))await this.appendProjectAuditEvent(input.auditEvent);
+      this.completeAtomicTaskMessageMutation(input.idempotency,input.responseStatus,input.responseBody,input.updatedAt);
+      return{kind:"updated",message:clone(updated)};
+    });}catch(error){
+      if(error instanceof AtomicTaskMessageConflict)return{kind:"conflict"};
       throw error;
     }
   }
 
-  async restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult> {
-    const current=this.tasks.get(input.task.id);
-    if(!current||current.deletedAt||current.archivedAt||current.executionMode!=="live")return{kind:"conflict"};
-    if(current.runId!==input.expectedReleasedRunId){
-      const active=await this.sandboxRuns.get(current.runId);
-      return current.activeReservation&&active?.taskId===current.id&&active.cleanupStatus==="active"&&["queued","starting","running"].includes(active.phase)
-        ?{kind:"existing_active",task:clone(current)}:{kind:"conflict"};
+  async deleteTaskMessageAtomically(input:AtomicTaskMessageDeleteInput):Promise<AtomicTaskMessageDeleteResult>{
+    try{return await this.atomicTaskMessageMutation([],async()=>{
+      const project=this.projects.get(input.idempotency.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active")throw new AtomicTaskMessageConflict();
+      const claimed=this.claimAtomicTaskMessageMutation(input.idempotency);
+      if(claimed.kind!=="claimed")return claimed;
+      if(claimed.resourceId!==input.messageId)throw new AtomicTaskMessageConflict();
+      const task=this.tasks.get(input.taskId);
+      const index=this.messages.findIndex((message)=>message.id===input.messageId&&message.taskId===input.taskId);
+      const current=this.messages[index];
+      if(!task||task.projectId!==input.idempotency.projectId||task.deletedAt||task.archivedAt||!current||!["pending","failed"].includes(current.deliveryStatus??"pending"))throw new AtomicTaskMessageConflict();
+      const deleted=normalizeStoredMessage(current.deletedAt?current:{...current,deletedAt:input.deletedAt,updatedAt:input.deletedAt});
+      this.messages[index]=clone(deleted);
+      this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((change)=>!(
+        change.interaction.taskId===input.taskId
+        && change.sourceKind==="product"
+        && change.sourceId===`message:${input.messageId}`
+      )));
+      if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))await this.appendProjectAuditEvent(input.auditEvent);
+      this.completeAtomicTaskMessageMutation(input.idempotency,input.responseStatus,input.responseBody,input.deletedAt);
+      return{kind:"deleted",message:clone(deleted)};
+    });}catch(error){
+      if(error instanceof AtomicTaskMessageConflict)return{kind:"conflict"};
+      throw error;
     }
-    const released=await this.sandboxRuns.get(input.expectedReleasedRunId);
-    if(!released||released.taskId!==current.id||released.runId!==current.runId||released.cleanupStatus!=="cleaned"||current.activeReservation)return{kind:"conflict"};
-    if(!sandboxRestartIdentityMatches(current,input))return{kind:"conflict"};
-    return this.atomicTaskMessageMutation([{task:input.task,reserveActive:true,runtimeState:input.runtimeState,sandboxRun:input.sandboxRun}],async()=>{
-      if(!this.reserveActiveTask(current.projectId,input.interruptedAt))return{kind:"capacity_rejected" as const};
-      const restarted=normalizeStoredTask(input.task,true);
-      this.tasks.set(restarted.id,clone(restarted));
-      await this.jsonDocs.put("sandbox_runtime_state",restarted.id,input.runtimeState);
-      await this.sandboxRuns.put(input.sandboxRun);
-      for(let index=0;index<this.messages.length;index++){
-        const message=this.messages[index]!;
-        if(message.taskId===restarted.id&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending"))this.messages[index]=clone({...message,deliveryStatus:"failed",claimToken:null,claimedAt:null,leaseExpiresAt:null,nextRetryAt:null,safeError:"Sandbox was released before this message was delivered",updatedAt:input.interruptedAt});
-      }
-      return{kind:"restarted",task:clone(restarted)};
-    });
   }
 
   async updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask> {
@@ -682,27 +854,9 @@ export class InMemoryProductStore implements ProductStore {
     return clone(task);
   }
 
-  async updateTaskStatusIfStarting(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(taskId);
-    if (!current || current.status !== "starting") {
-      return null;
-    }
-    const updated = { ...current, status, updatedAt };
-    this.tasks.set(taskId, clone(updated));
-    return clone(updated);
-  }
-
-  async updateTaskStatusIfNonterminal(taskId: string, status: AgentTask["status"], updatedAt: string): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(taskId);
-    if (!current || !isActiveTaskStatus(current.status)) {
-      return null;
-    }
-    const updated = { ...current, status, updatedAt };
-    this.tasks.set(taskId, clone(updated));
-    return clone(updated);
-  }
   async listActiveTasks(): Promise<PersistedAgentTask[]> {
-    return [...this.tasks.values()].filter((task) => !task.deletedAt&&task.activeReservation===true).map(clone);
+    const activeRunTaskIds=new Set((await this.sandboxRuns.listActive()).map((run)=>run.taskId));
+    return [...this.tasks.values()].filter((task) => !task.deletedAt&&activeRunTaskIds.has(task.id)).map(clone);
   }
 
   async listTasksForProject(projectId: string): Promise<PersistedAgentTask[]> {
@@ -736,75 +890,51 @@ export class InMemoryProductStore implements ProductStore {
     return clone(updated);
   }
 
-  async archiveTask(taskId: string, archivedAt: string): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(taskId);
-    if (!current || current.deletedAt) return null;
-    const updated = { ...current, archivedAt, updatedAt: archivedAt };
-    this.tasks.set(taskId, clone(updated));
-    return clone(updated);
+  async archiveTask(taskId:string,archivedAt:string,auditEvent?:ProjectAuditEvent) {
+    return this.atomicTaskMessageMutation([],async()=>{
+      const current = this.tasks.get(taskId);
+      if (!current || current.deletedAt) return{kind:"not_found_or_forbidden" as const};
+      const project=this.projects.get(current.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active"||auditEvent!==undefined&&auditEvent.projectId!==current.projectId)return{kind:"not_found_or_forbidden" as const};
+      if(!await this.taskSandboxReleased(current))return{kind:"sandbox_not_released" as const};
+      const updated = { ...current, archivedAt:current.archivedAt??archivedAt, updatedAt: archivedAt };
+      this.tasks.set(taskId, clone(updated));
+      if(auditEvent)await this.appendProjectAuditEvent(auditEvent);
+      return{kind:"ready" as const,value:clone(updated)};
+    });
   }
 
-  async deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null> {
-    const current = this.tasks.get(taskId);
-    if (!current) return null;
-    if(current.activeReservation)this.releaseActiveTask(current.projectId,deletedAt);
-    const releasedArtifactBytes = 0;
-    this.artifacts.splice(0, this.artifacts.length, ...this.artifacts.filter((artifact) => artifact.taskId !== taskId));
-    this.messages.splice(0, this.messages.length, ...this.messages.filter((message) => message.taskId !== taskId));
-    this.interactionChanges.splice(0, this.interactionChanges.length, ...this.interactionChanges.filter((change) => change.interaction.taskId !== taskId));
-    this.interactionSync.delete(taskId);
-    await this.jsonDocs.delete("sandbox_runtime_state", taskId);
-    await this.jsonDocs.delete("sandbox_run_state", current.runId);
-    const task = { ...current, fileLibraryId:null, activeReservation:false, deletedAt: current.deletedAt ?? deletedAt, updatedAt: deletedAt };
-    this.tasks.set(taskId, clone(task));
-    return { task: clone(task), releasedArtifactBytes };
+  async beginTaskDeletion(taskId:string,deletedAt:string,auditEvent?:ProjectAuditEvent) {
+    return this.atomicTaskMessageMutation([],async()=>{
+      const current = this.tasks.get(taskId);
+      if(!current)return{kind:"not_found_or_forbidden" as const};
+      const project=this.projects.get(current.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active"||auditEvent!==undefined&&auditEvent.projectId!==current.projectId)return{kind:"not_found_or_forbidden" as const};
+      if(!await this.taskSandboxReleased(current))return{kind:"sandbox_not_released" as const};
+      const task={...current,deletedAt:current.deletedAt??deletedAt,updatedAt:current.deletedAt?current.updatedAt:deletedAt};
+      this.tasks.set(taskId,clone(task));
+      if(auditEvent)await this.appendProjectAuditEvent(auditEvent);
+      return{kind:"ready" as const,value:clone(task)};
+    });
   }
 
-  async listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]> {
-    return [...this.tasks.values()].filter((task) => !task.deletedAt && !task.terminalReason && (
-      task.startIntentStatus === "pending" && (!task.startNextRetryAt || task.startNextRetryAt <= now) ||
-      task.startIntentStatus === "dispatching" && Boolean(task.startLeaseExpiresAt && task.startLeaseExpiresAt <= now) && (!task.startNextRetryAt || task.startNextRetryAt <= now)
-    )).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).slice(0, limit).map(clone);
-  }
-
-  async claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current || current.terminalReason || current.startIntentStatus !== "pending" || current.startClaimToken || (current.startNextRetryAt && current.startNextRetryAt > input.claimedAt)) return null;
-    const updated: PersistedAgentTask = { ...current, startIntentStatus: "dispatching", startClaimToken: input.claimToken, startClaimedAt: input.claimedAt, startLeaseExpiresAt: input.leaseExpiresAt, startAttemptCount: (current.startAttemptCount ?? 0) + 1, startSafeError: null, updatedAt: input.claimedAt };
-    this.tasks.set(input.id, clone(updated));
-    return clone(updated);
-  }
-
-  async reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current || current.terminalReason || current.startIntentStatus !== "dispatching" || current.startClaimToken !== input.expectedClaimToken || !current.startLeaseExpiresAt || current.startLeaseExpiresAt > input.claimedAt || (current.startNextRetryAt && current.startNextRetryAt > input.claimedAt)) return null;
-    const updated: PersistedAgentTask = { ...current, startClaimToken: input.claimToken, startClaimedAt: input.claimedAt, startLeaseExpiresAt: input.leaseExpiresAt, startAttemptCount: (current.startAttemptCount ?? 0) + 1, startSafeError: null, updatedAt: input.claimedAt };
-    this.tasks.set(input.id, clone(updated));
-    return clone(updated);
-  }
-
-  async recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current || current.startIntentStatus !== "dispatching" || current.startClaimToken !== input.claimToken || current.startDeliveryKey !== input.receipt.deliveryKey || current.startRequestHash !== input.receipt.requestHash || !input.receipt.accepted) return null;
-    const updated: PersistedAgentTask = { ...current, status: current.terminalReason ? current.status : "running", startIntentStatus: "dispatched", startReceipt: clone(input.receipt), startTimelineCursor: input.timelineCursor, startLeaseExpiresAt: null, startNextRetryAt: null, startSafeError: null, updatedAt: input.updatedAt };
-    this.tasks.set(input.id, clone(updated));
-    return clone(updated);
-  }
-
-  async deferTaskStart(input: TaskDeliveryDeferInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current || current.startIntentStatus !== "dispatching" || current.startClaimToken !== input.claimToken) return null;
-    const updated: PersistedAgentTask = { ...current, startIntentStatus: input.releaseClaim ? "pending" : "dispatching", startClaimToken: input.releaseClaim ? null : current.startClaimToken ?? null, startClaimedAt: input.releaseClaim ? null : current.startClaimedAt ?? null, startLeaseExpiresAt: input.releaseClaim ? null : current.startLeaseExpiresAt ?? null, startSafeError: input.safeError, startNextRetryAt: input.nextRetryAt, updatedAt: input.updatedAt };
-    this.tasks.set(input.id, clone(updated));
-    return clone(updated);
-  }
-
-  async failTaskStart(input: TaskDeliveryFailureInput): Promise<PersistedAgentTask | null> {
-    const current = this.tasks.get(input.id);
-    if (!current || current.startIntentStatus !== "dispatching" || current.startClaimToken !== input.claimToken) return null;
-    const updated: PersistedAgentTask = { ...current, startIntentStatus: "failed", startSafeError: input.safeError, startLeaseExpiresAt: null, updatedAt: input.updatedAt };
-    this.tasks.set(input.id, clone(updated));
-    return clone(updated);
+  async purgeDeletedTaskData(taskId:string,idempotency?:CompleteTaskIdempotencyInput):Promise<boolean>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const current=this.tasks.get(taskId);
+      if(!current?.deletedAt||!await this.taskSandboxReleased(current))return false;
+      const idempotencyKey=idempotency?taskIdempotencyKey(idempotency):null;
+      const idempotencyRecord=idempotencyKey?this.taskIdempotency.get(idempotencyKey):null;
+      if(idempotency&&(!idempotencyRecord||idempotencyRecord.resourceId!==taskId||idempotencyRecord.status!=="in_progress"||idempotencyRecord.requestHash!==idempotency.requestHash||idempotencyRecord.claimToken!==idempotency.claimToken))return false;
+      this.artifacts.splice(0, this.artifacts.length, ...this.artifacts.filter((artifact) => artifact.taskId !== taskId));
+      this.messages.splice(0, this.messages.length, ...this.messages.filter((message) => message.taskId !== taskId));
+      this.interactionChanges.splice(0, this.interactionChanges.length, ...this.interactionChanges.filter((change) => change.interaction.taskId !== taskId));
+      this.interactionSync.delete(taskId);
+      await this.jsonDocs.delete("sandbox_runtime_state", taskId);
+      this.sandboxRuns.deleteForTask(taskId);
+      this.tasks.delete(taskId);
+      if(idempotency&&idempotencyKey&&idempotencyRecord)this.taskIdempotency.set(idempotencyKey,{...idempotencyRecord,status:"completed",responseStatus:idempotency.responseStatus,responseBody:clone(idempotency.responseBody),updatedAt:idempotency.updatedAt});
+      return true;
+    });
   }
 
   async beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult> {
@@ -822,10 +952,19 @@ export class InMemoryProductStore implements ProductStore {
     return { kind: "claimed", resourceId: input.resourceId, claimToken: input.claimToken };
   }
 
+  async findTaskIdempotencyByResource(input:TaskIdempotencyResourceLookupInput):Promise<TaskIdempotencyBeginResult|null>{
+    const row=[...this.taskIdempotency.values()].find((record)=>record.actorId===input.actorId&&record.operation===input.operation&&record.key===input.key&&record.resourceId===input.resourceId);
+    if(!row)return null;
+    if(row.requestHash!==input.requestHash)return{kind:"hash_mismatch"};
+    if(row.status==="completed")return{kind:"replay",resourceId:row.resourceId,responseStatus:row.responseStatus!,responseBody:clone(row.responseBody)};
+    return{kind:"in_progress",resourceId:row.resourceId};
+  }
+
   async completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean> {
     const key = taskIdempotencyKey(input);
     const existing = this.taskIdempotency.get(key);
-    if (!existing || existing.status !== "in_progress" || existing.requestHash !== input.requestHash || existing.claimToken !== input.claimToken) return false;
+    if (!existing || existing.requestHash !== input.requestHash || existing.claimToken !== input.claimToken) return false;
+    if(existing.status==="completed")return existing.responseStatus===input.responseStatus&&strictStructuralEqual(existing.responseBody,input.responseBody);
     this.taskIdempotency.set(key, { ...existing, status: "completed", responseStatus: input.responseStatus, responseBody: clone(input.responseBody), updatedAt: input.updatedAt });
     return true;
   }
@@ -837,11 +976,11 @@ export class InMemoryProductStore implements ProductStore {
       this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
     });
   }
-  async completeTaskIdempotencyForResource(resourceId:string,responseStatus:number,responseBody:unknown,updatedAt:string):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.resourceId!==resourceId||record.status!=="in_progress")continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus,responseBody:clone(responseBody),updatedAt});completed+=1;}return completed;}
+  async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.projectId!==input.projectId||record.operation!==input.operation||record.resourceId!==input.resourceId||record.status!=="in_progress")continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.responseStatus,responseBody:clone(input.responseBody),updatedAt:input.updatedAt});completed+=1;}return completed;}
 
   async persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult> {
     const task = this.tasks.get(input.taskId);
-    if (!task) throw new Error("Task not found");
+    if (!task||task.deletedAt) throw new Error("Task not found");
     const previousChanges = this.interactionChanges.map(clone);
     const previousArtifacts = this.artifacts.map(clone);
     const previousAuditEvents = this.auditEvents.map(clone);
@@ -865,11 +1004,6 @@ export class InMemoryProductStore implements ProductStore {
         if (!this.auditEvents.some((event) => event.id === projection.auditEvent.id)) this.auditEvents.push(clone({...projection.auditEvent,detail:sanitizeProjectAuditDetail(projection.auditEvent.detail)}));
       }
       const inserted = this.appendInteractionChanges(input.taskId, input.changes);
-      if (input.lifecycle?.kind === "active") {
-        const current = this.tasks.get(input.taskId)!;
-        if (current.status !== input.lifecycle.expectedStatus) throw new Error("Task interaction lifecycle conflict");
-        this.tasks.set(input.taskId, { ...current, status: input.lifecycle.status, updatedAt: input.lifecycle.updatedAt });
-      }
       if (input.sourceSync) {
         this.interactionSync.set(input.taskId, { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt });
       }
@@ -921,6 +1055,8 @@ export class InMemoryProductStore implements ProductStore {
 
   async appendTaskArtifacts(artifacts: PersistedTaskArtifact[]): Promise<void> {
     for (const artifact of artifacts) {
+      const task=this.tasks.get(artifact.taskId);
+      if(!task||task.deletedAt)throw new Error("Task not found");
       if (!this.artifacts.some((existing) => existing.taskId === artifact.taskId && existing.fileId === artifact.fileId)) {
         this.artifacts.push(clone(artifact));
       }
@@ -929,7 +1065,7 @@ export class InMemoryProductStore implements ProductStore {
 
   async persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing"> {
     const task = this.tasks.get(input.artifact.taskId);
-    if (!task || task.projectId !== input.projectId) throw new Error("Task artifact project mismatch");
+    if (!task || task.deletedAt || task.projectId !== input.projectId) throw new Error("Task artifact project mismatch");
     const existing = this.artifacts.find((artifact) => artifact.taskId === input.artifact.taskId && artifact.fileId === input.artifact.fileId);
     if (existing) {
       if (!this.auditEvents.some((event) => event.id === input.auditEvent.id)) this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
@@ -953,25 +1089,6 @@ export class InMemoryProductStore implements ProductStore {
   async createPendingTaskMessage(v:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return this.atomicTaskMessageMutation([],async()=>{const source=this.tasks.get(v.taskId);if(!source||source.deletedAt)return null;const created=await this.createTaskMessage(v);this.appendInteractionChanges(v.taskId,interactionChange?[interactionChange]:[]);return created;});}
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { return this.messages.filter((value) => value.taskId === taskId && !value.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map(clone); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { return clone(this.messages.find((value) => value.id === id) ?? null); }
-  async updatePendingTaskMessage(id: string, content: string, requestHash: string, updatedAt: string, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null> {
-    return this.atomicTaskMessageMutation([], async () => {
-    const index = this.messages.findIndex((value) => value.id === id);
-    const current = this.messages[index];
-    if (!current || current.deletedAt || (current.deliveryStatus ?? "pending") !== "pending") return null;
-    const updated = { ...current, content, requestHash, updatedAt };
-    this.messages[index] = clone(updated);
-    this.appendInteractionChanges(current.taskId, interactionChange ? [interactionChange] : []);
-    return clone(updated);
-    });
-  }
-  async deleteQueuedTaskMessage(id: string, deletedAt: string): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === id);
-    const current = this.messages[index];
-    if (!current || current.deletedAt || !["pending", "failed"].includes(current.deliveryStatus ?? "pending")) return null;
-    const updated = { ...current, deletedAt, updatedAt: deletedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
-  }
   async listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]> {
     return this.messages.filter((message) => !message.deletedAt && (
       (message.deliveryStatus ?? "pending") === "pending" && (!message.nextRetryAt || message.nextRetryAt <= now) ||
@@ -1020,8 +1137,6 @@ export class InMemoryProductStore implements ProductStore {
     this.messages[index] = clone(updated);
     return clone(updated);
   }
-  async findTaskSummary(taskId: string): Promise<StoredTaskSummary | null> { const task=this.tasks.get(taskId); return task ? this.taskSummary(task) : null; }
-  async listTaskSummariesForProject(projectId: string): Promise<StoredTaskSummary[]> { return [...this.tasks.values()].filter((task) => task.projectId === projectId && !task.deletedAt).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).map((task) => this.taskSummary(task)); }
 
   private appendInteractionChanges(taskId: string, changes: TaskInteractionChangeInput[]): PersistedTaskInteractionChange[] {
     const inserted: PersistedTaskInteractionChange[] = [];
@@ -1042,16 +1157,28 @@ export class InMemoryProductStore implements ProductStore {
     return inserted;
   }
 
-  private async atomicTaskMessageMutation<T>(successors: AtomicTaskCreateInput[], mutation: () => Promise<T>): Promise<T> {
+  private async atomicTaskMessageMutation<T>(runtimeWrites: AtomicTaskCreateInput[], mutation: () => Promise<T>): Promise<T> {
+    const previous=this.taskMutationTail;
+    let release!:()=>void;
+    this.taskMutationTail=new Promise<void>((resolve)=>{release=resolve;});
+    await previous;
+    try{return await this.atomicTaskMessageMutationUnlocked(runtimeWrites,mutation);}
+    finally{release();}
+  }
+
+  private async atomicTaskMessageMutationUnlocked<T>(runtimeWrites: AtomicTaskCreateInput[], mutation: () => Promise<T>): Promise<T> {
     const previousChanges = this.interactionChanges.map(clone);
     const previousTasks = [...this.tasks.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousInteractionSync = [...this.interactionSync.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousMessages = this.messages.map(clone);
     const previousUsage = [...this.usage.entries()].map(([id,value]) => [id,clone(value)] as const);
-    const documents = await Promise.all(successors.flatMap((successor) => [
-      this.jsonDocs.get("sandbox_runtime_state", successor.task.id).then((document) => ["sandbox_runtime_state",successor.task.id,document] as const),
-      ...(successor.sandboxRun ? [this.jsonDocs.get("sandbox_run_state",successor.sandboxRun.runId).then((document) => ["sandbox_run_state",successor.sandboxRun!.runId,document] as const)] : [])
-    ]));
+    const previousLibraries = [...this.fileLibraries.entries()].map(([id,value]) => [id,clone(value)] as const);
+    const previousIdempotency = [...this.taskIdempotency.entries()].map(([id,value]) => [id,clone(value)] as const);
+    const previousAudits = this.auditEvents.map(clone);
+    const documents = await Promise.all(runtimeWrites.map((write) =>
+      this.jsonDocs.get("sandbox_runtime_state", write.task.id).then((document) => ["sandbox_runtime_state",write.task.id,document] as const)
+    ));
+    const previousRuns=this.sandboxRuns.snapshot();
     try {
       return await mutation();
     } catch (error) {
@@ -1063,21 +1190,53 @@ export class InMemoryProductStore implements ProductStore {
       this.messages.splice(0,this.messages.length,...previousMessages);
       this.usage.clear();
       for (const [id,value] of previousUsage) this.usage.set(id,value);
+      this.fileLibraries.clear();
+      for (const [id,value] of previousLibraries) this.fileLibraries.set(id,value);
+      this.taskIdempotency.clear();
+      for (const [id,value] of previousIdempotency) this.taskIdempotency.set(id,value);
+      this.auditEvents.splice(0,this.auditEvents.length,...previousAudits);
       for (const [collection,id,document] of documents) {
         if (document) await this.jsonDocs.put(collection,id,document);
         else await this.jsonDocs.delete(collection,id);
       }
+      this.sandboxRuns.restore(previousRuns);
       throw error;
     }
   }
 
-  private taskSummary(task: PersistedAgentTask): StoredTaskSummary { return { taskId: task.id, artifactCount: this.artifacts.filter((artifact) => artifact.taskId === task.id).length, updatedAt: task.updatedAt }; }
   private initializeTaskInteractionSync(taskId: string): void { this.interactionSync.set(taskId, { sourceCursor: null, historyStatus: "complete", lastSyncedAt: null }); }
+
+  private claimAtomicTaskMessageMutation(input:BeginTaskIdempotencyInput):
+    | {kind:"claimed";resourceId:string}
+    | {kind:"hash_mismatch"}
+    | {kind:"in_progress"}
+    | {kind:"replay";responseStatus:number;responseBody:unknown} {
+    const key=taskIdempotencyKey(input);
+    const existing=this.taskIdempotency.get(key);
+    if(existing){
+      if(existing.requestHash!==input.requestHash)return{kind:"hash_mismatch"};
+      if(existing.status==="completed")return{kind:"replay",responseStatus:existing.responseStatus!,responseBody:clone(existing.responseBody)};
+      if(existing.claimToken!==input.claimToken&&existing.leaseExpiresAt>input.now)return{kind:"in_progress"};
+      const claimed={...existing,claimToken:input.claimToken,leaseExpiresAt:input.leaseExpiresAt,updatedAt:input.now};
+      this.taskIdempotency.set(key,claimed);
+      return{kind:"claimed",resourceId:claimed.resourceId};
+    }
+    this.taskIdempotency.set(key,{...input,status:"in_progress",responseStatus:null,responseBody:null,updatedAt:input.now});
+    return{kind:"claimed",resourceId:input.resourceId};
+  }
+
+  private completeAtomicTaskMessageMutation(input:BeginTaskIdempotencyInput,responseStatus:number,responseBody:unknown,updatedAt:string):void{
+    const key=taskIdempotencyKey(input);
+    const record=this.taskIdempotency.get(key);
+    if(!record||record.status!=="in_progress"||record.requestHash!==input.requestHash||record.claimToken!==input.claimToken)throw new AtomicTaskMessageConflict();
+    this.taskIdempotency.set(key,{...record,status:"completed",responseStatus,responseBody:clone(responseBody),updatedAt});
+  }
 
   private reserveActiveTask(projectId: string, updatedAt: string): boolean {
     const policy = this.policies.get(projectId);
     const usage = this.usage.get(projectId);
-    if (this.projects.get(projectId)?.lifecycleStatus === "deleting" || !policy || !usage || (policy.activeTasksLimit !== null && usage.activeTasks + 1 > policy.activeTasksLimit)) return false;
+    const project=this.projects.get(projectId);
+    if (!project || (project.lifecycleStatus??"active") !== "active" || !policy || !usage || (policy.activeTasksLimit !== null && usage.activeTasks + 1 > policy.activeTasksLimit)) return false;
     this.usage.set(projectId, clone({ ...usage, activeTasks: usage.activeTasks + 1, updatedAt }));
     return true;
   }
@@ -1087,22 +1246,25 @@ export class InMemoryProductStore implements ProductStore {
     if (usage) this.usage.set(projectId, clone({ ...usage, activeTasks: Math.max(0, usage.activeTasks - 1), updatedAt }));
   }
 
-  private async projectSandboxesConfirmedCleaned(projectId:string):Promise<boolean>{
-    for(const task of this.tasks.values()){
-      if(task.projectId!==projectId||task.deletedAt||task.executionMode!=="live")continue;
-      if(task.activeReservation)return false;
-      const run=await this.sandboxRuns.get(task.runId);
-      if(!run||run.taskId!==task.id||run.runId!==task.runId||run.projectId!==task.projectId||run.workspaceId!==task.workspaceId||run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned")return false;
-    }
-    for(const run of await this.sandboxRuns.list())if(run.projectId===projectId&&run.cleanupStatus!=="cleaned"&&run.phase!=="cleaned")return false;
-    return true;
+  private async projectHasLiveBusinessReservations(projectId:string):Promise<boolean>{
+    return (await this.sandboxRuns.list()).some((run)=>run.projectId===projectId&&run.state!=="released")
+      || [...this.providerSettlements.values()].some((settlement)=>settlement.projectId===projectId&&["reserved","dispatched","delivered"].includes(settlement.status));
   }
 
-  private releaseReservationForCleanedRun(run:PersistedSandboxRunState):void{
-    const task=this.tasks.get(run.taskId);if(!task||task.runId!==run.runId||!task.activeReservation)return;
-    this.tasks.set(task.id,clone({...task,activeReservation:false,updatedAt:run.updatedAt}));this.releaseActiveTask(task.projectId,run.updatedAt);
+  private async taskSandboxReleased(task:PersistedAgentTask):Promise<boolean>{
+    if((await this.sandboxRuns.list()).some((run)=>run.taskId===task.id&&run.state!=="released"))return false;
+    if(!task.currentRunId)return true;
+    const run=await this.sandboxRuns.get(task.currentRunId);
+    return Boolean(run&&taskRunScopeMatches(task,run)&&run.state==="released");
   }
 
+}
+
+function isSuccessfulProjectDeletionCompletion(projectId:string,completion:CompleteTaskIdempotencyInput):boolean{
+  return completion.projectId===projectId
+    && completion.operation==="project.delete"
+    && completion.responseStatus===200
+    && strictStructuralEqual(completion.responseBody,{deleted:true});
 }
 
 class InMemoryJsonDocStore implements PostgresJsonDocStore {
@@ -1132,33 +1294,28 @@ class InMemoryJsonDocStore implements PostgresJsonDocStore {
 }
 
 class InMemorySandboxRunStore {
+  private readonly runs = new Map<string, PersistedSandboxRunState>();
   private mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly jsonDocs: PostgresJsonDocStore) {}
-
   async put(run: PersistedSandboxRunState): Promise<PersistedSandboxRunState> {
-    const current=await this.get(run.runId);if(current&&!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");
-    if(current&&!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");
-    const document = prepareSandboxRunDocument(run);
-    await this.jsonDocs.put("sandbox_run_state", run.runId, document);
-    const stored=sandboxRunFromDocument(document);
-    return stored;
+    const current=this.runs.get(run.runId);
+    if(current&&!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");
+    if(current&&current.state!=="released"&&run.state==="released")throw new Error("Sandbox released transition requires atomic settlement");
+    if(run.state!=="released"&&[...this.runs.values()].some((candidate)=>candidate.runId!==run.runId&&candidate.taskId===run.taskId&&candidate.state!=="released"))throw new Error("Task already has one unreleased sandbox Run");
+    this.runs.set(run.runId,clone(run));
+    return clone(run);
   }
 
   async get(runId: string): Promise<PersistedSandboxRunState | null> {
-    const document = await this.jsonDocs.get("sandbox_run_state", runId);
-    return document ? sandboxRunFromDocument(document) : null;
+    return clone(this.runs.get(runId)??null);
   }
 
   async list(): Promise<PersistedSandboxRunState[]> {
-    if (!(this.jsonDocs instanceof InMemoryJsonDocStore)) {
-      return [];
-    }
-    return this.jsonDocs.listCollection("sandbox_run_state").map(sandboxRunFromDocument);
+    return [...this.runs.values()].map(clone);
   }
 
   async listActive(): Promise<PersistedSandboxRunState[]> {
-    return (await this.list()).filter((run) => run.cleanupStatus !== "cleaned" && run.phase !== "cleaned");
+    return (await this.list()).filter((run) => run.state !== "released");
   }
 
   async claimForCleanup(input: SandboxRunCleanupClaimInput): Promise<PersistedSandboxRunState | null> {
@@ -1173,7 +1330,8 @@ class InMemorySandboxRunStore {
       }
       return this.put({
         ...current,
-        cleanupStatus: "deleting",
+        cleanupClaimedAt: input.claimedAt,
+        cleanupAttempts: (current.cleanupAttempts??0)+1,
         fencingToken: current.fencingToken + 1,
         updatedAt: input.claimedAt
       });
@@ -1191,22 +1349,40 @@ class InMemorySandboxRunStore {
         return null;
       }
       if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");
-      if(!isConfirmedCleanedRun(current)&&isConfirmedCleanedRun(run))throw new Error("Sandbox cleaned transition requires atomic settlement");
+      if(current.state!=="released"&&run.state==="released")throw new Error("Sandbox released transition requires atomic settlement");
       return this.put(run);
     });
   }
 
   async requestExplicitCleanup(input:TaskSandboxReleaseMutationInput,commit:()=>void):Promise<TaskSandboxReleaseMutationResult>{
     return this.serializeMutation(async()=>{
-      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return"conflict";
-      const document=this.jsonDocs.getSync("sandbox_run_state",input.runId);
-      const current=document?sandboxRunFromDocument(document):null;
+      const current=this.runs.get(input.runId);
       if(!current||current.taskId!==input.taskId||current.runId!==input.runId)return"conflict";
-      const already=current.cleanupStatus==="cleanup_requested"||current.cleanupStatus==="deleting"||current.cleanupStatus==="cleaned"||current.phase==="cleaned";
-      if(!already&&(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.cleanupStatus!=="cleanup_requested"))return"conflict";
+      const already=current.state==="release_requested"||current.state==="released";
+      if(current.state!=="released"&&(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1))return"conflict";
       commit();
-      if(!already)this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(input.run));
+      if(current.state!=="released")this.runs.set(input.runId,clone(input.run));
       return already?"already_requested":"applied";
+    });
+  }
+
+  async fail(input:SandboxRunFailureInput,commit:(event:ProjectAuditEvent)=>void):Promise<PersistedSandboxRunState|null>{
+    return this.serializeMutation(async()=>{
+      const current=this.runs.get(input.runId);
+      if(!current||current.fencingToken!==input.expectedFencingToken||!["starting","active"].includes(current.state))return null;
+      const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
+      this.runs.set(input.runId,clone(failed));
+      try{commit(input.auditEvent);return clone(failed);}catch(error){this.runs.set(input.runId,clone(current));throw error;}
+    });
+  }
+
+  async runStartupOperation<T>(input:SandboxStartupOperationInput,readTask:()=>PersistedAgentTask|undefined,operation:()=>Promise<T>):Promise<{kind:"applied";value:T}|{kind:"conflict"}>{
+    return this.serializeMutation(async()=>{
+      const run=this.runs.get(input.runId),task=readTask();
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run)||task.deletedAt||task.archivedAt)return{kind:"conflict"};
+      if(run.startupClaimToken&&run.startupClaimToken!==input.claimToken&&run.startupLeaseExpiresAt&&run.startupLeaseExpiresAt>input.claimedAt)return{kind:"conflict"};
+      this.runs.set(run.runId,clone({...run,startupClaimToken:input.claimToken,startupLeaseExpiresAt:input.leaseExpiresAt,updatedAt:input.claimedAt}));
+      return{kind:"applied",value:await operation()};
     });
   }
 
@@ -1215,43 +1391,30 @@ class InMemorySandboxRunStore {
       const current=await this.get(input.runId);
       if(!current)return{kind:"conflict"};
       if(current.startedAt){commit(input.auditEvent);return{kind:"already_started",run:current};}
-      if(current.fencingToken!==input.expectedFencingToken||current.cleanupStatus!=="active"||current.phase!=="starting")return{kind:"conflict"};
-      const run={...current,startedAt:input.startedAt,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
-      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return{kind:"conflict"};
-      this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(run));
-      try{commit(input.auditEvent);return{kind:"started",run};}catch(error){this.jsonDocs.putSync("sandbox_run_state",current.runId,prepareSandboxRunDocument(current));throw error}
+      if(current.fencingToken!==input.expectedFencingToken||current.state!=="starting"||current.startupClaimToken!==input.startupClaimToken)return{kind:"conflict"};
+      const run={...current,startedAt:input.startedAt,startupClaimToken:null,startupLeaseExpiresAt:null,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
+      this.runs.set(input.runId,clone(run));
+      try{commit(input.auditEvent);return{kind:"started",run:clone(run)};}catch(error){this.runs.set(current.runId,clone(current));throw error}
     });
   }
 
   async activateTask(
     input:ActivateTaskSandboxRunInput,
-    readTask:()=>PersistedAgentTask|undefined,
-    commitTask:(task:PersistedAgentTask)=>void
+    readTask:()=>PersistedAgentTask|undefined
   ):Promise<ActivateTaskSandboxRunResult>{
     return this.serializeMutation(async()=>{
-      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return{kind:"conflict"};
-      const document=this.jsonDocs.getSync("sandbox_run_state",input.runId);
-      const run=document?sandboxRunFromDocument(document):null;
+      const run=this.runs.get(input.runId);
       const task=readTask();
       if(!run||!task||!taskRunIdentityMatches(task,run,input))return{kind:"conflict"};
-      if(run.phase==="running"&&run.cleanupStatus==="active"&&task.executionMode==="live"&&!task.deletedAt&&!task.archivedAt&&task.activeReservation&&(task.status==="running"||task.status==="queued")){
-        return{kind:"already_running",task:clone(task),run};
+      if(run.state==="active"&&!task.deletedAt&&!task.archivedAt){
+        return{kind:"already_running",task:clone(task),run:clone(run)};
       }
-      if(run.phase!=="starting"||run.cleanupStatus!=="active"||!run.startedAt||run.fencingToken!==input.expectedFencingToken||task.executionMode!=="live"||task.deletedAt||task.archivedAt||task.status!=="starting"||!task.activeReservation){
+      if(run.state!=="starting"||!run.startedAt||run.fencingToken!==input.expectedFencingToken||task.deletedAt||task.archivedAt){
         return{kind:"conflict"};
       }
-      const activatedRun={...run,phase:"running" as const,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
-      const activatedTask={...task,status:"running" as const,updatedAt:input.activatedAt};
-      const prepared=prepareSandboxRunDocument(activatedRun);
-      try{
-        this.jsonDocs.putSync("sandbox_run_state",run.runId,prepared);
-        commitTask(activatedTask);
-        return{kind:"activated",task:clone(activatedTask),run:sandboxRunFromDocument(prepared)};
-      }catch(error){
-        this.jsonDocs.putSync("sandbox_run_state",run.runId,prepareSandboxRunDocument(run));
-        commitTask(task);
-        throw error;
-      }
+      const activatedRun={...run,state:"active" as const,startupClaimToken:null,startupLeaseExpiresAt:null,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
+      this.runs.set(run.runId,clone(activatedRun));
+      return{kind:"activated",task:clone(task),run:clone(activatedRun)};
     });
   }
 
@@ -1259,11 +1422,17 @@ class InMemorySandboxRunStore {
     return this.serializeMutation(async()=>{
       const current=await this.get(input.runId);
       if(!current||!sameRunIdentity(current,input.run))return"conflict";
-      if(current.cleanupStatus==="cleaned"||current.phase==="cleaned"){commit(true);return"already_applied";}
-      if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.cleanupStatus!=="cleaned"||input.run.phase!=="cleaned"||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
-      try{if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return"conflict";this.jsonDocs.putSync("sandbox_run_state",input.runId,prepareSandboxRunDocument(input.run));commit(false);return"applied";}catch(error){if(this.jsonDocs instanceof InMemoryJsonDocStore)this.jsonDocs.putSync("sandbox_run_state",current.runId,prepareSandboxRunDocument(current));throw error}
+      if(current.state==="released"){commit(true);return"already_applied";}
+      if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.state!=="released"||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
+      try{this.runs.set(input.runId,clone(input.run));commit(false);return"applied";}catch(error){this.runs.set(current.runId,clone(current));throw error}
     });
   }
+
+  snapshot():PersistedSandboxRunState[]{return[...this.runs.values()].map(clone)}
+  restore(runs:PersistedSandboxRunState[]):void{this.runs.clear();for(const run of runs)this.runs.set(run.runId,clone(run))}
+  delete(runId:string):void{this.runs.delete(runId)}
+  deleteForTask(taskId:string):void{for(const [runId,run] of this.runs)if(run.taskId===taskId)this.runs.delete(runId)}
+  deleteForProject(projectId:string):void{for(const [runId,run] of this.runs)if(run.projectId===projectId)this.runs.delete(runId)}
 
   private async serializeMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTail;
@@ -1278,16 +1447,28 @@ class InMemorySandboxRunStore {
   }
 }
 
-function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.startedAt===right.startedAt&&JSON.stringify(left.resourceLimits)===JSON.stringify(right.resourceLimits)&&JSON.stringify(left.resourceSnapshot)===JSON.stringify(right.resourceSnapshot)}
-function taskRunIdentityMatches(task:PersistedAgentTask,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.runId===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId}
-function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return JSON.stringify(left)===JSON.stringify(right)}
-function isConfirmedCleanedRun(run:PersistedSandboxRunState):boolean{return run.cleanupStatus==="cleaned"||run.phase==="cleaned"}
-function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,cleaned:PersistedSandboxRunState):boolean{const duration=current.startedAt===null?0:Math.max(0,(Date.parse(cleaned.updatedAt)-Date.parse(current.startedAt))/1000);return value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===cleaned.updatedAt&&value.durationSeconds===duration&&value.releaseReason===cleaned.releaseReason&&JSON.stringify(value.resources)===JSON.stringify(current.resourceSnapshot)}
-function taskMatchesActiveSandboxRun(task:PersistedAgentTask|undefined,project:Project|undefined,run:PersistedSandboxRunState):boolean{return Boolean(task&&project&&!task.deletedAt&&task.executionMode==="live"&&task.activeReservation===true&&task.id===run.taskId&&task.runId===run.runId&&task.projectId===run.projectId&&task.workspaceId===run.workspaceId&&task.fileLibraryId===run.fileLibraryId&&project.id===run.projectId&&project.workspaceId===run.workspaceId&&(task.createdByUserId??project.ownerUserId)===run.startedByUserId)}
+function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{
+  return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&
+    left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.namespace===right.namespace&&
+    left.image===right.image&&left.pvcName===right.pvcName&&left.projectSubPath===right.projectSubPath&&
+    left.fileLibraryRootSubPath===right.fileLibraryRootSubPath&&left.botifiedPort===right.botifiedPort&&left.startedAt===right.startedAt&&
+    left.createdAt===right.createdAt&&(left.resumeUnfinished??false)===(right.resumeUnfinished??false)&&
+    strictStructuralEqual(left.resourceNames,right.resourceNames)&&
+    strictStructuralEqual(left.serviceKeySecretRef,right.serviceKeySecretRef)&&
+    strictStructuralEqual(left.directories,right.directories)&&
+    strictStructuralEqual(left.resourceLimits,right.resourceLimits)&&
+    strictStructuralEqual(left.resourceSnapshot,right.resourceSnapshot)&&
+    strictStructuralEqual(left.modelCa??null,right.modelCa??null);
+}
+function taskRunIdentityMatches(task:PersistedAgentTask,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.currentRunId===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId}
+function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return strictStructuralEqual(left,right)}
+function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,released:PersistedSandboxRunState):boolean{const releasedAt=released.releasedAt;const duration=current.startedAt===null||!releasedAt?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(current.startedAt))/1000);return Boolean(releasedAt)&&value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===releasedAt&&value.durationSeconds===duration&&value.releaseReason===released.releaseReason&&strictStructuralEqual(value.resources,current.resourceSnapshot)}
+function taskMatchesActiveSandboxRun(task:PersistedAgentTask|undefined,project:Project|undefined,run:PersistedSandboxRunState):boolean{return Boolean(task&&project&&!task.deletedAt&&task.id===run.taskId&&task.currentRunId===run.runId&&task.projectId===run.projectId&&task.workspaceId===run.workspaceId&&task.fileLibraryId===run.fileLibraryId&&project.id===run.projectId&&project.workspaceId===run.workspaceId)}
 
-function sandboxRunCleanupEligible(run: PersistedSandboxRunState, _claimedAt: string): boolean {
-  if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") return false;
-  return run.cleanupStatus === "cleanup_requested" || run.cleanupStatus === "deleting";
+function sandboxRunCleanupEligible(run: PersistedSandboxRunState, claimedAt: string): boolean {
+  return (run.state === "release_requested" || run.state === "failed")
+    && (!run.startupLeaseExpiresAt||run.startupLeaseExpiresAt<=claimedAt)
+    && (!run.cleanupClaimedAt||Date.parse(run.cleanupClaimedAt)<=Date.parse(claimedAt)-120_000);
 }
 
 class InMemoryLeaseStore implements PostgresLeaseStore {
@@ -1366,54 +1547,33 @@ function clone<T>(value: T): T {
   return value === null || value === undefined ? value : structuredClone(value);
 }
 
-function isActiveTaskStatus(status: AgentTask["status"]): boolean {
-  return status === "queued" || status === "starting" || status === "running" || status === "stopping";
-}
+function snapshotMap<K,V>(values:Map<K,V>):Array<readonly [K,V]>{return[...values].map(([key,value])=>[key,clone(value)] as const)}
+function restoreMap<K,V>(target:Map<K,V>,values:Array<readonly [K,V]>):void{target.clear();for(const [key,value] of values)target.set(key,clone(value))}
+function restoreArray<T>(target:T[],values:T[]):void{target.splice(0,target.length,...values.map(clone))}
 
-function statusForTerminalReason(reason: import("../../contracts/src/api.js").TaskTerminalReason): AgentTask["status"] {
-  if (reason === "cancelled") return "cancelled";
-  if (reason === "failed") return "failed";
-  if (reason === "expired") return "expired";
-  if (reason === "cleaned_legacy") return "cleaned";
-  return "completed";
-}
-
-function normalizeStoredTask(task: PersistedAgentTask, activeReservation: boolean): PersistedAgentTask {
+function normalizeStoredTask(task: PersistedAgentTask): PersistedAgentTask {
   return {
     ...clone(task),
     title: task.title ?? task.prompt.replace(/[\r\n]+/g, " ").slice(0, 160),
-    activeReservation,
+    currentRunId: task.currentRunId ?? null,
     archivedAt: task.archivedAt ?? null,
-    deletedAt: task.deletedAt ?? null,
-    terminalReason: task.terminalReason ?? null,
-    terminalizedAt: task.terminalizedAt ?? null,
-    startClaimToken: task.startClaimToken ?? null,
-    startReceipt: task.startReceipt ?? null,
-    startTimelineCursor: task.startTimelineCursor ?? null,
-    startClaimedAt: task.startClaimedAt ?? null,
-    startLeaseExpiresAt: task.startLeaseExpiresAt ?? null,
-    startAttemptCount: task.startAttemptCount ?? 0,
-    startNextRetryAt: task.startNextRetryAt ?? null,
-    startSafeError: task.startSafeError ?? null,
-    artifactProjectionStatus: task.artifactProjectionStatus ?? "pending",
-    artifactProjectionError: task.artifactProjectionError ?? null,
-    artifactProjectionClaimToken: task.artifactProjectionClaimToken ?? null,
-    artifactProjectionLeaseExpiresAt: task.artifactProjectionLeaseExpiresAt ?? null,
-    artifactProjectionAttemptCount: task.artifactProjectionAttemptCount ?? 0,
-    artifactProjectionNextRetryAt: task.artifactProjectionNextRetryAt ?? null,
-    cleanupStatus: task.cleanupStatus ?? "pending",
-    cleanupError: task.cleanupError ?? null,
-    cleanupClaimToken: task.cleanupClaimToken ?? null,
-    cleanupLeaseExpiresAt: task.cleanupLeaseExpiresAt ?? null,
-    cleanupAttemptCount: task.cleanupAttemptCount ?? 0,
-    cleanupNextRetryAt: task.cleanupNextRetryAt ?? null,
-    cleanupCompletedAt: task.cleanupCompletedAt ?? null
+    deletedAt: task.deletedAt ?? null
   };
+}
+
+function validateTaskRunReservation(input:AtomicTaskCreateInput):void{
+  const expectedRunId=input.sandboxRun?.runId??null;
+  const reservesActive=input.sandboxRun!==undefined&&input.sandboxRun.state!=="released";
+  if(input.task.currentRunId!==expectedRunId||input.reserveActive!==reservesActive||(input.sandboxRun!==undefined&&!taskRunScopeMatches(input.task,input.sandboxRun)))throw new Error("Task Run reservation is inconsistent");
 }
 
 function sandboxRestartIdentityMatches(current:PersistedAgentTask,input:AtomicTaskSandboxRestartInput):boolean{
   const task=input.task,run=input.sandboxRun;
-  return task.id===current.id&&task.workspaceId===current.workspaceId&&task.projectId===current.projectId&&task.endpointId===current.endpointId&&task.fileLibraryId===current.fileLibraryId&&task.executionMode==="live"&&task.runId!==input.expectedReleasedRunId&&run.runId===task.runId&&run.taskId===current.id&&run.workspaceId===current.workspaceId&&run.projectId===current.projectId&&run.fileLibraryId===current.fileLibraryId&&run.phase==="starting"&&run.cleanupStatus==="active";
+  return task.id===current.id&&task.workspaceId===current.workspaceId&&task.projectId===current.projectId&&task.endpointId===current.endpointId&&task.fileLibraryId===current.fileLibraryId&&task.currentRunId!==input.expectedReleasedRunId&&run.runId===task.currentRunId&&run.taskId===current.id&&run.workspaceId===current.workspaceId&&run.projectId===current.projectId&&run.fileLibraryId===current.fileLibraryId&&run.state==="starting";
+}
+
+function taskRunScopeMatches(task:PersistedAgentTask,run:PersistedSandboxRunState):boolean{
+  return task.id===run.taskId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId;
 }
 
 function normalizeStoredMessage(message: PersistedTaskMessage): PersistedTaskMessage {
@@ -1462,6 +1622,8 @@ function correlationMatches(stored: TaskInteractionCorrelation | undefined, requ
   return Boolean(requested.callbackId && stored?.callbackId === requested.callbackId);
 }
 
+class AtomicTaskMessageConflict extends Error {}
+
 interface InMemoryTaskIdempotencyRecord {
   actorId: string;
   projectId: string;
@@ -1476,6 +1638,32 @@ interface InMemoryTaskIdempotencyRecord {
   responseBody: unknown;
   now: string;
   updatedAt: string;
+}
+
+function canonicalTaskMessage(message:PersistedTaskMessage,resourceId:string):PersistedTaskMessage {
+  return {
+    ...message,
+    id:resourceId,
+    deliveryKey:`delivery_message_${resourceId}`
+  };
+}
+
+function canonicalMessageAuditEvent(event:ProjectAuditEvent,message:PersistedTaskMessage,projectId:string):ProjectAuditEvent {
+  return {
+    ...event,
+    id:`audit_task_message_create_${message.id}`,
+    projectId,
+    action:"task.message.create",
+    status:"accepted",
+    resourceKind:"task",
+    resourceId:message.taskId,
+    detail:{
+      ...event.detail,
+      taskId:message.taskId,
+      messageId:message.id,
+      ...(message.deliveryStatus === undefined ? {} : {deliveryStatus:message.deliveryStatus})
+    }
+  };
 }
 
 function taskIdempotencyKey(input: Pick<BeginTaskIdempotencyInput, "actorId" | "projectId" | "operation" | "key">): string {
@@ -1500,8 +1688,7 @@ function providerWindowValue(settlement:ProjectProviderSettlement,metric:import(
   return metric==="providerTokens"?settlement.reservedTokens:settlement.reservedCost;
 }
 
-function failureEventMatches(type:ProjectAlert["type"],event:ProjectAuditEvent):boolean {
-  if(type==="task_failure")return event.action==="task.failed"&&event.status==="accepted";
+function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {
   if(type==="provider_failure")return event.action==="provider.request"&&event.status==="rejected"&&event.resourceKind==="provider"&&event.detail?.errorCategory!==undefined;
   if(type==="endpoint_failure")return event.resourceKind==="endpoint"&&event.status==="rejected"&&event.detail?.healthStatus==="unavailable";
   if(type==="sandbox_failure")return event.action==="sandbox.failed"&&event.status==="accepted";

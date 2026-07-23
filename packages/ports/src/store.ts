@@ -3,7 +3,6 @@ import type {
   AgentTaskArtifact,
   TaskHistoryStatus,
   TaskInteractionItem,
-  AgentTaskStatus,
   AuthSession,
   EndpointHealth,
   FileLibrary,
@@ -23,7 +22,7 @@ import type {
   UpdateProjectResourcePolicyInput,
   User,
   UserProfilePreferences,
-  UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential,
+  UserNotification, ActiveProjectAlert, ActiveProjectAlertRuleView, ProjectAlertRule, ProjectAlertRuleView, ProjectAlertType, ProjectCredential, StoredProjectCredential,
   ProjectContextEntry,
   Workspace,
   WorkspaceListProjection,
@@ -34,7 +33,8 @@ import type {
   TaskListSort,
   SandboxRenderResult,
   SandboxResourceSnapshot,
-  SandboxReleaseReason
+  SandboxReleaseReason,
+  SandboxFailureCode
 } from "../../contracts/src/api.js";
 
 export interface PersistedDeliveryReceipt {
@@ -45,30 +45,13 @@ export interface PersistedDeliveryReceipt {
   cursor?: string;
 }
 
-export interface PersistedAgentTask extends Omit<AgentTask, "sandbox" | "fileLibraryId"> {
+export interface PersistedAgentTask extends Omit<AgentTask, "fileLibraryId"> {
   fileLibraryId: string | null;
-  sandbox: SandboxRenderResult;
   createdByUserId?: string | null;
   agentContext?: string;
-  startDeliveryKey?: string | null;
-  startRequestHash?: string | null;
-  startClaimToken?: string | null;
-  startReceipt?: PersistedDeliveryReceipt | null;
-  startTimelineCursor?: string | null;
-  startClaimedAt?: string | null;
-  startLeaseExpiresAt?: string | null;
-  startAttemptCount?: number;
-  startNextRetryAt?: string | null;
-  artifactProjectionClaimToken?: string | null;
-  artifactProjectionLeaseExpiresAt?: string | null;
-  artifactProjectionAttemptCount?: number;
-  artifactProjectionNextRetryAt?: string | null;
-  cleanupClaimToken?: string | null;
-  cleanupLeaseExpiresAt?: string | null;
-  cleanupAttemptCount?: number;
-  cleanupNextRetryAt?: string | null;
-  finalizationIntentStatus?: Extract<AgentTaskStatus, "completed" | "failed" | "expired" | "cleaned"> | null;
-  finalizationIntentAt?: string | null;
+  currentRunId: string | null;
+  archivedAt: string | null;
+  deletedAt: string | null;
 }
 
 export interface PersistedTaskArtifact extends AgentTaskArtifact {
@@ -125,20 +108,10 @@ export interface TaskInteractionSyncMutation {
   lastSyncedAt: string;
 }
 
-export interface TaskInteractionActiveLifecycleMutation {
-  kind: "active";
-  expectedStatus: Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping">;
-  status: Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping">;
-  updatedAt: string;
-}
-
-export type TaskInteractionLifecycleMutation = TaskInteractionActiveLifecycleMutation;
-
 export interface PersistTaskInteractionMutationInput {
   taskId: string;
   changes: TaskInteractionChangeInput[];
   artifactProjections?: PersistTaskArtifactProjectionInput[];
-  lifecycle?: TaskInteractionLifecycleMutation;
   sourceSync?: TaskInteractionSyncMutation;
 }
 
@@ -170,8 +143,7 @@ export interface TaskInteractionStoreSnapshot {
 export type JsonDocumentCollection =
   | "project_settings"
   | "endpoint_snapshots"
-  | "sandbox_runtime_state"
-  | "sandbox_run_state";
+  | "sandbox_runtime_state";
 
 export interface PostgresJsonDocStore {
   put(collection: JsonDocumentCollection, id: string, document: Record<string, unknown>): Promise<void>;
@@ -179,8 +151,7 @@ export interface PostgresJsonDocStore {
   delete(collection: JsonDocumentCollection, id: string): Promise<void>;
 }
 
-export type PersistedSandboxRunPhase = "queued" | "starting" | "running" | "stopping" | "expired" | "cleaned";
-export type PersistedSandboxCleanupStatus = "active" | "cleanup_requested" | "deleting" | "cleaned";
+export type PersistedSandboxRunStateValue = "starting" | "active" | "release_requested" | "failed" | "released";
 export type PersistedSandboxTerminalFailureReason = "pod_failed" | "runner_terminated" | "runner_crash_loop_back_off";
 export type PersistedSandboxTerminalFailureSyncStatus = "pending" | "synced" | "unavailable";
 
@@ -215,7 +186,7 @@ export interface PersistedSandboxRunState {
   projectId: string;
   taskId: string;
   runId: string;
-  phase: PersistedSandboxRunPhase;
+  state: PersistedSandboxRunStateValue;
   image: string;
   pvcName: string;
   projectSubPath: string;
@@ -248,10 +219,13 @@ export interface PersistedSandboxRunState {
   };
   timelineCursor?: string | null;
   terminalFailure?: PersistedSandboxTerminalFailure | null;
-  startupFailure?: PersistedSandboxStartupFailure | null;
+  failureCode: SandboxFailureCode | null;
+  failureCause: string | null;
   fencingToken: number;
-  cleanupStatus: PersistedSandboxCleanupStatus;
   resumeUnfinished?: boolean;
+  startupClaimToken?: string | null;
+  startupLeaseExpiresAt?: string | null;
+  cleanupClaimedAt?: string | null;
   cleanupAttempts?: number;
   lastCleanupAt?: string | null;
   lastCleanupError?: {
@@ -259,6 +233,9 @@ export interface PersistedSandboxRunState {
     target: string;
     message: string;
   } | null;
+  releaseRequestedAt: string | null;
+  failedAt: string | null;
+  releasedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -282,6 +259,25 @@ export interface SandboxRunStore {
   ): Promise<PersistedSandboxRunState | null>;
 }
 
+export interface SandboxRunFailureInput {
+  runId: string;
+  expectedFencingToken: number;
+  code: SandboxFailureCode;
+  message: string;
+  failedAt: string;
+  terminalFailure?: PersistedSandboxTerminalFailure | null;
+  auditEvent: ProjectAuditEvent;
+}
+
+export interface SandboxStartupOperationInput {
+  taskId: string;
+  runId: string;
+  expectedFencingToken: number;
+  claimToken: string;
+  claimedAt: string;
+  leaseExpiresAt: string;
+}
+
 export interface SandboxUsageSettlement {
   runId: string;
   workspaceId: string;
@@ -299,6 +295,7 @@ export interface SandboxUsageSettlement {
 export interface ConfirmSandboxRunStartedInput {
   runId: string;
   expectedFencingToken: number;
+  startupClaimToken: string;
   startedAt: string;
   auditEvent: ProjectAuditEvent;
 }
@@ -374,6 +371,7 @@ export interface PostgresLeaseStore {
 
 export type DeleteEndpointResult = "deleted" | "not_found" | "referenced_by_tasks";
 export type DeleteProjectCredentialResult = "deleted" | "not_found" | "version_conflict" | "referenced_by_endpoints";
+export type FinalizeProjectDeletionResult = "deleted" | "not_ready";
 
 export class EndpointNameConflictError extends Error {
   constructor() { super("Endpoint name already exists"); }
@@ -444,8 +442,7 @@ export interface ProductStore {
   beginProjectDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<SandboxGuardedDeletionResult<Project>>;
   setProjectLifecycleStatus(id: string, status: "active" | "archived", updatedAt: string): Promise<Project | null>;
   transferProjectOwner(projectId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Project | null>;
-  deleteProjectDependenciesAndProject(id: string): Promise<boolean>;
-  deleteProjectAfterDependencies(id: string): Promise<boolean>;
+  finalizeProjectDeletion(id: string, completion?: CompleteTaskIdempotencyInput): Promise<FinalizeProjectDeletionResult>;
   createFileLibrary(value: FileLibrary): Promise<FileLibrary | null>;
   findFileLibrary(id: string): Promise<FileLibrary | null>;
   listFileLibrariesForProject(projectId: string): Promise<FileLibrary[]>;
@@ -456,9 +453,9 @@ export interface ProductStore {
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
   listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
-  createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule>;
-  listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;
-  updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
+  createProjectAlertRule(value: ProjectAlertRule): Promise<ActiveProjectAlertRuleView>;
+  listProjectAlertRules(projectId: string): Promise<ProjectAlertRuleView[]>;
+  updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ActiveProjectAlertRuleView | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
   listProjectsForUser(userId: string): Promise<Project[]>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
@@ -487,9 +484,9 @@ export interface ProductStore {
   pruneProjectProviderSettlements(before: string, limit: number): Promise<number>;
   listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]>;
   measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>;
-  measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlert["type"];metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
-  upsertActiveProjectAlert(alert: ProjectAlert): Promise<ProjectAlert>;
-  listActiveProjectAlerts(projectId: string): Promise<ProjectAlert[]>;
+  measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
+  upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert>;
+  listActiveProjectAlerts(projectId: string): Promise<ActiveProjectAlert[]>;
   listProjectAlerts(projectId: string): Promise<ProjectAlert[]>;
   queryProjectAlerts(projectId: string, query: import("../../contracts/src/api.js").ProjectAlertQuery): Promise<{ items: ProjectAlert[]; nextCursor: string | null }>;
   findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null>;
@@ -502,6 +499,8 @@ export interface ProductStore {
   confirmSandboxRunStarted(input: ConfirmSandboxRunStartedInput): Promise<ConfirmSandboxRunStartedResult>;
   activateTaskSandboxRun(input: ActivateTaskSandboxRunInput): Promise<ActivateTaskSandboxRunResult>;
   completeSandboxRunRelease(input: CompleteSandboxRunReleaseInput): Promise<CompleteSandboxRunReleaseResult>;
+  failSandboxRun(input: SandboxRunFailureInput): Promise<PersistedSandboxRunState | null>;
+  runSandboxStartupOperation<T>(input: SandboxStartupOperationInput, operation: () => Promise<T>): Promise<{ kind: "applied"; value: T } | { kind: "conflict" }>;
   listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;
 
   createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential>;
@@ -509,8 +508,6 @@ export interface ProductStore {
   listProjectCredentials(projectId: string): Promise<ProjectCredential[]>;
   updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict">;
   deleteProjectCredential(id: string, projectId: string, expectedVersion: number): Promise<DeleteProjectCredentialResult>;
-  listLegacyEndpointCredentialAliases(): Promise<Array<{ endpointId: string; projectId: string; baseUrl: string; secretRef: string }>>;
-  bindEndpointCredential(endpointId: string, credentialId: string): Promise<boolean>;
 
   createEndpoint(endpoint: ModelEndpoint, expectedCredentialVersion?: number): Promise<ModelEndpoint>;
   updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null>;
@@ -521,26 +518,23 @@ export interface ProductStore {
 
   createTaskAtomically(input: AtomicTaskCreateInput): Promise<AtomicTaskCreateResult>;
   restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult>;
+  createTaskMessageAtomically(input: AtomicTaskMessageInput): Promise<AtomicTaskMessageResult>;
+  editTaskMessageAtomically(input: AtomicTaskMessageEditInput): Promise<AtomicTaskMessageEditResult>;
+  deleteTaskMessageAtomically(input: AtomicTaskMessageDeleteInput): Promise<AtomicTaskMessageDeleteResult>;
   updateTask(task: PersistedAgentTask): Promise<PersistedAgentTask>;
-  updateTaskStatusIfStarting(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
-  updateTaskStatusIfNonterminal(taskId: string, status: AgentTaskStatus, updatedAt: string): Promise<PersistedAgentTask | null>;
   listActiveTasks(): Promise<PersistedAgentTask[]>;
   listTasksForProject(projectId: string): Promise<PersistedAgentTask[]>;
   queryTasksForProject(projectId: string, query: TaskStoreListQuery): Promise<TaskStoreListPage>;
   findTask(id: string): Promise<PersistedAgentTask | null>;
   updateTaskTitle(taskId: string, title: string, updatedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
-  archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedAgentTask | null>;
-  deleteTaskData(taskId: string, deletedAt: string): Promise<{ task: PersistedAgentTask; releasedArtifactBytes: number } | null>;
-  listTaskStartIntentsDue(now: string, limit: number): Promise<PersistedAgentTask[]>;
-  claimTaskStart(input: TaskDeliveryClaimInput): Promise<PersistedAgentTask | null>;
-  reclaimTaskStart(input: TaskDeliveryReclaimInput): Promise<PersistedAgentTask | null>;
-  recordTaskStartReceipt(input: TaskStartReceiptInput): Promise<PersistedAgentTask | null>;
-  deferTaskStart(input: TaskDeliveryDeferInput): Promise<PersistedAgentTask | null>;
-  failTaskStart(input: TaskDeliveryFailureInput): Promise<PersistedAgentTask | null>;
+  archiveTask(taskId: string, archivedAt: string, auditEvent?: ProjectAuditEvent): Promise<SandboxGuardedDeletionResult<PersistedAgentTask>>;
+  beginTaskDeletion(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<SandboxGuardedDeletionResult<PersistedAgentTask>>;
+  purgeDeletedTaskData(taskId: string, idempotency?: CompleteTaskIdempotencyInput): Promise<boolean>;
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
+  findTaskIdempotencyByResource(input: TaskIdempotencyResourceLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean>;
   requestTaskSandboxRelease(input: TaskSandboxReleaseMutationInput): Promise<TaskSandboxReleaseMutationResult>;
-  completeTaskIdempotencyForResource(resourceId: string, responseStatus: number, responseBody: unknown, updatedAt: string): Promise<number>;
+  completeTaskIdempotencyForResource(input: CompleteTaskIdempotencyForResourceInput): Promise<number>;
   persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult>;
   readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null>;
   listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]>;
@@ -553,16 +547,12 @@ export interface ProductStore {
   createPendingTaskMessage(message: PersistedTaskMessage, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
   listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]>;
   findTaskMessage(id: string): Promise<PersistedTaskMessage | null>;
-  updatePendingTaskMessage(id: string, content: string, requestHash: string, updatedAt: string, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
-  deleteQueuedTaskMessage(id: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<PersistedTaskMessage | null>;
   listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]>;
   claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null>;
   reclaimTaskMessage(input: TaskDeliveryReclaimInput): Promise<PersistedTaskMessage | null>;
   recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null>;
   deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null>;
   failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
-  findTaskSummary(taskId: string): Promise<StoredTaskSummary | null>;
-  listTaskSummariesForProject(projectId: string): Promise<StoredTaskSummary[]>;
 }
 
 export interface AtomicTaskCreateInput {
@@ -572,28 +562,87 @@ export interface AtomicTaskCreateInput {
   reserveActive: boolean;
   runtimeState?: Record<string, unknown>;
   sandboxRun?: PersistedSandboxRunState;
+  auditEvent?: ProjectAuditEvent;
 }
 
 export type AtomicTaskCreateResult=
   | {kind:"created";task:PersistedAgentTask}
+  | {kind:"project_unavailable"}
   | {kind:"library_name_conflict"}
   | {kind:"library_not_found"}
   | {kind:"already_bound"}
   | {kind:"capacity_rejected"};
 
 export interface AtomicTaskSandboxRestartInput {
-  expectedReleasedRunId: string;
+  // Null is the first-Run case and is valid only while the Task has no current Run.
+  expectedReleasedRunId: string | null;
   task: PersistedAgentTask;
   runtimeState: Record<string, unknown>;
   sandboxRun: PersistedSandboxRunState;
-  interruptedAt: string;
+  reservedAt: string;
 }
 
 export type AtomicTaskSandboxRestartResult =
   | { kind: "restarted"; task: PersistedAgentTask }
-  | { kind: "existing_active"; task: PersistedAgentTask }
   | { kind: "capacity_rejected" }
   | { kind: "conflict" };
+
+export interface AtomicTaskMessageInput {
+  taskId: string;
+  expectedCurrentRunId: string | null;
+  message: PersistedTaskMessage;
+  idempotency: BeginTaskIdempotencyInput;
+  auditEvent: ProjectAuditEvent;
+  restart?: {
+    task: PersistedAgentTask;
+    runtimeState: Record<string, unknown>;
+    sandboxRun: PersistedSandboxRunState;
+    reservedAt: string;
+  };
+}
+
+export type AtomicTaskMessageResult =
+  | { kind: "created"; task: PersistedAgentTask; message: PersistedTaskMessage; restarted: boolean }
+  | { kind: "capacity_rejected" }
+  | { kind: "hash_mismatch" }
+  | { kind: "in_progress" }
+  | { kind: "replay"; responseStatus: number; responseBody: unknown }
+  | { kind: "conflict" };
+
+interface AtomicTaskMessageMutationInput {
+  taskId: string;
+  messageId: string;
+  idempotency: BeginTaskIdempotencyInput;
+  auditEvent: ProjectAuditEvent;
+  responseStatus: number;
+  responseBody: unknown;
+}
+
+export interface AtomicTaskMessageEditInput extends AtomicTaskMessageMutationInput {
+  content: string;
+  requestHash: string;
+  expectedUpdatedAt: string;
+  updatedAt: string;
+  interactionChange: TaskInteractionChangeInput;
+}
+
+export interface AtomicTaskMessageDeleteInput extends AtomicTaskMessageMutationInput {
+  deletedAt: string;
+}
+
+type AtomicTaskMessageMutationReplay =
+  | { kind: "hash_mismatch" }
+  | { kind: "in_progress" }
+  | { kind: "replay"; responseStatus: number; responseBody: unknown }
+  | { kind: "conflict" };
+
+export type AtomicTaskMessageEditResult =
+  | { kind: "updated"; message: PersistedTaskMessage }
+  | AtomicTaskMessageMutationReplay;
+
+export type AtomicTaskMessageDeleteResult =
+  | { kind: "deleted"; message: PersistedTaskMessage }
+  | AtomicTaskMessageMutationReplay;
 
 export interface PersistTaskArtifactProjectionInput {
   projectId: string;
@@ -627,15 +676,13 @@ export interface TaskDeliveryReclaimInput extends TaskDeliveryClaimInput {
   expectedClaimToken: string;
 }
 
-export interface TaskStartReceiptInput {
+export interface TaskMessageReceiptInput {
   id: string;
   claimToken: string;
   receipt: PersistedDeliveryReceipt;
   timelineCursor: string | null;
   updatedAt: string;
 }
-
-export type TaskMessageReceiptInput = TaskStartReceiptInput;
 
 export interface TaskDeliveryDeferInput {
   id: string;
@@ -653,7 +700,6 @@ export interface TaskDeliveryFailureInput {
   updatedAt: string;
 }
 
-export interface StoredTaskSummary { taskId: string; artifactCount: number; updatedAt: string; }
 
 export type TaskIdempotencyOperation = "create" | "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
@@ -686,6 +732,31 @@ export interface CompleteTaskIdempotencyInput extends TaskIdempotencyScope {
   updatedAt: string;
 }
 
+export interface CompleteTaskIdempotencyForResourceInput {
+  projectId: string;
+  operation: TaskIdempotencyOperation;
+  resourceId: string;
+  responseStatus: number;
+  responseBody: unknown;
+  updatedAt: string;
+}
+
+export interface TaskMessageIdempotencyEnvelope {
+  kind: "task_message";
+  messageId: string;
+  taskId: string;
+  projectId: string;
+  actorId: string;
+}
+
+export interface TaskIdempotencyResourceLookupInput {
+  actorId: string;
+  operation: TaskIdempotencyOperation;
+  key: string;
+  requestHash: string;
+  resourceId: string;
+}
+
 export interface ReserveProjectProviderSettlementInput {
   id: string;
   projectId: string;
@@ -701,14 +772,14 @@ export interface ReserveProjectProviderSettlementInput {
 export interface ProjectResourceUsageAdjustment {
   projectId: string;
   delta: Pick<ProjectResourceUsage, "activeTasks" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes">;
-  limit?: ProjectAlert["type"];
+  limit?: ProjectAlertType;
   updatedAt: string;
 }
 
 export interface ProjectProviderUsageSettlement {
   usage: ProjectResourceUsage;
   endpointId: string | null;
-  exceededLimits: Array<Extract<ProjectAlert["type"], "provider_tokens_limit" | "provider_cost_limit">>;
+  exceededLimits: Array<Extract<ProjectAlertType, "provider_tokens_limit" | "provider_cost_limit">>;
 }
 
 export interface LegacyExternalIdentityBinding {

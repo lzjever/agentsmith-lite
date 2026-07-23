@@ -47,7 +47,6 @@ export interface CreateApplicationServicesInput {
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   taskDeliveryLeaseMs?: number;
-  taskMaintenanceLeaseMs?: number;
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
 }
@@ -82,7 +81,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const sandboxLifecyclePort = input.liveSandbox?.port ?? input.sandboxLifecyclePort;
   let tasks: TaskService;
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
-    dataRoot: input.dataRoot,
     namespace,
     ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {})
   });
@@ -146,11 +144,9 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
       const workspaceList = await workspaces.listWorkspaces(userId);
       const projectIds = workspaceList.flatMap((workspace) => workspace.projects.map((project) => project.id));
       const endpointGroups = await Promise.all(projectIds.map((projectId) => input.store.listEndpointsForProject(projectId)));
-      const taskGroups = await Promise.all(projectIds.map((projectId) => input.store.listTasksForProject(projectId)));
       return {
         workspaces: workspaceList,
-        endpoints: endpointGroups.flat(),
-        tasks: taskGroups.flat()
+        endpoints: endpointGroups.flat()
       };
     }
   };

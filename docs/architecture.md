@@ -8,7 +8,7 @@ Postgres is the product store when `POSTGRES_APP_URL` is set; only local dry-run
 
 The application projector is the single conversation read-model owner. It reads canonical Botified history and product message state, redacts display text, correlates stable Botified identities, and upserts typed `TaskInteractionItem` revisions. The Web receives only the projected interaction snapshot, message receipts, capabilities, and SSE changes; it does not parse NDJSON, merge lifecycle events, or infer business state.
 
-`task_interaction_changes` is the durable interaction log. Each mutation atomically persists interaction revisions, correlation fields, source cursor/history state, and any task lifecycle update. Source identity and interaction revision uniqueness make repeated timeline reads idempotent and preserve in-place updates through process recovery.
+`task_interaction_changes` is the durable interaction log. Each mutation atomically persists interaction revisions, correlation fields, source cursor/history state, and incremental artifact projections. Source identity and interaction revision uniqueness make repeated timeline reads idempotent and preserve in-place updates through process recovery.
 
 Botified history is the canonical input. The server resumes from a safe source cursor, recovers complete history by paging backward then forward when needed, and records `historyStatus: gap` when an earlier boundary is unavailable. A gap is surfaced to the client; it is never hidden by a tail-only reset or by advancing a cursor past unavailable history.
 
@@ -17,6 +17,14 @@ The runtime config enables Botified LLM text preview. The server relays it as tr
 `abortTurn` is a current-turn operation through Botified and leaves the Task, Sandbox, and detached work alive. Releasing a Sandbox is a separate, unconditional operation initiated only after user confirmation. It stops all work in the current Run and deletes that Run's app-owned Kubernetes resources while retaining the Task conversation, Botified session, and bound File Library. The next message or Terminal open creates a new Run for the same Task; completed history is retained and work interrupted by release is not resumed. Stoppable background work remains a typed interaction operation.
 
 Each Sandbox Run records its own ready and released timestamps and is settled once in Usage. Idle allocation time is counted because the Sandbox remains allocated until the user releases it.
+
+Task, Turn, and Run have separate ownership. A Task stores durable identity,
+ownership, endpoint, immutable File Library binding, archive state, and its
+current Run ID. Current Turn is derived from durable message delivery and
+Botified state. `sandbox_runs` owns the only compute lifecycle:
+`starting`, `active`, `release_requested`, `failed`, or `released`. Public Task
+detail and list responses expose only the `lifecycle`, `currentTurn`, and
+`sandboxState` projections plus server-calculated capabilities.
 
 ## Secrets
 

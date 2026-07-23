@@ -340,7 +340,8 @@ const auditActionLabels: Record<(typeof PROJECT_AUDIT_ACTIONS)[number], string> 
   "membership.add": "Added project member", "membership.change": "Changed project member", "membership.remove": "Removed project member",
   "provider.request": "Called model provider",
   "task.create": "Created task", "task.edit": "Edited task", "task.archive": "Archived task", "task.delete": "Deleted task",
-  "task.message.create": "Sent task message", "task.message.edit": "Edited task message", "task.message.delete": "Deleted task message", "task.cancel": "Cancelled task", "task.completed": "Task completed", "task.failed": "Task failed", "task.expired": "Task expired", "task.cleaned": "Cleaned task resources",
+  "task.message.create": "Sent task message", "task.message.edit": "Edited task message", "task.message.delete": "Deleted task message",
+  "task.historical_terminal": "Historical task terminal",
   "artifact.project": "Projected task artifact", "sandbox.started": "Started sandbox", "sandbox.failed": "Sandbox failed", "sandbox.release_requested": "Requested sandbox release", "sandbox.released": "Released sandbox",
   "file.upload": "Uploaded file", "file.delete": "Deleted file", "file.quota": "Reached file quota",
   "alert.resolve": "Resolved alert", "alert.dismiss": "Dismissed alert", "alert.rule.create": "Created alert rule", "alert.rule.update": "Updated alert rule", "alert.rule.delete": "Deleted alert rule", "alert.acknowledge": "Acknowledged alert", "alert.silence": "Silenced alert"
@@ -796,10 +797,10 @@ const auditDetailLabels: Record<string, string> = {
   endpointId: "Endpoint ID", alertRuleId: "Alert rule ID", alertId: "Alert ID", taskId: "Task ID", runId: "Run ID",
   releaseReason: "Release reason", messageId: "Message ID", deliveryStatus: "Delivery status", credentialVersion: "Credential version",
   healthStatus: "Health status", errorCategory: "Error category", modelCount: "Model count", filePath: "File path", bytes: "Bytes",
-  mediaType: "Media type", metric: "Metric", current: "Current", limit: "Limit", windowSeconds: "Window seconds",
+  mediaType: "Media type", metric: "Metric", current: "Current", limit: "Limit", windowSeconds: "Window seconds", historicalAction: "Original action",
 };
 function auditDetailLabel(key:string):string{return auditDetailLabels[key]??humanizeAuditToken(key)}
-function auditDetailValue(key:string,value:string|number):string{if(key==="releaseReason")return value==="legacy_cleaned"?"Legacy cleanup":humanizeAuditToken(String(value));return String(value)}
+function auditDetailValue(key:string,value:string|number):string{if(key==="releaseReason"||key==="historicalAction")return humanizeAuditToken(String(value));return String(value)}
 
 function browserQuery(): URLSearchParams {
   return new URLSearchParams(

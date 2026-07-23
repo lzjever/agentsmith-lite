@@ -13,7 +13,7 @@ export function TaskRunStatus({ currentTurn, sandboxState, capabilities, abortin
     try { await onAbort(); }
     catch (reason) { setAbortError(reason instanceof Error ? reason.message : "Current turn could not be stopped."); }
   }
-  const presentation = runStatePresentation(currentTurn, sandboxState);
+  const presentation = taskStatePresentation(currentTurn, sandboxState);
   const Icon = presentation.icon;
   return <div className="shrink-0 border-b border-border bg-surface-low px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><Icon role="img" aria-label={presentation.iconLabel} className={`size-4 shrink-0 ${presentation.iconClass} ${presentation.spinning ? "animate-spin" : ""}`} /><p className="text-sm text-secondary">{presentation.label}</p></div>{capabilities.abortTurn ? <AstryxButton label={aborting ? "Stopping..." : "Stop current turn"} variant="ghost" size="sm" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} /> : null}</div>{capabilities.abortTurn && abortError ? <p className="mt-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{abortError}</p> : null}</div>;
 }
@@ -32,9 +32,9 @@ export function TaskPreviewNotice({ message, onRetry }: { message: string; onRet
   return <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border bg-surface-low px-4 py-3 text-sm text-secondary" role="status"><span className="flex items-start gap-2"><CircleAlert className="mt-0.5 size-4 shrink-0" />{message}</span><AstryxButton label="Retry preview" variant="ghost" size="sm" onClick={onRetry} /></div>;
 }
 
-function runStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
+function taskStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
   if (sandboxState.state === "released") return { icon:CircleCheck, iconLabel:"Sandbox released", iconClass:"text-icon-default", label:"Sandbox released", spinning:false };
-  if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:"Sandbox is unavailable", spinning:false };
+  if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:sandboxState.cause?.message??"Sandbox is unavailable", spinning:false };
   if (sandboxState.state === "release_requested") return { icon:Loader2, iconLabel:"Sandbox release requested", iconClass:"text-icon-default", label:"Releasing sandbox", spinning:true };
   if (sandboxState.state === "starting") return { icon:Loader2, iconLabel:"Sandbox starting", iconClass:"text-icon-default", label:"Starting sandbox", spinning:true };
   if (currentTurn.state === "ready") return { icon:CircleDot, iconLabel:"Task ready", iconClass:"text-icon-default", label:"Ready for a message", spinning:false };

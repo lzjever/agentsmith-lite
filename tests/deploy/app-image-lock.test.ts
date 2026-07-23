@@ -39,14 +39,12 @@ describe("deploy app images.lock", () => {
     const job = manifests.find((manifest) => manifest.kind === "Job" && manifest.metadata.name === "agentsmith-lite-schema-bootstrap") as
       | JobResource
       | undefined;
-    const upgradeJob=manifests.find((manifest)=>manifest.kind==="Job"&&manifest.metadata.name==="agentsmith-lite-project-files-upgrade") as JobResource|undefined;
     const configMap = manifests.find((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "agentsmith-lite-config") as
       | ConfigMapResource
       | undefined;
 
     assert.equal(deployment?.spec.template.spec.containers[0]?.image, appDigestRef);
     assert.equal(job?.spec.template.spec.containers[0]?.image, appDigestRef);
-    assert.equal(upgradeJob?.spec.template.spec.containers[0]?.image,appDigestRef);
     assert.equal(configMap?.data.BOTIFIED_RUNNER_IMAGE, runnerDigestRef);
     assert.equal(configMap?.data.APP_PUBLIC_BASE_URL, "https://agentsmith.example.test/");
   });
@@ -179,11 +177,10 @@ describe("deploy app images.lock", () => {
       appEnvFile,
       [
         "AGENTSMITH_LITE_SANDBOX_MODE=live",
-        "AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI=https://models.example.test/v1",
         ""
       ].join("\n")
     );
-    writeFileSync(appSecretsFile, "AGENTSMITH_LITE_MODEL_API_KEY_OPENAI=sk-overlay-model-key\n");
+    writeFileSync(appSecretsFile, "APP_CREDENTIAL_ENCRYPTION_KEY=app-credential-key\n");
 
     const result = spawnSync("bash", [
       "scripts/deploy/render.sh",
@@ -214,8 +211,7 @@ describe("deploy app images.lock", () => {
     assert.match(manifest, /AGENTSMITH_LITE_SANDBOX_MODE: "live"/);
     assert.match(manifest, /BOTIFIED_RUNNER_IMAGE: "agentsmith-lite\/botified-runner:dev"/);
     assert.doesNotMatch(manifest, /registry\.example\.test\/agentsmith\/botified-runner/);
-    assert.match(manifest, /AGENTSMITH_LITE_MODEL_BASE_URL_OPENAI: "https:\/\/models\.example\.test\/v1"/);
-    assert.match(manifest, /AGENTSMITH_LITE_MODEL_API_KEY_OPENAI: "sk-overlay-model-key"/);
+    assert.match(manifest, /APP_CREDENTIAL_ENCRYPTION_KEY: "app-credential-key"/);
     assert.match(manifest, /POSTGRES_APP_URL: "postgresql:\/\/app:secret@db\/agentsmith"/);
     assert.match(manifest, /AUTH_MODE: "oidc"/);
     assert.match(manifest, /OIDC_CLIENT_SECRET: "oidc-client-secret"/);

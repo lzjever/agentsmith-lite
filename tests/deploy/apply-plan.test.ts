@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { createAppDeployPlan, formatKubectlCommand } from "../../packages/sandbox-controller/src/appDeployPlan.js";
 
 describe("deploy apply plan", () => {
-  it("stops API, migrates, upgrades Project files, then resumes workloads", () => {
+  it("stops API, migrates, then resumes workloads", () => {
     const plan = createAppDeployPlan({
       out: "out/manifests",
       timeout: "180s",
@@ -15,18 +15,15 @@ describe("deploy apply plan", () => {
     });
 
     const commands=plan.map((command)=>command.args.slice(6));
-    assert.deepEqual(commands.slice(0,8),[
+    assert.deepEqual(commands.slice(0,7),[
       ["delete","deployment/agentsmith-lite-api","--ignore-not-found"],
       ["delete","pod","--selector=app.kubernetes.io/component=api","--ignore-not-found","--wait=true","--timeout=180s"],
       ["delete","job/agentsmith-lite-schema-bootstrap","--ignore-not-found"],
-      ["delete","job/agentsmith-lite-project-files-upgrade","--ignore-not-found"],
       ["apply","-f","out/manifests","--selector","agentsmith-lite.io/deploy-phase=base"],
       ["apply","-f","out/manifests","--selector","agentsmith-lite.io/deploy-phase=migration"],
       ["wait","--for=condition=complete","job/agentsmith-lite-schema-bootstrap","--timeout=180s"],
-      ["apply","-f","out/manifests","--selector","agentsmith-lite.io/deploy-phase=upgrade"]
+      ["apply","-f","out/manifests","--selector","agentsmith-lite.io/deploy-phase=workload"]
     ]);
-    assert.deepEqual(commands[8],["wait","--for=condition=complete","job/agentsmith-lite-project-files-upgrade","--timeout=180s"]);
-    assert.deepEqual(commands[9],["apply","-f","out/manifests","--selector","agentsmith-lite.io/deploy-phase=workload"]);
     assert.deepEqual(commands.slice(-2),[
       ["rollout","status","deploy/agentsmith-lite-api","--timeout=180s"],
       ["rollout","status","deploy/agentsmith-lite-web","--timeout=180s"]
@@ -44,7 +41,6 @@ describe("deploy apply plan", () => {
     const plan = createAppDeployPlan({ out: "out/manifests", env: {} });
 
     assert.equal(plan.every((command)=>command.args.includes("--namespace")&&command.args.includes("agentsmith")),true);
-    assert.equal(plan.some((command)=>command.args.some((arg)=>arg.endsWith("agentsmith-lite-project-files-upgrade"))),true);
   });
 
   it("does not include forbidden kubectl surfaces in the apply plan", () => {

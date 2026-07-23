@@ -91,13 +91,15 @@ Non-2xx responses raise `BotifiedHttpError` with the HTTP status, Botified error
 
 ## Task Service Orchestration
 
-P3 wires task creation to the Botified port. By default this remains local-development friendly: `TaskService` creates redacted dry-run sandbox resources and sends the user prompt through the injected Botified client without resolving model credentials or talking to Kubernetes.
+Task creation and later messages use the same persistent Botified session derived
+from `taskId`. Local dry-run uses the injected Botified client without resolving
+model credentials or talking to Kubernetes.
 
 When live sandbox mode is explicitly configured, `TaskService` resolves the endpoint's OpenAI-compatible credential binding, checks the normalized credential base URL against the endpoint base URL, persists non-secret sandbox run state, materializes the per-task Secret and Botified config in memory, applies the six fenced Kubernetes resources, waits for the Pod readiness probe with a bounded poll loop, and only then posts the prompt. Startup failures before prompt submission mark the Run `failed`, persist its release intent, and trigger one scoped resource-removal pass.
 
 `TaskService` derives the per-task service key from the server session secret plus task/run identity. Live startup requires `APP_SESSION_SECRET` to be explicitly set to a non-default value; the development fallback is refused in live mode. The key is never written to ProductStore, task JSON, interaction changes, artifacts, or docs. It exists only in memory for Botified HTTP calls and, in live mode, in the Kubernetes Secret apply body.
 
-The `sandbox_runtime_state` JSON document stores only non-secret runtime metadata: Botified base URL, one timeline resume cursor, and sync timestamps. The `sandbox_run_state` JSON document stores resource identity, phase, cleanup status, and non-secret runtime paths. The model API key is not stored in task JSON, interaction changes, artifacts, runtime docs, run state, or ConfigMaps; it is only materialized into the live Secret apply body.
+The `sandbox_runtime_state` JSON document stores only non-secret runtime metadata: Botified base URL, one timeline resume cursor, and sync timestamps. The relational `sandbox_runs` row stores resource identity, the final Run state, safe failure cause, cleanup claim, fencing, resource sizing, and timestamps. The model API key is not stored in Task rows, interaction changes, artifacts, runtime docs, Run rows, or ConfigMaps; it is only materialized into the live Secret apply body.
 
 When `sandbox_runtime_state` is missing, `TaskService` rebuilds the non-secret Botified base URL from sandbox run metadata, reads `GET /v1/state`, stores only the safe `timeline_cursor`, and resumes timeline sync from that cursor.
 

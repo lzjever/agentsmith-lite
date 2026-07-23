@@ -3,7 +3,7 @@ import { ForbiddenError, NotFoundError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src/validation.js";
-import type { ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
+import type { CompleteTaskIdempotencyInput, ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 
@@ -63,11 +63,11 @@ export class SettingsService {
       }
     });
   }
-  async runIdempotentProjectDeletion(actorId:string,projectId:string,key:string,run:()=>Promise<{deleted:true}>):Promise<{deleted:true}>{
-    return this.runIdempotentMutation(actorId,projectId,"project.delete",key,{projectId},projectId,async()=>{
-      try{return await run();}
+  async runIdempotentProjectDeletion(actorId:string,projectId:string,key:string,run:(completion:CompleteTaskIdempotencyInput)=>Promise<{deleted:true}>):Promise<{deleted:true}>{
+    return runIdempotentMutation({store:this.store,actorId,scopeId:projectId,operation:"project.delete",key,request:{projectId},resourceId:projectId,failureMessage:"Settings operation failed",completeServerErrors:false,run:async(_resourceId,context)=>{
+      try{return await run(context.completion(200,{deleted:true}));}
       catch(error){if(await this.store.findProject(projectId))await this.auditProjectLifecycle(projectId,actorId,"project.delete","rejected");throw error;}
-    });
+    }});
   }
   async auditProjectLifecycle(projectId:string,actorId:string,action:ProjectAuditAction,status:"accepted"|"rejected"="accepted"){await this.store.appendProjectAuditEvent({id:newId("audit"),projectId,actorId,action,status,resourceKind:"project",resourceId:projectId,detail:{},createdAt:nowIso()});}
   private async requireWorkspaceAdmin(userId: string, workspaceId: string): Promise<Workspace> {

@@ -59,7 +59,7 @@ describe("postgres adapter ports", () => {
     assert.match(migration.sql,/delete from agent_task_artifacts/i);
     assert.match(migration.sql,/foreign key \(file_library_id, workspace_id, project_id\)[\s\S]*references file_libraries\(id, workspace_id, project_id\)[\s\S]*on delete restrict/i);
     assert.match(migration.sql,/deleted_at is null and file_library_id is not null[\s\S]*deleted_at is not null and file_library_id is null/i);
-    assert.match(migration.sql,/unique index agent_tasks_file_library_active_unique[\s\S]*where deleted_at is null/i);
+    assert.match(migration.sql,/unique index agent_tasks_file_library_active_unique[\s\S]*where deleted_at is null and file_library_id is not null/i);
     assert.match(migration.sql,/drop column if exists input_paths/i);
     assert.match(migration.sql,/drop column if exists source_task_id/i);
     assert.doesNotMatch(migration.sql,/\btask_follow_ups\b/i);

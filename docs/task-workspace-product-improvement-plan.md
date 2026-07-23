@@ -645,13 +645,9 @@ The SQL schema/data transition:
    partial unique binding constraint, then delete obsolete columns and statuses
    when the application switches to the final contract.
 
-Run the JuiceFS content transition once with the API scaled to zero. One
-upgrade-only Kubernetes Job using the application image mounts the database
-Secret and existing JuiceFS PVC, creates or locates the deterministic `Project
-files` Library row for each Project, and atomically renames the legacy `files/`
-directory to that Library root on the same volume. The Job is idempotent from
-source path, destination path, and Library row state, and fails fast if source
-and destination both contain data or their identities conflict.
+The local-development cutover discards the obsolete fixed Project files layout.
+File Libraries and their Library-scoped roots are the only supported storage
+model.
 
 Do not keep dual reads, dual writes, a compatibility read, backfill worker,
 migration ledger, report, legacy API field, or permanent migration path.
@@ -670,9 +666,6 @@ migration sequence and one final contract; do not stage adapters.
 - Add Library persistence, uniqueness, authorization, synchronous JuiceFS
   directory ownership, CRUD, and Library-scoped file APIs.
 - Copy and adapt the original Library selector and Files browser.
-- Prepare the app-stopped upgrade Job for the one-time Project files move.
-- Keep the fixed Project `files/` API/client until the coordinated Task UI
-  switchover in Phase 2; do not create another compatibility path.
 
 Focused checks: create/list/rename/delete authorization; bound/non-empty delete
 rejection; binary upload/download; traversal/symlink rejection; two Libraries

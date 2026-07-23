@@ -3,20 +3,20 @@ import path from "node:path";
 import type { Project, Workspace } from "../../contracts/src/api.js";
 import { ForbiddenError, NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { nowIso } from "../../domain/src/ids.js";
-import type { ProductStore } from "../../ports/src/store.js";
+import type { CompleteTaskIdempotencyInput, ProductStore } from "../../ports/src/store.js";
 import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
 import { withProjectFileLock } from "./fileService.js";
 
 export class DeletionService {
   constructor(private readonly store: ProductStore, private readonly dataRoot: string) {}
 
-  async deleteProject(userId: string, projectId: string): Promise<{ deleted: true }> {
+  async deleteProject(userId: string, projectId: string, completion?: CompleteTaskIdempotencyInput): Promise<{ deleted: true }> {
     return withFileLibraryLifecycleLock(projectId, async () => {
       const project = await this.requireProjectOwner(userId, projectId);
       const deletion = await this.store.beginProjectDeletion(project.id, nowIso(), userId);
       if(deletion.kind==="sandbox_not_released")throw sandboxReleaseRequiredError();
       if(deletion.kind==="not_found_or_forbidden")throw await this.projectDeletionConflict(userId,project.id);
-      await this.finishProject(deletion.value);
+      await this.finishProject(deletion.value,completion);
       return { deleted: true };
     });
   }
@@ -36,13 +36,12 @@ export class DeletionService {
     if (!(await this.store.deleteWorkspaceAfterProjects(workspace.id))) throw new ProductError("Workspace deletion is still pending", 409);
   }
 
-  private async finishProject(project: Project): Promise<void> {
+  private async finishProject(project: Project, completion?: CompleteTaskIdempotencyInput): Promise<void> {
     const root = this.projectRoot(project);
-    if(!(await this.store.deleteProjectDependenciesAndProject(project.id)))throw new ProductError("Project deletion preparation is still pending",409);
     await withProjectFileLock(root, async () => {
       await rm(root, { recursive: true, force: true, maxRetries: 2 });
     });
-    if(!(await this.store.deleteProjectAfterDependencies(project.id)))throw new ProductError("Project deletion is still pending",409);
+    if(await this.store.finalizeProjectDeletion(project.id,completion)==="not_ready")throw new ProductError("Project deletion is still pending",409);
   }
 
   private async requireProjectOwner(userId: string, projectId: string): Promise<Project> {

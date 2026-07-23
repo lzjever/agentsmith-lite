@@ -30,10 +30,18 @@ describe("Phase 2 task workspace API", () => {
 
   it("accepts exactly create_new or use_existing and returns the stable binding", async () => {
     const created = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "new", fileLibrary: { mode: "create_new", name: "New workspace" } }, "task-new");
-    assert.equal(typeof created.fileLibraryId, "string");
+    const presentationKeys=["capabilities","currentTurn","lifecycle","sandboxState","task"];
+    assert.deepEqual(Object.keys(created).sort(),presentationKeys);
+    assert.equal(typeof created.task.fileLibraryId, "string");
+    const direct=await json("GET",`/api/v1/tasks/${created.task.id}`);
+    const detail=await json("GET",`/api/v1/tasks/${created.task.id}/detail`);
+    const listed=await json("GET",`/api/v1/projects/${projectId}/tasks`);
+    const edited=await json("PATCH",`/api/v1/tasks/${created.task.id}`,{title:"Renamed"},"task-edit");
+    for(const value of [direct,detail,listed.items[0],edited])assert.deepEqual(Object.keys(value).sort(),presentationKeys);
+    assert.equal(edited.task.title,"Renamed");
     const library = await json("POST", `/api/v1/projects/${projectId}/file-libraries`, { name: "Existing" });
     const existing = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "existing", fileLibrary: { mode: "use_existing", id: library.id } }, "task-existing");
-    assert.equal(existing.fileLibraryId, library.id);
+    assert.equal(existing.task.fileLibraryId, library.id);
     await assertTaskError({endpointId,prompt:"bound",fileLibrary:{mode:"use_existing",id:library.id}},"task-bound",409,"file_library_already_bound");
     await assertTaskError({endpointId,prompt:"missing",fileLibrary:{mode:"use_existing",id:"library_missing"}},"task-missing",404,"file_library_not_found");
     await assertTaskError({endpointId,prompt:"name",fileLibrary:{mode:"create_new",name:"New workspace"}},"task-name-conflict",409,"file_library_name_conflict");
@@ -48,25 +56,26 @@ describe("Phase 2 task workspace API", () => {
 
   it("removes fixed files, task inputs, retry, and duplicate routes and rejects terminal messages", async () => {
     const task = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "terminal", fileLibrary: { mode: "create_new", name: "Terminal workspace" } }, "task-terminal");
+    const taskRecord=task.task;
     for (const [method, pathname] of [
       ["GET", `/api/v1/projects/${projectId}/files`],
-      ["GET", `/api/v1/tasks/${task.id}/inputs`],
-      ["POST", `/api/v1/tasks/${task.id}/retry`],
-      ["POST", `/api/v1/tasks/${task.id}/duplicate`]
+      ["GET", `/api/v1/tasks/${taskRecord.id}/inputs`],
+      ["POST", `/api/v1/tasks/${taskRecord.id}/retry`],
+      ["POST", `/api/v1/tasks/${taskRecord.id}/duplicate`]
     ] as const) assert.equal((await request(method, pathname, method === "POST" ? {} : undefined, true, crypto.randomUUID())).status, 404);
-    const message = await request("POST", `/api/v1/tasks/${task.id}/messages`, { content: "continue" }, true, "terminal-message");
+    const message = await request("POST", `/api/v1/tasks/${taskRecord.id}/messages`, { content: "continue" }, true, "terminal-message");
     assert.equal(message.status, 409);
-    const archived=await json("POST",`/api/v1/tasks/${task.id}/archive`,{},"archive-terminal");
-    assert.ok(archived.archivedAt);
-    let library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===task.fileLibraryId);
-    assert.equal(library.boundTask.id,task.id);
-    const upload=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${task.fileLibraryId}/files?path=kept.txt`,{method:"PUT",headers:{cookie,"x-csrf-token":csrf,"idempotency-key":"kept-upload","content-type":"application/octet-stream"},body:"keep me"});
+    const archived=await json("POST",`/api/v1/tasks/${taskRecord.id}/archive`,{},"archive-terminal");
+    assert.equal(archived.lifecycle.state,"archived");
+    let library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===taskRecord.fileLibraryId);
+    assert.equal(library.boundTask.id,taskRecord.id);
+    const upload=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${taskRecord.fileLibraryId}/files?path=kept.txt`,{method:"PUT",headers:{cookie,"x-csrf-token":csrf,"idempotency-key":"kept-upload","content-type":"application/octet-stream"},body:"keep me"});
     assert.equal(upload.status,200,await upload.text());
     assert.equal((await json("GET",`/api/v1/projects/${projectId}/usage`)).usage.projectFileBytes,7);
-    await json("DELETE",`/api/v1/tasks/${task.id}`,undefined,"delete-terminal");
-    library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===task.fileLibraryId);
+    await json("DELETE",`/api/v1/tasks/${taskRecord.id}`,undefined,"delete-terminal");
+    library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===taskRecord.fileLibraryId);
     assert.equal(library.boundTask,null);
-    assert.equal(await (await request("GET",`/api/v1/projects/${projectId}/file-libraries/${task.fileLibraryId}/files/download?path=kept.txt`)).text(),"keep me");
+    assert.equal(await (await request("GET",`/api/v1/projects/${projectId}/file-libraries/${taskRecord.fileLibraryId}/files/download?path=kept.txt`)).text(),"keep me");
     assert.equal((await json("GET",`/api/v1/projects/${projectId}/usage`)).usage.projectFileBytes,7);
   });
 
