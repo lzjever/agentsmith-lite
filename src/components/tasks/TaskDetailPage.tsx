@@ -1,6 +1,6 @@
 "use client";
 
-import { Archive, ArrowLeft, CircleAlert, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
+import { Archive, ArrowLeft, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
 import { Button as AstryxButton, IconButton, Tab, TabList } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -197,9 +197,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const archivedNotice = lifecycle.state === "archived" ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3"><Archive className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">This task is archived. Its conversation, files, and artifacts remain available.</p></div> : null;
   const sandboxNotice = sandboxState.state === "released"
     ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3" role="status"><CircleCheck className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">Sandbox resources were released. Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available.</p></div>
-    : sandboxState.state === "failed"
-      ? <div className="flex items-start gap-3 border border-error/30 bg-error/10 px-4 py-3" role="alert"><CircleAlert className="mt-0.5 size-4 shrink-0 text-error" /><p className="text-sm text-secondary">This task's sandbox is unavailable. Conversation history and File Library files remain available.</p></div>
-      : null;
+    : null;
 
   const releaseDialog = <ConfirmationDialog open={releaseOpen} onOpenChange={setReleaseOpen} title="Release sandbox?" description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." confirmText="Release sandbox" onConfirm={releaseSandbox} errorContext="Sandbox could not be released" />;
 
@@ -220,7 +218,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     {taskRefreshError}
     {archivedNotice}
     {sandboxNotice}
-    <TabList value={mode} onChange={selectWorkspaceMode} aria-label="Task workspace views" hasDivider className="shrink-0 flex-wrap">
+    <TabList value={mode} onChange={selectWorkspaceMode} aria-label="Task workspace views" hasDivider className="shrink-0 flex-wrap gap-2">
       <Tab value="conversation" label="Conversation" />
       <Tab value="terminal" label="Terminal" icon={<TerminalSquare size={14} />} aria-disabled={terminalDisabled} />
       {showArtifacts ? <Tab value="artifacts" label="Artifacts" className="xl:hidden" /> : null}
