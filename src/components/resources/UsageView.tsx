@@ -2,6 +2,7 @@
 
 import { Selector } from "@astryxdesign/core";
 import type { ProjectUsageOverview, ProjectUsageWindow } from "../../lib/api/client";
+import { formatLocalDate, formatLocalTime } from "../../lib/format/date";
 
 const labels = { activeTasks: "Active tasks", providerRequests: "Provider requests", providerTokens: "Provider tokens", providerCost: "Provider cost", projectFileBytes: "Project file storage" } as const;
 
@@ -20,9 +21,8 @@ export function UsageView({ overview, selectedEndpointId, onEndpointChange }: { 
 
 function UsageTotal({ label, value }: { label: string; value: string }) { return <div><dt className="type-caption text-tertiary">{label}</dt><dd className="mt-1 text-lg text-foreground">{value}</dd></div>; }
 function formatMetric(metric: keyof typeof labels, value: number): string { return metric === "providerCost" ? formatCost(value) : metric === "projectFileBytes" ? formatBytes(value) : formatNumber(value); }
-function formatNumber(value: number): string { return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value); }
-function formatCost(value: number): string { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(value); }
+function formatNumber(value: number): string { return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value); }
+function formatCost(value: number): string { return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(value); }
 function formatBytes(value: number): string { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / (1024 * 1024)).toFixed(1)} MiB`; }
-function formatDate(value: string): string { return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value)); }
-function formatUsageWindow(window: ProjectUsageWindow): string { return window.kind === "current_gauge" ? "Current state" : window.kind === "rolling" ? window.resetAt ? `${duration(window.windowSeconds)} rolling · resets ${new Intl.DateTimeFormat("en-US",{timeStyle:"short"}).format(new Date(window.resetAt))}` : `${duration(window.windowSeconds)} rolling · no usage in window` : `Project lifetime · started ${formatDate(window.startedAt)}`; }
+function formatUsageWindow(window: ProjectUsageWindow): string { return window.kind === "current_gauge" ? "Current state" : window.kind === "rolling" ? window.resetAt ? `${duration(window.windowSeconds)} rolling · resets ${formatLocalTime(window.resetAt)}` : `${duration(window.windowSeconds)} rolling · no usage in window` : `Project lifetime · started ${formatLocalDate(window.startedAt)}`; }
 function duration(seconds:number){if(seconds%86400===0)return `${seconds/86400}d`;if(seconds%3600===0)return `${seconds/3600}h`;return `${seconds}s`;}

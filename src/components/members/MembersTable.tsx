@@ -4,6 +4,7 @@ import { Badge, Button, IconButton, Selector, Table, TableBody, TableCell, Table
 import { Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { MemberRole, ProjectMember } from "../../lib/api/client";
+import { formatLocalDate } from "../../lib/format/date";
 import { memberIdentityLabel, memberRoleLabel } from "./members-page-utils";
 
 const editableRoles: Exclude<MemberRole, "owner">[] = ["admin", "member", "viewer"];
@@ -31,7 +32,7 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
           {visible.map((member) => <TableRow key={member.userId}>
             <TableCell><MemberIdentity member={member} /></TableCell>
             <TableCell><MemberRoleCell member={member} canManage={canManage} busy={mutationBusy} roleError={roleError} onDismissRoleError={onDismissRoleError} onChangeRole={onChangeRole} /></TableCell>
-            <TableCell><span className="text-sm text-secondary">{formatJoined(member.createdAt)}</span></TableCell>
+            <TableCell><span className="text-sm text-secondary">{formatLocalDate(member.createdAt)}</span></TableCell>
             <TableCell><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></TableCell>
           </TableRow>)}
         </TableBody>
@@ -42,7 +43,7 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
         <MemberIdentity member={member} />
         <div className="grid grid-cols-2 gap-4">
           <div><p className="type-caption text-tertiary">Access</p><div className="mt-1"><MemberRoleControl member={member} canManage={canManage} busy={mutationBusy} onChangeRole={onChangeRole} /></div></div>
-          <div><p className="type-caption text-tertiary">Joined</p><p className="mt-1 text-sm text-secondary">{formatJoined(member.createdAt)}</p></div>
+          <div><p className="type-caption text-tertiary">Joined</p><p className="mt-1 text-sm text-secondary">{formatLocalDate(member.createdAt)}</p></div>
         </div>
         {roleError?.userId === member.userId ? <InlineError message={roleError.message} onDismiss={onDismissRoleError} /> : null}
         <div className="flex flex-wrap justify-end gap-2 border-t border-subtle pt-3"><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></div>
@@ -67,5 +68,3 @@ function MemberActions({ member, canManage, busy, onRemove, onView }: { member: 
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) { return <div className="mt-2 flex items-center justify-between gap-2 text-sm text-error" role="alert"><span>{message}</span><IconButton label="Dismiss role error" variant="ghost" size="lg" onClick={onDismiss} icon={<X size={15} />} /></div>; }
-
-function formatJoined(value: string): string { return new Date(value).toLocaleDateString(); }

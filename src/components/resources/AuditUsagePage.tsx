@@ -26,6 +26,7 @@ import {
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
+import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { ErrorState } from "../ui/error-state";
 import { UsageView } from "./UsageView";
 import { auditResourceIdentity } from "./audit-resource-identity";
@@ -291,7 +292,7 @@ function taskHref(_projectId: string, taskId: string): string {
 
 function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "-";
-  if (seconds < 60) return `${seconds.toLocaleString("en-US", { maximumFractionDigits: 3 })} s`;
+  if (seconds < 60) return `${seconds.toLocaleString(undefined, { maximumFractionDigits: 3 })} s`;
   const whole = Math.floor(seconds);
   const hours = Math.floor(whole / 3600);
   const minutes = Math.floor((whole % 3600) / 60);
@@ -808,11 +809,4 @@ function browserQuery(): URLSearchParams {
 
 function replaceBrowserQuery(query: URLSearchParams) {
   window.history.replaceState(null, "", `${window.location.pathname}${query.size ? `?${query}` : ""}${window.location.hash}`);
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
 }

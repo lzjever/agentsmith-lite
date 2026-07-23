@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button, Dialog, DialogHeader, FileInput, IconButton, Skeleton, TextInput } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
+import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -604,5 +605,5 @@ export function formatBytes(bytes: number): string {
 }
 
 export function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return formatLocalDateTime(value);
 }

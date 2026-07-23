@@ -6,6 +6,7 @@ import { Button, EmptyState, Spinner } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type Workspace } from "../../lib/api/client";
+import { formatLocalDate as formatDate } from "../../lib/format/date";
 import { CreateProjectDialog } from "../projects/CreateProjectDialog";
 import { ProjectsTable } from "../projects/ProjectsTable";
 import { PageHeader } from "../layout/PageHeader";
@@ -47,7 +48,6 @@ function WorkspaceOverviewScope({ workspaceId }: { workspaceId: string }) {
 }
 
 function QuickLink({ href, icon: Icon, title, detail, action }: { href: string; icon: typeof Users; title: string; detail: string; action: string }) { return <Link href={href} className="group px-4 py-5 text-foreground no-underline hover:bg-surface-low"><Icon className="size-5 text-icon-default"/><h3 className="mt-3 font-medium">{title}</h3><p className="mt-1 text-sm text-secondary">{detail}</p><span className="mt-3 inline-flex items-center gap-1 text-sm text-secondary group-hover:text-foreground">{action}<ArrowRight size={14}/></span></Link>; }
-function formatDate(value: string): string { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value)); }
 function lifecycleLabel(status: Workspace["lifecycleStatus"]): string { const value = status ?? "active"; return value[0]!.toUpperCase() + value.slice(1); }
 function memberLabel(member: { displayName: string | null; email: string } | undefined): string { return member?.displayName || member?.email || "Workspace owner"; }
 function roleLabel(role: Workspace["memberRole"]): string { return role ? role[0]!.toUpperCase() + role.slice(1) : "Member"; }

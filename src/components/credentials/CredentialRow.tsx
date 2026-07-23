@@ -1,6 +1,7 @@
 import { RotateCw, Trash2 } from "lucide-react";
 import { Button, IconButton } from "@astryxdesign/core";
 import type { ProjectCredential } from "../../lib/api/client";
+import { formatLocalDateTime } from "../../lib/format/date";
 
 export function CredentialRow({
   credential,
@@ -37,5 +38,5 @@ function credentialTypeLabel(type: ProjectCredential["type"]): string {
 }
 
 function formatCredentialDate(value: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return formatLocalDateTime(value);
 }

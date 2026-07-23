@@ -31,6 +31,7 @@ import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
+import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
 
 export function AlertsPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
@@ -647,12 +648,6 @@ function AlertInstances({
       )}
     </section>
   );
-}
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
 }
 
 function alertLabel(alert: ProjectAlert) {

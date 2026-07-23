@@ -1,4 +1,5 @@
 import type { Endpoint, TaskDetail } from "../../lib/api/client.js";
+import { formatLocalDateTime } from "../../lib/format/date.js";
 
 export function taskCompatibleEndpoints(endpoints: Endpoint[]): Endpoint[] {
   return endpoints.filter((endpoint) => endpoint.taskEligible);
@@ -33,7 +34,7 @@ export function taskProjectionLabel(detail: Pick<TaskDetail, "lifecycle" | "curr
 }
 
 export function formatTaskDate(value: string): string {
-  return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return formatLocalDateTime(value);
 }
 
 export function formatArtifactBytes(bytes: number): string {

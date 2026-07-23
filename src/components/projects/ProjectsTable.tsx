@@ -16,6 +16,7 @@ import {
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
+import { formatLocalDate as formatDate } from "../../lib/format/date";
 import { orderProjectsForDisplay } from "../../lib/project-order";
 export function ProjectsTable({
   workspaceId,
@@ -269,9 +270,4 @@ function Pagination({
 }
 export function projectHref(workspaceId: string, projectId: string): string {
   return `/workspaces/${workspaceId}/projects/${projectId}/overview`;
-}
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(
-    new Date(value),
-  );
 }
