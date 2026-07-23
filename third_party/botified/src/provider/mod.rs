@@ -5,14 +5,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::llm_text_preview::ProviderPreviewContext;
 use crate::profiling::ProviderProfilingContext;
+use crate::provider::api_compat::ProviderApiCompat;
 use crate::provider::router::ProviderCapability;
 use crate::tools::ToolSpec;
 use crate::types::{
     AssistantMessageReplay, ContextRole, Message, ModelInput, StopReason, ToolCall, Usage,
 };
 
+pub mod api_compat;
 pub mod openai_chat;
 pub mod router;
+pub mod runtime_selection;
 pub mod thinking;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,8 +162,14 @@ pub struct ProviderMetadata {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_compat: Option<ProviderApiCompat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<ProviderCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ProviderMetadata {
@@ -170,7 +179,10 @@ impl ProviderMetadata {
             name: Some(profile.clone()),
             profile,
             model: None,
+            api_compat: None,
             capabilities: Vec::new(),
+            context_window_tokens: None,
+            max_output_tokens: None,
         }
     }
 
@@ -184,11 +196,39 @@ impl ProviderMetadata {
         self
     }
 
+    pub fn with_api_compat(mut self, api_compat: ProviderApiCompat) -> Self {
+        self.api_compat = Some(api_compat);
+        self
+    }
+
     pub fn with_capabilities(
         mut self,
         capabilities: impl IntoIterator<Item = ProviderCapability>,
     ) -> Self {
         self.capabilities = capabilities.into_iter().collect();
+        self
+    }
+
+    pub fn with_context_window_tokens(mut self, context_window_tokens: u64) -> Self {
+        self.context_window_tokens = Some(context_window_tokens);
+        self
+    }
+
+    pub fn with_optional_context_window_tokens(
+        mut self,
+        context_window_tokens: Option<u64>,
+    ) -> Self {
+        self.context_window_tokens = context_window_tokens;
+        self
+    }
+
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    pub fn with_optional_max_output_tokens(mut self, max_output_tokens: Option<u64>) -> Self {
+        self.max_output_tokens = max_output_tokens;
         self
     }
 
@@ -206,8 +246,17 @@ impl ProviderMetadata {
         if self.model.is_none() {
             self.model = fallback.model;
         }
+        if self.api_compat.is_none() {
+            self.api_compat = fallback.api_compat;
+        }
         if self.capabilities.is_empty() {
             self.capabilities = fallback.capabilities;
+        }
+        if self.context_window_tokens.is_none() {
+            self.context_window_tokens = fallback.context_window_tokens;
+        }
+        if self.max_output_tokens.is_none() {
+            self.max_output_tokens = fallback.max_output_tokens;
         }
         self
     }
@@ -219,7 +268,10 @@ impl ProviderMetadata {
             profile,
             name: self.name.as_deref().and_then(sanitize_provider_label),
             model: self.model.as_deref().and_then(sanitize_provider_label),
+            api_compat: self.api_compat,
             capabilities: self.capabilities.clone(),
+            context_window_tokens: self.context_window_tokens,
+            max_output_tokens: self.max_output_tokens,
         })
     }
 }
@@ -278,6 +330,8 @@ fn sanitize_provider_label(value: &str) -> Option<String> {
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
+    #[error("provider unavailable: {message}")]
+    Unavailable { message: String },
     #[error("provider config error: {message}")]
     Config { message: String },
     #[error("provider request failed: {message}")]
@@ -300,6 +354,12 @@ pub struct ProviderErrorDiagnostic {
 }
 
 impl ProviderError {
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::Unavailable {
+            message: message.into(),
+        }
+    }
+
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config {
             message: message.into(),
@@ -326,6 +386,13 @@ impl ProviderError {
 
     pub fn diagnostic(&self) -> ProviderErrorDiagnostic {
         match self {
+            Self::Unavailable { .. } => ProviderErrorDiagnostic {
+                code: "provider_unavailable",
+                message: self.to_string(),
+                retryable: false,
+                status: None,
+                provider_code: None,
+            },
             Self::Config { .. } => ProviderErrorDiagnostic {
                 code: "provider_config_error",
                 message: self.to_string(),
@@ -366,6 +433,25 @@ pub trait Provider: Send + Sync {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderResponse, ProviderError>;
+}
+
+pub(crate) enum ProviderCompletionError {
+    Provider(ProviderError),
+    Cancelled,
+}
+
+pub(crate) async fn complete_with_cancellation(
+    provider: &dyn Provider,
+    request: ProviderRequest,
+    cancel: CancellationToken,
+) -> Result<ProviderResponse, ProviderCompletionError> {
+    let complete = provider.complete(request, cancel.clone());
+    tokio::pin!(complete);
+    tokio::select! {
+        biased;
+        result = &mut complete => result.map_err(ProviderCompletionError::Provider),
+        () = cancel.cancelled() => Err(ProviderCompletionError::Cancelled),
+    }
 }
 
 #[cfg(test)]

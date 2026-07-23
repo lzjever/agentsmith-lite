@@ -1,10 +1,10 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::formatting::unix_timestamp_now;
 use crate::types::StopReason;
 
 const DEFAULT_SUBSCRIBER_CAPACITY: usize = 64;
@@ -142,7 +142,7 @@ impl LlmTextPreviewFrame {
 
     pub fn started(metadata: &LlmTextPreviewMetadata) -> Self {
         Self::Started {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
@@ -153,7 +153,7 @@ impl LlmTextPreviewFrame {
 
     pub fn text_delta(metadata: &LlmTextPreviewMetadata, delta: impl Into<String>) -> Self {
         Self::TextDelta {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
@@ -169,20 +169,20 @@ impl LlmTextPreviewFrame {
         stop_reason: StopReason,
     ) -> Self {
         Self::Finished {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
             provider_call_index: metadata.provider_call_index,
             input_ids: metadata.input_ids.clone(),
             text_emitted,
-            stop_reason: stop_reason_name(stop_reason).to_owned(),
+            stop_reason: stop_reason.as_str().to_owned(),
         }
     }
 
     pub fn aborted(metadata: &LlmTextPreviewMetadata, reason: impl Into<String>) -> Self {
         Self::Aborted {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
@@ -199,7 +199,7 @@ impl LlmTextPreviewFrame {
         provider_status: Option<u16>,
     ) -> Self {
         Self::Error {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
@@ -213,7 +213,7 @@ impl LlmTextPreviewFrame {
 
     pub fn status(metadata: &LlmTextPreviewMetadata, code: impl Into<String>) -> Self {
         Self::Status {
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             provider_request_id: metadata.provider_request_id.clone(),
             turn_id: metadata.turn_id.clone(),
             cycle_id: metadata.cycle_id.clone(),
@@ -381,12 +381,21 @@ impl LlmTextPreviewHub {
     pub fn subscribe(&self, filter: LlmTextPreviewFilter) -> LlmTextPreviewSubscription {
         let mut inner = self.inner.lock().expect("preview hub mutex poisoned");
         let (tx, rx) = mpsc::channel(inner.capacity);
+        let terminal_frame = Arc::new(Mutex::new(None));
         let id = inner.next_subscriber_id;
         inner.next_subscriber_id = inner.next_subscriber_id.saturating_add(1);
-        inner
-            .subscribers
-            .push(LlmTextPreviewSubscriber { id, filter, tx });
-        LlmTextPreviewSubscription { rx }
+        inner.subscribers.push(LlmTextPreviewSubscriber {
+            id,
+            filter,
+            tx,
+            terminal_frame: terminal_frame.clone(),
+        });
+        LlmTextPreviewSubscription {
+            rx,
+            hub: Arc::downgrade(&self.inner),
+            subscriber_id: id,
+            terminal_frame,
+        }
     }
 }
 
@@ -438,7 +447,10 @@ impl LlmTextPreviewHubInner {
             }
             match subscriber.tx.try_send(frame.clone()) {
                 Ok(()) => true,
-                Err(mpsc::error::TrySendError::Full(_)) => false,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    subscriber.record_lagged(&frame);
+                    false
+                }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
         });
@@ -446,45 +458,211 @@ impl LlmTextPreviewHubInner {
 }
 
 struct LlmTextPreviewSubscriber {
-    #[allow(dead_code)]
     id: u64,
     filter: LlmTextPreviewFilter,
     tx: mpsc::Sender<LlmTextPreviewFrame>,
+    terminal_frame: Arc<Mutex<Option<LlmTextPreviewFrame>>>,
+}
+
+impl LlmTextPreviewSubscriber {
+    fn record_lagged(&self, frame: &LlmTextPreviewFrame) {
+        let Ok(mut terminal_frame) = self.terminal_frame.lock() else {
+            return;
+        };
+        if terminal_frame.is_none() {
+            *terminal_frame = Some(status_frame_from(frame, "subscriber_lagged"));
+        }
+    }
 }
 
 pub struct LlmTextPreviewSubscription {
     rx: mpsc::Receiver<LlmTextPreviewFrame>,
+    hub: Weak<Mutex<LlmTextPreviewHubInner>>,
+    subscriber_id: u64,
+    terminal_frame: Arc<Mutex<Option<LlmTextPreviewFrame>>>,
 }
 
 impl LlmTextPreviewSubscription {
     pub async fn recv(&mut self) -> Option<LlmTextPreviewFrame> {
-        self.rx.recv().await
+        match self.rx.recv().await {
+            Some(frame) => Some(frame),
+            None => self.take_terminal_frame(),
+        }
     }
 
     pub fn try_recv(&mut self) -> Result<LlmTextPreviewFrame, mpsc::error::TryRecvError> {
-        self.rx.try_recv()
+        match self.rx.try_recv() {
+            Ok(frame) => Ok(frame),
+            Err(mpsc::error::TryRecvError::Disconnected) => self
+                .take_terminal_frame()
+                .ok_or(mpsc::error::TryRecvError::Disconnected),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn take_terminal_frame(&self) -> Option<LlmTextPreviewFrame> {
+        self.terminal_frame.lock().ok()?.take()
     }
 }
 
-fn timestamp_now() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("unix:{}", duration.as_secs())
+fn status_frame_from(frame: &LlmTextPreviewFrame, code: &str) -> LlmTextPreviewFrame {
+    LlmTextPreviewFrame::status(
+        &LlmTextPreviewMetadata {
+            provider_request_id: frame.provider_request_id().to_owned(),
+            turn_id: frame.turn_id().map(ToOwned::to_owned),
+            cycle_id: frame.cycle_id().map(ToOwned::to_owned),
+            provider_call_index: frame.provider_call_index(),
+            input_ids: frame.input_ids().to_vec(),
+        },
+        code,
+    )
 }
 
-fn stop_reason_name(stop_reason: StopReason) -> &'static str {
-    match stop_reason {
-        StopReason::EndTurn => "end_turn",
-        StopReason::ToolCalls => "tool_calls",
-        StopReason::ToolTerminated => "tool_terminated",
-        StopReason::ProviderStop => "provider_stop",
+impl Drop for LlmTextPreviewSubscription {
+    fn drop(&mut self) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        let Ok(mut inner) = hub.lock() else {
+            return;
+        };
+        inner
+            .subscribers
+            .retain(|subscriber| subscriber.id != self.subscriber_id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+
+    #[test]
+    fn llm_text_preview_drop_unregisters_without_publish() {
+        let hub = LlmTextPreviewHub::new();
+
+        for _ in 0..1_000 {
+            drop(hub.subscribe(LlmTextPreviewFilter::default()));
+        }
+
+        assert_eq!(
+            hub.inner
+                .lock()
+                .expect("preview hub mutex poisoned")
+                .subscribers
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn llm_text_preview_drop_and_publish_are_concurrency_safe() {
+        const PUBLISHERS: usize = 8;
+        const FRAMES_PER_PUBLISHER: usize = 100;
+        const CHURNERS: usize = 8;
+        const SUBSCRIPTIONS_PER_CHURNER: usize = 500;
+
+        let hub = LlmTextPreviewHub::with_capacity(PUBLISHERS * FRAMES_PER_PUBLISHER);
+        let mut stable_subscription = hub.subscribe(LlmTextPreviewFilter::default());
+        let metadata = LlmTextPreviewMetadata {
+            provider_request_id: "prq_concurrent".to_owned(),
+            turn_id: Some("turn-1".to_owned()),
+            cycle_id: Some("cyc-1".to_owned()),
+            provider_call_index: 0,
+            input_ids: vec!["msg-1".to_owned()],
+        };
+
+        thread::scope(|scope| {
+            for _ in 0..PUBLISHERS {
+                let sink = hub.sink();
+                let metadata = metadata.clone();
+                scope.spawn(move || {
+                    for _ in 0..FRAMES_PER_PUBLISHER {
+                        sink.publish(LlmTextPreviewFrame::text_delta(&metadata, "delta"));
+                    }
+                });
+            }
+            for _ in 0..CHURNERS {
+                let hub = hub.clone();
+                scope.spawn(move || {
+                    for _ in 0..SUBSCRIPTIONS_PER_CHURNER {
+                        drop(hub.subscribe(LlmTextPreviewFilter::default()));
+                    }
+                });
+            }
+        });
+
+        let mut received = 0;
+        while stable_subscription.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, PUBLISHERS * FRAMES_PER_PUBLISHER);
+        assert_eq!(
+            hub.inner
+                .lock()
+                .expect("preview hub mutex poisoned")
+                .subscribers
+                .len(),
+            1
+        );
+
+        drop(stable_subscription);
+        assert!(hub
+            .inner
+            .lock()
+            .expect("preview hub mutex poisoned")
+            .subscribers
+            .is_empty());
+    }
+
+    #[test]
+    fn llm_text_preview_slow_subscriber_gets_one_lag_status_before_disconnect() {
+        let hub = LlmTextPreviewHub::with_capacity(1);
+        let mut subscription = hub.subscribe(LlmTextPreviewFilter::default());
+        let metadata = LlmTextPreviewMetadata {
+            provider_request_id: "prq_slow".to_owned(),
+            turn_id: None,
+            cycle_id: None,
+            provider_call_index: 0,
+            input_ids: Vec::new(),
+        };
+        let sink = hub.sink();
+
+        sink.publish(LlmTextPreviewFrame::text_delta(&metadata, "first"));
+        sink.publish(LlmTextPreviewFrame::text_delta(&metadata, "second"));
+
+        assert_eq!(
+            subscription
+                .try_recv()
+                .expect("queued first frame should remain available")
+                .delta_text(),
+            Some("first")
+        );
+        match subscription
+            .try_recv()
+            .expect("lagged subscriber should receive a terminal status")
+        {
+            LlmTextPreviewFrame::Status {
+                provider_request_id,
+                code,
+                ..
+            } => {
+                assert_eq!(provider_request_id, "prq_slow");
+                assert_eq!(code, "subscriber_lagged");
+            }
+            other => panic!("expected terminal lag status, got {other:?}"),
+        }
+        assert_eq!(
+            subscription.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        );
+        assert!(hub
+            .inner
+            .lock()
+            .expect("preview hub mutex poisoned")
+            .subscribers
+            .is_empty());
+    }
 
     #[test]
     fn llm_text_preview_publish_cleans_closed_filtered_subscriber() {

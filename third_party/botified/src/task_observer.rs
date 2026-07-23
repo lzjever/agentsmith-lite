@@ -3,43 +3,22 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, Weak,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 
+use crate::formatting::bounded_chars;
 use crate::llm_text_preview::LlmTextPreviewFrame;
-#[cfg(target_os = "linux")]
-use crate::tasks::OBSERVER_STDIN_ATOMIC_WRITE_BYTES;
-use crate::tasks::{TaskStdinWriter, DEFAULT_BOTIFIED_FRAME_BYTES};
+use crate::tasks::{
+    representable_observe_message_id, task_observe_done_frame, task_observe_error_frame,
+    task_observe_text_frames, try_write_task_stdin_frame, TaskObserveConfig, TaskObserveDelivery,
+    TaskObserveException, TaskObserveSource, TaskObserveTextMetadata, TaskStdinFrameKind,
+    TaskStdinWriter,
+};
 
-const DEFAULT_OBSERVE_QUEUE_CAPACITY: usize = 32;
-const OBSERVE_TEXT_CHUNK_BYTES: usize = 384;
-const OBSERVE_FIELD_CHARS: usize = 256;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskObserveMode {
-    Final,
-    Stream,
-}
-
-impl TaskObserveMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "final" => Some(Self::Final),
-            "stream" => Some(Self::Stream),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Final => "final",
-            Self::Stream => "stream",
-        }
-    }
-}
+const OBSERVE_QUEUE_CAPACITY: usize = 32;
+const OBSERVE_DIAGNOSTIC_CHARS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskObserverDiagnostic {
@@ -56,18 +35,168 @@ pub struct TaskConversationObserver {
 }
 
 struct TaskConversationObserverInner {
-    observers: Mutex<HashMap<String, ObserverState>>,
+    observers: Mutex<HashMap<String, ObserverSlot>>,
+    transitions: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    #[cfg(test)]
+    discard_all_before_fence_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     next_generation: AtomicU64,
     next_observation_id: AtomicU64,
     diagnostic_sink: TaskObserverDiagnosticSink,
 }
 
+#[derive(Default)]
+struct ObserverSlot {
+    active: Option<ObserverState>,
+    prepared_generation: Option<u64>,
+    retirement: Option<RetirementFence>,
+    admission_closed: bool,
+    admitted_requests: usize,
+}
+
 #[derive(Clone)]
+struct RetirementFence {
+    generation: u64,
+    done: CancellationToken,
+    write_fence: Arc<Mutex<()>>,
+}
+
 struct ObserverState {
-    mode: TaskObserveMode,
+    config: TaskObserveConfig,
     sender: mpsc::Sender<String>,
     generation: u64,
     cancel: CancellationToken,
+    worker_done: CancellationToken,
+    write_fence: Arc<Mutex<()>>,
+    frame_cap: usize,
+    stream: Option<StreamBuffer>,
+}
+
+#[derive(Debug)]
+struct StreamBuffer {
+    provider_request_id: String,
+    cycle_id: Option<String>,
+    text: String,
+    scalar_count: usize,
+}
+
+pub struct PreparedGeneration {
+    task_id: String,
+    inner: Weak<TaskConversationObserverInner>,
+    generation: u64,
+    state: Option<ObserverState>,
+}
+
+pub(crate) struct TaskObserverRequestAdmission {
+    task_id: String,
+    inner: Weak<TaskConversationObserverInner>,
+}
+
+impl Drop for TaskObserverRequestAdmission {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        inner.release_request_admission(&self.task_id);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObserverCommitError {
+    AdmissionClosed,
+    Write(String),
+}
+
+impl PreparedGeneration {
+    pub fn generation(&self) -> u64 {
+        self.state
+            .as_ref()
+            .expect("prepared generation must still be available")
+            .generation
+    }
+
+    pub fn config(&self) -> TaskObserveConfig {
+        self.state
+            .as_ref()
+            .expect("prepared generation must still be available")
+            .config
+    }
+
+    pub fn cancel(mut self) {
+        if let Some(state) = self.state.take() {
+            state.cancel.cancel();
+            if let Some(inner) = self.inner.upgrade() {
+                inner.release_preparation(&self.task_id, self.generation);
+            }
+        }
+    }
+}
+
+impl Drop for PreparedGeneration {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.cancel.cancel();
+            if let Some(inner) = self.inner.upgrade() {
+                inner.release_preparation(&self.task_id, self.generation);
+            }
+        }
+    }
+}
+
+pub struct RetiredGeneration {
+    generation: u64,
+    state: Option<ObserverState>,
+}
+
+pub(crate) struct PreparedObserverRetirement {
+    fences: Vec<Arc<Mutex<()>>>,
+    retired_generation: Option<u64>,
+    retired_state: Option<ObserverState>,
+}
+
+impl PreparedObserverRetirement {
+    pub(crate) fn retired_generation(&self) -> Option<u64> {
+        self.retired_generation
+    }
+
+    pub(crate) fn fence(mut self) {
+        for fence in &self.fences {
+            let _write = fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        self.retired_state.take();
+    }
+}
+
+impl RetiredGeneration {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub async fn wait(mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        state.cancel.cancel();
+        state.worker_done.cancelled().await;
+    }
+
+    pub fn fence_in_flight(&self) {
+        if let Some(state) = self.state.as_ref() {
+            let _write = state
+                .write_fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for RetiredGeneration {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.cancel.cancel();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -84,20 +213,14 @@ pub enum FinalTextObservationKind {
     AssistantText,
 }
 
-impl FinalTextObservationKind {
-    fn frame_kind(self) -> &'static str {
-        match self {
-            Self::UserText => "user_text",
-            Self::AssistantText => "assistant_text",
-        }
-    }
-}
-
 impl TaskConversationObserver {
     pub fn new(diagnostic_sink: impl Fn(TaskObserverDiagnostic) + Send + Sync + 'static) -> Self {
         Self {
             inner: Arc::new(TaskConversationObserverInner {
                 observers: Mutex::new(HashMap::new()),
+                transitions: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                discard_all_before_fence_hook: Mutex::new(None),
                 next_generation: AtomicU64::new(1),
                 next_observation_id: AtomicU64::new(1),
                 diagnostic_sink: Arc::new(diagnostic_sink),
@@ -105,62 +228,425 @@ impl TaskConversationObserver {
         }
     }
 
-    pub fn enable(
+    pub(crate) fn transition_for(&self, task_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut transitions = self
+            .inner
+            .transitions
+            .lock()
+            .expect("task observer transition mutex poisoned");
+        transitions
+            .entry(task_id.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    pub(crate) fn transition_if_present(&self, task_id: &str) -> Option<Arc<AsyncMutex<()>>> {
+        self.inner
+            .transitions
+            .lock()
+            .expect("task observer transition mutex poisoned")
+            .get(task_id)
+            .cloned()
+    }
+
+    fn retire_transition(&self, task_id: &str) {
+        self.inner
+            .transitions
+            .lock()
+            .expect("task observer transition mutex poisoned")
+            .remove(task_id);
+    }
+
+    pub(crate) fn admit_request(&self, task_id: &str) -> Option<TaskObserverRequestAdmission> {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let slot = observers.entry(task_id.to_owned()).or_default();
+        if slot.admission_closed {
+            return None;
+        }
+        slot.admitted_requests = slot.admitted_requests.saturating_add(1);
+        Some(TaskObserverRequestAdmission {
+            task_id: task_id.to_owned(),
+            inner: Arc::downgrade(&self.inner),
+        })
+    }
+
+    pub(crate) fn close_admission(&self, task_id: &str) -> bool {
+        if let Some(slot) = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get_mut(task_id)
+        {
+            slot.admission_closed = true;
+            return slot.admitted_requests != 0;
+        }
+        false
+    }
+
+    pub(crate) fn release_closed_admission(&self, task_id: &str) {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let remove = if let Some(slot) = observers.get_mut(task_id) {
+            slot.admission_closed = false;
+            slot.active.is_none() && slot.prepared_generation.is_none() && slot.retirement.is_none()
+        } else {
+            false
+        };
+        if remove {
+            observers.remove(task_id);
+        }
+    }
+
+    pub fn write_result_if_admitted(
         &self,
-        task_id: impl Into<String>,
-        mode: TaskObserveMode,
-        writer: Arc<dyn TaskStdinWriter>,
-    ) -> CancellationToken {
-        let task_id = task_id.into();
-        let generation = self.inner.next_generation.fetch_add(1, Ordering::SeqCst);
-        let cancel = CancellationToken::new();
-        let (sender, receiver) = mpsc::channel(DEFAULT_OBSERVE_QUEUE_CAPACITY);
-        let previous = {
+        task_id: &str,
+        write_result: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), ObserverCommitError> {
+        let observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        if observers
+            .get(task_id)
+            .is_some_and(|slot| slot.admission_closed)
+        {
+            return Err(ObserverCommitError::AdmissionClosed);
+        }
+        write_result().map_err(ObserverCommitError::Write)
+    }
+
+    pub(crate) fn close_all_admission(&self) {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        for slot in observers.values_mut() {
+            slot.admission_closed = true;
+        }
+        observers.retain(|_, slot| {
+            slot.admitted_requests != 0
+                || slot.active.is_some()
+                || slot.prepared_generation.is_some()
+                || slot.retirement.is_some()
+        });
+    }
+
+    pub(crate) fn discard_all_and_fence(&self) {
+        let fences = {
             let mut observers = self
                 .inner
                 .observers
                 .lock()
                 .expect("task observer mutex poisoned");
-            observers.insert(
-                task_id.clone(),
-                ObserverState {
-                    mode,
-                    sender,
-                    generation,
-                    cancel: cancel.clone(),
-                },
-            )
+            let mut fences = Vec::new();
+            for slot in observers.values_mut() {
+                slot.admission_closed = true;
+                slot.prepared_generation = None;
+                if let Some(state) = slot.active.take() {
+                    state.cancel.cancel();
+                    fences.push(state.write_fence);
+                }
+                if let Some(retirement) = slot.retirement.take() {
+                    fences.push(retirement.write_fence);
+                }
+            }
+            observers.clear();
+            fences
         };
-        if let Some(previous) = previous {
-            previous.cancel.cancel();
+        #[cfg(test)]
+        let before_fence_hook = self
+            .inner
+            .discard_all_before_fence_hook
+            .lock()
+            .expect("discard-all before-fence test hook mutex poisoned")
+            .take();
+        #[cfg(test)]
+        if let Some(hook) = before_fence_hook {
+            hook();
         }
+        for fence in fences {
+            let _write = fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        self.inner
+            .transitions
+            .lock()
+            .expect("task observer transition mutex poisoned")
+            .clear();
+    }
+
+    pub(crate) fn cleanup_terminal(&self, task_id: &str) {
+        self.retire_transition(task_id);
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let removable = observers.get(task_id).is_some_and(|slot| {
+            slot.admitted_requests == 0
+                && slot.active.is_none()
+                && slot.prepared_generation.is_none()
+                && slot.retirement.is_none()
+        });
+        if removable {
+            observers.remove(task_id);
+        }
+    }
+
+    /// Clears a matching retirement after its write fence has been acquired.
+    pub(crate) fn complete_fenced_retirement(&self, task_id: &str, generation: u64) {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let removable = observers.get_mut(task_id).is_some_and(|slot| {
+            if slot
+                .retirement
+                .as_ref()
+                .is_some_and(|retirement| retirement.generation == generation)
+            {
+                slot.retirement = None;
+            }
+            slot.admitted_requests == 0
+                && slot.active.is_none()
+                && slot.prepared_generation.is_none()
+                && slot.retirement.is_none()
+        });
+        if removable {
+            observers.remove(task_id);
+        }
+    }
+
+    pub fn prepare(
+        &self,
+        task_id: impl Into<String>,
+        config: TaskObserveConfig,
+        writer: Arc<dyn TaskStdinWriter>,
+    ) -> Result<PreparedGeneration, String> {
+        let task_id = task_id.into();
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut observers = self
+                .inner
+                .observers
+                .lock()
+                .map_err(|_| "task observer mutex poisoned".to_owned())?;
+            observers
+                .try_reserve(1)
+                .map_err(|_| "task observer map capacity reservation failed".to_owned())?;
+            let slot = observers.entry(task_id.clone()).or_default();
+            if slot.admission_closed {
+                return Err("task observer admission is closed".to_owned());
+            }
+            if slot.prepared_generation.is_some() {
+                return Err("task observer generation is already prepared".to_owned());
+            }
+            slot.prepared_generation = Some(generation);
+        }
+        let cancel = CancellationToken::new();
+        let worker_done = CancellationToken::new();
+        let write_fence = Arc::new(Mutex::new(()));
+        let frame_cap = writer.atomic_frame_cap();
+        let (sender, receiver) = mpsc::channel(OBSERVE_QUEUE_CAPACITY);
         spawn_observer_writer(
-            Arc::downgrade(&self.inner),
-            task_id,
-            generation,
-            cancel.clone(),
+            ObserverWriterGeneration {
+                inner: Arc::downgrade(&self.inner),
+                task_id: task_id.clone(),
+                generation,
+                cancel: cancel.clone(),
+                worker_done: worker_done.clone(),
+                write_fence: write_fence.clone(),
+            },
             receiver,
             writer,
         );
-        cancel
+        Ok(PreparedGeneration {
+            task_id,
+            inner: Arc::downgrade(&self.inner),
+            generation,
+            state: Some(ObserverState {
+                config,
+                sender,
+                generation,
+                cancel,
+                worker_done,
+                write_fence,
+                frame_cap,
+                stream: None,
+            }),
+        })
     }
 
-    pub fn disable(&self, task_id: &str) -> bool {
-        let removed = self
+    /// Activates a fully prepared generation after its successful result was written.
+    /// Capacity was reserved by `prepare`, so this publication step cannot fail.
+    pub fn activate(&self, mut prepared: PreparedGeneration) {
+        let state = prepared
+            .state
+            .take()
+            .expect("prepared generation must only be activated once");
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let (_, mut slot) = observers
+            .remove_entry(prepared.task_id.as_str())
+            .expect("prepared generation owns a reserved observer map slot");
+        debug_assert_eq!(slot.prepared_generation, Some(prepared.generation));
+        debug_assert!(
+            slot.active.is_none(),
+            "caller must retire before activation"
+        );
+        debug_assert!(slot.retirement.is_none(), "caller must await retirement");
+        slot.prepared_generation = None;
+        slot.active = Some(state);
+        observers.insert(std::mem::take(&mut prepared.task_id), slot);
+    }
+
+    pub fn write_result_and_activate(
+        &self,
+        mut prepared: PreparedGeneration,
+        write_result: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), ObserverCommitError> {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let (_, mut slot) = observers
+            .remove_entry(prepared.task_id.as_str())
+            .expect("prepared generation owns a reserved observer map slot");
+        debug_assert_eq!(slot.prepared_generation, Some(prepared.generation));
+        debug_assert!(
+            slot.active.is_none(),
+            "caller must retire before activation"
+        );
+        debug_assert!(slot.retirement.is_none(), "caller must await retirement");
+        if slot.admission_closed {
+            slot.prepared_generation = None;
+            observers.insert(std::mem::take(&mut prepared.task_id), slot);
+            prepared
+                .state
+                .take()
+                .expect("prepared state exists")
+                .cancel
+                .cancel();
+            return Err(ObserverCommitError::AdmissionClosed);
+        }
+        if let Err(error) = write_result() {
+            slot.prepared_generation = None;
+            let task_id = std::mem::take(&mut prepared.task_id);
+            observers.insert(task_id, slot);
+            prepared
+                .state
+                .take()
+                .expect("prepared state exists")
+                .cancel
+                .cancel();
+            return Err(ObserverCommitError::Write(error));
+        }
+        slot.prepared_generation = None;
+        slot.active = prepared.state.take();
+        observers.insert(std::mem::take(&mut prepared.task_id), slot);
+        Ok(())
+    }
+
+    pub fn retire(&self, task_id: &str) -> Option<RetiredGeneration> {
+        self.inner.begin_retirement(task_id, None)
+    }
+
+    pub(crate) fn prepare_retirement(&self, task_id: &str) -> PreparedObserverRetirement {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        let Some(slot) = observers.get_mut(task_id) else {
+            return PreparedObserverRetirement {
+                fences: Vec::new(),
+                retired_generation: None,
+                retired_state: None,
+            };
+        };
+        let mut fences = slot
+            .retirement
+            .as_ref()
+            .map(|retirement| vec![retirement.write_fence.clone()])
+            .unwrap_or_default();
+        let retired_state = slot.active.take();
+        let retired_generation = retired_state.as_ref().map(|state| state.generation);
+        if let Some(state) = retired_state.as_ref() {
+            state.cancel.cancel();
+            fences.push(state.write_fence.clone());
+            slot.retirement = Some(RetirementFence {
+                generation: state.generation,
+                done: state.worker_done.clone(),
+                write_fence: state.write_fence.clone(),
+            });
+        }
+        PreparedObserverRetirement {
+            fences,
+            retired_generation,
+            retired_state,
+        }
+    }
+
+    pub async fn retire_and_wait(&self, task_id: &str) -> Option<u64> {
+        if let Some(retired) = self.retire(task_id) {
+            let generation = retired.generation();
+            retired.wait().await;
+            return Some(generation);
+        }
+        self.wait_for_retirement(task_id).await;
+        None
+    }
+
+    pub fn retire_and_fence(&self, task_id: &str) -> Option<u64> {
+        if let Some(retired) = self.retire(task_id) {
+            let generation = retired.generation();
+            retired.fence_in_flight();
+            drop(retired);
+            return Some(generation);
+        }
+        let retirement = self
             .inner
             .observers
             .lock()
             .expect("task observer mutex poisoned")
-            .remove(task_id);
-        if let Some(removed) = removed {
-            removed.cancel.cancel();
-            return true;
+            .get(task_id)
+            .and_then(|slot| slot.retirement.clone());
+        if let Some(retirement) = retirement {
+            let _write = retirement
+                .write_fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        false
+        None
     }
 
-    pub fn remove_task(&self, task_id: &str) {
-        self.disable(task_id);
+    pub async fn wait_for_retirement(&self, task_id: &str) {
+        let retirement = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get(task_id)
+            .and_then(|slot| slot.retirement.clone());
+        if let Some(retirement) = retirement {
+            retirement.done.cancelled().await;
+        }
     }
 
     pub fn is_observing(&self, task_id: &str) -> bool {
@@ -168,16 +654,28 @@ impl TaskConversationObserver {
             .observers
             .lock()
             .expect("task observer mutex poisoned")
-            .contains_key(task_id)
+            .get(task_id)
+            .is_some_and(|slot| slot.active.is_some())
     }
 
-    pub fn mode_for_task(&self, task_id: &str) -> Option<TaskObserveMode> {
+    pub fn generation_for_task(&self, task_id: &str) -> Option<u64> {
         self.inner
             .observers
             .lock()
             .expect("task observer mutex poisoned")
             .get(task_id)
-            .map(|state| state.mode)
+            .and_then(|slot| slot.active.as_ref())
+            .map(|state| state.generation)
+    }
+
+    pub fn config_for_task(&self, task_id: &str) -> Option<TaskObserveConfig> {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get(task_id)
+            .and_then(|slot| slot.active.as_ref())
+            .map(|state| state.config)
     }
 
     pub fn has_stream_observers(&self) -> bool {
@@ -186,268 +684,563 @@ impl TaskConversationObserver {
             .lock()
             .expect("task observer mutex poisoned")
             .values()
-            .any(|state| state.mode == TaskObserveMode::Stream)
+            .filter_map(|slot| slot.active.as_ref())
+            .any(|state| state.config.delivery == TaskObserveDelivery::StreamText)
+    }
+
+    pub fn clear_stream_buffers(&self) {
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        for state in observers
+            .values_mut()
+            .filter_map(|slot| slot.active.as_mut())
+        {
+            state.stream = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn stream_buffer_for_test(&self, task_id: &str) -> Option<(String, String)> {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get(task_id)
+            .and_then(|slot| slot.active.as_ref())
+            .and_then(|state| state.stream.as_ref())
+            .map(|buffer| (buffer.provider_request_id.clone(), buffer.text.clone()))
+    }
+
+    #[cfg(test)]
+    pub fn slot_count_for_test(&self) -> usize {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub fn transition_count_for_test(&self) -> usize {
+        self.inner
+            .transitions
+            .lock()
+            .expect("task observer transition mutex poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub fn retirement_generation_for_test(&self, task_id: &str) -> Option<u64> {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get(task_id)
+            .and_then(|slot| slot.retirement.as_ref())
+            .map(|retirement| retirement.generation)
+    }
+
+    #[cfg(test)]
+    pub fn admission_closed_for_test(&self, task_id: &str) -> bool {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .get(task_id)
+            .is_some_and(|slot| slot.admission_closed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_discard_all_before_fence_hook_for_test(
+        &self,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        *self
+            .inner
+            .discard_all_before_fence_hook
+            .lock()
+            .expect("discard-all before-fence test hook mutex poisoned") = Some(Box::new(hook));
+    }
+
+    pub fn active_task_ids(&self) -> Vec<String> {
+        self.inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned")
+            .iter()
+            .filter(|(_, slot)| slot.active.is_some())
+            .map(|(task_id, _)| task_id.clone())
+            .collect()
     }
 
     pub fn publish_final_text(&self, observation: FinalTextObservation<'_>) {
-        let frames = self.inner.final_text_frames(observation);
-        self.publish_frames(TaskObserveMode::Final, frames);
+        if observation.text.trim().is_empty() {
+            return;
+        }
+        let source = match observation.kind {
+            FinalTextObservationKind::UserText => TaskObserveSource::User,
+            FinalTextObservationKind::AssistantText => TaskObserveSource::Assistant,
+        };
+        let timestamp = SystemTime::now();
+        let message_id = representable_observe_message_id(observation.message_id);
+        let mut failures = Vec::new();
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        for (task_id, state) in observers
+            .iter_mut()
+            .filter_map(|(task_id, slot)| slot.active.as_mut().map(|state| (task_id, state)))
+        {
+            let delivery = state.config.delivery;
+            let eligible = delivery == TaskObserveDelivery::FinalText
+                || (delivery == TaskObserveDelivery::StreamText
+                    && source == TaskObserveSource::User);
+            if !eligible {
+                continue;
+            }
+            let observation_id = self.inner.next_observation_id();
+            let built = task_observe_text_frames(
+                &observation_id,
+                TaskObserveTextMetadata {
+                    delivery,
+                    source,
+                    timestamp,
+                    message_id,
+                    provider_request_id: None,
+                    cycle_id: observation.cycle_id,
+                },
+                observation.text,
+                state.frame_cap,
+            );
+            if let Err(code) = enqueue_built_frames(state, built) {
+                failures.push((task_id.clone(), state.generation, code));
+            }
+        }
+        drop(observers);
+        for (task_id, generation, code) in failures {
+            self.inner
+                .clone()
+                .detach_generation(task_id, generation, code);
+        }
     }
 
     pub fn publish_preview_frame(&self, frame: &LlmTextPreviewFrame) {
-        // The preview loop can outlive stream observers; skip idle JSON frame construction.
-        if !self.has_stream_observers() {
-            return;
-        }
-        let frames = self.inner.preview_frames(frame);
-        if !frames.is_empty() {
-            self.publish_frames(TaskObserveMode::Stream, frames);
-        }
-    }
-
-    fn publish_frames(&self, mode: TaskObserveMode, frames: Vec<String>) {
-        if frames.is_empty() {
-            return;
-        }
-        let targets = {
-            let observers = self
-                .inner
-                .observers
-                .lock()
-                .expect("task observer mutex poisoned");
-            observers
-                .iter()
-                .filter(|(_, state)| state.mode == mode)
-                .map(|(task_id, state)| (task_id.clone(), state.generation, state.sender.clone()))
-                .collect::<Vec<_>>()
-        };
-
-        for (task_id, generation, sender) in targets {
-            for frame in &frames {
-                match sender.try_send(frame.clone()) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        self.inner.remove_generation_with_diagnostic(
-                            &task_id,
-                            generation,
-                            "observer_queue_full",
-                            "task observe queue is full",
-                        );
-                        break;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        self.inner.remove_generation_with_diagnostic(
-                            &task_id,
-                            generation,
-                            "observer_queue_closed",
-                            "task observe queue is closed",
-                        );
-                        break;
-                    }
-                }
+        let mut failures = Vec::new();
+        let mut observers = self
+            .inner
+            .observers
+            .lock()
+            .expect("task observer mutex poisoned");
+        for (task_id, state) in observers
+            .iter_mut()
+            .filter_map(|(task_id, slot)| slot.active.as_mut().map(|state| (task_id, state)))
+        {
+            if state.config.delivery != TaskObserveDelivery::StreamText {
+                continue;
             }
+            if let Err(code) = self.inner.apply_preview_frame(state, frame) {
+                failures.push((task_id.clone(), state.generation, code));
+            }
+        }
+        drop(observers);
+        for (task_id, generation, code) in failures {
+            self.inner
+                .clone()
+                .detach_generation(task_id, generation, code);
         }
     }
 }
 
 impl TaskConversationObserverInner {
-    fn final_text_frames(&self, observation: FinalTextObservation<'_>) -> Vec<String> {
-        if observation.text.trim().is_empty() {
-            return Vec::new();
-        }
-        let metadata = ObserveFrameMetadata {
-            mode: TaskObserveMode::Final,
-            kind: observation.kind.frame_kind(),
-            message_id: observation.message_id,
-            provider_request_id: None,
-            cycle_id: observation.cycle_id,
-            text_emitted: None,
-            error: None,
+    fn release_request_admission(&self, task_id: &str) {
+        let mut observers = self.observers.lock().expect("task observer mutex poisoned");
+        let remove = if let Some(slot) = observers.get_mut(task_id) {
+            debug_assert!(slot.admitted_requests != 0);
+            if slot.admitted_requests != 0 {
+                slot.admitted_requests -= 1;
+            }
+            slot.admitted_requests == 0
+                && slot.active.is_none()
+                && slot.prepared_generation.is_none()
+                && slot.retirement.is_none()
+        } else {
+            false
         };
-        self.text_frames(metadata, observation.text)
+        if remove {
+            observers.remove(task_id);
+        }
     }
 
-    fn preview_frames(&self, frame: &LlmTextPreviewFrame) -> Vec<String> {
+    fn release_preparation(&self, task_id: &str, generation: u64) {
+        let mut observers = self.observers.lock().expect("task observer mutex poisoned");
+        let remove_slot = if let Some(slot) = observers.get_mut(task_id) {
+            if slot.prepared_generation == Some(generation) {
+                slot.prepared_generation = None;
+            }
+            slot.admitted_requests == 0
+                && slot.active.is_none()
+                && slot.prepared_generation.is_none()
+                && slot.retirement.is_none()
+        } else {
+            false
+        };
+        if remove_slot {
+            observers.remove(task_id);
+        }
+    }
+
+    fn begin_retirement(
+        self: &Arc<Self>,
+        task_id: &str,
+        generation: Option<u64>,
+    ) -> Option<RetiredGeneration> {
+        let mut observers = self.observers.lock().expect("task observer mutex poisoned");
+        let slot = observers.get_mut(task_id)?;
+        let matches = slot.active.as_ref().is_some_and(|state| {
+            generation.is_none_or(|generation| state.generation == generation)
+        });
+        if !matches {
+            return None;
+        }
+        let state = slot
+            .active
+            .take()
+            .expect("matching active generation exists");
+        state.cancel.cancel();
+        slot.retirement = Some(RetirementFence {
+            generation: state.generation,
+            done: state.worker_done.clone(),
+            write_fence: state.write_fence.clone(),
+        });
+        Some(RetiredGeneration {
+            generation: state.generation,
+            state: Some(state),
+        })
+    }
+
+    fn complete_writer_generation(&self, task_id: &str, generation: u64) {
+        let mut observers = self.observers.lock().expect("task observer mutex poisoned");
+        let remove_slot = if let Some(slot) = observers.get_mut(task_id) {
+            if slot
+                .active
+                .as_ref()
+                .is_some_and(|state| state.generation == generation)
+            {
+                if let Some(state) = slot.active.take() {
+                    state.cancel.cancel();
+                }
+            }
+            if slot.prepared_generation == Some(generation) {
+                slot.prepared_generation = None;
+            }
+            if slot
+                .retirement
+                .as_ref()
+                .is_some_and(|retirement| retirement.generation == generation)
+            {
+                slot.retirement = None;
+            }
+            slot.admitted_requests == 0
+                && slot.active.is_none()
+                && slot.prepared_generation.is_none()
+                && slot.retirement.is_none()
+        } else {
+            false
+        };
+        if remove_slot {
+            observers.remove(task_id);
+        }
+    }
+
+    fn next_observation_id(&self) -> String {
+        format!(
+            "obs_{}",
+            self.next_observation_id.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    fn apply_preview_frame(
+        &self,
+        state: &mut ObserverState,
+        frame: &LlmTextPreviewFrame,
+    ) -> Result<(), &'static str> {
         match frame {
             LlmTextPreviewFrame::Started {
                 provider_request_id,
                 cycle_id,
                 ..
-            } => self.text_frames(
-                ObserveFrameMetadata {
-                    mode: TaskObserveMode::Stream,
-                    kind: "assistant_text_started",
-                    message_id: None,
-                    provider_request_id: Some(provider_request_id),
-                    cycle_id: cycle_id.as_deref(),
-                    text_emitted: None,
-                    error: None,
-                },
-                "",
-            ),
+            } => {
+                if provider_request_id.is_empty() {
+                    state.stream = None;
+                    return Ok(());
+                }
+                state.stream = Some(StreamBuffer {
+                    provider_request_id: provider_request_id.clone(),
+                    cycle_id: cycle_id.clone(),
+                    text: String::new(),
+                    scalar_count: 0,
+                });
+                Ok(())
+            }
             LlmTextPreviewFrame::TextDelta {
                 provider_request_id,
                 cycle_id,
                 delta,
                 ..
-            } => self.text_frames(
-                ObserveFrameMetadata {
-                    mode: TaskObserveMode::Stream,
-                    kind: "assistant_text",
-                    message_id: None,
-                    provider_request_id: Some(provider_request_id),
-                    cycle_id: cycle_id.as_deref(),
-                    text_emitted: None,
-                    error: None,
-                },
-                delta,
-            ),
+            } => {
+                if provider_request_id.is_empty() {
+                    state.stream = None;
+                    return Ok(());
+                }
+                if state
+                    .stream
+                    .as_ref()
+                    .is_none_or(|buffer| buffer.provider_request_id != *provider_request_id)
+                {
+                    state.stream = Some(StreamBuffer {
+                        provider_request_id: provider_request_id.clone(),
+                        cycle_id: cycle_id.clone(),
+                        text: String::new(),
+                        scalar_count: 0,
+                    });
+                }
+                let buffer = state.stream.as_mut().expect("stream buffer was installed");
+                buffer.text.push_str(delta);
+                buffer.scalar_count = buffer.scalar_count.saturating_add(delta.chars().count());
+                if buffer.scalar_count
+                    >= usize::from(state.config.min_batch_chars.expect("stream batch is set"))
+                {
+                    flush_stream_buffer(self, state)?;
+                }
+                Ok(())
+            }
             LlmTextPreviewFrame::Finished {
                 provider_request_id,
                 cycle_id,
-                text_emitted,
                 ..
-            } => self.text_frames(
-                ObserveFrameMetadata {
-                    mode: TaskObserveMode::Stream,
-                    kind: "assistant_text_done",
-                    message_id: None,
-                    provider_request_id: Some(provider_request_id),
-                    cycle_id: cycle_id.as_deref(),
-                    text_emitted: Some(*text_emitted),
-                    error: None,
-                },
-                "",
-            ),
+            } => self.finish_stream(state, provider_request_id, cycle_id.as_deref(), None),
             LlmTextPreviewFrame::Aborted {
                 provider_request_id,
                 cycle_id,
                 ..
-            } => self.text_frames(
-                ObserveFrameMetadata {
-                    mode: TaskObserveMode::Stream,
-                    kind: "assistant_text_error",
-                    message_id: None,
-                    provider_request_id: Some(provider_request_id),
-                    cycle_id: cycle_id.as_deref(),
-                    text_emitted: None,
-                    error: Some(ObserveErrorPayload {
-                        code: "aborted".to_owned(),
-                        retryable: true,
-                        provider_status: None,
-                    }),
-                },
-                "",
+            } => self.finish_stream(
+                state,
+                provider_request_id,
+                cycle_id.as_deref(),
+                Some(TaskObserveException::new(
+                    "aborted",
+                    "provider text generation aborted",
+                    true,
+                )),
             ),
             LlmTextPreviewFrame::Error {
                 provider_request_id,
                 cycle_id,
                 code,
                 retryable,
-                provider_status,
                 ..
-            } => self.text_frames(
-                ObserveFrameMetadata {
-                    mode: TaskObserveMode::Stream,
-                    kind: "assistant_text_error",
-                    message_id: None,
-                    provider_request_id: Some(provider_request_id),
-                    cycle_id: cycle_id.as_deref(),
-                    text_emitted: None,
-                    error: Some(ObserveErrorPayload {
-                        code: bounded_chars(code, OBSERVE_FIELD_CHARS),
-                        retryable: *retryable,
-                        provider_status: *provider_status,
-                    }),
-                },
-                "",
+            } => self.finish_stream(
+                state,
+                provider_request_id,
+                cycle_id.as_deref(),
+                Some(TaskObserveException::new(
+                    code,
+                    bounded_chars(code, 256),
+                    *retryable,
+                )),
             ),
-            LlmTextPreviewFrame::Status { .. } => Vec::new(),
+            LlmTextPreviewFrame::Status { .. } => Ok(()),
         }
     }
 
-    fn text_frames(&self, metadata: ObserveFrameMetadata<'_>, text: &str) -> Vec<String> {
-        let observation_id = format!(
-            "obs_{}",
-            self.next_observation_id.fetch_add(1, Ordering::SeqCst)
-        );
-        let chunks = chunk_text_by_bytes(text, OBSERVE_TEXT_CHUNK_BYTES);
-        let timestamp = timestamp_now();
-        let last_index = chunks.len().saturating_sub(1);
-        chunks
-            .into_iter()
-            .enumerate()
-            .map(|(index, chunk)| {
-                observe_frame(
-                    &observation_id,
-                    metadata.clone(),
-                    chunk,
-                    index,
-                    index == last_index,
-                    &timestamp,
-                )
-            })
-            .collect()
-    }
-
-    fn remove_generation_with_diagnostic(
+    fn finish_stream(
         &self,
-        task_id: &str,
-        generation: u64,
-        code: &'static str,
-        message: impl Into<String>,
-    ) {
-        let removed = {
-            let mut observers = self.observers.lock().expect("task observer mutex poisoned");
-            let should_remove = observers
-                .get(task_id)
-                .is_some_and(|state| state.generation == generation);
-            should_remove.then(|| observers.remove(task_id)).flatten()
-        };
-        if let Some(removed) = removed {
-            removed.cancel.cancel();
-            (self.diagnostic_sink)(TaskObserverDiagnostic {
-                task_id: task_id.to_owned(),
-                code,
-                message: message.into(),
-            });
+        state: &mut ObserverState,
+        provider_request_id: &str,
+        cycle_id: Option<&str>,
+        exception: Option<TaskObserveException>,
+    ) -> Result<(), &'static str> {
+        if provider_request_id.is_empty()
+            || state
+                .stream
+                .as_ref()
+                .is_none_or(|buffer| buffer.provider_request_id != provider_request_id)
+        {
+            return Ok(());
         }
+        flush_stream_buffer(self, state)?;
+        state.stream = None;
+        let observation_id = self.next_observation_id();
+        let timestamp = SystemTime::now();
+        let frame = match exception {
+            Some(exception) => task_observe_error_frame(
+                &observation_id,
+                timestamp,
+                provider_request_id,
+                cycle_id,
+                exception,
+                state.frame_cap,
+            ),
+            None => task_observe_done_frame(
+                &observation_id,
+                timestamp,
+                provider_request_id,
+                cycle_id,
+                state.frame_cap,
+            ),
+        };
+        enqueue_frame(state, frame.map_err(|_| "observer_frame_build_failed")?)
+    }
+
+    fn detach_generation(self: Arc<Self>, task_id: String, generation: u64, code: &'static str) {
+        let Some(retired) = self.begin_retirement(&task_id, Some(generation)) else {
+            return;
+        };
+        tokio::spawn(async move {
+            retired.wait().await;
+            (self.diagnostic_sink)(TaskObserverDiagnostic {
+                task_id,
+                code,
+                message: observer_failure_message(code).to_owned(),
+            });
+        });
     }
 }
 
-fn spawn_observer_writer(
+fn flush_stream_buffer(
+    inner: &TaskConversationObserverInner,
+    state: &mut ObserverState,
+) -> Result<(), &'static str> {
+    let Some(buffer) = state.stream.as_mut() else {
+        return Ok(());
+    };
+    if buffer.text.is_empty() {
+        buffer.scalar_count = 0;
+        return Ok(());
+    }
+    let text = std::mem::take(&mut buffer.text);
+    buffer.scalar_count = 0;
+    let observation_id = inner.next_observation_id();
+    let timestamp = SystemTime::now();
+    let frames = task_observe_text_frames(
+        &observation_id,
+        TaskObserveTextMetadata {
+            delivery: TaskObserveDelivery::StreamText,
+            source: TaskObserveSource::Assistant,
+            timestamp,
+            message_id: None,
+            provider_request_id: Some(&buffer.provider_request_id),
+            cycle_id: buffer.cycle_id.as_deref(),
+        },
+        &text,
+        state.frame_cap,
+    );
+    enqueue_built_frames(state, frames)
+}
+
+fn enqueue_built_frames(
+    state: &mut ObserverState,
+    frames: Result<Vec<String>, String>,
+) -> Result<(), &'static str> {
+    let frames = frames.map_err(|_| "observer_frame_build_failed")?;
+    for frame in frames {
+        enqueue_frame(state, frame)?;
+    }
+    Ok(())
+}
+
+fn enqueue_frame(state: &mut ObserverState, frame: String) -> Result<(), &'static str> {
+    match state.sender.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => Err("observer_queue_full"),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err("observer_queue_closed"),
+    }
+}
+
+struct ObserverWriterGeneration {
     inner: Weak<TaskConversationObserverInner>,
     task_id: String,
     generation: u64,
     cancel: CancellationToken,
+    worker_done: CancellationToken,
+    write_fence: Arc<Mutex<()>>,
+}
+
+struct ObserverWriterDoneGuard {
+    inner: Weak<TaskConversationObserverInner>,
+    task_id: String,
+    generation: u64,
+    worker_done: CancellationToken,
+}
+
+impl Drop for ObserverWriterDoneGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.complete_writer_generation(&self.task_id, self.generation);
+        }
+        self.worker_done.cancel();
+    }
+}
+
+fn spawn_observer_writer(
+    worker: ObserverWriterGeneration,
     mut receiver: mpsc::Receiver<String>,
     writer: Arc<dyn TaskStdinWriter>,
 ) {
+    let ObserverWriterGeneration {
+        inner,
+        task_id,
+        generation,
+        cancel,
+        worker_done,
+        write_fence,
+    } = worker;
+    let done_guard = ObserverWriterDoneGuard {
+        inner: inner.clone(),
+        task_id: task_id.clone(),
+        generation,
+        worker_done,
+    };
     tokio::spawn(async move {
+        let _done_guard = done_guard;
         loop {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => break,
                 frame = receiver.recv() => {
-                    let Some(frame) = frame else {
-                        break;
-                    };
-                    let write = write_observe_frame_blocking(writer.clone(), frame);
-                    tokio::pin!(write);
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        result = &mut write => {
-                            if let Err(error) = result {
-                                if let Some(inner) = inner.upgrade() {
-                                    inner.remove_generation_with_diagnostic(
-                                        &task_id,
-                                        generation,
-                                        "observer_write_failed",
-                                        bounded_chars(&error, 512),
-                                    );
-                                }
-                                break;
-                            }
+                    let Some(frame) = frame else { break; };
+                    let result = {
+                        let _write = write_fence
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if cancel.is_cancelled() {
+                            break;
                         }
+                        try_write_task_stdin_frame(
+                            writer.as_ref(),
+                            TaskStdinFrameKind::Observe,
+                            frame.as_bytes(),
+                        )
+                    };
+                    if let Err(error) = result {
+                        if let Some(inner) = inner.upgrade() {
+                            inner.clone().detach_generation(
+                                task_id.clone(),
+                                generation,
+                                "observer_write_failed",
+                            );
+                            (inner.diagnostic_sink)(TaskObserverDiagnostic {
+                                task_id: task_id.clone(),
+                                code: "observer_write_detail",
+                                message: bounded_chars(&error, OBSERVE_DIAGNOSTIC_CHARS),
+                            });
+                        }
+                        break;
                     }
                 }
             }
@@ -455,398 +1248,111 @@ fn spawn_observer_writer(
     });
 }
 
-async fn write_observe_frame_blocking(
-    writer: Arc<dyn TaskStdinWriter>,
-    frame: String,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || writer.try_write_observer_stdin(frame.as_bytes()))
-        .await
-        .unwrap_or_else(|error| Err(format!("observer writer task failed: {error}")))
-}
-
-#[derive(Clone)]
-struct ObserveFrameMetadata<'a> {
-    mode: TaskObserveMode,
-    kind: &'static str,
-    message_id: Option<&'a str>,
-    provider_request_id: Option<&'a str>,
-    cycle_id: Option<&'a str>,
-    text_emitted: Option<bool>,
-    error: Option<ObserveErrorPayload>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ObserveFramePayload<'a> {
-    op: &'static str,
-    id: &'a str,
-    kind: &'static str,
-    mode: &'static str,
-    text: &'a str,
-    chunk_index: usize,
-    is_last_chunk: bool,
-    timestamp: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider_request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cycle_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text_emitted: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ObserveErrorPayload>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ObserveErrorPayload {
-    code: String,
-    retryable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider_status: Option<u16>,
-}
-
-fn observe_frame(
-    observation_id: &str,
-    metadata: ObserveFrameMetadata<'_>,
-    text: &str,
-    chunk_index: usize,
-    is_last_chunk: bool,
-    timestamp: &str,
-) -> String {
-    let payload = ObserveFramePayload {
-        op: "observe",
-        id: observation_id,
-        kind: metadata.kind,
-        mode: metadata.mode.as_str(),
-        text,
-        chunk_index,
-        is_last_chunk,
-        timestamp,
-        message_id: metadata
-            .message_id
-            .map(|value| bounded_chars(value, OBSERVE_FIELD_CHARS)),
-        provider_request_id: metadata
-            .provider_request_id
-            .map(|value| bounded_chars(value, OBSERVE_FIELD_CHARS)),
-        cycle_id: metadata
-            .cycle_id
-            .map(|value| bounded_chars(value, OBSERVE_FIELD_CHARS)),
-        text_emitted: metadata.text_emitted,
-        error: metadata.error,
-    };
-    let json = serde_json::to_string(&payload).expect("observe frame should serialize");
-    debug_assert!(json.len() + "<botified></botified>\n".len() <= DEFAULT_BOTIFIED_FRAME_BYTES);
-    #[cfg(target_os = "linux")]
-    debug_assert!(
-        json.len() + "<botified></botified>\n".len() <= OBSERVER_STDIN_ATOMIC_WRITE_BYTES
-    );
-    format!("<botified>{json}</botified>\n")
-}
-
-fn chunk_text_by_bytes(text: &str, max_bytes: usize) -> Vec<&str> {
-    if text.is_empty() {
-        return vec![""];
+fn observer_failure_message(code: &str) -> &'static str {
+    match code {
+        "observer_queue_full" => "task observe queue is full",
+        "observer_queue_closed" => "task observe queue is closed",
+        "observer_frame_build_failed" => "task observe frame could not be built",
+        "observer_write_failed" => "task observe stdin write failed",
+        _ => "task observer detached",
     }
-    let max_bytes = max_bytes.max(1);
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + max_bytes).min(text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            end = text[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(offset, _)| start + offset)
-                .unwrap_or(text.len());
-        }
-        chunks.push(&text[start..end]);
-        start = end;
-    }
-    chunks
-}
-
-fn bounded_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
-    }
-    value.chars().take(max_chars).collect()
-}
-
-fn timestamp_now() -> String {
-    system_time_rfc3339(SystemTime::now())
-}
-
-fn system_time_rfc3339(time: SystemTime) -> String {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let total_seconds = duration.as_secs() as i64;
-    let nanos = duration.subsec_nanos();
-    let days_since_unix_epoch = total_seconds.div_euclid(86_400);
-    let seconds_of_day = total_seconds.rem_euclid(86_400);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    let (year, month, day) = civil_from_days(days_since_unix_epoch);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        let millis = nanos / 1_000_000;
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    }
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_piece = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_piece + 2) / 5 + 1;
-    let month = month_piece + if month_piece < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-
-    (year as i32, month as u32, day as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm_text_preview::LlmTextPreviewMetadata;
-    use crate::tasks::TASK_STDIN_OBSERVE_FRAME_BYTES;
+    use crate::tasks::{TaskStdinWriteSuccess, TASK_STDIN_FRAME_SAFETY_CEILING};
     use crate::types::StopReason;
     use serde_json::Value;
-    use std::sync::{atomic::AtomicUsize, Condvar, Mutex as StdMutex};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize},
+        mpsc as std_mpsc, Mutex as StdMutex,
+    };
     use std::time::Duration;
-    use tokio::sync::oneshot;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct RecordingStdin {
-        text: Arc<StdMutex<String>>,
+        frames: Arc<StdMutex<Vec<String>>>,
+        cap: usize,
+    }
+
+    impl Default for RecordingStdin {
+        fn default() -> Self {
+            Self {
+                frames: Arc::new(StdMutex::new(Vec::new())),
+                cap: TASK_STDIN_FRAME_SAFETY_CEILING,
+            }
+        }
     }
 
     impl RecordingStdin {
-        fn text(&self) -> String {
-            self.text
+        fn values(&self) -> Vec<Value> {
+            self.frames
                 .lock()
-                .expect("recording stdin mutex poisoned")
-                .clone()
+                .unwrap()
+                .iter()
+                .map(|frame| {
+                    serde_json::from_str(
+                        frame
+                            .strip_prefix("<botified>")
+                            .unwrap()
+                            .strip_suffix("</botified>\n")
+                            .unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect()
         }
     }
 
     impl TaskStdinWriter for RecordingStdin {
-        fn write_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-            self.text
+        fn atomic_frame_cap(&self) -> usize {
+            self.cap
+        }
+
+        fn try_write_frame(&self, bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
+            self.frames
                 .lock()
-                .expect("recording stdin mutex poisoned")
-                .push_str(&String::from_utf8_lossy(bytes));
-            Ok(())
-        }
-
-        fn supports_observer_stdin(&self) -> bool {
-            true
-        }
-
-        fn try_write_observer_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-            self.write_stdin(bytes)
+                .unwrap()
+                .push(String::from_utf8(bytes.to_vec()).unwrap());
+            Ok(TaskStdinWriteSuccess::delivered())
         }
     }
 
-    #[derive(Clone)]
-    struct BlockingStdin {
-        started: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<(StdMutex<bool>, Condvar)>,
-        completed_writes: Arc<AtomicUsize>,
-    }
+    #[derive(Clone, Default)]
+    struct FailingStdin(Arc<AtomicUsize>);
 
-    impl BlockingStdin {
-        fn new() -> (Self, oneshot::Receiver<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            (
-                Self {
-                    started: Arc::new(StdMutex::new(Some(started_tx))),
-                    release: Arc::new((StdMutex::new(false), Condvar::new())),
-                    completed_writes: Arc::new(AtomicUsize::new(0)),
-                },
-                started_rx,
-            )
+    impl TaskStdinWriter for FailingStdin {
+        fn atomic_frame_cap(&self) -> usize {
+            TASK_STDIN_FRAME_SAFETY_CEILING
         }
 
-        fn release(&self) {
-            let (lock, cvar) = &*self.release;
-            *lock.lock().expect("blocking stdin mutex poisoned") = true;
-            cvar.notify_all();
-        }
-
-        fn completed_writes(&self) -> usize {
-            self.completed_writes.load(Ordering::SeqCst)
-        }
-
-        fn release_on_drop(&self) -> BlockingStdinReleaseGuard {
-            BlockingStdinReleaseGuard {
-                stdin: self.clone(),
-            }
+        fn try_write_frame(&self, _bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("would block".to_owned())
         }
     }
 
-    impl TaskStdinWriter for BlockingStdin {
-        fn write_stdin(&self, _bytes: &[u8]) -> Result<(), String> {
-            if let Some(started) = self
-                .started
+    struct BlockingPanickingStdin {
+        entered: std_mpsc::Sender<()>,
+        release: StdMutex<std_mpsc::Receiver<()>>,
+    }
+
+    impl TaskStdinWriter for BlockingPanickingStdin {
+        fn atomic_frame_cap(&self) -> usize {
+            TASK_STDIN_FRAME_SAFETY_CEILING
+        }
+
+        fn try_write_frame(&self, _bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
+            self.entered.send(()).expect("panic test remains active");
+            self.release
                 .lock()
-                .expect("blocking stdin started mutex poisoned")
-                .take()
-            {
-                let _ = started.send(());
-            }
-            let (lock, cvar) = &*self.release;
-            let mut released = lock.lock().expect("blocking stdin mutex poisoned");
-            while !*released {
-                released = cvar
-                    .wait(released)
-                    .expect("blocking stdin condvar wait failed");
-            }
-            self.completed_writes.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+                .expect("panic release mutex poisoned")
+                .recv()
+                .expect("panic test releases writer");
+            panic!("injected observer writer panic");
         }
-
-        fn supports_observer_stdin(&self) -> bool {
-            true
-        }
-
-        fn try_write_observer_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-            self.write_stdin(bytes)
-        }
-    }
-
-    struct BlockingStdinReleaseGuard {
-        stdin: BlockingStdin,
-    }
-
-    impl Drop for BlockingStdinReleaseGuard {
-        fn drop(&mut self) {
-            self.stdin.release();
-        }
-    }
-
-    #[derive(Clone)]
-    struct HoldFirstRecordingStdin {
-        first_started: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
-        release_first: Arc<(StdMutex<bool>, Condvar)>,
-        call_count: Arc<AtomicUsize>,
-        writes: Arc<StdMutex<Vec<String>>>,
-    }
-
-    impl HoldFirstRecordingStdin {
-        fn new() -> (Self, oneshot::Receiver<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            (
-                Self {
-                    first_started: Arc::new(StdMutex::new(Some(started_tx))),
-                    release_first: Arc::new((StdMutex::new(false), Condvar::new())),
-                    call_count: Arc::new(AtomicUsize::new(0)),
-                    writes: Arc::new(StdMutex::new(Vec::new())),
-                },
-                started_rx,
-            )
-        }
-
-        fn release_first(&self) {
-            let (lock, cvar) = &*self.release_first;
-            *lock
-                .lock()
-                .expect("hold-first stdin release mutex poisoned") = true;
-            cvar.notify_all();
-        }
-
-        fn release_first_on_drop(&self) -> HoldFirstRecordingStdinReleaseGuard {
-            HoldFirstRecordingStdinReleaseGuard {
-                stdin: self.clone(),
-            }
-        }
-
-        fn write_count(&self) -> usize {
-            self.writes
-                .lock()
-                .expect("hold-first stdin writes mutex poisoned")
-                .len()
-        }
-
-        fn text(&self) -> String {
-            self.writes
-                .lock()
-                .expect("hold-first stdin writes mutex poisoned")
-                .join("")
-        }
-    }
-
-    struct HoldFirstRecordingStdinReleaseGuard {
-        stdin: HoldFirstRecordingStdin,
-    }
-
-    impl Drop for HoldFirstRecordingStdinReleaseGuard {
-        fn drop(&mut self) {
-            self.stdin.release_first();
-        }
-    }
-
-    impl TaskStdinWriter for HoldFirstRecordingStdin {
-        fn write_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-            let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-            if index == 0 {
-                if let Some(started) = self
-                    .first_started
-                    .lock()
-                    .expect("hold-first stdin started mutex poisoned")
-                    .take()
-                {
-                    let _ = started.send(());
-                }
-                let (lock, cvar) = &*self.release_first;
-                let mut released = lock
-                    .lock()
-                    .expect("hold-first stdin release mutex poisoned");
-                while !*released {
-                    released = cvar
-                        .wait(released)
-                        .expect("hold-first stdin condvar wait failed");
-                }
-            }
-            self.writes
-                .lock()
-                .expect("hold-first stdin writes mutex poisoned")
-                .push(String::from_utf8_lossy(bytes).to_string());
-            Ok(())
-        }
-
-        fn supports_observer_stdin(&self) -> bool {
-            true
-        }
-
-        fn try_write_observer_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-            self.write_stdin(bytes)
-        }
-    }
-
-    fn frame_values(text: &str) -> Vec<Value> {
-        text.split("<botified>")
-            .skip(1)
-            .map(|rest| {
-                let end = rest.find("</botified>").expect("frame should close");
-                serde_json::from_str(&rest[..end]).expect("frame should be valid JSON")
-            })
-            .collect()
-    }
-
-    fn frame_strings(text: &str) -> Vec<String> {
-        text.split_inclusive('\n')
-            .filter(|line| line.starts_with("<botified>"))
-            .map(ToOwned::to_owned)
-            .collect()
     }
 
     async fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -855,221 +1361,450 @@ mod tests {
                 if condition() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("condition should become true before timeout");
+        .unwrap();
     }
 
-    #[tokio::test]
-    async fn final_text_frames_are_valid_chunked_observe_json() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let stdin = RecordingStdin::default();
-        observer.enable("task-a", TaskObserveMode::Final, Arc::new(stdin.clone()));
-
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: &format!("alpha-{}-omega", "x".repeat(OBSERVE_TEXT_CHUNK_BYTES + 16)),
-            message_id: Some("assistant-public"),
-            cycle_id: Some("cycle-1"),
-        });
-        wait_until(|| frame_values(&stdin.text()).len() >= 2).await;
-
-        let frames = frame_values(&stdin.text());
-        assert!(frames.len() >= 2);
-        assert!(frames.iter().all(|frame| frame["op"] == "observe"));
-        assert!(frames.iter().all(|frame| frame["kind"] == "assistant_text"));
-        assert!(frames.iter().all(|frame| frame["mode"] == "final"));
-        assert!(frames
-            .iter()
-            .all(|frame| frame["message_id"] == "assistant-public"));
-        assert_eq!(frames[0]["chunk_index"], 0);
-        assert_eq!(frames.last().unwrap()["is_last_chunk"], true);
-        assert!(frames
-            .iter()
-            .all(|frame| frame.to_string().len() < DEFAULT_BOTIFIED_FRAME_BYTES));
-    }
-
-    #[tokio::test]
-    async fn escaping_heavy_observe_frames_stay_within_stdin_observe_frame_cap() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let stdin = RecordingStdin::default();
-        observer.enable("task-a", TaskObserveMode::Final, Arc::new(stdin.clone()));
-
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: &"\\".repeat(OBSERVE_TEXT_CHUNK_BYTES * 4),
-            message_id: Some("assistant-public"),
-            cycle_id: Some("cycle-1"),
-        });
-        wait_until(|| frame_strings(&stdin.text()).len() >= 4).await;
-
-        let frames = frame_strings(&stdin.text());
-        assert!(frames.len() >= 4);
-        assert!(
-            frames
-                .iter()
-                .all(|frame| frame.len() <= TASK_STDIN_OBSERVE_FRAME_BYTES),
-            "observe frames must stay within stdin cap: {:?}",
-            frames.iter().map(|frame| frame.len()).collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn final_text_observer_ignores_empty_text() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let stdin = RecordingStdin::default();
-        observer.enable("task-a", TaskObserveMode::Final, Arc::new(stdin.clone()));
-
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: "",
-            message_id: Some("assistant-empty"),
-            cycle_id: None,
-        });
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: " \t\n",
-            message_id: Some("assistant-whitespace"),
-            cycle_id: None,
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(stdin.text(), "");
-    }
-
-    #[tokio::test]
-    async fn preview_frames_map_only_visible_stream_events() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let stdin = RecordingStdin::default();
-        observer.enable("task-a", TaskObserveMode::Stream, Arc::new(stdin.clone()));
-        let metadata = LlmTextPreviewMetadata {
-            provider_request_id: "prq_1".to_owned(),
+    fn metadata(id: &str) -> LlmTextPreviewMetadata {
+        LlmTextPreviewMetadata {
+            provider_request_id: id.to_owned(),
             turn_id: Some("turn_1".to_owned()),
-            cycle_id: Some("cyc_1".to_owned()),
+            cycle_id: Some("cycle_1".to_owned()),
             provider_call_index: 0,
-            input_ids: vec!["msg_1".to_owned()],
-        };
+            input_ids: Vec::new(),
+        }
+    }
 
-        observer.publish_preview_frame(&LlmTextPreviewFrame::started(&metadata));
-        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(&metadata, "draft"));
+    #[tokio::test]
+    async fn prepared_generation_is_invisible_until_activation() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin::default();
+        let prepared = observer
+            .prepare(
+                "task",
+                TaskObserveConfig::final_text(),
+                Arc::new(stdin.clone()),
+            )
+            .unwrap();
+        observer.publish_final_text(FinalTextObservation {
+            kind: FinalTextObservationKind::UserText,
+            text: "before fence",
+            message_id: Some("msg_1"),
+            cycle_id: None,
+        });
+        assert!(stdin.values().is_empty());
+
+        observer.activate(prepared);
+        observer.publish_final_text(FinalTextObservation {
+            kind: FinalTextObservationKind::UserText,
+            text: "after fence",
+            message_id: Some("msg_2"),
+            cycle_id: None,
+        });
+        wait_until(|| stdin.values().len() == 1).await;
+        assert_eq!(stdin.values()[0]["text"], "after fence");
+    }
+
+    #[tokio::test]
+    async fn failed_or_closed_commit_never_activates_and_releases_reservation() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin::default();
+        let prepared = observer
+            .prepare(
+                "write-fails",
+                TaskObserveConfig::final_text(),
+                Arc::new(stdin.clone()),
+            )
+            .unwrap();
+        assert!(matches!(
+            observer.write_result_and_activate(prepared, || Err("result failed".to_owned())),
+            Err(ObserverCommitError::Write(error)) if error == "result failed"
+        ));
+        assert!(!observer.is_observing("write-fails"));
+        observer.activate(
+            observer
+                .prepare(
+                    "write-fails",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+        assert!(observer.is_observing("write-fails"));
+
+        let prepared = observer
+            .prepare("closed", TaskObserveConfig::final_text(), Arc::new(stdin))
+            .unwrap();
+        observer.close_admission("closed");
+        let writes = AtomicUsize::new(0);
+        assert_eq!(
+            observer.write_result_and_activate(prepared, || {
+                writes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            Err(ObserverCommitError::AdmissionClosed)
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert!(!observer.is_observing("closed"));
+        assert_eq!(observer.slot_count_for_test(), 2);
+
+        observer.close_admission("never-observed");
+        assert_eq!(
+            observer.slot_count_for_test(),
+            2,
+            "closing admission must not create a permanent tombstone"
+        );
+        observer.release_closed_admission("closed");
+        assert_eq!(observer.slot_count_for_test(), 1);
+    }
+
+    #[tokio::test]
+    async fn fenced_retirement_cleanup_is_generation_guarded() {
+        let observer = TaskConversationObserver::new(|_| {});
+        observer.inner.observers.lock().unwrap().insert(
+            "task".to_owned(),
+            ObserverSlot {
+                retirement: Some(RetirementFence {
+                    generation: 7,
+                    done: CancellationToken::new(),
+                    write_fence: Arc::new(Mutex::new(())),
+                }),
+                ..ObserverSlot::default()
+            },
+        );
+
+        observer.complete_fenced_retirement("task", 6);
+        assert_eq!(observer.retirement_generation_for_test("task"), Some(7));
+
+        observer.complete_fenced_retirement("task", 7);
+        assert_eq!(observer.slot_count_for_test(), 0);
+
+        let replacement = observer
+            .prepare(
+                "task",
+                TaskObserveConfig::final_text(),
+                Arc::new(RecordingStdin::default()),
+            )
+            .unwrap();
+        let replacement_generation = replacement.generation();
+        observer.activate(replacement);
+        observer.inner.complete_writer_generation("task", 7);
+        assert_eq!(
+            observer.generation_for_task("task"),
+            Some(replacement_generation)
+        );
+        observer.retire_and_wait("task").await;
+    }
+
+    #[tokio::test]
+    async fn final_and_stream_user_text_share_dynamic_cap_chunking() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin {
+            cap: 420,
+            ..RecordingStdin::default()
+        };
+        observer.activate(
+            observer
+                .prepare(
+                    "task",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+        observer.publish_final_text(FinalTextObservation {
+            kind: FinalTextObservationKind::UserText,
+            text: &format!("{}{}", "\\\"".repeat(100), "界".repeat(100)),
+            message_id: Some("msg_1"),
+            cycle_id: None,
+        });
+        wait_until(|| stdin.values().len() > 1).await;
+        assert!(stdin.frames.lock().unwrap().iter().all(|f| f.len() <= 420));
+        let values = stdin.values();
+        assert_eq!(values[0]["delivery"], "final_text");
+        assert_eq!(values[0]["source"], "user");
+        assert_eq!(values.last().unwrap()["is_last_chunk"], true);
+        let timestamp = values[0]["timestamp"].clone();
+        assert!(timestamp.as_str().is_some_and(|value| value.ends_with('Z')));
+        assert!(values.iter().all(|value| value["timestamp"] == timestamp));
+    }
+
+    #[tokio::test]
+    async fn opaque_public_message_ids_are_forwarded_only_when_observe_representable() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin::default();
+        observer.activate(
+            observer
+                .prepare(
+                    "task",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+
+        let cases = [
+            ("valid_token-1", true),
+            ("unicode-消息", false),
+            ("spaced id", false),
+            ("slash/id", false),
+        ];
+        for (index, (message_id, representable)) in cases.into_iter().enumerate() {
+            observer.publish_final_text(FinalTextObservation {
+                kind: FinalTextObservationKind::UserText,
+                text: &format!("visible-{index}"),
+                message_id: Some(message_id),
+                cycle_id: None,
+            });
+            wait_until(|| stdin.values().len() == index + 1).await;
+            let values = stdin.values();
+            assert_eq!(values[index]["text"], format!("visible-{index}"));
+            assert_eq!(
+                values[index].get("message_id").and_then(Value::as_str),
+                representable.then_some(message_id)
+            );
+            assert!(observer.is_observing("task"));
+        }
+
+        let overlong = "x".repeat(2049);
+        observer.publish_final_text(FinalTextObservation {
+            kind: FinalTextObservationKind::UserText,
+            text: "visible-overlong",
+            message_id: Some(&overlong),
+            cycle_id: None,
+        });
+        wait_until(|| stdin.values().len() == 5).await;
+        assert_eq!(stdin.values()[4]["text"], "visible-overlong");
+        assert!(stdin.values()[4].get("message_id").is_none());
+        assert!(observer.is_observing("task"));
+    }
+
+    #[tokio::test]
+    async fn stream_batches_scalars_and_terminal_only_closes_matching_draft() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin::default();
+        observer.activate(
+            observer
+                .prepare(
+                    "task",
+                    TaskObserveConfig::stream_text(3).unwrap(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+        let first = metadata("prq_1");
+        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(&first, "你"));
+        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(&first, "好a"));
+        let other = metadata("prq_2");
         observer.publish_preview_frame(&LlmTextPreviewFrame::finished(
-            &metadata,
+            &other,
             true,
             StopReason::EndTurn,
         ));
-        wait_until(|| frame_values(&stdin.text()).len() >= 3).await;
-
-        let kinds = frame_values(&stdin.text())
-            .into_iter()
-            .map(|frame| frame["kind"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            kinds,
-            vec![
-                "assistant_text_started",
-                "assistant_text",
-                "assistant_text_done"
-            ]
-        );
-    }
-
-    #[test]
-    fn preview_frame_without_stream_observer_skips_frame_construction() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let metadata = LlmTextPreviewMetadata {
-            provider_request_id: "prq_no_observer".to_owned(),
-            turn_id: Some("turn_no_observer".to_owned()),
-            cycle_id: Some("cyc_no_observer".to_owned()),
-            provider_call_index: 0,
-            input_ids: vec!["msg_no_observer".to_owned()],
-        };
-        let before = observer.inner.next_observation_id.load(Ordering::SeqCst);
-
-        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(
-            &metadata,
-            "draft without observer",
+        observer.publish_preview_frame(&LlmTextPreviewFrame::finished(
+            &first,
+            true,
+            StopReason::EndTurn,
         ));
-
-        assert_eq!(
-            observer.inner.next_observation_id.load(Ordering::SeqCst),
-            before
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn blocking_observer_writer_does_not_block_async_runtime() {
-        let observer = TaskConversationObserver::new(|_| {});
-        let (stdin, started) = BlockingStdin::new();
-        let _release_guard = stdin.release_on_drop();
-
-        observer.enable("task-a", TaskObserveMode::Final, Arc::new(stdin.clone()));
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: "blocked writer",
-            message_id: Some("assistant-blocked"),
-            cycle_id: None,
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), started)
-            .await
-            .expect("blocking writer should start without stalling the runtime")
-            .expect("blocking writer start signal should send");
-
-        let (probe_tx, probe_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            let _ = probe_tx.send(());
-        });
-        tokio::time::timeout(Duration::from_millis(100), probe_rx)
-            .await
-            .expect("async runtime should continue while writer is blocked")
-            .expect("probe task should send");
-
-        stdin.release();
-        wait_until(|| stdin.completed_writes() == 1).await;
+        wait_until(|| stdin.values().len() == 2).await;
+        let values = stdin.values();
+        assert_eq!(values[0]["text"], "你好a");
+        assert_eq!(values[1]["event"], "done");
+        assert!(observer.is_observing("task"));
     }
 
     #[tokio::test]
-    async fn observer_writer_preserves_frame_order_while_first_write_is_blocked() {
+    async fn new_stream_id_discards_old_buffer_and_late_delta_starts_new_buffer() {
         let observer = TaskConversationObserver::new(|_| {});
-        let (stdin, first_started) = HoldFirstRecordingStdin::new();
-        let _release_guard = stdin.release_first_on_drop();
-        observer.enable("task-a", TaskObserveMode::Final, Arc::new(stdin.clone()));
+        let stdin = RecordingStdin::default();
+        observer.activate(
+            observer
+                .prepare(
+                    "task",
+                    TaskObserveConfig::stream_text(10).unwrap(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(&metadata("old"), "drop"));
+        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(&metadata("new"), "keep"));
+        observer.publish_preview_frame(&LlmTextPreviewFrame::finished(
+            &metadata("new"),
+            true,
+            StopReason::EndTurn,
+        ));
+        wait_until(|| stdin.values().len() == 2).await;
+        assert_eq!(stdin.values()[0]["text"], "keep");
+    }
 
+    #[tokio::test]
+    async fn write_failure_retires_only_matching_generation_once() {
+        let diagnostics = Arc::new(StdMutex::new(Vec::new()));
+        let captured = diagnostics.clone();
+        let observer = TaskConversationObserver::new(move |diagnostic| {
+            captured.lock().unwrap().push(diagnostic.code);
+        });
+        let failing = FailingStdin::default();
+        let healthy = RecordingStdin::default();
+        observer.activate(
+            observer
+                .prepare(
+                    "bad",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(failing.clone()),
+                )
+                .unwrap(),
+        );
+        observer.activate(
+            observer
+                .prepare(
+                    "good",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(healthy.clone()),
+                )
+                .unwrap(),
+        );
         observer.publish_final_text(FinalTextObservation {
             kind: FinalTextObservationKind::AssistantText,
-            text: "first",
-            message_id: Some("assistant-first"),
+            text: "visible",
+            message_id: Some("msg_1"),
             cycle_id: None,
         });
-        tokio::time::timeout(Duration::from_secs(1), first_started)
+        wait_until(|| !observer.is_observing("bad") && healthy.values().len() == 1).await;
+        assert!(observer.is_observing("good"));
+        assert_eq!(
+            diagnostics
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|code| **code == "observer_write_failed")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn writer_panic_completes_matching_retirement_and_terminal_cleanup() {
+        let observer = TaskConversationObserver::new(|_| {});
+        observer.transition_for("panic-writer");
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        observer.activate(
+            observer
+                .prepare(
+                    "panic-writer",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(BlockingPanickingStdin {
+                        entered: entered_tx,
+                        release: StdMutex::new(release_rx),
+                    }),
+                )
+                .unwrap(),
+        );
+        observer.publish_final_text(FinalTextObservation {
+            kind: FinalTextObservationKind::AssistantText,
+            text: "panic in writer",
+            message_id: None,
+            cycle_id: None,
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer reaches injected panic boundary");
+
+        let retired = observer.retire("panic-writer").expect("active generation");
+        assert_eq!(
+            observer.retirement_generation_for_test("panic-writer"),
+            Some(retired.generation())
+        );
+        release_tx.send(()).expect("writer remains blocked");
+        tokio::time::timeout(Duration::from_secs(1), retired.wait())
             .await
-            .expect("first writer call should start")
-            .expect("first writer signal should send");
+            .expect("writer panic must signal retirement completion");
 
+        observer.cleanup_terminal("panic-writer");
+        assert_eq!(observer.slot_count_for_test(), 0);
+        assert_eq!(observer.transition_count_for_test(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn diagnostic_sink_panic_completes_writer_retirement_without_residue() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let release_rx = Arc::new(StdMutex::new(release_rx));
+        let panic_once = Arc::new(AtomicBool::new(true));
+        let observer = TaskConversationObserver::new({
+            let release_rx = release_rx.clone();
+            let panic_once = panic_once.clone();
+            move |_| {
+                if panic_once.swap(false, Ordering::SeqCst) {
+                    entered_tx.send(()).expect("sink panic test remains active");
+                    release_rx
+                        .lock()
+                        .expect("sink release mutex poisoned")
+                        .recv()
+                        .expect("sink panic test releases callback");
+                    panic!("injected observer diagnostic sink panic");
+                }
+            }
+        });
+        observer.transition_for("panic-sink");
+        observer.activate(
+            observer
+                .prepare(
+                    "panic-sink",
+                    TaskObserveConfig::final_text(),
+                    Arc::new(FailingStdin::default()),
+                )
+                .unwrap(),
+        );
         observer.publish_final_text(FinalTextObservation {
             kind: FinalTextObservationKind::AssistantText,
-            text: "second",
-            message_id: Some("assistant-second"),
+            text: "fail before sink panic",
+            message_id: None,
             cycle_id: None,
         });
-        observer.publish_final_text(FinalTextObservation {
-            kind: FinalTextObservationKind::AssistantText,
-            text: "third",
-            message_id: Some("assistant-third"),
-            cycle_id: None,
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(stdin.write_count(), 0);
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sink runs after matching retirement is installed");
+        assert!(observer
+            .retirement_generation_for_test("panic-sink")
+            .is_some());
 
-        stdin.release_first();
-        wait_until(|| stdin.write_count() == 3).await;
+        release_tx.send(()).expect("sink remains blocked");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            observer.retire_and_wait("panic-sink"),
+        )
+        .await
+        .expect("sink panic must not strand retirement");
 
-        let texts = frame_values(&stdin.text())
-            .into_iter()
-            .map(|frame| frame["text"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(texts, vec!["first", "second", "third"]);
+        observer.cleanup_terminal("panic-sink");
+        assert_eq!(observer.slot_count_for_test(), 0);
+        assert_eq!(observer.transition_count_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn retirement_drops_buffer_without_flush() {
+        let observer = TaskConversationObserver::new(|_| {});
+        let stdin = RecordingStdin::default();
+        observer.activate(
+            observer
+                .prepare(
+                    "task",
+                    TaskObserveConfig::stream_text(20).unwrap(),
+                    Arc::new(stdin.clone()),
+                )
+                .unwrap(),
+        );
+        observer.publish_preview_frame(&LlmTextPreviewFrame::text_delta(
+            &metadata("prq_1"),
+            "pending",
+        ));
+        observer.retire_and_wait("task").await;
+        assert!(stdin.values().is_empty());
+        assert!(!observer.is_observing("task"));
     }
 }

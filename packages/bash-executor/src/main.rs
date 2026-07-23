@@ -1,24 +1,38 @@
 use std::{
     env,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{mpsc, Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 
 const OUTPUT_CHANNEL_CAPACITY: usize = 16;
-const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
 struct ExecuteRequest {
     op: String,
+    mode: ExecutionMode,
     command: String,
     cwd: String,
     interactive_stdio: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecutionMode {
+    Tool,
+    Terminal,
 }
 
 #[derive(Deserialize)]
@@ -99,10 +113,13 @@ fn parse_listen(args: impl Iterator<Item = String>) -> Result<SocketAddr, String
 }
 
 fn handle_connection(stream: TcpStream) -> io::Result<()> {
-    handle_connection_with_output_limit(stream, MAX_COMMAND_OUTPUT_BYTES)
+    let shutdown = ConnectionShutdown(stream.try_clone()?);
+    let result = handle_connection_inner(stream);
+    drop(shutdown);
+    result
 }
 
-fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -> io::Result<()> {
+fn handle_connection_inner(stream: TcpStream) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     let mut reader = BufReader::new(reader_stream);
@@ -135,7 +152,90 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
     };
     let (control_tx, control_rx) = mpsc::channel();
     thread::spawn(move || read_controls(reader, control_tx));
+    match request.mode {
+        ExecutionMode::Tool => handle_tool(request, writer, control_rx),
+        ExecutionMode::Terminal => handle_terminal(request, writer, control_rx),
+    }
+}
 
+fn handle_tool(
+    request: ExecuteRequest,
+    writer: Arc<Mutex<TcpStream>>,
+    control_rx: mpsc::Receiver<Control>,
+) -> io::Result<()> {
+    let mut command = Command::new("bash");
+    command
+        .arg("-lc")
+        .arg(request.command)
+        .current_dir(request.cwd)
+        .stdin(if request.interactive_stdio {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear();
+    inherit_safe_environment(&mut command);
+
+    let mut child = ToolChildGuard::spawn(command)?;
+    let mut input = child.child_mut().stdin.take();
+    let stdout = child
+        .child_mut()
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture tool stdout"))?;
+    let stderr = child
+        .child_mut()
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture tool stderr"))?;
+    let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
+    spawn_output_reader(stdout, output_tx.clone());
+    spawn_output_reader(stderr, output_tx.clone());
+    drop(output_tx);
+
+    loop {
+        let mut made_progress = false;
+        while let Ok(chunk) = output_rx.try_recv() {
+            made_progress = true;
+            write_output_event(&writer, chunk)?;
+        }
+        match control_rx.try_recv() {
+            Ok(Control::Stdin(bytes)) => {
+                if let Some(input) = input.as_mut() {
+                    input.write_all(&bytes)?;
+                    input.flush()?;
+                }
+            }
+            Ok(Control::Cancel)
+            | Ok(Control::Disconnected)
+            | Ok(Control::Resize { .. })
+            | Err(mpsc::TryRecvError::Disconnected) => child.kill_group(),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if let Some(status) = child.try_wait()? {
+            drain_output_after_exit(&writer, &output_rx, &mut child)?;
+            write_event(
+                &writer,
+                &CompletedEvent {
+                    op: "completed",
+                    exit_code: status.code(),
+                },
+            )?;
+            return Ok(());
+        }
+        if !made_progress {
+            thread::sleep(WAIT_POLL_INTERVAL);
+        }
+    }
+}
+
+fn handle_terminal(
+    request: ExecuteRequest,
+    writer: Arc<Mutex<TcpStream>>,
+    control_rx: mpsc::Receiver<Control>,
+) -> io::Result<()> {
     let pty = native_pty_system();
     let pair = match pty.openpty(PtySize {
         rows: 24,
@@ -169,7 +269,7 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
         "TERM",
         env::var_os("TERM").unwrap_or_else(|| "xterm-256color".into()),
     );
-    let mut child = match pair.slave.spawn_command(command) {
+    let child = match pair.slave.spawn_command(command) {
         Ok(child) => child,
         Err(error) => {
             write_event(
@@ -182,14 +282,9 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
             return Err(io::Error::other(error));
         }
     };
+    let mut child = PtyChildGuard::new(child);
     drop(pair.slave);
-    let terminal_input = if request.interactive_stdio {
-        Some(Mutex::new(
-            pair.master.take_writer().map_err(io::Error::other)?,
-        ))
-    } else {
-        None
-    };
+    let terminal_input = Mutex::new(pair.master.take_writer().map_err(io::Error::other)?);
     let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
     spawn_output_reader(
         pair.master.try_clone_reader().map_err(io::Error::other)?,
@@ -197,109 +292,209 @@ fn handle_connection_with_output_limit(stream: TcpStream, output_limit: usize) -
     );
     drop(output_tx);
 
-    let mut cancel = false;
-    let mut output_bytes = 0_usize;
-    let mut output_limit_exceeded = false;
     loop {
         while let Ok(chunk) = output_rx.try_recv() {
-            output_bytes = output_bytes.saturating_add(chunk.len());
-            if output_bytes > output_limit {
-                if !output_limit_exceeded {
-                    output_limit_exceeded = true;
-                    cancel = true;
-                    kill_child(&mut child);
-                    let message =
-                        format!("command output exceeded cumulative limit of {output_limit} bytes");
-                    write_event(
-                        &writer,
-                        &ErrorEvent {
-                            op: "error",
-                            message: &message,
-                        },
-                    )?;
-                }
-                continue;
-            }
-            write_event(
-                &writer,
-                &OutputEvent {
-                    op: "output",
-                    data: BASE64.encode(chunk),
-                },
-            )?;
+            write_output_event(&writer, chunk)?;
         }
-        if !cancel {
-            match control_rx.try_recv() {
-                Ok(Control::Stdin(bytes)) => {
-                    if let Some(input) = &terminal_input {
-                        let mut input = input
-                            .lock()
-                            .map_err(|_| io::Error::other("terminal input lock poisoned"))?;
-                        input.write_all(&bytes)?;
-                        input.flush()?;
-                    }
-                }
-                Ok(Control::Resize { rows, cols }) => {
-                    pair.master
-                        .resize(PtySize {
-                            rows,
-                            cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        })
-                        .map_err(io::Error::other)?;
-                }
-                Ok(Control::Cancel) | Ok(Control::Disconnected) => {
-                    cancel = true;
-                    kill_child(&mut child);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    cancel = true;
-                    kill_child(&mut child);
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+        match control_rx.try_recv() {
+            Ok(Control::Stdin(bytes)) => {
+                let mut input = terminal_input
+                    .lock()
+                    .map_err(|_| io::Error::other("terminal input lock poisoned"))?;
+                input.write_all(&bytes)?;
+                input.flush()?;
             }
+            Ok(Control::Resize { rows, cols }) => {
+                pair.master
+                    .resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(io::Error::other)?;
+            }
+            Ok(Control::Cancel)
+            | Ok(Control::Disconnected)
+            | Err(mpsc::TryRecvError::Disconnected) => {
+                child.kill_group();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
         if let Some(status) = child.try_wait()? {
-            while let Ok(chunk) = output_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                output_bytes = output_bytes.saturating_add(chunk.len());
-                if output_bytes <= output_limit {
-                    write_event(
-                        &writer,
-                        &OutputEvent {
-                            op: "output",
-                            data: BASE64.encode(chunk),
-                        },
-                    )?;
-                } else if !output_limit_exceeded {
-                    output_limit_exceeded = true;
-                    kill_child(&mut child);
-                    let message =
-                        format!("command output exceeded cumulative limit of {output_limit} bytes");
-                    write_event(
-                        &writer,
-                        &ErrorEvent {
-                            op: "error",
-                            message: &message,
-                        },
-                    )?;
+            let deadline = Instant::now() + POST_EXIT_DRAIN_TIMEOUT;
+            while Instant::now() < deadline {
+                match output_rx.recv_timeout(WAIT_POLL_INTERVAL) {
+                    Ok(chunk) => write_output_event(&writer, chunk)?,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
             write_event(
                 &writer,
                 &CompletedEvent {
                     op: "completed",
-                    exit_code: if output_limit_exceeded {
-                        None
-                    } else {
-                        Some(status.exit_code() as i32)
-                    },
+                    exit_code: Some(status.exit_code() as i32),
                 },
             )?;
+            return Ok(());
+        }
+        thread::sleep(WAIT_POLL_INTERVAL);
+    }
+}
+
+struct ConnectionShutdown(TcpStream);
+
+impl Drop for ConnectionShutdown {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+struct ToolChildGuard {
+    child: Child,
+    process_group_id: u32,
+    armed: bool,
+    kill_sent: bool,
+    #[cfg(test)]
+    kill_attempts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ToolChildGuard {
+    fn spawn(mut command: Command) -> io::Result<Self> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn()?;
+        let process_group_id = child.id();
+        Ok(Self {
+            child,
+            process_group_id,
+            armed: true,
+            kill_sent: false,
+            #[cfg(test)]
+            kill_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn kill_group(&mut self) {
+        if !self.armed || self.kill_sent {
+            return;
+        }
+        self.kill_sent = true;
+        #[cfg(test)]
+        self.kill_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        kill_process_group(self.process_group_id);
+        let _ = self.child.kill();
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn finish(&mut self) {
+        self.disarm();
+    }
+
+    #[cfg(test)]
+    fn kill_attempts(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.kill_attempts.clone()
+    }
+
+    fn terminate_and_reap(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.kill_group();
+        let _ = self.child.wait();
+        self.disarm();
+    }
+}
+
+impl Drop for ToolChildGuard {
+    fn drop(&mut self) {
+        self.terminate_and_reap();
+    }
+}
+
+struct PtyChildGuard {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+impl PtyChildGuard {
+    fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self { child }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+        self.child.try_wait().map_err(io::Error::other)
+    }
+
+    fn kill_group(&mut self) {
+        kill_child(&mut self.child);
+    }
+}
+
+impl Drop for PtyChildGuard {
+    fn drop(&mut self) {
+        self.kill_group();
+        let _ = self.child.wait();
+    }
+}
+
+fn inherit_safe_environment(command: &mut Command) {
+    for (key, value) in env::vars_os() {
+        if key == "PATH" || key == "HOME" || key == "TERM" || key == "LANG" || key == "LC_ALL" {
+            command.env(key, value);
+        }
+    }
+}
+
+fn write_output_event(writer: &Arc<Mutex<TcpStream>>, chunk: Vec<u8>) -> io::Result<()> {
+    write_event(
+        writer,
+        &OutputEvent {
+            op: "output",
+            data: BASE64.encode(chunk),
+        },
+    )
+}
+
+fn drain_output_after_exit(
+    writer: &Arc<Mutex<TcpStream>>,
+    output_rx: &mpsc::Receiver<Vec<u8>>,
+    child: &mut ToolChildGuard,
+) -> io::Result<()> {
+    let deadline = Instant::now() + POST_EXIT_DRAIN_TIMEOUT;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
             break;
         }
-        thread::sleep(std::time::Duration::from_millis(5));
+        let remaining = deadline.saturating_duration_since(now);
+        match output_rx.recv_timeout(remaining.min(WAIT_POLL_INTERVAL)) {
+            Ok(chunk) => write_output_event(writer, chunk)?,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                child.finish();
+                return Ok(());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
+
+    child.kill_group();
+    while let Ok(chunk) = output_rx.recv() {
+        write_output_event(writer, chunk)?;
+    }
+    child.finish();
     Ok(())
 }
 
@@ -377,9 +572,19 @@ fn kill_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     let _ = child.kill();
 }
 
+fn kill_process_group(process_group_id: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_connection, handle_connection_with_output_limit, parse_listen};
+    use super::{
+        drain_output_after_exit, handle_connection, parse_listen, spawn_output_reader,
+        ToolChildGuard, OUTPUT_CHANNEL_CAPACITY, WAIT_POLL_INTERVAL,
+    };
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
@@ -402,6 +607,78 @@ mod tests {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
+    fn run_post_exit_case(command_text: &str) -> (Vec<u8>, usize, Duration) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let client = TcpStream::connect(addr).expect("client should connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout should set");
+        let (server, _) = listener.accept().expect("server should accept");
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(server));
+
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg("-lc")
+            .arg(command_text)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = ToolChildGuard::spawn(command).expect("tool process should spawn");
+        let kill_attempts = child.kill_attempts();
+        let stdout = child
+            .child_mut()
+            .stdout
+            .take()
+            .expect("stdout should be piped");
+        let stderr = child
+            .child_mut()
+            .stderr
+            .take()
+            .expect("stderr should be piped");
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
+        spawn_output_reader(stdout, output_tx.clone());
+        spawn_output_reader(stderr, output_tx.clone());
+        drop(output_tx);
+
+        while child
+            .try_wait()
+            .expect("leader status should be readable")
+            .is_none()
+        {
+            thread::sleep(WAIT_POLL_INTERVAL);
+        }
+        let drain_started = Instant::now();
+        drain_output_after_exit(&writer, &output_rx, &mut child)
+            .expect("post-exit output should drain");
+        let drain_elapsed = drain_started.elapsed();
+        drop(child);
+        drop(writer);
+
+        let mut output = Vec::new();
+        let mut reader = BufReader::new(client);
+        loop {
+            let mut line = String::new();
+            if reader
+                .read_line(&mut line)
+                .expect("output event should read")
+                == 0
+            {
+                break;
+            }
+            let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
+                .expect("output event should be JSON");
+            if event["op"] == "output" {
+                output.extend(
+                    BASE64
+                        .decode(event["data"].as_str().expect("output data"))
+                        .expect("output should be base64"),
+                );
+            }
+        }
+        (output, kill_attempts.load(Ordering::SeqCst), drain_elapsed)
+    }
+
     #[test]
     fn accepts_only_loopback_listen_addresses() {
         assert_eq!(
@@ -416,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn executes_ndjson_request_and_returns_output_and_completion() {
+    fn tool_mode_uses_pipes_and_returns_output_and_completion() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have address");
         let server = thread::spawn(move || {
@@ -424,7 +701,7 @@ mod tests {
             handle_connection(stream).expect("executor connection should succeed");
         });
         let mut stream = TcpStream::connect(addr).expect("client should connect");
-        writeln!(stream, r#"{{"op":"execute","command":"printf sidecar-output","cwd":".","interactive_stdio":false}}"#)
+        writeln!(stream, r#"{{"op":"execute","mode":"tool","command":"if [ -t 1 ]; then printf tty; else printf pipe; fi","cwd":".","interactive_stdio":false}}"#)
             .expect("execute request should write");
         let mut reader = BufReader::new(stream);
         let mut output = String::new();
@@ -438,7 +715,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(output.trim_end())
                 .expect("output event should be JSON")["data"],
-            "c2lkZWNhci1vdXRwdXQ="
+            "cGlwZQ=="
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(completed.trim_end())
@@ -449,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_terminates_the_entire_pty_process_group() {
+    fn cancel_terminates_the_entire_tool_process_group() {
         let marker_path = unique_marker_path();
         let _ = fs::remove_file(&marker_path);
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -465,6 +742,7 @@ mod tests {
         let command = format!("sleep 3; touch {}", shell_quote(&marker_path));
         let execute = serde_json::json!({
             "op": "execute",
+            "mode": "tool",
             "command": command,
             "cwd": ".",
             "interactive_stdio": false,
@@ -517,7 +795,7 @@ mod tests {
             .expect("read timeout should set");
         writeln!(
             stream,
-            r#"{{"op":"execute","command":"exec bash -il","cwd":".","interactive_stdio":true}}"#
+            r#"{{"op":"execute","mode":"terminal","command":"exec bash -il","cwd":".","interactive_stdio":true}}"#
         )
         .expect("execute request should write");
         writeln!(stream, r#"{{"op":"resize","rows":31,"cols":97}}"#)
@@ -547,43 +825,151 @@ mod tests {
             }
         }
         assert!(String::from_utf8_lossy(&output).contains("PTY_READY"));
+        let mut eof = String::new();
+        assert_eq!(
+            reader
+                .read_line(&mut eof)
+                .expect("terminal connection should close after completion"),
+            0
+        );
         server.join().expect("server should finish");
     }
 
     #[test]
-    fn terminates_commands_that_exceed_the_cumulative_output_limit() {
+    fn output_over_sixteen_mib_completes_without_sidecar_termination() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have address");
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("client should connect");
-            handle_connection_with_output_limit(stream, 16)
-                .expect("executor connection should succeed");
+            handle_connection(stream).expect("executor connection should succeed");
         });
         let mut stream = TcpStream::connect(addr).expect("client should connect");
-        writeln!(stream, r#"{{"op":"execute","command":"printf 12345678901234567; sleep 30","cwd":".","interactive_stdio":false}}"#)
+        writeln!(stream, r#"{{"op":"execute","mode":"tool","command":"head -c 16777217 /dev/zero","cwd":".","interactive_stdio":false}}"#)
             .expect("execute request should write");
         let mut reader = BufReader::new(stream);
-        let mut events = Vec::new();
+        let mut output_bytes = 0_usize;
+        let completed;
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).expect("event should read");
             let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
                 .expect("event should be JSON");
-            let completed = event["op"] == "completed";
-            events.push(event);
-            if completed {
+            if event["op"] == "output" {
+                output_bytes += BASE64
+                    .decode(event["data"].as_str().expect("output data"))
+                    .expect("output should be base64")
+                    .len();
+            }
+            if event["op"] == "completed" {
+                completed = event;
                 break;
             }
         }
-        assert!(events.iter().any(|event| {
-            event["op"] == "error"
-                && event["message"] == "command output exceeded cumulative limit of 16 bytes"
-        }));
-        assert_eq!(events.last().expect("completion event")["op"], "completed");
-        assert_eq!(
-            events.last().expect("completion event")["exit_code"],
-            serde_json::Value::Null
-        );
+        assert_eq!(output_bytes, 16 * 1024 * 1024 + 1);
+        assert_eq!(completed["exit_code"], 0);
         server.join().expect("executor server should finish");
+    }
+
+    #[test]
+    fn client_disconnect_kills_and_reaps_the_command_group() {
+        let marker_path = unique_marker_path();
+        let _ = fs::remove_file(&marker_path);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client should connect");
+            let _ = handle_connection(stream);
+        });
+        let mut stream = TcpStream::connect(addr).expect("client should connect");
+        let command = format!(
+            "(sleep 2; touch {}) & while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done",
+            shell_quote(&marker_path)
+        );
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "op": "execute",
+                "mode": "tool",
+                "command": command,
+                "cwd": ".",
+                "interactive_stdio": false,
+            })
+        )
+        .expect("execute request should write");
+        let mut reader = BufReader::new(stream);
+        let mut first = String::new();
+        reader
+            .read_line(&mut first)
+            .expect("first output event should read");
+        drop(reader);
+        server
+            .join()
+            .expect("executor handler should return after disconnect");
+
+        thread::sleep(Duration::from_millis(2300));
+        assert!(
+            !marker_path.exists(),
+            "disconnected command descendants must be killed"
+        );
+        let _ = fs::remove_file(marker_path);
+    }
+
+    #[test]
+    fn dropping_tool_child_guard_kills_and_reaps_the_process_group() {
+        let marker_path = unique_marker_path();
+        let _ = fs::remove_file(&marker_path);
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg("-lc")
+            .arg(format!("sleep 2; touch {}", shell_quote(&marker_path)))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        let guard = ToolChildGuard::spawn(command).expect("tool process should spawn");
+        drop(guard);
+        thread::sleep(Duration::from_millis(2300));
+        assert!(
+            !marker_path.exists(),
+            "an early handler return must kill command descendants"
+        );
+        let _ = fs::remove_file(marker_path);
+    }
+
+    #[test]
+    fn normal_tool_exit_disarms_without_killing_the_process_group() {
+        let (output, kill_attempts, _) = run_post_exit_case("printf normal");
+
+        assert_eq!(output, b"normal");
+        assert_eq!(kill_attempts, 0);
+    }
+
+    #[test]
+    fn short_lived_descendant_output_drains_before_group_cleanup() {
+        let (output, kill_attempts, elapsed) = run_post_exit_case("(sleep 0.02; printf late) &");
+
+        assert_eq!(output, b"late");
+        assert_eq!(kill_attempts, 0);
+        assert!(elapsed < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn long_lived_descendant_is_killed_once_after_post_exit_drain_window() {
+        let marker_path = unique_marker_path();
+        let _ = fs::remove_file(&marker_path);
+        let command = format!("(sleep 2; touch {}) &", shell_quote(&marker_path));
+
+        let (_, kill_attempts, elapsed) = run_post_exit_case(&command);
+
+        assert_eq!(kill_attempts, 1);
+        assert!(elapsed >= super::POST_EXIT_DRAIN_TIMEOUT);
+        assert!(elapsed < Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            !marker_path.exists(),
+            "long-lived descendant must be cleaned up after the drain window"
+        );
+        let _ = fs::remove_file(marker_path);
     }
 }

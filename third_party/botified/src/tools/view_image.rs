@@ -9,7 +9,9 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::attachments::MAX_IMAGE_BASE64_BYTES;
-use crate::provider::{Provider, ProviderRequest};
+use crate::provider::{
+    complete_with_cancellation, Provider, ProviderCompletionError, ProviderRequest,
+};
 use crate::types::{ContentPart, Message, ToolCall, ToolResult};
 
 use super::{Tool, ToolError, ToolExecutionContext, ToolSpec};
@@ -116,13 +118,26 @@ impl Tool for ViewImageTool {
             ])],
             Vec::new(),
         );
-        let response = self
-            .provider
-            .complete(request, cancel)
-            .await
-            .map_err(|error| {
-                ToolError::execution_failed(format!("view_image provider request failed: {error}"))
-            })?;
+        let provider_result =
+            complete_with_cancellation(self.provider.as_ref(), request, cancel.clone()).await;
+        if cancel.is_cancelled() {
+            return Err(ToolError::execution_failed(
+                "view_image provider request cancelled",
+            ));
+        }
+        let response = match provider_result {
+            Ok(response) => response,
+            Err(ProviderCompletionError::Provider(error)) => {
+                return Err(ToolError::execution_failed(format!(
+                    "view_image provider request failed: {error}"
+                )))
+            }
+            Err(ProviderCompletionError::Cancelled) => {
+                return Err(ToolError::execution_failed(
+                    "view_image provider request cancelled",
+                ));
+            }
+        };
 
         if !response.tool_calls.is_empty() {
             return Err(ToolError::execution_failed(

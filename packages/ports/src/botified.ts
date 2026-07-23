@@ -259,7 +259,7 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       body: JSON.stringify({ text: input.text, delivery_key: input.deliveryKey, request_hash: input.requestHash }),
       headers: { "content-type": "application/json" }
     });
-    return deliveryReceiptFromBody(body, input);
+    return deliveryReceiptFromBody(body);
   }
 
   async queryDeliveryReceipt(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null> {
@@ -270,7 +270,7 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       });
       const record = asRecord(body);
       if (record?.found === false) return null;
-      return deliveryReceiptFromBody(body, { deliveryKey, requestHash: "" });
+      return deliveryReceiptFromBody(body);
     } catch (error) {
       if (error instanceof BotifiedHttpError && error.status === 404) return null;
       throw error;
@@ -801,10 +801,10 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function deliveryReceiptFromBody(body: unknown, fallback: Pick<BotifiedDeliveryMessageInput, "deliveryKey" | "requestHash">): BotifiedDeliveryReceipt {
+function deliveryReceiptFromBody(body: unknown): BotifiedDeliveryReceipt {
   const record = asRecord(body);
-  const deliveryKey = stringField(record, "delivery_key") ?? fallback.deliveryKey;
-  const requestHash = stringField(record, "request_hash") ?? fallback.requestHash;
+  const deliveryKey = stringField(record, "delivery_key");
+  const requestHash = stringField(record, "request_hash");
   if (!deliveryKey || !requestHash || record?.ok !== true) {
     throw new BotifiedHttpError({
       status: 200,

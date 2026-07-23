@@ -1,19 +1,22 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::formatting::bounded_chars;
 use crate::registry::{
-    RegistryError, RegistryHistoryResult, RegistryItem, RegistryQuery, RegistryQueryResult,
-    RegistrySetAck, RegistrySetRequest, RegistryStore, RegistryTtl, RegistryWriterKind,
+    RegistryDeleteAck, RegistryError, RegistryHistoryResult, RegistryItem, RegistryQuery,
+    RegistryQueryResult, RegistrySetAck, RegistrySetRequest, RegistryStore, RegistryTtl,
+    RegistryWriterKind,
 };
 use crate::tools::{Tool, ToolError, ToolExecutionContext, ToolSpec};
 use crate::types::{ToolCall, ToolResult};
 
 pub const REGISTRY_SET_TOOL_NAME: &str = "registry_set";
+pub const REGISTRY_DELETE_TOOL_NAME: &str = "registry_delete";
 pub const REGISTRY_GET_TOOL_NAME: &str = "registry_get";
 pub const REGISTRY_HISTORY_TOOL_NAME: &str = "registry_history";
 const REGISTRY_TOOL_ERROR_MESSAGE_CHARS: usize = 256;
@@ -31,6 +34,7 @@ pub fn registry_tools_for_writer(
             writer_kind,
             origin.clone(),
         )),
+        Arc::new(RegistryDeleteTool::new(store.clone(), writer_kind, origin)),
         Arc::new(RegistryGetTool::new(store.clone())),
         Arc::new(RegistryHistoryTool::new(store)),
     ]
@@ -39,8 +43,68 @@ pub fn registry_tools_for_writer(
 pub fn is_registry_tool_name(name: &str) -> bool {
     matches!(
         name,
-        REGISTRY_SET_TOOL_NAME | REGISTRY_GET_TOOL_NAME | REGISTRY_HISTORY_TOOL_NAME
+        REGISTRY_SET_TOOL_NAME
+            | REGISTRY_DELETE_TOOL_NAME
+            | REGISTRY_GET_TOOL_NAME
+            | REGISTRY_HISTORY_TOOL_NAME
     )
+}
+
+pub struct RegistryDeleteTool {
+    store: RegistryStore,
+    writer_kind: RegistryWriterKind,
+    origin: String,
+}
+
+impl RegistryDeleteTool {
+    pub fn new(store: RegistryStore, writer_kind: RegistryWriterKind, origin: String) -> Self {
+        Self {
+            store,
+            writer_kind,
+            origin,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for RegistryDeleteTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            REGISTRY_DELETE_TOOL_NAME,
+            "Delete the exact current registry topic. Deleting a missing or expired topic is a no-op.",
+            json!({
+                "type": "object",
+                "required": ["topic"],
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Exact dot-separated topic; wildcards and patterns are not supported."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        call: ToolCall,
+        _context: ToolExecutionContext,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let max_response_bytes = self.store.config().max_response_bytes;
+        let topic = match parse_delete_arguments(&call, max_response_bytes) {
+            Ok(topic) => topic,
+            Err(result) => return Ok(result),
+        };
+        match self
+            .store
+            .delete(self.writer_kind, self.origin.clone(), topic)
+        {
+            Ok(ack) => Ok(registry_delete_success(call, ack, max_response_bytes)),
+            Err(error) => Ok(registry_store_error(call, error, max_response_bytes)),
+        }
+    }
 }
 
 pub struct RegistrySetTool {
@@ -62,6 +126,8 @@ impl RegistrySetTool {
 #[async_trait]
 impl Tool for RegistrySetTool {
     fn spec(&self) -> ToolSpec {
+        let default_ttl_secs = self.store.config().default_ttl.as_secs_f64();
+        let history_retention_secs = self.store.config().history_retention.as_secs_f64();
         ToolSpec::new(
             REGISTRY_SET_TOOL_NAME,
             "Write a short-term registry state value for a topic.",
@@ -69,9 +135,18 @@ impl Tool for RegistrySetTool {
                 "type": "object",
                 "required": ["topic", "value"],
                 "properties": {
-                    "topic": { "type": "string" },
+                    "topic": {
+                        "type": "string",
+                        "description": "Dot-separated topic segments; wildcards are not supported."
+                    },
                     "value": {},
-                    "ttl_secs": { "type": "number" },
+                    "ttl_secs": {
+                        "type": ["number", "null"],
+                        "exclusiveMinimum": 0,
+                        "description": format!(
+                            "TTL in seconds: omit for the configured default ({default_ttl_secs}s), provide a positive number, or use null to keep the value until deletion, overwrite, or restart. Current TTL is independent of the {history_retention_secs}s history retention window. Expired values are not returned by registry_get."
+                        )
+                    },
                     "freq_hz": { "type": "number" },
                     "source": { "type": "string" }
                 },
@@ -114,15 +189,25 @@ impl RegistryGetTool {
 #[async_trait]
 impl Tool for RegistryGetTool {
     fn spec(&self) -> ToolSpec {
+        let config = self.store.config();
         ToolSpec::new(
             REGISTRY_GET_TOOL_NAME,
-            "Read current, unexpired registry state for a topic pattern.",
+            "Read current, unexpired registry state for a topic pattern. Results may be truncated by limit or response budget.",
             json!({
                 "type": "object",
                 "required": ["topic"],
                 "properties": {
-                    "topic": { "type": "string" },
-                    "limit": { "type": "integer" }
+                    "topic": {
+                        "type": "string",
+                        "description": topic_pattern_description()
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": config.max_query_limit,
+                        "default": config.default_query_limit,
+                        "description": query_limit_description(config.default_query_limit, config.max_query_limit)
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -160,16 +245,33 @@ impl RegistryHistoryTool {
 #[async_trait]
 impl Tool for RegistryHistoryTool {
     fn spec(&self) -> ToolSpec {
+        let config = self.store.config();
         ToolSpec::new(
             REGISTRY_HISTORY_TOOL_NAME,
-            "Read recent registry history samples for a topic pattern.",
+            "Read recent registry history samples for a topic pattern. Results may be truncated by limit or response budget.",
             json!({
                 "type": "object",
                 "required": ["topic", "since_secs"],
                 "properties": {
-                    "topic": { "type": "string" },
-                    "since_secs": { "type": "number" },
-                    "limit": { "type": "integer" }
+                    "topic": {
+                        "type": "string",
+                        "description": topic_pattern_description()
+                    },
+                    "since_secs": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": format!(
+                            "Positive lookback window in seconds; the effective lookback is capped by the configured retention ({}s).",
+                            config.history_retention.as_secs_f64()
+                        )
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": config.max_query_limit,
+                        "default": config.default_query_limit,
+                        "description": query_limit_description(config.default_query_limit, config.max_query_limit)
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -192,6 +294,16 @@ impl Tool for RegistryHistoryTool {
             Err(error) => Ok(registry_store_error(call, error, max_response_bytes)),
         }
     }
+}
+
+fn query_limit_description(default: usize, max: usize) -> String {
+    format!(
+        "Maximum items to return; defaults to {default}, maximum {max}. Values outside 1..={max} return an error."
+    )
+}
+
+fn topic_pattern_description() -> &'static str {
+    "Dot-separated topic pattern; * matches one segment. ** is allowed only as the final segment and matches zero or more remaining segments, including the base topic itself."
 }
 
 fn parse_set_arguments(
@@ -240,6 +352,14 @@ fn parse_get_arguments(
         query = query.with_limit(limit);
     }
     Ok(query)
+}
+
+fn parse_delete_arguments(
+    call: &ToolCall,
+    max_response_bytes: usize,
+) -> Result<String, ToolResult> {
+    reject_unknown_arguments(call, &["topic"], max_response_bytes)?;
+    required_string(call, "topic", max_response_bytes)
 }
 
 fn parse_history_arguments(
@@ -524,10 +644,6 @@ fn sanitized_registry_field(field: &str) -> String {
     }
 }
 
-fn bounded_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 fn bounded_utf8_bytes(value: &str, max_bytes: usize) -> String {
     let mut output = String::new();
     for ch in value.chars() {
@@ -552,9 +668,24 @@ fn registry_set_success(
         "origin": ack.origin,
         "seq": ack.seq,
         "freq_hz": ack.freq_hz,
-        "updated_at": system_time_rfc3339(ack.updated_at),
-        "expires_at": system_time_rfc3339(ack.expires_at),
-        "ttl_secs": duration_secs(ack.ttl),
+        "updated_at": crate::formatting::system_time_rfc3339(ack.updated_at),
+        "expires_at": ack.expires_at.map(crate::formatting::system_time_rfc3339),
+        "ttl_secs": ack.ttl.map(duration_secs),
+    });
+    bounded_success(call, details, max_response_bytes, TruncateSide::Back)
+}
+
+fn registry_delete_success(
+    call: ToolCall,
+    ack: RegistryDeleteAck,
+    max_response_bytes: usize,
+) -> ToolResult {
+    let details = json!({
+        "kind": "registry_delete",
+        "topic": ack.topic,
+        "deleted": ack.deleted,
+        "seq": ack.seq,
+        "server_time": crate::formatting::system_time_rfc3339(ack.server_time),
     });
     bounded_success(call, details, max_response_bytes, TruncateSide::Back)
 }
@@ -572,7 +703,7 @@ fn registry_get_success(
         .collect::<Vec<_>>();
     let details = json!({
         "kind": "registry_get",
-        "server_time": system_time_rfc3339(server_time),
+        "server_time": crate::formatting::system_time_rfc3339(server_time),
         "items": items,
         "matched_count": result.matched_count,
         "returned_count": result.returned_count,
@@ -595,7 +726,7 @@ fn registry_history_success(
         .collect::<Vec<_>>();
     let details = json!({
         "kind": "registry_history",
-        "server_time": system_time_rfc3339(server_time),
+        "server_time": crate::formatting::system_time_rfc3339(server_time),
         "items": items,
         "oldest_seq": result.oldest_seq,
         "newest_seq": result.newest_seq,
@@ -609,7 +740,9 @@ fn registry_history_success(
 
 fn current_item_json(item: &RegistryItem, server_time: SystemTime) -> Value {
     let age_secs = duration_between(server_time, item.updated_at);
-    let expires_in_secs = duration_between(item.expires_at, server_time);
+    let expires_in_secs = item
+        .expires_at
+        .map(|expires_at| duration_between(expires_at, server_time));
     let mut value = history_item_json(item);
     if let Value::Object(object) = &mut value {
         object.insert("age_secs".to_owned(), json!(age_secs));
@@ -627,9 +760,9 @@ fn history_item_json(item: &RegistryItem) -> Value {
         "origin": &item.origin,
         "seq": item.seq,
         "freq_hz": item.freq_hz,
-        "updated_at": system_time_rfc3339(item.updated_at),
-        "expires_at": system_time_rfc3339(item.expires_at),
-        "ttl_secs": duration_secs(item.ttl),
+        "updated_at": crate::formatting::system_time_rfc3339(item.updated_at),
+        "expires_at": item.expires_at.map(crate::formatting::system_time_rfc3339),
+        "ttl_secs": item.ttl.map(duration_secs),
     })
 }
 
@@ -755,49 +888,4 @@ fn duration_between(later: SystemTime, earlier: SystemTime) -> f64 {
         .duration_since(earlier)
         .unwrap_or_default()
         .as_secs_f64()
-}
-
-fn system_time_rfc3339(time: SystemTime) -> String {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = duration.as_secs();
-    let nanos = duration.subsec_nanos();
-    let days = (seconds / 86_400) as i64;
-    let seconds_of_day = seconds % 86_400;
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    let (year, month, day) = civil_from_days(days);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        let millis = nanos / 1_000_000;
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    }
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_piece = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_piece + 2) / 5 + 1;
-    let month = month_piece + if month_piece < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-
-    (year as i32, month as u32, day as u32)
-}
-
-trait ToolResultDetailsExt {
-    fn with_details(self, details: Value) -> Self;
-}
-
-impl ToolResultDetailsExt for ToolResult {
-    fn with_details(mut self, details: Value) -> Self {
-        self.details = details;
-        self
-    }
 }

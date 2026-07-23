@@ -1,343 +1,86 @@
-use std::collections::{HashMap, VecDeque};
-use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+use std::time::SystemTime;
 
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use thiserror::Error;
+use tokio::sync::{broadcast, Notify};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegistryConfig {
-    pub retention: Duration,
-    pub default_ttl: Duration,
-    pub max_topics: usize,
-    pub max_topic_len: usize,
-    pub max_source_len: usize,
-    pub max_value_bytes: usize,
-    pub max_history_items: usize,
-    pub max_history_bytes: usize,
-    pub default_query_limit: usize,
-    pub max_query_limit: usize,
-    pub max_response_bytes: usize,
-}
+mod maintenance;
+mod model;
+mod store;
+mod subscription;
+mod topic;
+
+use maintenance::prune_expired_locked;
+#[cfg(test)]
+use maintenance::MaintenanceTestPause;
+pub(crate) use maintenance::RegistryMaintenanceHandle;
+
+pub(crate) use model::MIN_REGISTRY_WS_MESSAGE_BYTES;
+pub use model::{
+    RegistryConfig, RegistryDeleteAck, RegistryError, RegistryHistoryResult, RegistryItem,
+    RegistryQuery, RegistryQueryResult, RegistrySetAck, RegistrySetRequest, RegistryStats,
+    RegistryStoreOptions, RegistryTopicSummary, RegistryTtl, RegistryWriterKind,
+};
+pub(crate) use subscription::RegistrySubscriptionSnapshot;
+use topic::{validate_topic_name, TopicPattern};
+pub(crate) use topic::{RegistrySubscriptionFilter, RegistrySubscriptionFilterError};
+
+#[cfg(test)]
+pub(crate) const MIN_REGISTRY_RESPONSE_BYTES: usize = 74;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegistryStoreOptions {
-    pub websocket_max_frame_bytes: usize,
+pub enum RegistryChangeKind {
+    Set,
+    Delete,
+    Expire,
 }
 
-impl RegistryStoreOptions {
-    pub const DEFAULT_WEBSOCKET_MAX_FRAME_BYTES: usize = 64 * 1024;
-
-    pub const fn new() -> Self {
-        Self {
-            websocket_max_frame_bytes: Self::DEFAULT_WEBSOCKET_MAX_FRAME_BYTES,
-        }
-    }
-
-    pub const fn with_websocket_max_frame_bytes(
-        mut self,
-        websocket_max_frame_bytes: usize,
-    ) -> Self {
-        self.websocket_max_frame_bytes = websocket_max_frame_bytes;
-        self
-    }
-
-    fn validate(&self) -> Result<(), RegistryError> {
-        validate_positive_usize(
-            "registry.websocket_max_frame_bytes",
-            self.websocket_max_frame_bytes,
-        )
-    }
+#[derive(Debug, Clone)]
+pub enum RegistryChange {
+    Set {
+        seq: u64,
+        changed_at: SystemTime,
+        item: Arc<RegistryItem>,
+    },
+    Delete {
+        seq: u64,
+        changed_at: SystemTime,
+        topic: String,
+        writer_kind: RegistryWriterKind,
+        origin: String,
+    },
+    Expire {
+        seq: u64,
+        changed_at: SystemTime,
+        topic: String,
+    },
 }
 
-impl Default for RegistryStoreOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RegistryConfig {
-    pub const DEFAULT_RETENTION: Duration = Duration::from_secs(300);
-    pub const DEFAULT_TTL: Duration = Duration::from_secs(5);
-    pub const DEFAULT_MAX_TOPICS: usize = 4096;
-    pub const DEFAULT_MAX_TOPIC_LEN: usize = 256;
-    pub const DEFAULT_MAX_SOURCE_LEN: usize = 128;
-    pub const DEFAULT_MAX_VALUE_BYTES: usize = 8192;
-    pub const DEFAULT_MAX_HISTORY_ITEMS: usize = 20_000;
-    pub const DEFAULT_MAX_HISTORY_BYTES: usize = 67_108_864;
-    pub const DEFAULT_QUERY_LIMIT: usize = 100;
-    pub const DEFAULT_MAX_QUERY_LIMIT: usize = 1000;
-    pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 262_144;
-
-    pub fn validate(&self) -> Result<(), RegistryError> {
-        validate_positive_duration("registry.retention", self.retention)?;
-        validate_positive_duration("registry.default_ttl", self.default_ttl)?;
-        if self.default_ttl > self.retention {
-            return Err(RegistryError::InvalidConfig(
-                "registry.default_ttl must be less than or equal to registry.retention".to_owned(),
-            ));
-        }
-        validate_positive_usize("registry.max_topics", self.max_topics)?;
-        validate_positive_usize("registry.max_topic_len", self.max_topic_len)?;
-        validate_positive_usize("registry.max_source_len", self.max_source_len)?;
-        validate_positive_usize("registry.max_value_bytes", self.max_value_bytes)?;
-        validate_positive_usize("registry.max_history_items", self.max_history_items)?;
-        validate_positive_usize("registry.max_history_bytes", self.max_history_bytes)?;
-        validate_positive_usize("registry.default_query_limit", self.default_query_limit)?;
-        validate_positive_usize("registry.max_query_limit", self.max_query_limit)?;
-        validate_positive_usize("registry.max_response_bytes", self.max_response_bytes)?;
-        if self.default_query_limit > self.max_query_limit {
-            return Err(RegistryError::InvalidConfig(
-                "registry.default_query_limit must be less than or equal to registry.max_query_limit"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl Default for RegistryConfig {
-    fn default() -> Self {
-        Self {
-            retention: Self::DEFAULT_RETENTION,
-            default_ttl: Self::DEFAULT_TTL,
-            max_topics: Self::DEFAULT_MAX_TOPICS,
-            max_topic_len: Self::DEFAULT_MAX_TOPIC_LEN,
-            max_source_len: Self::DEFAULT_MAX_SOURCE_LEN,
-            max_value_bytes: Self::DEFAULT_MAX_VALUE_BYTES,
-            max_history_items: Self::DEFAULT_MAX_HISTORY_ITEMS,
-            max_history_bytes: Self::DEFAULT_MAX_HISTORY_BYTES,
-            default_query_limit: Self::DEFAULT_QUERY_LIMIT,
-            max_query_limit: Self::DEFAULT_MAX_QUERY_LIMIT,
-            max_response_bytes: Self::DEFAULT_MAX_RESPONSE_BYTES,
-        }
-    }
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum RegistryError {
-    #[error("invalid registry config: {0}")]
-    InvalidConfig(String),
-    #[error("invalid topic")]
-    InvalidTopic,
-    #[error("invalid topic pattern")]
-    InvalidPattern,
-    #[error("value field is required")]
-    InvalidValue,
-    #[error("ttl_secs must be a finite positive number")]
-    InvalidTtl,
-    #[error("freq_hz must be finite and greater than or equal to zero")]
-    InvalidFrequency,
-    #[error("source must be non-empty and within configured limits")]
-    InvalidSource,
-    #[error("value exceeds registry max_value_bytes")]
-    ValueTooLarge,
-    #[error("registry max_topics limit reached")]
-    TooManyTopics,
-    #[error("query limit exceeds configured bounds")]
-    QueryTooLarge,
-    #[error("since_secs must be a finite positive number")]
-    InvalidSince,
-}
-
-impl RegistryError {
-    pub fn code(&self) -> &'static str {
+impl RegistryChange {
+    pub fn kind(&self) -> RegistryChangeKind {
         match self {
-            Self::InvalidConfig(_) => "invalid_config",
-            Self::InvalidTopic => "invalid_topic",
-            Self::InvalidPattern => "invalid_pattern",
-            Self::InvalidValue => "invalid_value",
-            Self::InvalidTtl => "invalid_ttl",
-            Self::InvalidFrequency => "invalid_frequency",
-            Self::InvalidSource => "invalid_source",
-            Self::ValueTooLarge => "value_too_large",
-            Self::TooManyTopics => "too_many_topics",
-            Self::QueryTooLarge => "query_too_large",
-            Self::InvalidSince => "invalid_since",
+            Self::Set { .. } => RegistryChangeKind::Set,
+            Self::Delete { .. } => RegistryChangeKind::Delete,
+            Self::Expire { .. } => RegistryChangeKind::Expire,
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RegistryWriterKind {
-    WebsocketClient,
-    MainAgent,
-    Subagent,
-    ManagedTask,
-}
-
-impl RegistryWriterKind {
-    pub fn as_str(self) -> &'static str {
+    pub fn seq(&self) -> u64 {
         match self {
-            Self::WebsocketClient => "websocket_client",
-            Self::MainAgent => "main_agent",
-            Self::Subagent => "subagent",
-            Self::ManagedTask => "managed_task",
-        }
-    }
-}
-
-impl fmt::Display for RegistryWriterKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RegistryTtl {
-    Default,
-    Seconds(f64),
-    Null,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RegistrySetRequest {
-    pub topic: String,
-    pub value: Option<Value>,
-    pub source: String,
-    pub ttl: RegistryTtl,
-    pub freq_hz: Option<f64>,
-}
-
-impl RegistrySetRequest {
-    pub fn new(topic: impl Into<String>, value: Value, source: impl Into<String>) -> Self {
-        Self {
-            topic: topic.into(),
-            value: Some(value),
-            source: source.into(),
-            ttl: RegistryTtl::Default,
-            freq_hz: None,
+            Self::Set { seq, .. } | Self::Delete { seq, .. } | Self::Expire { seq, .. } => *seq,
         }
     }
 
-    pub fn missing_value(topic: impl Into<String>, source: impl Into<String>) -> Self {
-        Self {
-            topic: topic.into(),
-            value: None,
-            source: source.into(),
-            ttl: RegistryTtl::Default,
-            freq_hz: None,
+    pub fn topic(&self) -> &str {
+        match self {
+            Self::Set { item, .. } => &item.topic,
+            Self::Delete { topic, .. } | Self::Expire { topic, .. } => topic,
         }
     }
-
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.source = source.into();
-        self
-    }
-
-    pub fn with_ttl(mut self, ttl: RegistryTtl) -> Self {
-        self.ttl = ttl;
-        self
-    }
-
-    pub fn with_freq_hz(mut self, freq_hz: f64) -> Self {
-        self.freq_hz = Some(freq_hz);
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RegistryQuery {
-    pub topic: String,
-    pub since_secs: Option<f64>,
-    pub limit: Option<usize>,
-}
-
-impl RegistryQuery {
-    pub fn new(topic: impl Into<String>) -> Self {
-        Self {
-            topic: topic.into(),
-            since_secs: None,
-            limit: None,
-        }
-    }
-
-    pub fn history(topic: impl Into<String>, since_secs: f64) -> Self {
-        Self {
-            topic: topic.into(),
-            since_secs: Some(since_secs),
-            limit: None,
-        }
-    }
-
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RegistryItem {
-    pub topic: String,
-    pub value: Value,
-    pub source: String,
-    pub writer_kind: RegistryWriterKind,
-    pub origin: String,
-    pub seq: u64,
-    pub freq_hz: Option<f64>,
-    pub updated_at: SystemTime,
-    pub expires_at: SystemTime,
-    pub ttl: Duration,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RegistrySetAck {
-    pub topic: String,
-    pub source: String,
-    pub writer_kind: RegistryWriterKind,
-    pub origin: String,
-    pub seq: u64,
-    pub freq_hz: Option<f64>,
-    pub updated_at: SystemTime,
-    pub expires_at: SystemTime,
-    pub ttl: Duration,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RegistryTopicSummary {
-    pub topic: String,
-    pub writer_kind: RegistryWriterKind,
-    pub origin: String,
-    pub source: String,
-    pub latest_seq: u64,
-    pub last_seen_at: SystemTime,
-    pub current: bool,
-    pub expires_at: Option<SystemTime>,
-    pub sample_count_retained: usize,
-    pub freq_hz: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RegistryQueryResult<T> {
-    pub server_time: SystemTime,
-    pub items: Vec<T>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub truncated: bool,
-    pub truncated_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RegistryHistoryResult {
-    pub server_time: SystemTime,
-    pub items: Vec<RegistryItem>,
-    pub oldest_seq: Option<u64>,
-    pub newest_seq: Option<u64>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub truncated: bool,
-    pub truncated_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct RegistryStats {
-    pub history_bytes: usize,
-    pub pruned_history_items_total: u64,
-    pub rejected_writes_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -346,23 +89,49 @@ pub struct RegistryStore {
     options: RegistryStoreOptions,
     instance_id: String,
     started_at: SystemTime,
-    inner: Arc<Mutex<RegistryInner>>,
+    inner: Arc<RegistryShared>,
+}
+
+#[derive(Debug)]
+struct RegistryShared {
+    state: Mutex<RegistryInner>,
+    deadline_notify: Arc<Notify>,
+    changes: broadcast::Sender<RegistryChange>,
+    maintenance_started: AtomicBool,
+    active_subscriptions: AtomicUsize,
+    subscription_rejected_total: AtomicU64,
+    slow_subscription_closed_total: AtomicU64,
+    #[cfg(test)]
+    after_deadline_check_pause: Mutex<Option<MaintenanceTestPause>>,
+    #[cfg(test)]
+    before_batch_yield_pause: Mutex<Option<MaintenanceTestPause>>,
 }
 
 #[derive(Debug)]
 struct RegistryInner {
-    current: HashMap<String, RegistryItem>,
-    history: VecDeque<HistoryEntry>,
+    current: HashMap<String, Arc<RegistryItem>>,
+    current_expirations: BTreeSet<(SystemTime, String, u64)>,
+    history: BTreeMap<u128, HistoryEntry>,
+    history_expirations: BTreeSet<(SystemTime, u128)>,
+    known_topics: usize,
     history_bytes: usize,
-    next_seq: u64,
+    history_topic_counts: HashMap<String, usize>,
+    next_history_id: u128,
+    last_committed_seq: u64,
+    set_total: u64,
+    delete_total: u64,
+    expire_total: u64,
     pruned_history_items_total: u64,
     rejected_writes_total: u64,
+    #[cfg(test)]
+    history_expiration_index_visits: usize,
 }
 
 #[derive(Debug, Clone)]
 struct HistoryEntry {
-    item: RegistryItem,
+    item: Arc<RegistryItem>,
     value_bytes: usize,
+    retention_deadline: Option<SystemTime>,
 }
 
 impl RegistryStore {
@@ -386,21 +155,53 @@ impl RegistryStore {
         options: RegistryStoreOptions,
         started_at: SystemTime,
     ) -> Result<Self, RegistryError> {
+        #[cfg(not(test))]
         config.validate()?;
+        #[cfg(test)]
+        if config.max_response_bytes == MIN_REGISTRY_RESPONSE_BYTES {
+            let mut validation_config = config.clone();
+            validation_config.max_response_bytes = MIN_REGISTRY_WS_MESSAGE_BYTES;
+            validation_config.validate()?;
+        } else {
+            config.validate()?;
+        }
         options.validate()?;
+        let (changes, _) = broadcast::channel(options.change_broadcast_capacity);
         Ok(Self {
             config,
             options,
             instance_id: new_instance_id(),
             started_at,
-            inner: Arc::new(Mutex::new(RegistryInner {
-                current: HashMap::new(),
-                history: VecDeque::new(),
-                history_bytes: 0,
-                next_seq: 1,
-                pruned_history_items_total: 0,
-                rejected_writes_total: 0,
-            })),
+            inner: Arc::new(RegistryShared {
+                state: Mutex::new(RegistryInner {
+                    current: HashMap::new(),
+                    current_expirations: BTreeSet::new(),
+                    history: BTreeMap::new(),
+                    history_expirations: BTreeSet::new(),
+                    known_topics: 0,
+                    history_bytes: 0,
+                    history_topic_counts: HashMap::new(),
+                    next_history_id: 1,
+                    last_committed_seq: 0,
+                    set_total: 0,
+                    delete_total: 0,
+                    expire_total: 0,
+                    pruned_history_items_total: 0,
+                    rejected_writes_total: 0,
+                    #[cfg(test)]
+                    history_expiration_index_visits: 0,
+                }),
+                deadline_notify: Arc::new(Notify::new()),
+                changes,
+                maintenance_started: AtomicBool::new(false),
+                active_subscriptions: AtomicUsize::new(0),
+                subscription_rejected_total: AtomicU64::new(0),
+                slow_subscription_closed_total: AtomicU64::new(0),
+                #[cfg(test)]
+                after_deadline_check_pause: Mutex::new(None),
+                #[cfg(test)]
+                before_batch_yield_pause: Mutex::new(None),
+            }),
         })
     }
 
@@ -423,316 +224,38 @@ impl RegistryStore {
     pub fn stats(&self) -> RegistryStats {
         let inner = self.lock_inner();
         RegistryStats {
+            known_topics: inner.known_topics,
+            current_topics: inner.current.len(),
+            history_items: inner.history.len(),
             history_bytes: inner.history_bytes,
+            last_committed_seq: inner.last_committed_seq,
+            set_total: inner.set_total,
+            delete_total: inner.delete_total,
+            expire_total: inner.expire_total,
             pruned_history_items_total: inner.pruned_history_items_total,
             rejected_writes_total: inner.rejected_writes_total,
+            active_subscriptions: self.inner.active_subscriptions.load(Ordering::Acquire),
+            max_subscriptions: self.config.max_subscriptions,
+            subscription_rejected_total: self
+                .inner
+                .subscription_rejected_total
+                .load(Ordering::Relaxed),
+            slow_subscription_closed_total: self
+                .inner
+                .slow_subscription_closed_total
+                .load(Ordering::Relaxed),
         }
     }
 
-    pub fn set(
-        &self,
-        writer_kind: RegistryWriterKind,
-        origin: impl Into<String>,
-        request: RegistrySetRequest,
-    ) -> Result<RegistrySetAck, RegistryError> {
-        self.set_at(writer_kind, origin, request, SystemTime::now())
-    }
-
-    pub fn set_at(
-        &self,
-        writer_kind: RegistryWriterKind,
-        origin: impl Into<String>,
-        request: RegistrySetRequest,
-        now: SystemTime,
-    ) -> Result<RegistrySetAck, RegistryError> {
-        let prepared = match self.prepare_set(writer_kind, origin.into(), request, now) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.record_rejected_write();
-                return Err(error);
-            }
-        };
-
-        let mut inner = self.lock_inner();
-        prune_locked(&self.config, &mut inner, now);
-
-        if !inner.current.contains_key(&prepared.item.topic)
-            && inner.current.len() >= self.config.max_topics
-        {
-            inner.rejected_writes_total += 1;
-            return Err(RegistryError::TooManyTopics);
-        }
-
-        let seq = inner.next_seq;
-        inner.next_seq = inner.next_seq.saturating_add(1);
-        let mut item = prepared.item;
-        item.seq = seq;
-        let ack = RegistrySetAck {
-            topic: item.topic.clone(),
-            source: item.source.clone(),
-            writer_kind: item.writer_kind,
-            origin: item.origin.clone(),
-            seq: item.seq,
-            freq_hz: item.freq_hz,
-            updated_at: item.updated_at,
-            expires_at: item.expires_at,
-            ttl: item.ttl,
-        };
-
-        inner.current.insert(item.topic.clone(), item.clone());
-        inner.history.push_back(HistoryEntry {
-            item,
-            value_bytes: prepared.value_bytes,
-        });
-        inner.history_bytes = inner.history_bytes.saturating_add(prepared.value_bytes);
-        prune_locked(&self.config, &mut inner, now);
-
-        Ok(ack)
-    }
-
-    pub fn get(
-        &self,
-        query: RegistryQuery,
-    ) -> Result<RegistryQueryResult<RegistryItem>, RegistryError> {
-        self.get_at(query, SystemTime::now())
-    }
-
-    pub fn get_at(
-        &self,
-        query: RegistryQuery,
-        now: SystemTime,
-    ) -> Result<RegistryQueryResult<RegistryItem>, RegistryError> {
-        let pattern = TopicPattern::parse(&query.topic, self.config.max_topic_len)?;
-        let limit = self.resolve_limit(query.limit)?;
-
-        let (mut items, matched_count) = {
-            let mut inner = self.lock_inner();
-            prune_locked(&self.config, &mut inner, now);
-
-            let mut matches = inner
-                .current
-                .values()
-                .filter(|item| !is_expired(item, now) && pattern.matches(&item.topic))
-                .collect::<Vec<_>>();
-            matches.sort_by(|left, right| left.topic.cmp(&right.topic));
-            let matched_count = matches.len();
-            let items = matches.into_iter().take(limit).cloned().collect::<Vec<_>>();
-            (items, matched_count)
-        };
-
-        let mut truncated = matched_count > limit;
-        let mut truncated_reason = truncated.then(|| "limit".to_owned());
-        if truncate_items_to_response_bytes(
-            &mut items,
-            self.config.max_response_bytes,
-            TruncateSide::Back,
-        ) {
-            truncated = true;
-            truncated_reason = Some("response_bytes".to_owned());
-        }
-        let returned_count = items.len();
-
-        Ok(RegistryQueryResult {
-            server_time: now,
-            items,
-            matched_count,
-            returned_count,
-            truncated,
-            truncated_reason,
-        })
-    }
-
-    pub fn history(&self, query: RegistryQuery) -> Result<RegistryHistoryResult, RegistryError> {
-        self.history_at(query, SystemTime::now())
-    }
-
-    pub fn history_at(
-        &self,
-        query: RegistryQuery,
-        now: SystemTime,
-    ) -> Result<RegistryHistoryResult, RegistryError> {
-        let pattern = TopicPattern::parse(&query.topic, self.config.max_topic_len)?;
-        let limit = self.resolve_limit(query.limit)?;
-        let since_secs = query.since_secs.ok_or(RegistryError::InvalidSince)?;
-        let since = duration_from_secs(since_secs, RegistryError::InvalidSince)?;
-        let window = since.min(self.config.retention);
-
-        let (mut items, matched_count) = {
-            let mut inner = self.lock_inner();
-            prune_locked(&self.config, &mut inner, now);
-
-            let mut items = Vec::new();
-            let mut matched_count = 0usize;
-            for entry in inner.history.iter().rev() {
-                if within_window(entry.item.updated_at, now, window)
-                    && pattern.matches(&entry.item.topic)
-                {
-                    matched_count = matched_count.saturating_add(1);
-                    if items.len() < limit {
-                        items.push(entry.item.clone());
-                    }
-                }
-            }
-            items.reverse();
-            (items, matched_count)
-        };
-
-        let mut truncated = matched_count > items.len();
-        let mut truncated_reason = truncated.then(|| "limit".to_owned());
-        if truncate_items_to_response_bytes(
-            &mut items,
-            self.config.max_response_bytes,
-            TruncateSide::Front,
-        ) {
-            truncated = true;
-            truncated_reason = Some("response_bytes".to_owned());
-        }
-        let oldest_seq = items.first().map(|item| item.seq);
-        let newest_seq = items.last().map(|item| item.seq);
-        let returned_count = items.len();
-
-        Ok(RegistryHistoryResult {
-            server_time: now,
-            items,
-            oldest_seq,
-            newest_seq,
-            matched_count,
-            returned_count,
-            truncated,
-            truncated_reason,
-        })
-    }
-
-    pub fn topics(
-        &self,
-        query: RegistryQuery,
-    ) -> Result<RegistryQueryResult<RegistryTopicSummary>, RegistryError> {
-        self.topics_at(query, SystemTime::now())
-    }
-
-    pub fn topics_at(
-        &self,
-        query: RegistryQuery,
-        now: SystemTime,
-    ) -> Result<RegistryQueryResult<RegistryTopicSummary>, RegistryError> {
-        let pattern = TopicPattern::parse(&query.topic, self.config.max_topic_len)?;
-        let limit = self.resolve_limit(query.limit)?;
-
-        let (mut items, matched_count) = {
-            let mut inner = self.lock_inner();
-            prune_locked(&self.config, &mut inner, now);
-
-            let mut accumulators = HashMap::<String, TopicAccumulator>::new();
-            for entry in &inner.history {
-                accumulators
-                    .entry(entry.item.topic.clone())
-                    .or_default()
-                    .record_history(&entry.item);
-            }
-            for item in inner.current.values() {
-                accumulators
-                    .entry(item.topic.clone())
-                    .or_default()
-                    .record_current(item, !is_expired(item, now));
-            }
-
-            let mut items = accumulators
-                .into_values()
-                .map(TopicAccumulator::into_summary)
-                .filter(|summary| pattern.matches(&summary.topic))
-                .collect::<Vec<_>>();
-            items.sort_by(|left, right| left.topic.cmp(&right.topic));
-            let matched_count = items.len();
-            items.truncate(limit);
-            (items, matched_count)
-        };
-
-        let mut truncated = matched_count > limit;
-        let mut truncated_reason = truncated.then(|| "limit".to_owned());
-        if truncate_items_to_response_bytes(
-            &mut items,
-            self.config.max_response_bytes,
-            TruncateSide::Back,
-        ) {
-            truncated = true;
-            truncated_reason = Some("response_bytes".to_owned());
-        }
-        let returned_count = items.len();
-
-        Ok(RegistryQueryResult {
-            server_time: now,
-            items,
-            matched_count,
-            returned_count,
-            truncated,
-            truncated_reason,
-        })
-    }
-
-    fn prepare_set(
-        &self,
-        writer_kind: RegistryWriterKind,
-        origin: String,
-        request: RegistrySetRequest,
-        now: SystemTime,
-    ) -> Result<PreparedSet, RegistryError> {
-        validate_topic_name(&request.topic, self.config.max_topic_len)?;
-        let source = normalize_source(&request.source, self.config.max_source_len)?;
-        let value = request.value.ok_or(RegistryError::InvalidValue)?;
-        let value_bytes = value_size(&value)?;
-        if value_bytes > self.config.max_value_bytes {
-            return Err(RegistryError::ValueTooLarge);
-        }
-        let ttl = match request.ttl {
-            RegistryTtl::Default => self.config.default_ttl,
-            RegistryTtl::Seconds(seconds) => {
-                duration_from_secs(seconds, RegistryError::InvalidTtl)?
-            }
-            RegistryTtl::Null => return Err(RegistryError::InvalidTtl),
-        }
-        .min(self.config.retention);
-        let freq_hz = match request.freq_hz {
-            Some(freq_hz) if !freq_hz.is_finite() || freq_hz < 0.0 => {
-                return Err(RegistryError::InvalidFrequency)
-            }
-            other => other,
-        };
-        let expires_at = now.checked_add(ttl).unwrap_or(now);
-
-        Ok(PreparedSet {
-            value_bytes,
-            item: RegistryItem {
-                topic: request.topic,
-                value,
-                source,
-                writer_kind,
-                origin,
-                seq: 0,
-                freq_hz,
-                updated_at: now,
-                expires_at,
-                ttl,
-            },
-        })
-    }
-
-    fn resolve_limit(&self, limit: Option<usize>) -> Result<usize, RegistryError> {
-        let limit = limit.unwrap_or(self.config.default_query_limit);
-        if limit == 0 || limit > self.config.max_query_limit {
-            return Err(RegistryError::QueryTooLarge);
-        }
-        Ok(limit)
+    pub fn last_committed_seq(&self) -> u64 {
+        self.lock_inner().last_committed_seq
     }
 
     fn lock_inner(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
         self.inner
+            .state
             .lock()
             .expect("registry store mutex should not be poisoned")
-    }
-
-    fn record_rejected_write(&self) {
-        let mut inner = self.lock_inner();
-        inner.rejected_writes_total = inner.rejected_writes_total.saturating_add(1);
     }
 }
 
@@ -742,310 +265,474 @@ impl Default for RegistryStore {
     }
 }
 
-#[derive(Debug)]
-struct PreparedSet {
-    item: RegistryItem,
-    value_bytes: usize,
-}
-
-#[derive(Debug, Default)]
-struct TopicAccumulator {
-    latest: Option<TopicLatest>,
-    sample_count_retained: usize,
-    current: bool,
-}
-
-impl TopicAccumulator {
-    fn record_history(&mut self, item: &RegistryItem) {
-        self.sample_count_retained += 1;
-        self.record_latest(item);
-    }
-
-    fn record_current(&mut self, item: &RegistryItem, current: bool) {
-        self.current |= current;
-        self.record_latest(item);
-    }
-
-    fn record_latest(&mut self, item: &RegistryItem) {
-        let replace = self
-            .latest
-            .as_ref()
-            .map(|latest| item.seq > latest.seq)
-            .unwrap_or(true);
-        if replace {
-            self.latest = Some(TopicLatest::from_item(item));
-        }
-    }
-
-    fn into_summary(self) -> RegistryTopicSummary {
-        let latest = self
-            .latest
-            .expect("topic accumulator should contain at least one item");
-        RegistryTopicSummary {
-            topic: latest.topic,
-            writer_kind: latest.writer_kind,
-            origin: latest.origin,
-            source: latest.source,
-            latest_seq: latest.seq,
-            last_seen_at: latest.updated_at,
-            current: self.current,
-            expires_at: Some(latest.expires_at),
-            sample_count_retained: self.sample_count_retained,
-            freq_hz: latest.freq_hz,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TopicLatest {
-    topic: String,
-    writer_kind: RegistryWriterKind,
-    origin: String,
-    source: String,
-    seq: u64,
-    updated_at: SystemTime,
-    expires_at: SystemTime,
-    freq_hz: Option<f64>,
-}
-
-impl TopicLatest {
-    fn from_item(item: &RegistryItem) -> Self {
-        Self {
-            topic: item.topic.clone(),
-            writer_kind: item.writer_kind,
-            origin: item.origin.clone(),
-            source: item.source.clone(),
-            seq: item.seq,
-            updated_at: item.updated_at,
-            expires_at: item.expires_at,
-            freq_hz: item.freq_hz,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TopicPattern {
-    segments: Vec<PatternSegment>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PatternSegment {
-    Literal(String),
-    One,
-    Rest,
-}
-
-impl TopicPattern {
-    fn parse(pattern: &str, max_len: usize) -> Result<Self, RegistryError> {
-        if pattern.is_empty() || pattern.len() > max_len {
-            return Err(RegistryError::InvalidPattern);
-        }
-        if pattern.starts_with('.') || pattern.ends_with('.') || pattern.contains("..") {
-            return Err(RegistryError::InvalidPattern);
-        }
-
-        let raw_segments = pattern.split('.').collect::<Vec<_>>();
-        let mut segments = Vec::with_capacity(raw_segments.len());
-        for (index, segment) in raw_segments.iter().enumerate() {
-            match *segment {
-                "*" => segments.push(PatternSegment::One),
-                "**" => {
-                    if index != raw_segments.len() - 1 {
-                        return Err(RegistryError::InvalidPattern);
-                    }
-                    segments.push(PatternSegment::Rest);
-                }
-                literal => {
-                    if !is_valid_topic_segment(literal) {
-                        return Err(RegistryError::InvalidPattern);
-                    }
-                    segments.push(PatternSegment::Literal(literal.to_owned()));
-                }
-            }
-        }
-
-        Ok(Self { segments })
-    }
-
-    fn matches(&self, topic: &str) -> bool {
-        let topic_segments = topic.split('.').collect::<Vec<_>>();
-        let mut topic_index = 0usize;
-        for (pattern_index, pattern_segment) in self.segments.iter().enumerate() {
-            match pattern_segment {
-                PatternSegment::Rest => {
-                    return pattern_index == self.segments.len() - 1;
-                }
-                PatternSegment::One => {
-                    if topic_index >= topic_segments.len() {
-                        return false;
-                    }
-                    topic_index += 1;
-                }
-                PatternSegment::Literal(literal) => {
-                    if topic_index >= topic_segments.len() || literal != topic_segments[topic_index]
-                    {
-                        return false;
-                    }
-                    topic_index += 1;
-                }
-            }
-        }
-        topic_index == topic_segments.len()
-    }
-}
-
-fn validate_topic_name(topic: &str, max_len: usize) -> Result<(), RegistryError> {
-    if topic.is_empty() || topic.len() > max_len {
-        return Err(RegistryError::InvalidTopic);
-    }
-    if topic.starts_with('.') || topic.ends_with('.') || topic.contains("..") {
-        return Err(RegistryError::InvalidTopic);
-    }
-    for segment in topic.split('.') {
-        if !is_valid_topic_segment(segment) {
-            return Err(RegistryError::InvalidTopic);
-        }
-    }
-    Ok(())
-}
-
-fn is_valid_topic_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
-fn normalize_source(source: &str, max_len: usize) -> Result<String, RegistryError> {
-    let source = source.trim();
-    if source.is_empty() || source.len() > max_len {
-        return Err(RegistryError::InvalidSource);
-    }
-    Ok(source.to_owned())
-}
-
-fn value_size(value: &Value) -> Result<usize, RegistryError> {
-    serde_json::to_vec(value)
-        .map(|encoded| encoded.len())
-        .map_err(|_| RegistryError::InvalidValue)
-}
-
-fn duration_from_secs(seconds: f64, error: RegistryError) -> Result<Duration, RegistryError> {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return Err(error);
-    }
-    let millis = (seconds * 1000.0).round();
-    if !millis.is_finite() || millis <= 0.0 || millis > u64::MAX as f64 {
-        return Err(error);
-    }
-    Ok(Duration::from_millis(millis as u64))
-}
-
-fn validate_positive_duration(field: &str, value: Duration) -> Result<(), RegistryError> {
-    if value.is_zero() {
-        Err(RegistryError::InvalidConfig(format!(
-            "{field} must be greater than 0"
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_positive_usize(field: &str, value: usize) -> Result<(), RegistryError> {
-    if value == 0 {
-        Err(RegistryError::InvalidConfig(format!(
-            "{field} must be greater than 0"
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-fn prune_locked(config: &RegistryConfig, inner: &mut RegistryInner, now: SystemTime) {
-    let mut retained = VecDeque::with_capacity(inner.history.len());
-    let mut retained_bytes = 0usize;
-    for entry in inner.history.drain(..) {
-        if older_than_retention(entry.item.updated_at, now, config.retention) {
-            inner.pruned_history_items_total = inner.pruned_history_items_total.saturating_add(1);
-        } else {
-            retained_bytes = retained_bytes.saturating_add(entry.value_bytes);
-            retained.push_back(entry);
-        }
-    }
-    inner.history = retained;
-    inner.history_bytes = retained_bytes;
-
-    inner.current.retain(|_, item| !is_expired(item, now));
-
-    while inner.history.len() > config.max_history_items
-        || inner.history_bytes > config.max_history_bytes
-    {
-        let Some(removed) = inner.history.pop_front() else {
-            inner.history_bytes = 0;
-            break;
-        };
-        inner.history_bytes = inner.history_bytes.saturating_sub(removed.value_bytes);
-        inner.pruned_history_items_total = inner.pruned_history_items_total.saturating_add(1);
-    }
-}
-
-fn older_than_retention(updated_at: SystemTime, now: SystemTime, retention: Duration) -> bool {
-    now.duration_since(updated_at)
-        .is_ok_and(|age| age > retention)
-}
-
-fn within_window(updated_at: SystemTime, now: SystemTime, window: Duration) -> bool {
-    now.duration_since(updated_at)
-        .map(|age| age <= window)
-        .unwrap_or(true)
-}
-
-fn is_expired(item: &RegistryItem, now: SystemTime) -> bool {
-    now.duration_since(item.expires_at).is_ok()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum TruncateSide {
-    Front,
-    Back,
-}
-
-fn truncate_items_to_response_bytes<T: Serialize>(
-    items: &mut Vec<T>,
-    max_response_bytes: usize,
-    side: TruncateSide,
-) -> bool {
-    let mut truncated = false;
-    while !items.is_empty() && estimated_response_bytes(items) > max_response_bytes {
-        match side {
-            TruncateSide::Front => {
-                items.remove(0);
-            }
-            TruncateSide::Back => {
-                items.pop();
-            }
-        }
-        truncated = true;
-    }
-    truncated
-}
-
-fn estimated_response_bytes<T: Serialize>(items: &[T]) -> usize {
-    let item_bytes = items
-        .iter()
-        .map(|item| {
-            serde_json::to_vec(item)
-                .map(|encoded| encoded.len())
-                .unwrap_or(0)
-        })
-        .sum::<usize>();
-    128usize
-        .saturating_add(item_bytes)
-        .saturating_add(items.len().saturating_sub(1))
-}
-
 fn new_instance_id() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("reg_{}", hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use super::*;
+
+    pub(super) fn timestamp(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    pub(super) fn performance_test_config() -> RegistryConfig {
+        RegistryConfig {
+            history_retention: Duration::from_secs(10_000),
+            default_ttl: Duration::from_secs(10_000),
+            max_subscriptions: 64,
+            max_topics: 256,
+            max_topic_len: 64,
+            max_source_len: 32,
+            max_value_bytes: 128,
+            max_history_items: 256,
+            max_history_bytes: 256 * 128,
+            default_query_limit: 16,
+            max_query_limit: 256,
+            max_response_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn set_pruning_work_is_independent_of_unexpired_history_length() {
+        let store = RegistryStore::new_at(performance_test_config(), timestamp(0)).unwrap();
+        for index in 0..128 {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new(
+                        format!("robot.topic_{}", index % 16),
+                        json!(index),
+                        "test",
+                    ),
+                    timestamp(1),
+                )
+                .unwrap();
+        }
+        {
+            let mut inner = store.lock_inner();
+            inner.history_expiration_index_visits = 0;
+        }
+
+        store
+            .set_at(
+                RegistryWriterKind::WebsocketClient,
+                "ws:test",
+                RegistrySetRequest::new("robot.next", json!(true), "test"),
+                timestamp(2),
+            )
+            .unwrap();
+
+        assert!(store.lock_inner().history_expiration_index_visits <= 2);
+    }
+
+    #[test]
+    fn expiration_work_tracks_expired_items_and_retention_boundary_is_strict() {
+        let mut config = performance_test_config();
+        config.history_retention = Duration::from_secs(10);
+        config.default_ttl = Duration::from_secs(10);
+        let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+        for index in 0..64 {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new(
+                        format!("robot.topic_{}", index % 16),
+                        json!(index),
+                        "test",
+                    ),
+                    timestamp(1),
+                )
+                .unwrap();
+        }
+        {
+            let mut inner = store.lock_inner();
+            inner.history_expiration_index_visits = 0;
+        }
+
+        store
+            .set_at(
+                RegistryWriterKind::WebsocketClient,
+                "ws:test",
+                RegistrySetRequest::new("robot.boundary", json!(true), "test"),
+                timestamp(11),
+            )
+            .unwrap();
+        {
+            let inner = store.lock_inner();
+            assert_eq!(inner.history.len(), 65);
+            assert!(inner.history_expiration_index_visits <= 2);
+        }
+
+        {
+            let mut inner = store.lock_inner();
+            inner.history_expiration_index_visits = 0;
+        }
+        store
+            .set_at(
+                RegistryWriterKind::WebsocketClient,
+                "ws:test",
+                RegistrySetRequest::new("robot.after_boundary", json!(true), "test"),
+                timestamp(12),
+            )
+            .unwrap();
+        let inner = store.lock_inner();
+        assert_eq!(inner.history.len(), 2);
+        assert_eq!(inner.pruned_history_items_total, 64);
+        assert!(inner.history_expiration_index_visits <= 65);
+    }
+
+    #[test]
+    fn cap_eviction_removes_matching_deadline_index_entries() {
+        let mut config = performance_test_config();
+        config.max_history_items = 8;
+        let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+        for index in 0..128 {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new(
+                        format!("robot.topic_{}", index % 16),
+                        json!(index),
+                        "test",
+                    ),
+                    timestamp(1),
+                )
+                .unwrap();
+        }
+        let inner = store.lock_inner();
+        assert_eq!(inner.history.len(), 8);
+        assert_eq!(inner.history_expirations.len(), 8);
+        assert_eq!(inner.current_expirations.len(), inner.current.len());
+    }
+
+    #[test]
+    fn seq_exhaustion_rejects_set_delete_and_expire_without_mutating_current() {
+        let mut config = performance_test_config();
+        config.max_response_bytes = 16 * 1024;
+        let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+        store
+            .set_at(
+                RegistryWriterKind::WebsocketClient,
+                "ws:test",
+                RegistrySetRequest::new("robot.pose", json!("first"), "first"),
+                timestamp(1),
+            )
+            .unwrap();
+        store.lock_inner().last_committed_seq = u64::MAX;
+
+        let before = store.lock_inner().current.clone();
+        assert_eq!(
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new("robot.pose", json!("second"), "second"),
+                    timestamp(2),
+                )
+                .unwrap_err(),
+            RegistryError::SeqExhausted
+        );
+        assert_eq!(store.lock_inner().current, before);
+        assert_eq!(
+            store
+                .delete_at(
+                    RegistryWriterKind::MainAgent,
+                    "agent:main",
+                    "robot.pose",
+                    timestamp(2),
+                )
+                .unwrap_err(),
+            RegistryError::SeqExhausted
+        );
+        assert_eq!(store.lock_inner().current, before);
+
+        let expiring = RegistryStore::new_at(performance_test_config(), timestamp(0)).unwrap();
+        expiring
+            .set_at(
+                RegistryWriterKind::ManagedTask,
+                "task:test",
+                RegistrySetRequest::new("robot.short", json!(true), "short")
+                    .with_ttl(RegistryTtl::Seconds(1.0)),
+                timestamp(1),
+            )
+            .unwrap();
+        expiring.lock_inner().last_committed_seq = u64::MAX;
+        assert_eq!(
+            expiring
+                .get_at(RegistryQuery::new("robot.short"), timestamp(2))
+                .unwrap_err(),
+            RegistryError::SeqExhausted
+        );
+        assert!(expiring.lock_inner().current.contains_key("robot.short"));
+    }
+
+    #[test]
+    fn history_id_wrap_preserves_insertion_order_and_cap_eviction() {
+        let mut config = performance_test_config();
+        config.max_history_items = 3;
+        let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+
+        for (second, value) in [(1, 1), (2, 2)] {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new("robot.pose", json!(value), "test"),
+                    timestamp(second),
+                )
+                .unwrap();
+        }
+        store.lock_inner().next_history_id = u128::MAX;
+        for (second, value) in [(3, 3), (4, 4)] {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new("robot.pose", json!(value), "test"),
+                    timestamp(second),
+                )
+                .unwrap();
+        }
+
+        let history = store
+            .history_at(
+                RegistryQuery::history("robot.pose", 10.0).with_limit(3),
+                timestamp(4),
+            )
+            .unwrap();
+        assert_eq!(
+            history
+                .items
+                .iter()
+                .map(|item| item.value.clone())
+                .collect::<Vec<_>>(),
+            vec![json!(2), json!(3), json!(4)]
+        );
+        let inner = store.lock_inner();
+        assert_eq!(
+            inner.history.keys().copied().collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(inner.history_expirations.len(), inner.history.len());
+        assert_eq!(inner.pruned_history_items_total, 1);
+        drop(inner);
+
+        let expired = store
+            .history_at(
+                RegistryQuery::history("robot.pose", 20_000.0).with_limit(3),
+                timestamp(10_005),
+            )
+            .unwrap();
+        assert!(expired.items.is_empty());
+        assert_eq!(store.lock_inner().history_expirations.len(), 0);
+    }
+
+    #[test]
+    fn set_shares_one_arc_between_current_history_and_change() {
+        let store = RegistryStore::new_at(performance_test_config(), timestamp(0)).unwrap();
+        let mut changes = store.subscribe_changes();
+        store
+            .set_at(
+                RegistryWriterKind::WebsocketClient,
+                "ws:test",
+                RegistrySetRequest::new("robot.pose", json!({"x": 1}), "test"),
+                timestamp(1),
+            )
+            .unwrap();
+
+        let inner = store.lock_inner();
+        let current = inner.current.get("robot.pose").unwrap();
+        let history = &inner.history.first_key_value().unwrap().1.item;
+        let RegistryChange::Set { item: changed, .. } = changes.try_recv().unwrap() else {
+            panic!("set must publish a set change");
+        };
+        assert!(Arc::ptr_eq(current, history));
+        assert!(Arc::ptr_eq(current, &changed));
+    }
+
+    #[test]
+    fn overwrite_keeps_current_expiry_index_bounded_and_stale_deadline_is_harmless() {
+        let store = RegistryStore::new_at(performance_test_config(), timestamp(0)).unwrap();
+        for second in 1..=128 {
+            store
+                .set_at(
+                    RegistryWriterKind::WebsocketClient,
+                    "ws:test",
+                    RegistrySetRequest::new("robot.pose", json!(second), "test")
+                        .with_ttl(RegistryTtl::Seconds(100.0)),
+                    timestamp(second),
+                )
+                .unwrap();
+            assert_eq!(store.lock_inner().current_expirations.len(), 1);
+        }
+
+        let stale = (timestamp(2), "robot.pose".to_owned(), 1);
+        store.lock_inner().current_expirations.insert(stale);
+        store.maintenance_step_at(timestamp(150));
+        assert_eq!(
+            store.lock_inner().current.get("robot.pose").unwrap().seq,
+            128
+        );
+    }
+
+    #[test]
+    fn history_time_item_and_byte_eviction_remove_deadline_entries_without_changes() {
+        for config in [
+            RegistryConfig {
+                history_retention: Duration::from_secs(1),
+                ..performance_test_config()
+            },
+            RegistryConfig {
+                max_history_items: 1,
+                ..performance_test_config()
+            },
+            RegistryConfig {
+                max_history_bytes: 1,
+                ..performance_test_config()
+            },
+        ] {
+            let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+            let mut changes = store.subscribe_changes();
+            for second in 1..=2 {
+                store
+                    .set_at(
+                        RegistryWriterKind::WebsocketClient,
+                        "ws:test",
+                        RegistrySetRequest::new(
+                            format!("robot.topic_{second}"),
+                            json!(second),
+                            "test",
+                        )
+                        .with_ttl(RegistryTtl::Null),
+                        timestamp(second),
+                    )
+                    .unwrap();
+            }
+            while changes.try_recv().is_ok() {}
+            let seq = store.last_committed_seq();
+            store.maintenance_step_at(timestamp(4));
+            let inner = store.lock_inner();
+            assert_eq!(inner.history_expirations.len(), inner.history.len());
+            assert_eq!(
+                inner.history_bytes,
+                inner
+                    .history
+                    .values()
+                    .map(|entry| entry.value_bytes)
+                    .sum::<usize>()
+            );
+            assert_eq!(inner.last_committed_seq, seq);
+            assert!(inner.pruned_history_items_total >= 1);
+            assert!(changes.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn delete_lazy_prune_and_maintenance_race_commits_expire_once() {
+        let store = RegistryStore::new_at(performance_test_config(), timestamp(0)).unwrap();
+        let mut changes = store.subscribe_changes();
+        store
+            .set_at(
+                RegistryWriterKind::ManagedTask,
+                "task:test",
+                RegistrySetRequest::new("robot.race", json!(1), "test")
+                    .with_ttl(RegistryTtl::Seconds(1.0)),
+                timestamp(1),
+            )
+            .unwrap();
+        changes.try_recv().unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        std::thread::scope(|scope| {
+            let delete_store = store.clone();
+            let delete_barrier = barrier.clone();
+            scope.spawn(move || {
+                delete_barrier.wait();
+                delete_store
+                    .delete_at(
+                        RegistryWriterKind::MainAgent,
+                        "agent:main",
+                        "robot.race",
+                        timestamp(2),
+                    )
+                    .unwrap();
+            });
+            let get_store = store.clone();
+            let get_barrier = barrier.clone();
+            scope.spawn(move || {
+                get_barrier.wait();
+                get_store
+                    .get_at(RegistryQuery::new("robot.race"), timestamp(2))
+                    .unwrap();
+            });
+            barrier.wait();
+            store.maintenance_step_at(timestamp(2));
+        });
+
+        let published = std::iter::from_fn(|| changes.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].kind(), RegistryChangeKind::Expire);
+        assert_eq!(store.stats().expire_total, 1);
+        assert_eq!(store.stats().delete_total, 0);
+        assert_eq!(store.last_committed_seq(), 2);
+    }
+
+    #[test]
+    fn concurrent_writes_preserve_caps_and_global_change_order_without_deadlock() {
+        let mut config = performance_test_config();
+        config.max_topics = 32;
+        config.max_history_items = 128;
+        config.max_history_bytes = 128 * 128;
+        let store = RegistryStore::new_at(config, timestamp(0)).unwrap();
+        let mut changes = store.subscribe_changes();
+
+        std::thread::scope(|scope| {
+            for worker in 0..16 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for index in 0..100 {
+                        store
+                            .set_at(
+                                RegistryWriterKind::WebsocketClient,
+                                format!("ws:{worker}"),
+                                RegistrySetRequest::new(
+                                    format!("robot.topic_{}", index % 32),
+                                    json!({"worker": worker, "index": index}),
+                                    "test",
+                                )
+                                .with_ttl(RegistryTtl::Null),
+                                timestamp(1),
+                            )
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        let stats = store.stats();
+        assert_eq!(stats.current_topics, 32);
+        assert_eq!(stats.history_items, 128);
+        assert_eq!(stats.last_committed_seq, 1600);
+        assert_eq!(stats.set_total, 1600);
+        let published = std::iter::from_fn(|| changes.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(published.len(), 1600);
+        assert!(published
+            .windows(2)
+            .all(|pair| pair[0].seq() + 1 == pair[1].seq()));
+        let inner = store.lock_inner();
+        assert_eq!(inner.current_expirations.len(), 0);
+        assert_eq!(inner.history_expirations.len(), inner.history.len());
+    }
 }

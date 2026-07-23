@@ -1,19 +1,28 @@
 use std::{
+    collections::BTreeSet,
     io::{self, BufRead, BufReader, Write},
     net::{SocketAddr, TcpStream},
     process::ExitStatus,
-    sync::{mpsc::{self, SyncSender, TrySendError}, Arc},
-    thread,
+    sync::{Arc, Mutex, TryLockError},
     time::{Duration, Instant},
 };
 
 #[cfg(test)]
-use std::{env, ffi::OsStr, io::Read, os::raw::c_int, process::{Command, Stdio}};
+use std::{
+    env,
+    ffi::OsStr,
+    io::Read,
+    os::raw::c_int,
+    process::{Child, Command, Stdio},
+    thread,
+};
 
 #[cfg(all(test, unix))]
 use std::os::fd::AsRawFd;
 #[cfg(all(test, unix))]
 use std::os::unix::process::CommandExt;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -21,9 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::tasks::{BotifiedFrameScanner, TaskStdinWriteSuccess, TaskStdinWriter};
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use crate::tasks::SharedTaskStdinWriter;
+use crate::tasks::{BotifiedFrameScanner, TaskStdinWriteSuccess, TaskStdinWriter};
 use crate::types::{ToolCall, ToolResult};
 
 use super::{
@@ -32,10 +41,12 @@ use super::{
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_OUTPUT_BYTES: usize = 60 * 1024;
+const MAX_OUTPUT_BYTES: usize = crate::types::DEFAULT_TOOL_RESULT_TEXT_TAIL_BYTES;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(test)]
 const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+const EXECUTOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const EXECUTOR_STDIN_FRAME_CAP: usize = 64 * 1024;
 
 #[cfg(all(test, unix))]
 const SIGKILL: c_int = 9;
@@ -45,14 +56,17 @@ const F_GETFL: c_int = 3;
 const F_SETFL: c_int = 4;
 #[cfg(all(test, any(target_os = "android", target_os = "linux")))]
 const O_NONBLOCK: c_int = 0o4000;
-#[cfg(all(test, any(
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "ios",
-    target_os = "macos",
-    target_os = "netbsd",
-    target_os = "openbsd"
-)))]
+#[cfg(all(
+    test,
+    any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
 const O_NONBLOCK: c_int = 0x0004;
 
 #[cfg(all(test, unix))]
@@ -65,15 +79,42 @@ unsafe extern "C" {
 pub struct BashTool {
     default_timeout: Duration,
     max_output_bytes: usize,
+    exact_secret_env_names: Arc<BTreeSet<String>>,
     executor_addr: SocketAddr,
+    #[cfg(test)]
+    local_execution: bool,
 }
 
 impl BashTool {
-    pub fn new() -> Self {
+    pub fn new(executor_addr: SocketAddr) -> Self {
         Self {
             default_timeout: DEFAULT_TIMEOUT,
             max_output_bytes: MAX_OUTPUT_BYTES,
-            executor_addr: "127.0.0.1:3110".parse().expect("default executor address must parse"),
+            exact_secret_env_names: Arc::new(BTreeSet::new()),
+            executor_addr,
+            #[cfg(test)]
+            local_execution: false,
+        }
+    }
+
+    pub fn from_executor_addr(addr: &str) -> Result<Self, String> {
+        let executor_addr = addr
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("invalid bash executor address: {error}"))?;
+        if !executor_addr.ip().is_loopback() {
+            return Err("bash executor address must be loopback-only".to_owned());
+        }
+        Ok(Self::new(executor_addr))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_local_for_test() -> Self {
+        Self {
+            default_timeout: DEFAULT_TIMEOUT,
+            max_output_bytes: MAX_OUTPUT_BYTES,
+            exact_secret_env_names: Arc::new(BTreeSet::new()),
+            executor_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            local_execution: true,
         }
     }
 
@@ -82,19 +123,24 @@ impl BashTool {
         self
     }
 
-    pub fn with_executor_addr(mut self, addr: &str) -> Result<Self, String> {
-        let executor_addr = addr.parse::<SocketAddr>().map_err(|error| format!("invalid bash executor address: {error}"))?;
-        if !executor_addr.ip().is_loopback() {
-            return Err("bash executor address must be loopback-only".to_owned());
+    pub fn with_exact_secret_env_names<I, S>(mut self, names: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut exact_secret_env_names = BTreeSet::new();
+        for name in names {
+            let name = name.into();
+            if !is_shell_env_identifier(&name) {
+                return Err(
+                    "configured credential environment names must match [A-Za-z_][A-Za-z0-9_]*"
+                        .to_owned(),
+                );
+            }
+            exact_secret_env_names.insert(name);
         }
-        self.executor_addr = executor_addr;
+        self.exact_secret_env_names = Arc::new(exact_secret_env_names);
         Ok(self)
-    }
-}
-
-impl Default for BashTool {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -102,6 +148,8 @@ impl Default for BashTool {
 #[serde(deny_unknown_fields)]
 struct BashArguments {
     command: String,
+    #[serde(default)]
+    _task_label: Option<String>,
     #[serde(default)]
     timeout_secs: Option<Value>,
     #[serde(default, rename = "detach_after_secs")]
@@ -124,6 +172,14 @@ struct BashOutcome {
     output_snapshot: Option<ToolOutputSnapshot>,
     timed_out: bool,
     cancelled: bool,
+}
+
+#[cfg(test)]
+struct BashRunOptions<'a> {
+    cwd: &'a str,
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+    exact_secret_env_names: &'a BTreeSet<String>,
 }
 
 impl OutputAccumulator {
@@ -353,17 +409,21 @@ impl Tool for BashTool {
                         "type": "string",
                         "description": "Command to execute with bash -lc."
                     },
+                    "task_label": {
+                        "type": "string",
+                        "description": "Optional display-only label for a detached background task. whitespace is collapsed, labels are truncated to at most 64 characters, and control characters make the label invalid. Use task_id for all operations."
+                    },
                     "timeout_secs": {
                         "type": ["number", "integer", "null"],
                         "description": "Optional execution timeout in seconds. Omit to use the finite server default; use null for no automatic deadline."
                     },
                     "detach_after_secs": {
                         "type": ["number", "integer"],
-                        "description": "Optional foreground-wait threshold in seconds before detaching execution into a background task. Use 0 to detach immediately. This threshold does not guarantee runtime, timeout, success, readiness, output, or callback delivery. A detached task returns an acknowledgement that proves only running state and task identity. Any terminal callback is a best-effort terminal callback."
+                        "description": "Optional foreground-wait threshold in seconds before detaching execution into a background task. Use 0 to detach immediately. This threshold does not guarantee runtime, timeout, success, readiness, output, or callback delivery. A detached task returns an acknowledgement that proves only running state and task identity. Any terminal callback is a best-effort terminal callback. For timed_out, cancelled, or failed terminal callbacks, report the terminal result by default instead of restarting, unless the user explicitly requested a restart or an explicit bounded retry policy already applies."
                     },
                     "interactive_stdio": {
                         "type": "boolean",
-                        "description": "Structured ask/tell/registry/reply/send/observe stdio for Botified-managed bash tasks. Defaults to true when Botified can run bash as a background task; set false only when stdout should be treated as raw log text. Plain stdout is log output; complete <botified> stdout frames are filtered from task output. Task stdin frames are short bounded control frames, not a data channel. To ask the agent, print <botified>{\"op\":\"ask\",\"id\":\"a1\",\"message\":\"...\",\"expect\":\"yes/no\"}</botified> and read a <botified>{\"op\":\"reply\",...}</botified> line from stdin. To notify without a reply, print <botified>{\"op\":\"tell\",\"id\":\"t1\",\"message\":\"...\"}</botified>. A managed task may publish current state with <botified>{\"op\":\"registry_set\",...}</botified> or read a low-frequency snapshot with <botified>{\"op\":\"registry_get\",...}</botified>; registry_get returns registry_snapshot or registry_error on stdin. The task may receive <botified>{\"op\":\"send\",...}</botified> lines from task_send and, after task_observe authorization, read-only <botified>{\"op\":\"observe\",...}</botified> notifications."
+                        "description": "Structured ask/tell/registry/reply/send/observe stdio for Botified-managed bash tasks. Defaults to true when Botified can run bash as a background task; set false only when stdout should be treated as raw log text. Plain stdout is log output; complete <botified> stdout frames are filtered from task output. Task stdin frames are short bounded controls, not a data channel. To ask the agent, print <botified>{\"op\":\"ask\",\"id\":\"a1\",\"message\":\"...\",\"expect\":\"yes/no\"}</botified> and quickly drain stdin for <botified>{\"op\":\"reply\",...}</botified>. To notify without a reply, print <botified>{\"op\":\"tell\",\"id\":\"t1\",\"message\":\"...\"}</botified>. A managed task may publish state with <botified>{\"op\":\"registry_set\",...}</botified>, delete exact state with <botified>{\"op\":\"registry_delete\",\"topic\":\"robot.pose\"}</botified>, or request <botified>{\"op\":\"registry_get\",...}</botified>; registry_get returns <botified>{\"op\":\"registry_snapshot\",\"id\":\"...\",\"server_time\":\"...\",\"items\":[],\"matched_count\":0,\"returned_count\":0,\"truncated\":false,\"truncated_reason\":null}</botified> or <botified>{\"op\":\"registry_error\",...}</botified> on stdin. Read snapshot data from registry_snapshot.items, not entries. registry_set does not return an ack and does not wake the agent. registry_delete does not return an ack and does not wake the agent. The task may receive <botified>{\"op\":\"send\",...}</botified> lines from task_send. task_send writes only to task stdin; it does not produce public assistant text or become an assistant observation. A task requests future visible text with <botified>{\"op\":\"observe_request\",\"id\":\"o1\",\"delivery\":\"final_text\"}</botified> or <botified>{\"op\":\"observe_request\",\"id\":\"o2\",\"delivery\":\"stream_text\",\"min_batch_chars\":1}</botified>, and disables it with <botified>{\"op\":\"observe_request\",\"id\":\"o3\",\"enabled\":false}</botified>. min_batch_chars defaults to 1. Read the correlated <botified>{\"op\":\"observe_result\",\"id\":\"o2\",\"ok\":true,\"observing\":true,\"delivery\":\"stream_text\",\"min_batch_chars\":1}</botified> configuration result before delivery. Canonical assistant frames are <botified>{\"op\":\"observe\",\"id\":\"obs-1\",\"delivery\":\"stream_text\",\"source\":\"assistant\",\"event\":\"text\",\"text\":\"draft\",\"chunk_index\":0,\"is_last_chunk\":true,\"timestamp\":\"2026-07-10T00:00:00Z\",\"provider_request_id\":\"provider-1\"}</botified> and <botified>{\"op\":\"observe\",\"id\":\"obs-2\",\"delivery\":\"stream_text\",\"source\":\"assistant\",\"event\":\"done\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"provider_request_id\":\"provider-1\"}</botified>: use op/source/event, never kind=assistant_text. final_text sends future external user and assistant final text; stream_text sends future external user text plus assistant draft text/done/error, requires llm_text_preview.enabled=true, and never silently falls back. observe_result confirms configuration only; observe delivery is best-effort with no ack, reply, replay, retry, or completion guarantee. Continuously and quickly drain and demux reply/send/registry_snapshot/registry_error/observe_result/observe; offload slow work to another queue or worker."
                     }
                 },
                 "required": ["command"]
@@ -390,7 +450,11 @@ impl Tool for BashTool {
         let cwd = context.cwd;
         let output_sink = context.output_sink;
         let interactive_stdio = context.interactive_stdio;
+        let exact_secret_env_names = self.exact_secret_env_names.clone();
         let executor_addr = self.executor_addr;
+        let executor_command = safe_executor_command(&command, &exact_secret_env_names);
+        #[cfg(test)]
+        let local_execution = self.local_execution;
 
         if cancel.is_cancelled() {
             let outcome = cancelled_bash_outcome(output_sink)?;
@@ -403,8 +467,23 @@ impl Tool for BashTool {
         }
 
         let outcome = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if local_execution {
+                return run_bash_command(
+                    &command,
+                    BashRunOptions {
+                        cwd: &cwd,
+                        timeout,
+                        max_output_bytes,
+                        exact_secret_env_names: &exact_secret_env_names,
+                    },
+                    output_sink,
+                    interactive_stdio,
+                    cancel,
+                );
+            }
             run_executor_bash_command(
-                &command,
+                &executor_command,
                 &cwd,
                 timeout,
                 max_output_bytes,
@@ -468,16 +547,17 @@ fn timeout_from_context_or_arguments(
 #[derive(Serialize)]
 struct ExecutorExecuteRequest<'a> {
     op: &'static str,
+    mode: &'static str,
     command: &'a str,
     cwd: &'a str,
     interactive_stdio: bool,
 }
 
 #[derive(Serialize)]
-struct ExecutorControlRequest {
+struct ExecutorControlRequest<'a> {
     op: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<String>,
+    data: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -492,50 +572,96 @@ struct ExecutorEvent {
 }
 
 struct ExecutorStdinWriter {
-    sender: SyncSender<ExecutorControlRequest>,
+    stream: Mutex<TcpStream>,
+}
+
+struct ExecutorConnectionGuard {
+    stream: TcpStream,
+}
+
+impl ExecutorConnectionGuard {
+    fn new(stream: &TcpStream) -> io::Result<Self> {
+        Ok(Self {
+            stream: stream.try_clone()?,
+        })
+    }
+}
+
+impl Drop for ExecutorConnectionGuard {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+struct OutputSinkCompletionGuard {
+    sink: Option<Arc<dyn ToolOutputSink>>,
+}
+
+impl OutputSinkCompletionGuard {
+    fn new(sink: Option<Arc<dyn ToolOutputSink>>) -> Self {
+        Self { sink }
+    }
+
+    fn sink(&self) -> Option<&Arc<dyn ToolOutputSink>> {
+        self.sink.as_ref()
+    }
+
+    fn complete(&mut self) -> Result<Option<ToolOutputSnapshot>, ToolError> {
+        self.sink.take().map(|sink| sink.complete()).transpose()
+    }
+}
+
+impl Drop for OutputSinkCompletionGuard {
+    fn drop(&mut self) {
+        if let Some(sink) = self.sink.take() {
+            let _ = sink.complete();
+        }
+    }
 }
 
 impl ExecutorStdinWriter {
-    fn frame(bytes: &[u8]) -> ExecutorControlRequest {
-        ExecutorControlRequest {
-            op: "stdin",
-            data: Some(BASE64.encode(bytes)),
-        }
-    }
-
-    fn write_frame(&self, bytes: &[u8]) -> Result<(), String> {
-        self.sender.send(Self::frame(bytes)).map_err(|_| "bash executor stdin is closed".to_owned())
-    }
-
-    fn try_write_frame(&self, bytes: &[u8]) -> Result<(), String> {
-        match self.sender.try_send(Self::frame(bytes)) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err("bash executor stdin writer is busy".to_owned()),
-            Err(TrySendError::Disconnected(_)) => Err("bash executor stdin is closed".to_owned()),
-        }
+    fn write_control(&self, request: &ExecutorControlRequest<'_>) -> Result<(), String> {
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|_| "bash executor control connection lock is poisoned".to_owned())?;
+        write_ndjson(&mut stream, request)
+            .map_err(|error| format!("failed to write bash executor control: {error}"))
     }
 }
 
 impl TaskStdinWriter for ExecutorStdinWriter {
-    fn write_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-        self.write_frame(bytes)
+    fn atomic_frame_cap(&self) -> usize {
+        EXECUTOR_STDIN_FRAME_CAP
     }
 
-    fn supports_priority_stdin(&self) -> bool {
-        true
-    }
-
-    fn try_write_priority_stdin(&self, bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
-        self.try_write_frame(bytes)?;
+    fn try_write_frame(&self, bytes: &[u8]) -> Result<TaskStdinWriteSuccess, String> {
+        if bytes.len() > EXECUTOR_STDIN_FRAME_CAP {
+            return Err(format!(
+                "stdin frame exceeds executor limit: {} > {} bytes",
+                bytes.len(),
+                EXECUTOR_STDIN_FRAME_CAP
+            ));
+        }
+        let encoded = BASE64.encode(bytes);
+        let mut stream = match self.stream.try_lock() {
+            Ok(stream) => stream,
+            Err(TryLockError::WouldBlock) => {
+                return Err("bash executor stdin writer is busy".to_owned())
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return Err("bash executor control connection lock is poisoned".to_owned())
+            }
+        };
+        write_ndjson(
+            &mut stream,
+            &ExecutorControlRequest {
+                op: "stdin",
+                data: Some(&encoded),
+            },
+        )
+        .map_err(|error| format!("failed to write bash executor stdin: {error}"))?;
         Ok(TaskStdinWriteSuccess::delivered())
-    }
-
-    fn supports_observer_stdin(&self) -> bool {
-        true
-    }
-
-    fn try_write_observer_stdin(&self, bytes: &[u8]) -> Result<(), String> {
-        self.try_write_frame(bytes)
     }
 }
 
@@ -558,106 +684,217 @@ fn run_executor_bash_command(
     if cancel.is_cancelled() {
         return cancelled_bash_outcome(output_sink);
     }
-    let mut stream = TcpStream::connect_timeout(&executor_addr, Duration::from_secs(2)).map_err(|error| {
-        ToolError::execution_failed(format!("failed to connect to bash executor: {error}"))
-    })?;
-    stream.set_read_timeout(Some(WAIT_POLL_INTERVAL)).map_err(|error| {
-        ToolError::execution_failed(format!("failed to configure bash executor connection: {error}"))
-    })?;
-    write_ndjson(&mut stream, &ExecutorExecuteRequest {
-        op: "execute",
-        command,
-        cwd,
-        interactive_stdio: interactive_stdio.is_some(),
-    }).map_err(|error| ToolError::execution_failed(format!("failed to start bash executor request: {error}")))?;
+    let mut output_sink = OutputSinkCompletionGuard::new(output_sink);
 
-    let mut control_stream = stream.try_clone().map_err(|error| ToolError::execution_failed(format!("failed to clone bash executor connection: {error}")))?;
-    let (control_sender, control_receiver) = mpsc::sync_channel(32);
-    thread::spawn(move || {
-        while let Ok(control) = control_receiver.recv() {
-            if write_ndjson(&mut control_stream, &control).is_err() {
-                return;
-            }
-        }
+    let mut stream =
+        TcpStream::connect_timeout(&executor_addr, EXECUTOR_CONNECT_TIMEOUT).map_err(|error| {
+            ToolError::execution_failed(format!("failed to connect to bash executor: {error}"))
+        })?;
+    let _connection = ExecutorConnectionGuard::new(&stream).map_err(|error| {
+        ToolError::execution_failed(format!("failed to guard bash executor connection: {error}"))
+    })?;
+    stream
+        .set_read_timeout(Some(WAIT_POLL_INTERVAL))
+        .map_err(|error| {
+            ToolError::execution_failed(format!(
+                "failed to configure bash executor connection: {error}"
+            ))
+        })?;
+    write_ndjson(
+        &mut stream,
+        &ExecutorExecuteRequest {
+            op: "execute",
+            mode: "tool",
+            command,
+            cwd,
+            interactive_stdio: interactive_stdio.is_some(),
+        },
+    )
+    .map_err(|error| {
+        ToolError::execution_failed(format!("failed to start bash executor request: {error}"))
+    })?;
+
+    let control_writer = Arc::new(ExecutorStdinWriter {
+        stream: Mutex::new(stream.try_clone().map_err(|error| {
+            ToolError::execution_failed(format!(
+                "failed to clone bash executor connection: {error}"
+            ))
+        })?),
     });
-    let writer = Arc::new(ExecutorStdinWriter { sender: control_sender.clone() });
     if let Some(bridge) = interactive_stdio.as_ref() {
-        bridge.register_stdin_writer(writer.clone());
+        bridge
+            .register_stdin_writer(control_writer.clone())
+            .map_err(|error| {
+                ToolError::execution_failed(format!("failed to install task stdin writer: {error}"))
+            })?;
     }
+
     let mut reader = BufReader::new(stream);
     let mut output = OutputAccumulator::new(max_output_bytes);
-    let mut scanner = interactive_stdio.as_ref().map(|_| BotifiedFrameScanner::default());
+    let mut scanner = interactive_stdio
+        .as_ref()
+        .map(|_| BotifiedFrameScanner::default());
     let started = Instant::now();
     let mut cancelled = false;
     let mut timed_out = false;
     let mut cancel_sent = false;
-    let mut status = None;
-
-    loop {
-        if !cancel_sent && (cancel.is_cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit)) {
+    let status = loop {
+        if !cancel_sent
+            && (cancel.is_cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit))
+        {
             cancelled = cancel.is_cancelled();
             timed_out = !cancelled;
-            control_sender.send(ExecutorControlRequest { op: "cancel", data: None })
-                .map_err(|_| ToolError::execution_failed("bash executor stdin is closed"))?;
+            control_writer
+                .write_control(&ExecutorControlRequest {
+                    op: "cancel",
+                    data: None,
+                })
+                .map_err(ToolError::execution_failed)?;
             cancel_sent = true;
         }
+
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => break,
+            Ok(0) => {
+                return Err(ToolError::execution_failed(
+                    "bash executor disconnected before completion",
+                ))
+            }
             Ok(_) => {
-                let event: ExecutorEvent = serde_json::from_str(line.trim_end()).map_err(|error| ToolError::execution_failed(format!("invalid bash executor response: {error}")))?;
+                let event: ExecutorEvent =
+                    serde_json::from_str(line.trim_end()).map_err(|error| {
+                        ToolError::execution_failed(format!(
+                            "invalid bash executor response: {error}"
+                        ))
+                    })?;
                 match event.op.as_str() {
                     "output" => {
-                        let encoded = event.data.ok_or_else(|| ToolError::execution_failed("bash executor output missing data"))?;
-                        let chunk = BASE64.decode(encoded).map_err(|error| ToolError::execution_failed(format!("invalid bash executor output: {error}")))?;
-                        fan_out_executor_chunk(&chunk, &mut output, max_output_bytes, output_sink.as_ref(), scanner.as_mut(), interactive_stdio.as_ref())?;
+                        let encoded = event.data.ok_or_else(|| {
+                            ToolError::execution_failed("bash executor output missing data")
+                        })?;
+                        let chunk = BASE64.decode(encoded).map_err(|error| {
+                            ToolError::execution_failed(format!(
+                                "invalid bash executor output: {error}"
+                            ))
+                        })?;
+                        fan_out_executor_chunk(
+                            &chunk,
+                            &mut output,
+                            max_output_bytes,
+                            output_sink.sink(),
+                            scanner.as_mut(),
+                            interactive_stdio.as_ref(),
+                        )?;
                     }
-                    "completed" => { status = event.exit_code.map(exit_status_from_code).transpose()?; break; }
-                    "error" => return Err(ToolError::execution_failed(event.message.unwrap_or_else(|| "bash executor failed".to_owned()))),
-                    other => return Err(ToolError::execution_failed(format!("unknown bash executor response: {other}"))),
+                    "completed" => break event.exit_code.map(exit_status_from_code).transpose()?,
+                    "error" => {
+                        return Err(ToolError::execution_failed(
+                            event
+                                .message
+                                .unwrap_or_else(|| "bash executor failed".to_owned()),
+                        ))
+                    }
+                    other => {
+                        return Err(ToolError::execution_failed(format!(
+                            "unknown bash executor response: {other}"
+                        )))
+                    }
                 }
             }
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
-            Err(error) => return Err(ToolError::execution_failed(format!("failed to read bash executor response: {error}"))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => {
+                return Err(ToolError::execution_failed(format!(
+                    "failed to read bash executor response: {error}"
+                )))
+            }
         }
-    }
+    };
+
     if let Some(scanner) = scanner.as_mut() {
-        let scan = scanner.finish();
-        fan_out_executor_scan(scan, &mut output, max_output_bytes, output_sink.as_ref(), interactive_stdio.as_ref())?;
+        fan_out_executor_scan(
+            scanner.finish(),
+            &mut output,
+            max_output_bytes,
+            output_sink.sink(),
+            interactive_stdio.as_ref(),
+        )?;
     }
-    let output_snapshot = output_sink.map(|sink| sink.complete()).transpose()?;
-    Ok(BashOutcome { status, output, output_snapshot, timed_out, cancelled })
+    let output_snapshot = output_sink.complete()?;
+    Ok(BashOutcome {
+        status,
+        output,
+        output_snapshot,
+        timed_out,
+        cancelled,
+    })
 }
 
 fn exit_status_from_code(code: i32) -> Result<ExitStatus, ToolError> {
     #[cfg(unix)]
-    { Ok(std::os::unix::process::ExitStatusExt::from_raw(code << 8)) }
+    {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(ExitStatusExt::from_raw(code << 8))
+    }
     #[cfg(not(unix))]
-    { let _ = code; Err(ToolError::execution_failed("bash executor exit status is unsupported on this platform")) }
+    {
+        let _ = code;
+        Err(ToolError::execution_failed(
+            "bash executor exit status is unsupported on this platform",
+        ))
+    }
 }
 
 fn fan_out_executor_chunk(
-    chunk: &[u8], output: &mut OutputAccumulator, max_output_bytes: usize,
-    output_sink: Option<&Arc<dyn ToolOutputSink>>, scanner: Option<&mut BotifiedFrameScanner>,
+    chunk: &[u8],
+    output: &mut OutputAccumulator,
+    max_output_bytes: usize,
+    output_sink: Option<&Arc<dyn ToolOutputSink>>,
+    scanner: Option<&mut BotifiedFrameScanner>,
     interactive_stdio: Option<&Arc<dyn crate::tasks::InteractiveStdioBridge>>,
 ) -> Result<(), ToolError> {
     if let Some(scanner) = scanner {
-        return fan_out_executor_scan(scanner.push(chunk), output, max_output_bytes, output_sink, interactive_stdio);
+        return fan_out_executor_scan(
+            scanner.push(chunk),
+            output,
+            max_output_bytes,
+            output_sink,
+            interactive_stdio,
+        );
     }
     fan_out_executor_plain(chunk, output, max_output_bytes, output_sink)
 }
 
 fn fan_out_executor_scan(
-    scan: crate::tasks::BotifiedFrameScan, output: &mut OutputAccumulator, max_output_bytes: usize,
-    output_sink: Option<&Arc<dyn ToolOutputSink>>, interactive_stdio: Option<&Arc<dyn crate::tasks::InteractiveStdioBridge>>,
+    scan: crate::tasks::BotifiedFrameScan,
+    output: &mut OutputAccumulator,
+    max_output_bytes: usize,
+    output_sink: Option<&Arc<dyn ToolOutputSink>>,
+    interactive_stdio: Option<&Arc<dyn crate::tasks::InteractiveStdioBridge>>,
 ) -> Result<(), ToolError> {
-    if !scan.plain_output.is_empty() { fan_out_executor_plain(&scan.plain_output, output, max_output_bytes, output_sink)?; }
-    if !scan.events.is_empty() { if let Some(bridge) = interactive_stdio { bridge.handle_frame_events(scan.events); } }
+    if !scan.plain_output.is_empty() {
+        fan_out_executor_plain(&scan.plain_output, output, max_output_bytes, output_sink)?;
+    }
+    if !scan.events.is_empty() {
+        if let Some(bridge) = interactive_stdio {
+            bridge.handle_frame_events(scan.events);
+        }
+    }
     Ok(())
 }
 
-fn fan_out_executor_plain(chunk: &[u8], output: &mut OutputAccumulator, max_output_bytes: usize, output_sink: Option<&Arc<dyn ToolOutputSink>>) -> Result<(), ToolError> {
-    if let Some(sink) = output_sink { sink.record(chunk)?; }
+fn fan_out_executor_plain(
+    chunk: &[u8],
+    output: &mut OutputAccumulator,
+    max_output_bytes: usize,
+    output_sink: Option<&Arc<dyn ToolOutputSink>>,
+) -> Result<(), ToolError> {
+    if let Some(sink) = output_sink {
+        sink.record(chunk)?;
+    }
     output.push(chunk, max_output_bytes);
     Ok(())
 }
@@ -665,9 +902,7 @@ fn fan_out_executor_plain(chunk: &[u8], output: &mut OutputAccumulator, max_outp
 #[cfg(test)]
 fn run_bash_command(
     command: &str,
-    cwd: &str,
-    timeout: Option<Duration>,
-    max_output_bytes: usize,
+    options: BashRunOptions<'_>,
     output_sink: Option<Arc<dyn ToolOutputSink>>,
     interactive_stdio: Option<Arc<dyn crate::tasks::InteractiveStdioBridge>>,
     cancel: CancellationToken,
@@ -677,11 +912,14 @@ fn run_bash_command(
     }
 
     let mut child = Command::new("bash");
-    let redirected_command = format!("{}\nexec 2>&1\n{command}", secret_env_cleanup_script());
+    let redirected_command = format!(
+        "{}\nexec 2>&1\n{command}",
+        secret_env_cleanup_script(options.exact_secret_env_names)
+    );
     child
         .arg("-lc")
         .arg(redirected_command)
-        .current_dir(cwd)
+        .current_dir(options.cwd)
         .stdin(if interactive_stdio.is_some() {
             Stdio::piped()
         } else {
@@ -691,11 +929,8 @@ fn run_bash_command(
         .stderr(Stdio::piped())
         .env_clear();
 
-    #[cfg(unix)]
-    child.process_group(0);
-
     for (key, value) in env::vars_os() {
-        if should_inherit_env_key(&key) {
+        if should_inherit_env_key(&key, options.exact_secret_env_names) {
             child.env(key, value);
         }
     }
@@ -704,32 +939,47 @@ fn run_bash_command(
         return cancelled_bash_outcome(output_sink);
     }
 
-    let mut child = child
-        .spawn()
-        .map_err(|error| ToolError::execution_failed(format!("failed to spawn bash: {error}")))?;
+    let mut processes = BashProcessGuard::spawn(child)?;
 
-    let output_pipe = child
+    let output_pipe = processes
+        .bash_mut()
         .stdout
         .take()
         .ok_or_else(|| ToolError::execution_failed("failed to capture bash stdout"))?;
-    let startup_stderr_pipe = child
+    let startup_stderr_pipe = processes
+        .bash_mut()
         .stderr
         .take()
         .ok_or_else(|| ToolError::execution_failed("failed to capture bash stderr"))?;
     if let Some(bridge) = interactive_stdio.as_ref() {
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| ToolError::execution_failed("failed to capture bash stdin"))?;
-        #[cfg(target_os = "linux")]
-        bridge.register_stdin_writer(Arc::new(SharedTaskStdinWriter::new_verified_pipe(stdin)));
-        #[cfg(not(target_os = "linux"))]
-        bridge.register_stdin_writer(Arc::new(SharedTaskStdinWriter::new(stdin)));
+        let Some(stdin) = processes.bash_mut().stdin.take() else {
+            return Err(ToolError::execution_failed("failed to capture bash stdin"));
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let writer = SharedTaskStdinWriter::new_managed_pipe(stdin).map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "failed to register managed task stdin: {error}"
+                ))
+            })?;
+            if let Err(error) = bridge.register_stdin_writer(Arc::new(writer)) {
+                return Err(ToolError::execution_failed(format!(
+                    "failed to install task stdin writer: {error}"
+                )));
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            drop(stdin);
+            return Err(ToolError::execution_failed(
+                "managed task stdin is supported only on Linux and macOS",
+            ));
+        }
     }
 
     let mut output_pump = OutputPump::new(
         output_pipe,
-        max_output_bytes,
+        options.max_output_bytes,
         output_sink,
         interactive_stdio,
     )?;
@@ -745,17 +995,28 @@ fn run_bash_command(
 
         if cancel.is_cancelled() {
             cancelled = true;
-            kill_child(&mut child);
-            break child.wait().ok();
+            processes.kill_group();
+            break processes.bash_mut().wait().ok();
         }
 
-        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+        if options
+            .timeout
+            .is_some_and(|timeout| started.elapsed() >= timeout)
+        {
             timed_out = true;
-            kill_child(&mut child);
-            break child.wait().ok();
+            processes.kill_group();
+            break processes.bash_mut().wait().ok();
         }
 
-        match child.try_wait().map_err(|error| {
+        if let Some(watchdog_status) = processes.watchdog_status().map_err(|error| {
+            ToolError::execution_failed(format!("failed to wait for bash watchdog: {error}"))
+        })? {
+            return Err(ToolError::execution_failed(format!(
+                "bash watchdog exited before command completion: {watchdog_status}"
+            )));
+        }
+
+        match processes.bash_mut().try_wait().map_err(|error| {
             ToolError::execution_failed(format!("failed to wait for bash: {error}"))
         })? {
             Some(exit_status) => {
@@ -773,7 +1034,7 @@ fn run_bash_command(
     )?;
 
     if !output_pump.is_closed() || !startup_stderr.closed {
-        kill_process_group(child.id());
+        processes.kill_group();
         drain_bash_pipes_until(
             &mut output_pump,
             &mut startup_stderr,
@@ -792,6 +1053,115 @@ fn run_bash_command(
         timed_out,
         cancelled,
     })
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+struct BashProcessGuard {
+    watchdog: Child,
+    bash: Option<Child>,
+    watchdog_stdin: Option<UnixStream>,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl BashProcessGuard {
+    fn spawn(mut bash_command: Command) -> Result<Self, ToolError> {
+        let (watchdog_stdout, watchdog_stdin) = UnixStream::pair().map_err(|error| {
+            ToolError::execution_failed(format!("failed to create bash watchdog socket: {error}"))
+        })?;
+        let watchdog_stdout: OwnedFd = watchdog_stdout.into();
+        let mut watchdog_command = Command::new("/bin/sh");
+        watchdog_command
+            .arg("-c")
+            .arg("while IFS= read -r line; do :; done\nkill -s KILL 0")
+            .stdin(Stdio::from(watchdog_stdout))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        watchdog_command.process_group(0);
+
+        let watchdog = watchdog_command.spawn().map_err(|error| {
+            ToolError::execution_failed(format!("failed to spawn bash watchdog: {error}"))
+        })?;
+        let watchdog_pgid = watchdog.id();
+        let mut guard = Self {
+            watchdog,
+            bash: None,
+            watchdog_stdin: Some(watchdog_stdin),
+        };
+
+        bash_command.process_group(watchdog_pgid as i32);
+        let bash = bash_command.spawn().map_err(|error| {
+            ToolError::execution_failed(format!("failed to spawn bash: {error}"))
+        })?;
+        guard.bash = Some(bash);
+        Ok(guard)
+    }
+
+    fn bash_mut(&mut self) -> &mut Child {
+        self.bash.as_mut().expect("bash child should be attached")
+    }
+
+    fn watchdog_status(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.watchdog.try_wait()
+    }
+
+    fn kill_group(&mut self) {
+        kill_process_group(self.watchdog.id());
+        if let Some(bash) = self.bash.as_mut() {
+            let _ = bash.kill();
+        }
+    }
+
+    fn terminate_and_reap(&mut self) {
+        drop(self.watchdog_stdin.take());
+        self.kill_group();
+        if let Some(bash) = self.bash.as_mut() {
+            let _ = bash.wait();
+        }
+        let _ = self.watchdog.wait();
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl Drop for BashProcessGuard {
+    fn drop(&mut self) {
+        self.terminate_and_reap();
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+struct BashProcessGuard {
+    bash: Child,
+}
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+impl BashProcessGuard {
+    fn spawn(mut bash_command: Command) -> Result<Self, ToolError> {
+        #[cfg(unix)]
+        bash_command.process_group(0);
+        let bash = bash_command.spawn().map_err(|error| {
+            ToolError::execution_failed(format!("failed to spawn bash: {error}"))
+        })?;
+        Ok(Self { bash })
+    }
+
+    fn bash_mut(&mut self) -> &mut Child {
+        &mut self.bash
+    }
+
+    fn watchdog_status(&mut self) -> io::Result<Option<ExitStatus>> {
+        Ok(None)
+    }
+
+    fn kill_group(&mut self) {
+        kill_child(&mut self.bash);
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+impl Drop for BashProcessGuard {
+    fn drop(&mut self) {
+        terminate_child(&mut self.bash);
+    }
 }
 
 #[cfg(test)]
@@ -872,15 +1242,21 @@ impl<T> PipeNonblocking for T {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 fn kill_child(child: &mut std::process::Child) {
     kill_process_group(child.id());
     let _ = child.kill();
 }
 
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+fn terminate_child(child: &mut std::process::Child) {
+    kill_child(child);
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 fn kill_process_group(child_id: u32) {
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     {
         let process_group_id = -(child_id as c_int);
         // SAFETY: kill(2) is called with the child process group id created above.
@@ -895,10 +1271,34 @@ fn format_tool_result(
     tool_call_id: String,
     tool_name: String,
     outcome: BashOutcome,
-    max_output_bytes: usize,
+    _max_output_bytes: usize,
 ) -> ToolResult {
     let exit_code = outcome.status.and_then(|status| status.code());
-    let aggregated_output = String::from_utf8_lossy(&outcome.output.bytes).to_string();
+    let output_tail = outcome
+        .output_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.tail.clone())
+        .unwrap_or_else(|| String::from_utf8_lossy(&outcome.output.bytes).to_string());
+    let output_tail_truncated = outcome
+        .output_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.output_tail_truncated)
+        .unwrap_or(outcome.output.truncated);
+    let output_bytes = outcome
+        .output_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.output_bytes)
+        .unwrap_or_else(|| (outcome.output.dropped_bytes + outcome.output.bytes.len()) as u64);
+    let output_artifact_truncated = outcome
+        .output_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.output_artifact_truncated)
+        .unwrap_or(false);
+    let output_dropped_bytes = outcome
+        .output_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.output_dropped_bytes)
+        .unwrap_or(outcome.output.dropped_bytes as u64);
     let mut text = String::new();
 
     if outcome.cancelled {
@@ -914,10 +1314,12 @@ fn format_tool_result(
         None => text.push_str("exit code: unavailable\n"),
     }
 
-    if outcome.output.truncated {
+    if output_tail_truncated {
+        let output_tail_omitted_bytes = output_bytes.saturating_sub(output_tail.len() as u64);
         text.push_str(&format!(
-            "[botified output truncated; showing last {max_output_bytes} bytes, dropped {} bytes]\n",
-            outcome.output.dropped_bytes
+            "[botified output truncated; showing last {} bytes, omitted {} earlier output bytes]\n",
+            output_tail.len(),
+            output_tail_omitted_bytes
         ));
     }
 
@@ -938,21 +1340,26 @@ fn format_tool_result(
         ));
     }
 
-    if !aggregated_output.is_empty() {
-        text.push_str("output:\n");
-        text.push_str(&aggregated_output);
-        if !aggregated_output.ends_with('\n') {
+    text.push_str(&format!("output_tail_truncated: {output_tail_truncated}\n"));
+    if !output_tail.is_empty() {
+        text.push_str("output_tail:\n");
+        text.push_str(&output_tail);
+        if !output_tail.ends_with('\n') {
             text.push('\n');
         }
     }
 
-    let truncated = outcome.output.truncated;
+    let truncated = output_tail_truncated;
     let mut details = json!({
         "exit_code": exit_code,
         "timed_out": outcome.timed_out,
         "cancelled": outcome.cancelled,
         "truncated": truncated,
-        "aggregated_output": aggregated_output
+        "output_bytes": output_bytes,
+        "output_tail": output_tail,
+        "output_tail_truncated": output_tail_truncated,
+        "output_artifact_truncated": output_artifact_truncated,
+        "output_dropped_bytes": output_dropped_bytes
     });
     if let Some(snapshot) = outcome.output_snapshot {
         details["output_artifact_path"] = snapshot
@@ -1011,9 +1418,8 @@ fn is_secret_env_key(key: &OsStr) -> bool {
         || key.contains("PASSWORD")
 }
 
-#[cfg(test)]
-fn secret_env_cleanup_script() -> &'static str {
-    r#"botified_clear_secret_env() {
+fn secret_env_cleanup_script(exact_secret_env_names: &BTreeSet<String>) -> String {
+    let mut script = r#"botified_clear_secret_env() {
     local key botified_had_nocasematch
     shopt -q nocasematch
     botified_had_nocasematch=$?
@@ -1027,8 +1433,33 @@ fn secret_env_cleanup_script() -> &'static str {
         shopt -u nocasematch
     fi
 }
-botified_clear_secret_env
-unset -f botified_clear_secret_env"#
+botified_clear_secret_env"#
+        .to_owned();
+    for name in exact_secret_env_names {
+        script.push_str("\nbuiltin unset -v -- ");
+        script.push_str(name);
+        script.push_str(" 2>/dev/null || builtin true");
+        script.push_str("\nif [[ -v ");
+        script.push_str(name);
+        script.push_str(
+            " ]]; then\n    builtin printf 'botified: configured credential environment cleanup failed\\n' >&2\n    builtin exit 126\nfi",
+        );
+    }
+    script.push_str("\nbuiltin unset -f botified_clear_secret_env");
+    script
+}
+
+fn safe_executor_command(command: &str, exact_secret_env_names: &BTreeSet<String>) -> String {
+    format!(
+        "{}\nexec 2>&1\n{command}",
+        secret_env_cleanup_script(exact_secret_env_names)
+    )
+}
+
+fn is_shell_env_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
 }
 
 #[cfg(test)]
@@ -1037,8 +1468,12 @@ fn is_bash_exported_function_env_key(key: &OsStr) -> bool {
 }
 
 #[cfg(test)]
-fn should_inherit_env_key(key: &OsStr) -> bool {
-    !is_secret_env_key(key) && !is_bash_exported_function_env_key(key)
+fn should_inherit_env_key(key: &OsStr, exact_secret_env_names: &BTreeSet<String>) -> bool {
+    !is_secret_env_key(key)
+        && !exact_secret_env_names
+            .iter()
+            .any(|name| key == OsStr::new(name))
+        && !is_bash_exported_function_env_key(key)
 }
 
 #[cfg(test)]
@@ -1048,26 +1483,17 @@ mod tests {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::process;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
+    use std::ffi::CString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
     use crate::tasks::{BotifiedFrameEvent, InteractiveStdioBridge, TaskStdinWriter};
-
-    #[test]
-    fn detach_schema_does_not_promise_completion_or_callback_delivery() {
-        let spec = BashTool::new().spec();
-        let description = spec.input_schema["properties"]["detach_after_secs"]["description"]
-            .as_str()
-            .expect("detach_after_secs description");
-
-        assert!(description.contains("proves only running state and task identity"));
-        assert!(description.contains("does not guarantee runtime, timeout, success, readiness"));
-        assert!(description.contains("best-effort terminal callback"));
-    }
 
     enum FakeRead {
         Chunk(Vec<u8>),
@@ -1131,6 +1557,7 @@ mod tests {
         log: Arc<Mutex<Vec<String>>>,
         bytes: Arc<Mutex<Vec<u8>>>,
         fail_record: bool,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl RecordingSink {
@@ -1139,6 +1566,7 @@ mod tests {
                 log,
                 bytes: Arc::new(Mutex::new(Vec::new())),
                 fail_record: false,
+                completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
@@ -1147,6 +1575,7 @@ mod tests {
                 log,
                 bytes: Arc::new(Mutex::new(Vec::new())),
                 fail_record: true,
+                completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
@@ -1171,6 +1600,10 @@ mod tests {
                 output_dropped_bytes: 0,
             }
         }
+
+        fn completion_count(&self) -> usize {
+            self.completed.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl ToolOutputSink for RecordingSink {
@@ -1190,6 +1623,8 @@ mod tests {
         }
 
         fn complete(&self) -> Result<ToolOutputSnapshot, ToolError> {
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.snapshot_from_bytes(true))
         }
 
@@ -1203,7 +1638,9 @@ mod tests {
     }
 
     impl InteractiveStdioBridge for RecordingBridge {
-        fn register_stdin_writer(&self, _writer: Arc<dyn TaskStdinWriter>) {}
+        fn register_stdin_writer(&self, _writer: Arc<dyn TaskStdinWriter>) -> Result<(), String> {
+            Ok(())
+        }
 
         fn handle_frame_events(&self, events: Vec<BotifiedFrameEvent>) {
             let mut log = self.log.lock().expect("shared log mutex poisoned");
@@ -1233,9 +1670,67 @@ mod tests {
                     BotifiedFrameEvent::RegistryGet(frame) => {
                         log.push(format!("registry_get:{}", frame.id));
                     }
+                    BotifiedFrameEvent::RegistryDelete(frame) => {
+                        log.push(format!(
+                            "registry_delete:{}",
+                            frame.id.as_deref().unwrap_or("none")
+                        ));
+                    }
+                    BotifiedFrameEvent::ObserveRequest(frame) => {
+                        log.push(format!("observe_request:{}", frame.id));
+                    }
+                    BotifiedFrameEvent::ObserveRequestRejected(frame) => {
+                        log.push(format!("observe_request_rejected:{}", frame.id));
+                    }
                 }
             }
         }
+    }
+
+    #[derive(Default)]
+    struct RetainingBridge {
+        writer: Mutex<Option<Arc<dyn TaskStdinWriter>>>,
+    }
+
+    impl RetainingBridge {
+        fn release_writer(&self) {
+            self.writer
+                .lock()
+                .expect("retaining bridge mutex poisoned")
+                .take();
+        }
+    }
+
+    impl InteractiveStdioBridge for RetainingBridge {
+        fn register_stdin_writer(&self, writer: Arc<dyn TaskStdinWriter>) -> Result<(), String> {
+            *self
+                .writer
+                .lock()
+                .map_err(|_| "retaining bridge mutex poisoned".to_owned())? = Some(writer);
+            Ok(())
+        }
+
+        fn handle_frame_events(&self, _events: Vec<BotifiedFrameEvent>) {}
+    }
+
+    #[cfg(unix)]
+    struct RejectingBridge {
+        child_pid_fifo: PathBuf,
+        child_pid: Mutex<Option<libc::pid_t>>,
+    }
+
+    #[cfg(unix)]
+    impl InteractiveStdioBridge for RejectingBridge {
+        fn register_stdin_writer(&self, _writer: Arc<dyn TaskStdinWriter>) -> Result<(), String> {
+            let child_pid = fs::read_to_string(&self.child_pid_fifo)
+                .expect("child should publish its pid before registration rejects")
+                .parse::<libc::pid_t>()
+                .expect("child pid should parse");
+            *self.child_pid.lock().expect("child pid mutex poisoned") = Some(child_pid);
+            Err("task no longer accepts stdin".to_owned())
+        }
+
+        fn handle_frame_events(&self, _events: Vec<BotifiedFrameEvent>) {}
     }
 
     static BASH_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -1287,12 +1782,39 @@ mod tests {
 
     #[test]
     fn should_inherit_env_key_filters_secrets_and_bash_exported_functions() {
-        assert!(!should_inherit_env_key(OsStr::new("OPENAI_API_KEY")));
-        assert!(!should_inherit_env_key(OsStr::new("CUSTOM_TOKEN")));
-        assert!(!should_inherit_env_key(OsStr::new("BASH_FUNC__longopt%%")));
-        assert!(!should_inherit_env_key(OsStr::new("BASH_FUNC_echo%%")));
-        assert!(should_inherit_env_key(OsStr::new("BOTIFIED_SAFE_VISIBLE")));
-        assert!(should_inherit_env_key(OsStr::new("NOT_BASH_FUNC_echo%%")));
+        let configured = BTreeSet::from(["GALBOT_CONTROL".to_owned()]);
+        assert!(!should_inherit_env_key(
+            OsStr::new("OPENAI_API_KEY"),
+            &configured
+        ));
+        assert!(!should_inherit_env_key(
+            OsStr::new("CUSTOM_TOKEN"),
+            &configured
+        ));
+        assert!(!should_inherit_env_key(
+            OsStr::new("GALBOT_CONTROL"),
+            &configured
+        ));
+        assert!(should_inherit_env_key(
+            OsStr::new("galbot_control"),
+            &configured
+        ));
+        assert!(!should_inherit_env_key(
+            OsStr::new("BASH_FUNC__longopt%%"),
+            &configured
+        ));
+        assert!(!should_inherit_env_key(
+            OsStr::new("BASH_FUNC_echo%%"),
+            &configured
+        ));
+        assert!(should_inherit_env_key(
+            OsStr::new("BOTIFIED_SAFE_VISIBLE"),
+            &configured
+        ));
+        assert!(should_inherit_env_key(
+            OsStr::new("NOT_BASH_FUNC_echo%%"),
+            &configured
+        ));
     }
 
     #[test]
@@ -1307,7 +1829,7 @@ env | sort
 printf 'deepseek:%s\\n' \"${{DEEPSEEK_API_KEY-unset}}\"
 printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
 ",
-            secret_env_cleanup_script()
+            secret_env_cleanup_script(&BTreeSet::new())
         );
         let output = std::process::Command::new("bash")
             .env_remove("BASH_ENV")
@@ -1339,9 +1861,12 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
 
         let outcome = run_bash_command(
             "echo ok",
-            ".",
-            Some(Duration::from_secs(2)),
-            1024,
+            BashRunOptions {
+                cwd: ".",
+                timeout: Some(Duration::from_secs(2)),
+                max_output_bytes: 1024,
+                exact_secret_env_names: &BTreeSet::new(),
+            },
             None,
             None,
             CancellationToken::new(),
@@ -1352,6 +1877,50 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
         assert_eq!(String::from_utf8_lossy(&outcome.output.bytes), "ok\n");
         assert!(!outcome.timed_out);
         assert!(!outcome.cancelled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_stdin_writer_registration_terminates_and_reaps_child() {
+        let _guard = BASH_ENV_TEST_LOCK
+            .lock()
+            .expect("bash env test mutex poisoned");
+        let temp_dir = TempDir::new("rejected-stdin-registration");
+        let child_pid_fifo = temp_dir.path.join("child.pid.fifo");
+        let fifo_path = CString::new(child_pid_fifo.as_os_str().as_bytes())
+            .expect("fifo path should not contain a null byte");
+        // SAFETY: fifo_path is a valid, null-terminated path and mode contains permission bits only.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        let command = format!("printf '%s' $$ > '{}'; sleep 30", child_pid_fifo.display());
+        let bridge = Arc::new(RejectingBridge {
+            child_pid_fifo,
+            child_pid: Mutex::new(None),
+        });
+
+        let error = run_bash_command(
+            &command,
+            BashRunOptions {
+                cwd: ".",
+                timeout: Some(Duration::from_secs(2)),
+                max_output_bytes: 1024,
+                exact_secret_env_names: &BTreeSet::new(),
+            },
+            None,
+            Some(bridge.clone()),
+            CancellationToken::new(),
+        )
+        .expect_err("writer registration should be rejected");
+
+        assert!(error.to_string().contains("task no longer accepts stdin"));
+        let child_pid = bridge
+            .child_pid
+            .lock()
+            .expect("child pid mutex poisoned")
+            .expect("registration rejection should follow child pid publication");
+        // SAFETY: signal 0 only probes whether the reaped process still exists.
+        let result = unsafe { libc::kill(child_pid, 0) };
+        assert_eq!(result, -1, "child process {child_pid} should be gone");
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 
     #[test]
@@ -1371,9 +1940,12 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
 
         let outcome = run_bash_command(
             "printf 'script stderr\\n' >&2\nprintf 'script stdout\\n'",
-            ".",
-            Some(Duration::from_secs(2)),
-            4096,
+            BashRunOptions {
+                cwd: ".",
+                timeout: Some(Duration::from_secs(2)),
+                max_output_bytes: 4096,
+                exact_secret_env_names: &BTreeSet::new(),
+            },
             Some(sink),
             None,
             CancellationToken::new(),
@@ -1388,13 +1960,10 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
         assert!(sink_output.contains("startup stderr\n"), "{sink_output:?}");
 
         let result = format_tool_result("call_1".to_owned(), "bash".to_owned(), outcome, 4096);
-        let aggregated_output = result.details["aggregated_output"]
+        let output_tail = result.details["output_tail"]
             .as_str()
-            .expect("aggregated output should be present");
-        assert!(
-            aggregated_output.contains("startup stderr\n"),
-            "{aggregated_output:?}"
-        );
+            .expect("output_tail should be present");
+        assert!(output_tail.contains("startup stderr\n"), "{output_tail:?}");
     }
 
     #[test]
@@ -1422,9 +1991,12 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
 
         let outcome = run_bash_command(
             "printf 'script should not run\\n'",
-            ".",
-            Some(Duration::from_secs(2)),
-            payload_size + 4096,
+            BashRunOptions {
+                cwd: ".",
+                timeout: Some(Duration::from_secs(2)),
+                max_output_bytes: payload_size + 4096,
+                exact_secret_env_names: &BTreeSet::new(),
+            },
             None,
             None,
             CancellationToken::new(),
@@ -1562,7 +2134,59 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
     }
 
     #[test]
-    fn sync_interactive_bash_result_filters_protocol_frames_from_aggregated_output() {
+    fn output_pump_removes_python_print_line_ending_from_interactive_artifact() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(RecordingSink::new(log.clone()));
+        let sink_probe = sink.clone();
+        let bridge = Arc::new(RecordingBridge { log: log.clone() });
+        let mut pump = OutputPump::new(
+            FakeReader::chunks([
+                b"<botified>{\"op\":\"tell\",\"id\":\"t1\",\"message\":\"ready\"}</botified>"
+                    .as_slice(),
+                b"\n".as_slice(),
+            ]),
+            1024,
+            Some(sink),
+            Some(bridge),
+        )
+        .expect("pump should initialize");
+
+        assert!(pump.drain_available().expect("frame should drain"));
+        assert_eq!(
+            log.lock().expect("shared log mutex poisoned").as_slice(),
+            &["tell:t1"]
+        );
+        assert!(pump.drain_available().expect("line ending should drain"));
+
+        let output = pump.complete().expect("complete").output;
+        assert!(sink_probe.bytes().is_empty());
+        assert!(output.bytes.is_empty());
+    }
+
+    #[test]
+    fn output_pump_raw_mode_preserves_protocol_looking_bytes_exactly() {
+        let input =
+            b"<botified>{\"op\":\"tell\",\"id\":\"t1\",\"message\":\"ready\"}</botified>\r\n";
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(RecordingSink::new(log));
+        let sink_probe = sink.clone();
+        let mut pump = OutputPump::new(
+            FakeReader::chunks(input.chunks(1)),
+            input.len(),
+            Some(sink),
+            None,
+        )
+        .expect("pump should initialize");
+
+        while pump.drain_available().expect("raw chunk should drain") {}
+        let output = pump.complete().expect("complete").output;
+
+        assert_eq!(sink_probe.bytes(), input);
+        assert_eq!(output.bytes, input);
+    }
+
+    #[test]
+    fn sync_interactive_bash_result_filters_protocol_frames_from_output_tail() {
         let _guard = BASH_ENV_TEST_LOCK
             .lock()
             .expect("bash env test mutex poisoned");
@@ -1572,9 +2196,12 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
         let bridge = Arc::new(RecordingBridge { log: log.clone() });
         let outcome = run_bash_command(
             r#"printf 'alpha '; printf '<botified>{"op":"send","id":"echoed","message":"raw"}</botified>'; printf ' omega\n'"#,
-            ".",
-            Some(Duration::from_secs(2)),
-            4096,
+            BashRunOptions {
+                cwd: ".",
+                timeout: Some(Duration::from_secs(2)),
+                max_output_bytes: 4096,
+                exact_secret_env_names: &BTreeSet::new(),
+            },
             None,
             Some(bridge),
             CancellationToken::new(),
@@ -1582,21 +2209,15 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
         .expect("bash command should run");
 
         let result = format_tool_result("call_1".to_owned(), "bash".to_owned(), outcome, 4096);
-        let aggregated_output = result.details["aggregated_output"]
+        let output_tail = result.details["output_tail"]
             .as_str()
-            .expect("aggregated output should be present");
-        assert_eq!(aggregated_output, "alpha  omega\n");
-        assert!(result.text.contains("output:\nalpha  omega\n"));
+            .expect("output_tail should be present");
+        assert_eq!(output_tail, "alpha  omega\n");
+        assert!(result.text.contains("output_tail:\nalpha  omega\n"));
         assert!(!result.text.contains("<botified>"), "{}", result.text);
         assert!(!result.text.contains(r#""op":"send""#), "{}", result.text);
-        assert!(
-            !aggregated_output.contains("<botified>"),
-            "{aggregated_output}"
-        );
-        assert!(
-            !aggregated_output.contains(r#""op":"send""#),
-            "{aggregated_output}"
-        );
+        assert!(!output_tail.contains("<botified>"), "{output_tail}");
+        assert!(!output_tail.contains(r#""op":"send""#), "{output_tail}");
         assert!(
             log.lock()
                 .expect("shared log mutex poisoned")
@@ -1604,34 +2225,6 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
                 .any(|entry| entry == "protocol_diagnostic:unsupported_op"),
             "echoed stdin frame should be filtered as an unsupported stdout frame"
         );
-    }
-
-    #[test]
-    fn executor_protocol_preserves_output_and_uses_loopback_ndjson() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("executor should connect");
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().expect("stream should clone"))
-                .read_line(&mut request)
-                .expect("execute request should read");
-            let request: Value = serde_json::from_str(request.trim_end()).expect("execute request should be JSON");
-            assert_eq!(request["op"], "execute");
-            assert_eq!(request["command"], "printf ignored");
-            assert_eq!(request["interactive_stdio"], false);
-            writeln!(stream, r#"{{"op":"output","data":"c2lkZWNhciBvdXRwdXQK"}}"#).expect("output should write");
-            writeln!(stream, r#"{{"op":"completed","exit_code":0}}"#).expect("completion should write");
-        });
-
-        let outcome = run_executor_bash_command(
-            "printf ignored", ".", Some(Duration::from_secs(1)), 4096, None, None,
-            CancellationToken::new(), addr,
-        ).expect("executor command should complete");
-        server.join().expect("executor server should finish");
-        let result = format_tool_result("call_1".to_owned(), "bash".to_owned(), outcome, 4096);
-        assert_eq!(result.details["aggregated_output"], "sidecar output\n");
-        assert!(result.text.contains("status: completed\nexit code: 0\n"));
     }
 
     #[test]
@@ -1649,5 +2242,225 @@ printf 'qwen:%s\\n' \"${{QWEN_API_KEY-unset}}\"
         assert_eq!(output.bytes, b"def");
         assert!(output.truncated);
         assert_eq!(output.dropped_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn configured_executor_is_the_only_execution_path_and_keeps_output_limits() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("executor listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("executor listener address should resolve");
+        let executor = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("executor should accept");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("stream should clone"))
+                .read_line(&mut request)
+                .expect("execute request should read");
+            let request: Value =
+                serde_json::from_str(request.trim_end()).expect("execute request should parse");
+            assert_eq!(request["op"], "execute");
+            assert_eq!(request["mode"], "tool");
+            let command = request["command"].as_str().expect("command should be text");
+            assert!(
+                command.contains("*api_key*|*token*|*secret*|*password*"),
+                "pattern-based cleanup must run inside the login shell: {command}"
+            );
+            assert!(
+                command.contains("builtin unset -v -- GALBOT_CONTROL"),
+                "exact credential cleanup must be included: {command}"
+            );
+            assert!(
+                command.ends_with("\nexit 99"),
+                "the user command must run only after cleanup: {command}"
+            );
+            assert_eq!(request["cwd"], "/workspace");
+            assert_eq!(request["interactive_stdio"], false);
+            writeln!(
+                stream,
+                "{}",
+                json!({"op": "output", "data": BASE64.encode(b"remote-output")})
+            )
+            .expect("output event should write");
+            writeln!(stream, "{}", json!({"op": "completed", "exit_code": 0}))
+                .expect("completion event should write");
+        });
+
+        let mut tool = BashTool::new(address)
+            .with_exact_secret_env_names(["GALBOT_CONTROL"])
+            .expect("exact credential name should be accepted");
+        tool.max_output_bytes = 6;
+        let result = tool
+            .execute(
+                ToolCall::new("call_executor", "bash", json!({"command": "exit 99"})),
+                ToolExecutionContext::new("/workspace"),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("remote bash should execute");
+        executor.join().expect("executor thread should finish");
+
+        assert_eq!(result.details["exit_code"], 0);
+        assert_eq!(result.details["output_tail"], "output");
+        assert_eq!(result.details["output_tail_truncated"], true);
+        assert_eq!(result.details["output_dropped_bytes"], 7);
+    }
+
+    #[tokio::test]
+    async fn configured_executor_receives_cancel_and_returns_cancelled_result() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("executor listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("executor listener address should resolve");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let executor = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("executor should accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("stream should clone"));
+            let mut execute = String::new();
+            reader
+                .read_line(&mut execute)
+                .expect("execute request should read");
+            started_tx
+                .send(())
+                .expect("test should await execute request");
+            let mut control = String::new();
+            reader
+                .read_line(&mut control)
+                .expect("cancel control should read");
+            let control: Value =
+                serde_json::from_str(control.trim_end()).expect("cancel control should parse");
+            assert_eq!(control, json!({"op": "cancel"}));
+            writeln!(stream, "{}", json!({"op": "completed", "exit_code": 137}))
+                .expect("completion event should write");
+        });
+
+        let tool = BashTool::new(address);
+        let cancel = CancellationToken::new();
+        let execution = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tool.execute(
+                    ToolCall::new("call_cancel", "bash", json!({"command": "sleep 30"})),
+                    ToolExecutionContext::new("/workspace").with_no_deadline(),
+                    cancel,
+                )
+                .await
+            }
+        });
+        started_rx
+            .await
+            .expect("executor should receive execute request");
+        cancel.cancel();
+        let result = execution
+            .await
+            .expect("bash execution task should join")
+            .expect("cancelled bash should return a tool result");
+        executor.join().expect("executor thread should finish");
+
+        assert_eq!(result.details["cancelled"], true);
+        assert_eq!(result.details["timed_out"], false);
+        assert_eq!(result.details["exit_code"], 137);
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn executor_disconnect_completes_output_sink() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("executor listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("executor address should resolve");
+        let executor = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("executor should accept");
+            let mut request = String::new();
+            BufReader::new(stream)
+                .read_line(&mut request)
+                .expect("execute request should read");
+        });
+        let sink = Arc::new(RecordingSink::new(Arc::new(Mutex::new(Vec::new()))));
+        let probe = sink.clone();
+        let result = BashTool::new(address)
+            .execute(
+                ToolCall::new("call_disconnect", "bash", json!({"command": "sleep 30"})),
+                ToolExecutionContext::new("/workspace").with_output_sink(sink),
+                CancellationToken::new(),
+            )
+            .await;
+        executor.join().expect("executor should finish");
+
+        assert!(result.is_err());
+        assert_eq!(probe.completion_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn output_sink_failure_disconnects_executor_with_retained_stdin_writer() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::{Shutdown, TcpListener};
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("executor listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("executor address should resolve");
+        let (disconnect_tx, disconnect_rx) = mpsc::channel();
+        let executor = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("executor should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("executor read timeout should configure");
+            let mut reader =
+                BufReader::new(stream.try_clone().expect("executor stream should clone"));
+            let mut request = String::new();
+            reader
+                .read_line(&mut request)
+                .expect("execute request should read");
+            let request: Value =
+                serde_json::from_str(request.trim_end()).expect("execute request should parse");
+            assert_eq!(request["interactive_stdio"], true);
+            writeln!(
+                stream,
+                "{}",
+                json!({"op": "output", "data": BASE64.encode(b"fail the sink")})
+            )
+            .expect("executor output should write");
+
+            let mut byte = [0_u8; 1];
+            let disconnected = matches!(reader.read(&mut byte), Ok(0));
+            disconnect_tx
+                .send(disconnected)
+                .expect("disconnect result should send");
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+
+        let bridge = Arc::new(RetainingBridge::default());
+        let sink = Arc::new(RecordingSink::failing(Arc::new(Mutex::new(Vec::new()))));
+        let result = BashTool::new(address)
+            .execute(
+                ToolCall::new("call_sink_failure", "bash", json!({"command": "sleep 30"})),
+                ToolExecutionContext::new("/workspace")
+                    .with_output_sink(sink)
+                    .with_interactive_stdio(bridge.clone()),
+                CancellationToken::new(),
+            )
+            .await;
+        let disconnected = disconnect_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("executor should report connection state");
+        bridge.release_writer();
+        executor.join().expect("executor should finish");
+
+        assert!(result.is_err());
+        assert!(
+            disconnected,
+            "executor must observe disconnect while the bridge retains its stdin writer"
+        );
     }
 }

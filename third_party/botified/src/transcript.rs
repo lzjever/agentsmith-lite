@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::ops::Range;
 use thiserror::Error;
 
 use crate::types::{assistant_payload_is_valid, Message, ModelInput, ToolCall, ToolResult};
@@ -93,6 +94,24 @@ pub fn repair_provider_transcript(messages: Vec<Message>) -> Vec<Message> {
 
     close_pending_block(&mut repaired, &mut pending);
     repaired
+}
+
+pub(crate) fn request_range_contains_synthetic_missing_tool_result(
+    messages: &[Message],
+    request_range: Range<usize>,
+) -> bool {
+    messages
+        .get(request_range)
+        .unwrap_or_default()
+        .iter()
+        .any(|message| {
+            matches!(
+                message,
+                Message::ToolResult(result)
+                    if result.details.get("kind").and_then(serde_json::Value::as_str)
+                        == Some(SYNTHETIC_MISSING_TOOL_RESULT_KIND)
+            )
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

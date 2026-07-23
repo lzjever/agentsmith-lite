@@ -14,8 +14,9 @@ mod publish_file;
 pub use publish_file::{FilePublicationSink, PublishFileTool, PUBLISH_FILE_TOOL_NAME};
 mod registry;
 pub use registry::{
-    is_registry_tool_name, registry_tools_for_writer, RegistryGetTool, RegistryHistoryTool,
-    RegistrySetTool, REGISTRY_GET_TOOL_NAME, REGISTRY_HISTORY_TOOL_NAME, REGISTRY_SET_TOOL_NAME,
+    is_registry_tool_name, registry_tools_for_writer, RegistryDeleteTool, RegistryGetTool,
+    RegistryHistoryTool, RegistrySetTool, REGISTRY_DELETE_TOOL_NAME, REGISTRY_GET_TOOL_NAME,
+    REGISTRY_HISTORY_TOOL_NAME, REGISTRY_SET_TOOL_NAME,
 };
 mod view_image;
 pub use view_image::ViewImageTool;

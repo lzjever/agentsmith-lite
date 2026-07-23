@@ -1,14 +1,22 @@
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use crate::private_fs::{
+    ensure_private_dir, ensure_private_dir_with_legacy_tree, open_private_file,
+    private_open_options, tighten_private_file_path,
+};
 
 pub const DEFAULT_FILES_ROOT_DIR: &str = "files";
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
@@ -18,6 +26,8 @@ pub const DEFAULT_MAX_MESSAGE_FILES: usize = 16;
 pub const DEFAULT_MAX_MESSAGE_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_MAX_STORE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
+const MAX_STORE_ENTRIES: usize = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStoreOptions {
@@ -93,7 +103,15 @@ struct FileStoreInner {
     metadata_dir: PathBuf,
     tmp_dir: PathBuf,
     corrupt_dir: PathBuf,
-    lock: Mutex<()>,
+    lock: Mutex<StoreUsage>,
+    #[cfg(test)]
+    full_verification_count: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct StoreUsage {
+    object_bytes: u64,
+    retained_entries: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +264,14 @@ impl FileStoreError {
         )
     }
 
+    fn too_many_store_entries(limit: usize) -> Self {
+        Self::new(
+            FileStoreErrorKind::StoreTooLarge,
+            "store_too_large",
+            format!("store exceeds retained entry limit of {limit}"),
+        )
+    }
+
     fn not_found(file_id: &str) -> Self {
         Self::new(
             FileStoreErrorKind::FileNotFound,
@@ -282,6 +308,14 @@ impl FileStoreError {
         )
     }
 
+    fn corrupt_metadata_message(file_id: &str) -> Self {
+        Self::new(
+            FileStoreErrorKind::CorruptMetadata,
+            "corrupt_metadata",
+            format!("file metadata is corrupt: {file_id}"),
+        )
+    }
+
     fn storage(operation: impl Into<String>, source: io::Error) -> Self {
         Self::with_source(
             FileStoreErrorKind::Storage,
@@ -308,13 +342,19 @@ impl FileStore {
         let metadata_dir = options.root_dir.join("metadata");
         let tmp_dir = options.root_dir.join("tmp");
         let corrupt_dir = options.root_dir.join("corrupt");
-        for dir in [&objects_dir, &metadata_dir, &tmp_dir, &corrupt_dir] {
-            fs::create_dir_all(dir).map_err(|error| {
+        for dir in [&options.root_dir, &objects_dir, &metadata_dir, &tmp_dir] {
+            ensure_private_dir(dir).map_err(|error| {
                 FileStoreError::storage(format!("failed to create {}", dir.display()), error)
             })?;
         }
+        ensure_private_dir_with_legacy_tree(&corrupt_dir).map_err(|error| {
+            FileStoreError::storage(
+                format!("failed to create or secure {}", corrupt_dir.display()),
+                error,
+            )
+        })?;
 
-        recover_store(&objects_dir, &metadata_dir, &tmp_dir, &corrupt_dir)?;
+        let usage = recover_store(&objects_dir, &metadata_dir, &tmp_dir, &corrupt_dir)?;
 
         Ok(Self {
             inner: Arc::new(FileStoreInner {
@@ -323,7 +363,9 @@ impl FileStore {
                 metadata_dir,
                 tmp_dir,
                 corrupt_dir,
-                lock: Mutex::new(()),
+                lock: Mutex::new(usage),
+                #[cfg(test)]
+                full_verification_count: AtomicUsize::new(0),
             }),
         })
     }
@@ -403,19 +445,70 @@ impl FileStore {
         Ok(self.metadata(file_id)?.external())
     }
 
+    pub(crate) fn verify_file(&self, file_id: &str) -> Result<FileRecord, FileStoreError> {
+        self.verify_file_with_consumer(file_id, io::sink())
+            .map(|(metadata, _)| metadata)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_verification_count(&self) -> usize {
+        self.inner.full_verification_count.load(Ordering::Relaxed)
+    }
+
     pub fn download_bytes(&self, file_id: &str) -> Result<FileDownload, FileStoreError> {
-        let metadata = self.metadata(file_id)?;
-        let bytes = fs::read(&metadata.agent_path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                FileStoreError::object_missing(&metadata.file_id)
-            } else {
-                FileStoreError::storage(
-                    format!("failed to read {}", metadata.agent_path.display()),
-                    error,
-                )
-            }
-        })?;
+        let (metadata, bytes) = self.verify_file_with_consumer(file_id, Vec::new())?;
         Ok(FileDownload { metadata, bytes })
+    }
+
+    fn verify_file_with_consumer<W: Write>(
+        &self,
+        file_id: &str,
+        mut consumer: W,
+    ) -> Result<(FileRecord, W), FileStoreError> {
+        let file_id = validate_file_id(file_id)?;
+        let metadata = self.read_metadata(&file_id)?;
+        let mut object = self.open_available_object(&metadata)?;
+        let object_len = object
+            .metadata()
+            .map_err(|error| FileStoreError::storage("failed to inspect stored object", error))?
+            .len();
+        if object_len != metadata.size_bytes
+            || object_len > self.inner.options.max_file_bytes
+            || usize::try_from(object_len).is_err()
+        {
+            return Err(FileStoreError::corrupt_metadata_message(&file_id));
+        }
+        let read_limit = object_len
+            .checked_add(1)
+            .ok_or_else(|| FileStoreError::corrupt_metadata_message(&file_id))?;
+        let mut reader = (&mut object).take(read_limit);
+        let mut hasher = Sha256::new();
+        let mut size_bytes = 0_u64;
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| FileStoreError::storage("failed to read stored object", error))?;
+            if read == 0 {
+                break;
+            }
+            size_bytes = size_bytes
+                .checked_add(read as u64)
+                .ok_or_else(|| FileStoreError::corrupt_metadata_message(&file_id))?;
+            hasher.update(&buffer[..read]);
+            consumer.write_all(&buffer[..read]).map_err(|error| {
+                FileStoreError::storage("failed to consume stored object", error)
+            })?;
+        }
+        let actual_sha256 = hex::encode(hasher.finalize());
+        #[cfg(test)]
+        self.inner
+            .full_verification_count
+            .fetch_add(1, Ordering::Relaxed);
+        if size_bytes != metadata.size_bytes || actual_sha256 != metadata.sha256 {
+            return Err(FileStoreError::corrupt_metadata_message(&file_id));
+        }
+        Ok((metadata, consumer))
     }
 
     pub fn touch(&self, file_id: &str) -> Result<FileRecord, FileStoreError> {
@@ -459,23 +552,24 @@ impl FileStore {
             .iter()
             .map(|file_id| validate_file_id(file_id))
             .collect::<Result<HashSet<_>, _>>()?;
-        let _guard = self
+        let mut usage = self
             .inner
             .lock
             .lock()
             .map_err(|_| FileStoreError::storage_message("file store lock poisoned"))?;
-        self.cleanup_locked(&protected_file_ids)
+        self.cleanup_locked(&protected_file_ids, &mut usage)
     }
 
     pub fn remove_file(&self, file_id: &str) -> Result<(), FileStoreError> {
         let file_id = validate_file_id(file_id)?;
-        let _guard = self
+        let mut usage = self
             .inner
             .lock
             .lock()
             .map_err(|_| FileStoreError::storage_message("file store lock poisoned"))?;
         remove_file_if_exists(self.object_path(&file_id))?;
         remove_file_if_exists(self.metadata_path(&file_id))?;
+        *usage = self.current_store_usage()?;
         Ok(())
     }
 
@@ -489,7 +583,7 @@ impl FileStore {
     ) -> Result<FileRecord, FileStoreError> {
         let filename = validate_filename(filename)?;
         let mime_type = normalize_mime_type(mime_type);
-        let _guard = self
+        let mut usage = self
             .inner
             .lock
             .lock()
@@ -508,22 +602,27 @@ impl FileStore {
             }
         };
 
-        if let Err(error) = self.cleanup_locked(&HashSet::new()) {
+        if let Err(error) = self.cleanup_locked(&HashSet::new(), &mut usage) {
             let _ = fs::remove_file(&object_tmp);
             return Err(error);
         }
-        let current_store_bytes = match self.current_store_bytes() {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let _ = fs::remove_file(&object_tmp);
-                return Err(error);
-            }
-        };
-        if current_store_bytes + size_bytes > self.inner.options.max_store_bytes {
+        let exceeds_byte_capacity = usage
+            .object_bytes
+            .checked_add(size_bytes)
+            .is_none_or(|bytes| bytes > self.inner.options.max_store_bytes);
+        if exceeds_byte_capacity {
             let _ = fs::remove_file(&object_tmp);
             return Err(FileStoreError::store_too_large(
                 self.inner.options.max_store_bytes,
             ));
+        }
+        let exceeds_entry_capacity = usage
+            .retained_entries
+            .checked_add(1)
+            .is_none_or(|entries| entries > MAX_STORE_ENTRIES);
+        if exceeds_entry_capacity {
+            let _ = fs::remove_file(&object_tmp);
+            return Err(FileStoreError::too_many_store_entries(MAX_STORE_ENTRIES));
         }
 
         fs::rename(&object_tmp, &object_path).map_err(|error| {
@@ -587,6 +686,8 @@ impl FileStore {
             ));
         }
 
+        usage.object_bytes += size_bytes;
+        usage.retained_entries += 1;
         Ok(record)
     }
 
@@ -688,37 +789,54 @@ impl FileStore {
 
     fn read_metadata(&self, file_id: &str) -> Result<FileRecord, FileStoreError> {
         let path = self.metadata_path(file_id);
-        let raw = fs::read(&path).map_err(|error| {
+        let mut options = private_open_options();
+        options.read(true);
+        let mut file = open_private_file(&options, &path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 FileStoreError::not_found(file_id)
+            } else if invalid_private_file_type(&error) {
+                FileStoreError::corrupt_metadata_message(file_id)
             } else {
-                FileStoreError::storage(format!("failed to read {}", path.display()), error)
+                FileStoreError::storage(format!("failed to open {}", path.display()), error)
             }
+        })?;
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw).map_err(|error| {
+            FileStoreError::storage(format!("failed to read {}", path.display()), error)
         })?;
         let record: FileRecord = serde_json::from_slice(&raw)
             .map_err(|error| FileStoreError::corrupt_metadata(file_id, error))?;
         if record.file_id != file_id {
-            return Err(FileStoreError::new(
-                FileStoreErrorKind::CorruptMetadata,
-                "corrupt_metadata",
-                format!("metadata file id mismatch for {file_id}"),
-            ));
+            return Err(FileStoreError::corrupt_metadata_message(file_id));
+        }
+        if record.agent_path != self.object_path(file_id) {
+            return Err(FileStoreError::corrupt_metadata_message(file_id));
         }
         Ok(record)
     }
 
     fn ensure_available(&self, record: &FileRecord) -> Result<(), FileStoreError> {
+        self.open_available_object(record).map(|_| ())
+    }
+
+    fn open_available_object(&self, record: &FileRecord) -> Result<File, FileStoreError> {
         if record.retained_until <= unix_now() {
             return Err(FileStoreError::expired(&record.file_id));
         }
-        if !record.agent_path.exists() {
-            return Err(FileStoreError::object_missing(&record.file_id));
-        }
-        Ok(())
+        let path = self.object_path(&record.file_id);
+        let mut options = private_open_options();
+        options.read(true);
+        open_private_file(&options, &path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound || invalid_private_file_type(&error) {
+                FileStoreError::object_missing(&record.file_id)
+            } else {
+                FileStoreError::storage(format!("failed to open {}", path.display()), error)
+            }
+        })
     }
 
-    fn current_store_bytes(&self) -> Result<u64, FileStoreError> {
-        let mut total = 0_u64;
+    fn current_store_usage(&self) -> Result<StoreUsage, FileStoreError> {
+        let mut usage = StoreUsage::default();
         for entry in fs::read_dir(&self.inner.objects_dir).map_err(|error| {
             FileStoreError::storage(
                 format!("failed to read {}", self.inner.objects_dir.display()),
@@ -735,13 +853,48 @@ impl FileStore {
                 FileStoreError::storage(format!("failed to inspect {:?}", entry.path()), error)
             })?;
             if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
+                usage.object_bytes = usage.object_bytes.saturating_add(metadata.len());
             }
         }
-        Ok(total)
+        for entry in fs::read_dir(&self.inner.metadata_dir).map_err(|error| {
+            FileStoreError::storage(
+                format!("failed to read {}", self.inner.metadata_dir.display()),
+                error,
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                FileStoreError::storage(
+                    format!("failed to read {}", self.inner.metadata_dir.display()),
+                    error,
+                )
+            })?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    FileStoreError::storage(format!("failed to inspect {}", path.display()), error)
+                })?
+                .is_file()
+            {
+                continue;
+            }
+            let is_record = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.strip_suffix(".json"))
+                .is_some_and(|file_id| validate_file_id(file_id).is_ok());
+            if is_record {
+                usage.retained_entries += 1;
+            }
+        }
+        Ok(usage)
     }
 
-    fn cleanup_locked(&self, protected_file_ids: &HashSet<String>) -> Result<(), FileStoreError> {
+    fn cleanup_locked(
+        &self,
+        protected_file_ids: &HashSet<String>,
+        usage: &mut StoreUsage,
+    ) -> Result<(), FileStoreError> {
         let now = unix_now();
         let mut expired = Vec::new();
         for entry in fs::read_dir(&self.inner.metadata_dir).map_err(|error| {
@@ -766,11 +919,13 @@ impl FileStore {
             let Some(file_id) = file_name.strip_suffix(".json") else {
                 continue;
             };
-            if validate_file_id(file_id).is_err() || protected_file_ids.contains(file_id) {
+            if validate_file_id(file_id).is_err() {
                 continue;
             }
             match self.read_metadata(file_id) {
-                Ok(record) if record.retained_until <= now => {
+                Ok(record)
+                    if record.retained_until <= now && !protected_file_ids.contains(file_id) =>
+                {
                     expired.push(record.file_id);
                 }
                 Ok(_) => {}
@@ -786,6 +941,7 @@ impl FileStore {
             remove_file_if_exists(self.object_path(&file_id))?;
             remove_file_if_exists(self.metadata_path(&file_id))?;
         }
+        *usage = self.current_store_usage()?;
         Ok(())
     }
 
@@ -821,7 +977,7 @@ fn recover_store(
     metadata_dir: &Path,
     tmp_dir: &Path,
     corrupt_dir: &Path,
-) -> Result<(), FileStoreError> {
+) -> Result<StoreUsage, FileStoreError> {
     clear_directory(tmp_dir)?;
     let mut metadata_ids = HashSet::new();
 
@@ -832,9 +988,20 @@ fn recover_store(
             FileStoreError::storage(format!("failed to read {}", metadata_dir.display()), error)
         })?;
         let path = entry.path();
-        if !entry.file_type().map(|ty| ty.is_file()).unwrap_or(false) {
+        let file_type = entry.file_type().map_err(|error| {
+            FileStoreError::storage(format!("failed to inspect {}", path.display()), error)
+        })?;
+        if file_type.is_symlink() {
+            remove_file_if_exists(path)?;
             continue;
         }
+        if !file_type.is_file() {
+            move_corrupt_metadata(&path, corrupt_dir)?;
+            continue;
+        }
+        tighten_private_file_path(&path).map_err(|error| {
+            FileStoreError::storage(format!("failed to secure {}", path.display()), error)
+        })?;
         let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
             move_corrupt_metadata(&path, corrupt_dir)?;
             continue;
@@ -855,7 +1022,9 @@ fn recover_store(
                 serde_json::from_slice::<FileRecord>(&raw)
                     .map_err(|error| FileStoreError::corrupt_metadata(file_id, error))
             }) {
-            Ok(record) if record.file_id == file_id => {
+            Ok(record)
+                if record.file_id == file_id && record.agent_path == objects_dir.join(file_id) =>
+            {
                 metadata_ids.insert(file_id.to_owned());
             }
             Ok(_) | Err(_) => {
@@ -864,26 +1033,55 @@ fn recover_store(
         }
     }
 
+    let mut object_bytes = 0_u64;
     for entry in fs::read_dir(objects_dir).map_err(|error| {
         FileStoreError::storage(format!("failed to read {}", objects_dir.display()), error)
     })? {
         let entry = entry.map_err(|error| {
             FileStoreError::storage(format!("failed to read {}", objects_dir.display()), error)
         })?;
-        if !entry.file_type().map(|ty| ty.is_file()).unwrap_or(false) {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            FileStoreError::storage(format!("failed to inspect {}", path.display()), error)
+        })?;
+        if file_type.is_symlink() {
+            remove_file_if_exists(path)?;
             continue;
         }
-        let path = entry.path();
+        if !file_type.is_file() {
+            return Err(FileStoreError::storage_message(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
         let Some(file_id) = path.file_name().and_then(|value| value.to_str()) else {
             remove_file_if_exists(path)?;
             continue;
         };
         if validate_file_id(file_id).is_err() || !metadata_ids.contains(file_id) {
             remove_file_if_exists(path)?;
+        } else {
+            tighten_private_file_path(&path).map_err(|error| {
+                FileStoreError::storage(format!("failed to secure {}", path.display()), error)
+            })?;
+            object_bytes = object_bytes.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|error| {
+                        FileStoreError::storage(
+                            format!("failed to inspect {}", path.display()),
+                            error,
+                        )
+                    })?
+                    .len(),
+            );
         }
     }
 
-    Ok(())
+    Ok(StoreUsage {
+        object_bytes,
+        retained_entries: metadata_ids.len(),
+    })
 }
 
 fn clear_directory(dir: &Path) -> Result<(), FileStoreError> {
@@ -931,13 +1129,11 @@ fn move_corrupt_metadata(path: &Path, corrupt_dir: &Path) -> Result<(), FileStor
 }
 
 fn create_new_file(path: &Path) -> Result<File, FileStoreError> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| {
-            FileStoreError::storage(format!("failed to create {}", path.display()), error)
-        })
+    let mut options = private_open_options();
+    options.write(true).create_new(true);
+    open_private_file(&options, path).map_err(|error| {
+        FileStoreError::storage(format!("failed to create {}", path.display()), error)
+    })
 }
 
 fn remove_file_if_exists(path: PathBuf) -> Result<(), FileStoreError> {
@@ -964,6 +1160,10 @@ fn is_unsupported_dir_sync(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
     ) || error.raw_os_error() == Some(22)
+}
+
+fn invalid_private_file_type(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::InvalidInput || error.raw_os_error() == Some(libc::ELOOP)
 }
 
 fn validate_file_id(file_id: &str) -> Result<String, FileStoreError> {

@@ -1,9 +1,26 @@
 {
   "mode": "vendored_source",
-  "source": ".reference/botified",
-  "commit": "988f65d31652008ca4ea320ec99ec5c6d03e7890",
-  "checksum": "sha256:fda790a606239ff207534761a9d874844d7d01dc73ffd071f468085f3b186347",
-  "checksumMaterial": "Cargo.toml, Cargo.lock, and src/ only; upstream docs, tests, terminal UI module/bin, and optional side components are excluded from the Lite runner build context",
+  "repository": "https://github.com/lzjever/botified",
+  "referencePath": "../.reference/botified",
+  "upstreamTag": "v0.4.37",
+  "commit": "3cb852daae060faa6e26cc538f6c12d940d89ed5",
+  "checksum": "sha256:b220675b463d0022390868789dd2a7587a63f23357e0ecb0ab6e3464c2049a70",
+  "checksumMaterial": "SHA-256 of newline-delimited '<file-sha256>  <relative-path>' records for Cargo.toml, Cargo.lock, and src/** regular files, sorted by relative path with LC_ALL=C; checksum covers the final Lite-patched vendored runtime, not the pristine upstream tree",
+  "liteDelta": [
+    "required loopback bash_executor_addr with explicit tool/terminal modes while retaining v0.4.37 Bash filtering, output accounting, cancellation, and detached semantics",
+    "authenticated terminal WebSocket and background-task stop HTTP routes",
+    "durable resume_unfinished=false discard of unfinished session work",
+    "session-owned idempotent delivery receipts keyed by delivery_key and request_hash",
+    "command_execution.cancelled canonical timeline mapping",
+    "exact AgentSmith Lite in-cluster broker plaintext HTTP allowance"
+  ],
+  "excludedUpstreamPaths": [
+    "src/tui/**",
+    "src/bin/**",
+    "src/setup_file.rs",
+    "src/setup_interactive.rs",
+    "src/config_guidance.rs"
+  ],
   "runtimeEntrypoint": "botified serve",
   "productTuiExposed": false
 }

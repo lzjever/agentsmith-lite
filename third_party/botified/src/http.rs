@@ -1,62 +1,61 @@
-use std::collections::VecDeque;
-use std::convert::Infallible;
-use std::fs;
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::multipart::{MultipartError, MultipartRejection};
 use axum::extract::rejection::BytesRejection;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::extract::{DefaultBodyLimit, FromRequest, Path as AxumPath, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::{stream, SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::agent_loop::InputUrgency;
 use crate::attachments::{parse_user_input, AttachmentError, ParsedUserInput, PublicInputItem};
 use crate::event::EventCursor;
 use crate::files::{
-    ExternalFileMetadata, FileRecord, FileSource, FileStore, FileStoreError, FileStoreErrorKind,
-    DEFAULT_MAX_UPLOAD_REQUEST_BYTES,
-};
-use crate::llm_text_preview::{
-    LlmTextPreviewFilter, LlmTextPreviewFrame, LlmTextPreviewSubscription,
+    FileRecord, FileStore, FileStoreError, FileStoreErrorKind, DEFAULT_MAX_UPLOAD_REQUEST_BYTES,
 };
 use crate::registry::{
-    RegistryError, RegistryHistoryResult, RegistryItem, RegistryQuery, RegistryQueryResult,
-    RegistrySetAck, RegistrySetRequest, RegistryStore, RegistryTopicSummary, RegistryTtl,
-    RegistryWriterKind,
+    RegistryError, RegistryHistoryResult, RegistryItem, RegistryQueryResult, RegistryStore,
 };
 use crate::service::{
     summarize_input_content, EnqueueSubmitStatus, Service, ServiceError, ServiceState,
 };
-use crate::timeline::{push_timeline_event_line, TimelineEnvelope, TimelineItem, TimelineTrace};
-use crate::timeline_store::{
-    HistoryBoundary, TimelineForwardPage, TimelineHistoryPage, TimelineStoreError,
-    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_TIMELINE_PAGE_LIMIT,
-};
+use crate::timeline_store::TimelineStoreError;
 use crate::types::{ContentPart, MessageFileBinding};
 
+mod delivery;
+mod files;
+mod registry_http;
+mod registry_ws;
+mod timeline;
+
+use delivery::{delivery_from_body, validate_delivery_key};
+
 pub const MAX_HTTP_JSON_BYTES: usize = 10 * 1024 * 1024;
-const NEXT_CURSOR_HEADER: &str = "x-botified-next-cursor";
-const HAS_MORE_AFTER_HEADER: &str = "x-botified-has-more-after";
-const PAGE_START_CURSOR_HEADER: &str = "x-botified-page-start-cursor";
-const PAGE_END_CURSOR_HEADER: &str = "x-botified-page-end-cursor";
-const HAS_MORE_BEFORE_HEADER: &str = "x-botified-has-more-before";
+pub const MAX_HTTP_MESSAGE_REQUESTS: usize = 4;
+pub const MAX_HTTP_SERVICE_MUTATIONS: usize = 4;
+pub const MAX_HTTP_LLM_TEXT_PREVIEW_SUBSCRIPTIONS: usize = 64;
+pub const MAX_HTTP_TIMELINE_FOLLOW_CONNECTIONS: usize = 32;
+pub const MAX_HTTP_TIMELINE_BLOCKING_TASKS: usize = 4;
+pub const MAX_HTTP_REGISTRY_WS_CONTROL_CONNECTIONS: usize = 32;
+pub const MAX_HTTP_REGISTRY_BLOCKING_TASKS: usize = 4;
+const HTTP_JSON_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const HTTP_UPLOAD_BODY_READ_TIMEOUT: Duration = Duration::from_secs(300);
 const HISTORY_BOUNDARY_HEADER: &str = "x-botified-history-boundary";
-const TIMELINE_FOLLOW_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const REGISTRY_WS_ERROR_MESSAGE_CHARS: usize = 256;
 const AGENT_MEDIATED_TASK_REPLY_MESSAGE: &str =
     "task asks are agent-mediated; use normal chat so the agent can call task_reply(task_id, ask_id, message)";
 const RESERVED_CLIENT_MESSAGE_ID_PREFIXES: [&str; 5] = [
@@ -67,31 +66,68 @@ const RESERVED_CLIENT_MESSAGE_ID_PREFIXES: [&str; 5] = [
     "botified_",
 ];
 static NEXT_AUTO_MESSAGE_ID_PREFIX: AtomicU64 = AtomicU64::new(1);
-static NEXT_REGISTRY_WS_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+std::thread_local! {
+    static REGISTRY_SERIALIZATION_COUNTS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
 
 #[derive(Clone)]
 struct HttpState {
     service: Service,
     service_key: Option<String>,
     file_store: Option<FileStore>,
+    terminal: Option<TerminalConfig>,
     auto_message_id_prefix: String,
     next_message_id: Arc<AtomicU64>,
-    delivery_store: Option<Arc<DeliveryStore>>,
+    message_request_slots: Arc<Semaphore>,
+    service_mutation_slots: Arc<Semaphore>,
+    file_upload_slots: Arc<Semaphore>,
+    file_download_slots: Arc<Semaphore>,
+    llm_text_preview_slots: Arc<Semaphore>,
+    timeline_follow_slots: Arc<Semaphore>,
+    timeline_blocking_slots: Arc<Semaphore>,
+    registry_ws_connection_slots: Option<Arc<Semaphore>>,
+    registry_blocking_slots: Option<Arc<Semaphore>>,
 }
 
 impl HttpState {
-    fn new(service: Service, service_key: Option<String>) -> Self {
+    fn new(
+        service: Service,
+        service_key: Option<String>,
+        terminal: Option<TerminalConfig>,
+    ) -> Self {
         let file_store = service.file_store();
-        let delivery_store = file_store.as_ref().map(|store| DeliveryStore::new(
-            store.options().root_dir.join("delivery-receipts"),
-        ));
+        let registry_ws_connection_slots = service.registry_store().map(|store| {
+            let capacity = store
+                .config()
+                .max_subscriptions
+                .saturating_add(MAX_HTTP_REGISTRY_WS_CONTROL_CONNECTIONS)
+                .min(Semaphore::MAX_PERMITS);
+            Arc::new(Semaphore::new(capacity))
+        });
+        let registry_blocking_slots = service
+            .registry_store()
+            .map(|_| Arc::new(Semaphore::new(MAX_HTTP_REGISTRY_BLOCKING_TASKS)));
         Self {
             service,
             service_key,
             file_store,
+            terminal,
             auto_message_id_prefix: new_auto_message_id_prefix(),
             next_message_id: Arc::new(AtomicU64::new(1)),
-            delivery_store,
+            message_request_slots: Arc::new(Semaphore::new(MAX_HTTP_MESSAGE_REQUESTS)),
+            service_mutation_slots: Arc::new(Semaphore::new(MAX_HTTP_SERVICE_MUTATIONS)),
+            file_upload_slots: Arc::new(Semaphore::new(1)),
+            file_download_slots: Arc::new(Semaphore::new(2)),
+            llm_text_preview_slots: Arc::new(Semaphore::new(
+                MAX_HTTP_LLM_TEXT_PREVIEW_SUBSCRIPTIONS,
+            )),
+            timeline_follow_slots: Arc::new(Semaphore::new(MAX_HTTP_TIMELINE_FOLLOW_CONNECTIONS)),
+            timeline_blocking_slots: Arc::new(Semaphore::new(MAX_HTTP_TIMELINE_BLOCKING_TASKS)),
+            registry_ws_connection_slots,
+            registry_blocking_slots,
         }
     }
 
@@ -101,53 +137,10 @@ impl HttpState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeliveryReceipt {
-    delivery_key: String,
-    request_hash: String,
-    message_id: String,
-    timeline_cursor: String,
-}
-
-#[derive(Clone)]
-struct DeliveryStore {
-    root: PathBuf,
-}
-
-impl DeliveryStore {
-    fn new(root: PathBuf) -> Arc<Self> {
-        Arc::new(Self { root })
-    }
-
-    fn path(&self, key: &str) -> Result<PathBuf, ApiError> {
-        if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
-            return Err(ApiError::invalid_request("delivery_key must be an ASCII token"));
-        }
-        Ok(self.root.join(format!("{key}.json")))
-    }
-
-    fn get(&self, key: &str) -> Result<Option<DeliveryReceipt>, ApiError> {
-        let path = self.path(key)?;
-        match fs::read_to_string(path) {
-            Ok(raw) => serde_json::from_str(&raw)
-                .map(Some)
-                .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_corrupt", "delivery receipt is corrupt", true)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true)),
-        }
-    }
-
-    fn put(&self, receipt: &DeliveryReceipt) -> Result<(), ApiError> {
-        fs::create_dir_all(&self.root)
-            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))?;
-        let path = self.path(&receipt.delivery_key)?;
-        let temp = self.root.join(format!(".{}.tmp", receipt.delivery_key));
-        let bytes = serde_json::to_vec(receipt)
-            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))?;
-        fs::write(&temp, bytes)
-            .and_then(|_| fs::rename(&temp, &path))
-            .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "delivery_receipt_unavailable", "delivery receipt is unavailable", true))
-    }
+#[derive(Debug, Clone)]
+pub struct TerminalConfig {
+    pub executor_addr: std::net::SocketAddr,
+    pub cwd: String,
 }
 
 fn new_auto_message_id_prefix() -> String {
@@ -160,111 +153,189 @@ fn new_auto_message_id_prefix() -> String {
     format!("{stamp:x}_{process:x}_{sequence:x}")
 }
 
-fn timestamp_now() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("unix:{}", duration.as_secs())
+pub fn router(service: Service, service_key: Option<String>) -> Router {
+    router_with_optional_terminal(service, service_key, None)
 }
 
-pub fn router(service: Service, service_key: Option<String>) -> Router {
+pub fn router_with_terminal(
+    service: Service,
+    service_key: Option<String>,
+    terminal: TerminalConfig,
+) -> Router {
+    router_with_optional_terminal(service, service_key, Some(terminal))
+}
+
+fn router_with_optional_terminal(
+    service: Service,
+    service_key: Option<String>,
+    terminal: Option<TerminalConfig>,
+) -> Router {
     let max_upload_request_bytes = service
         .file_store()
         .map(|file_store| file_store.options().max_upload_request_bytes)
         .unwrap_or(DEFAULT_MAX_UPLOAD_REQUEST_BYTES);
-    let state = HttpState::new(service, service_key);
+    let state = HttpState::new(service, service_key, terminal);
     build_router(state, max_upload_request_bytes)
 }
 
 fn build_router(state: HttpState, max_upload_request_bytes: u64) -> Router {
     let files_upload_limit = usize::try_from(max_upload_request_bytes).unwrap_or(usize::MAX);
     let registry_enabled = state.service.registry_store().is_some();
-    let mut router = Router::new()
-        .route("/healthz", get(healthz))
+    let mut protected = Router::new()
         .route("/v1/state", get(state_handler))
         .route(
             "/v1/messages",
             post(messages_handler).layer(DefaultBodyLimit::max(MAX_HTTP_JSON_BYTES)),
         )
-        .route("/v1/deliveries/:delivery_key", get(delivery_receipt_handler))
+        .route(
+            "/v1/deliveries/:delivery_key",
+            get(delivery_receipt_handler),
+        )
         .route(
             "/v1/files",
-            post(upload_files_handler).layer(DefaultBodyLimit::max(files_upload_limit)),
+            post(files::upload_files_handler).layer(DefaultBodyLimit::max(files_upload_limit)),
         )
-        .route("/v1/files/:file_id", get(download_file_handler))
-        .route("/v1/timeline", get(timeline_handler))
-        .route("/v1/llm-text-preview", get(llm_text_preview_handler))
+        .route("/v1/files/:file_id", get(files::download_file_handler))
+        .route("/v1/timeline", get(timeline::timeline_handler))
+        .route(
+            "/v1/llm-text-preview",
+            get(timeline::llm_text_preview_handler),
+        )
         .route("/v1/abort", post(abort_handler))
         .route(
             "/v1/background-tasks/:task_id/stop",
             post(stop_background_task_handler),
+        )
+        .route("/v1/task-presets", get(task_presets_handler))
+        .route(
+            "/v1/task-presets/:preset_id/start",
+            post(task_preset_start_handler).layer(DefaultBodyLimit::max(MAX_HTTP_JSON_BYTES)),
         );
-    router = router.route("/v1/terminal/ws", get(terminal_ws_handler));
 
-    if registry_enabled {
-        router = router
-            .route("/v1/registry/ws", get(registry_ws_handler))
-            .route("/v1/registry/current", get(registry_current_handler))
-            .route("/v1/registry/history", get(registry_history_handler))
-            .route("/v1/registry/topics", get(registry_topics_handler));
+    if state.terminal.is_some() {
+        protected = protected.route("/v1/terminal/ws", get(terminal_ws_handler));
     }
 
-    router.with_state(state)
+    if registry_enabled {
+        protected = protected
+            .route("/v1/registry/ws", get(registry_ws::registry_ws_handler))
+            .route(
+                "/v1/registry/current",
+                get(registry_http::registry_current_handler),
+            )
+            .route(
+                "/v1/registry/history",
+                get(registry_http::registry_history_handler),
+            )
+            .route(
+                "/v1/registry/topics",
+                get(registry_http::registry_topics_handler),
+            );
+    }
+
+    let protected = protected.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        authorize_request,
+    ));
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(protected)
+        .with_state(state)
 }
 
 async fn terminal_ws_handler(
     State(state): State<HttpState>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    Ok(ws.on_upgrade(terminal_websocket).into_response())
+    let terminal = state
+        .terminal
+        .clone()
+        .ok_or_else(ApiError::terminal_unavailable)?;
+    Ok(ws
+        .on_upgrade(move |socket| terminal_websocket(socket, terminal))
+        .into_response())
 }
 
-async fn terminal_websocket(socket: WebSocket) {
-    let executor = match TcpStream::connect("127.0.0.1:3110").await {
+async fn terminal_websocket(socket: WebSocket, terminal: TerminalConfig) {
+    let executor = match TcpStream::connect(terminal.executor_addr).await {
         Ok(stream) => stream,
         Err(_) => {
             let (mut sender, _) = socket.split();
-            let _ = sender.send(WsMessage::Text(json!({"op":"error","message":"Task terminal is unavailable"}).to_string())).await;
+            let _ = sender
+                .send(WsMessage::Text(
+                    json!({"op": "error", "message": "Task terminal is unavailable"}).to_string(),
+                ))
+                .await;
             return;
         }
     };
     let (executor_reader, mut executor_writer) = executor.into_split();
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/workspace/task/home".to_owned());
-    let execute = json!({"op":"execute","command":"exec bash -il","cwd":home,"interactive_stdio":true}).to_string();
-    if executor_writer.write_all(execute.as_bytes()).await.is_err() || executor_writer.write_all(b"\n").await.is_err() {
+    let execute = json!({
+        "op": "execute",
+        "mode": "terminal",
+        "command": "exec bash -il",
+        "cwd": terminal.cwd,
+        "interactive_stdio": true,
+    })
+    .to_string();
+    if executor_writer
+        .write_all(format!("{execute}\n").as_bytes())
+        .await
+        .is_err()
+    {
         return;
     }
+
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    if ws_sender.send(WsMessage::Text(json!({"op":"ready"}).to_string())).await.is_err() {
+    if ws_sender
+        .send(WsMessage::Text(json!({"op": "ready"}).to_string()))
+        .await
+        .is_err()
+    {
+        let _ = executor_writer.write_all(b"{\"op\":\"cancel\"}\n").await;
         return;
     }
     let output = async {
         let mut lines = BufReader::new(executor_reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if ws_sender.send(WsMessage::Text(line)).await.is_err() { break; }
+            if ws_sender.send(WsMessage::Text(line)).await.is_err() {
+                break;
+            }
         }
     };
     let input = async {
         while let Some(Ok(message)) = ws_receiver.next().await {
             match message {
                 WsMessage::Text(text) => {
-                    if executor_writer.write_all(text.as_bytes()).await.is_err() || executor_writer.write_all(b"\n").await.is_err() { break; }
+                    if executor_writer.write_all(text.as_bytes()).await.is_err()
+                        || executor_writer.write_all(b"\n").await.is_err()
+                    {
+                        break;
+                    }
                 }
-                WsMessage::Close(_) => {
-                    let _ = executor_writer.write_all(b"{\"op\":\"cancel\"}\n").await;
-                    break;
-                }
+                WsMessage::Close(_) => break,
                 _ => {}
             }
         }
     };
-    tokio::select! { _ = output => {}, _ = input => {} }
+    tokio::select! {
+        _ = output => {}
+        _ = input => {}
+    }
+    let _ = executor_writer.write_all(b"{\"op\":\"cancel\"}\n").await;
 }
 
 async fn healthz() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn authorize_request(
+    State(state): State<HttpState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    authorize(request.headers(), state.service_key.as_deref())?;
+    Ok(next.run(request).await)
 }
 
 async fn state_handler(
@@ -272,73 +343,177 @@ async fn state_handler(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&headers, state.service_key.as_deref())?;
-    Ok(Json(state.service.timeline_bootstrap_snapshot()))
+    let service = state.service.clone();
+    let snapshot = run_timeline_blocking_task(
+        state.timeline_blocking_slots.clone(),
+        "timeline state snapshot",
+        move || service.timeline_bootstrap_snapshot(),
+    )
+    .await?;
+    Ok(Json(snapshot))
+}
+
+async fn run_timeline_blocking_task<T: Send + 'static>(
+    slots: Arc<Semaphore>,
+    operation: &'static str,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    let permit = slots
+        .try_acquire_owned()
+        .map_err(|_| ApiError::timeline_worker_limit())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|_| ApiError::timeline_worker_failed(operation))
+}
+
+async fn run_service_mutation_blocking_task<T: Send + 'static>(
+    slots: Arc<Semaphore>,
+    operation: &'static str,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    let permit = slots
+        .try_acquire_owned()
+        .map_err(|_| ApiError::service_mutation_worker_limit())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|_| ApiError::service_mutation_worker_failed(operation))
+}
+
+async fn run_message_blocking_task<T: Send + 'static>(
+    request_permit: Arc<OwnedSemaphorePermit>,
+    operation: &'static str,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let _request_permit = request_permit;
+        task()
+    })
+    .await
+    .map_err(|_| ApiError::message_worker_failed(operation))
 }
 
 async fn messages_handler(
     State(state): State<HttpState>,
-    headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    request: Request,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
+    authorize(request.headers(), state.service_key.as_deref())?;
+    require_message_json_content_type(request.headers())?;
+    let request_permit = Arc::new(
+        state
+            .message_request_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::message_request_limit())?,
+    );
 
+    let body = read_bytes_body_with_timeout(request, &state, HTTP_JSON_BODY_READ_TIMEOUT).await?;
     let body = parse_json_body(body)?;
     let delivery = delivery_from_body(&body)?;
-    if let Some(delivery) = delivery.as_ref() {
-        let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
-        if let Some(receipt) = store.get(&delivery.delivery_key)? {
-            if receipt.request_hash != delivery.request_hash {
-                return Err(ApiError::message_conflict("delivery_key was already used with a different request_hash"));
-            }
-            return Ok(Json(message_response_from_receipt(receipt)));
-        }
-    }
-    if let Some(response) = slash_command_response(&state.service, &body) {
-        return Ok(Json(response));
+    if delivery.is_none() && is_slash_command_body(&body) {
+        let service = state.service.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let slash_response =
+            run_message_blocking_task(request_permit.clone(), "message slash command", move || {
+                let _runtime = runtime.enter();
+                slash_command_response(&service, &body)
+                    .expect("slash command body should produce a response")
+            })
+            .await?;
+        return Ok(Json(slash_response));
     }
 
     let client_message_id = message_id_from_body(&body)?;
-    if let (Some(delivery), Some(client_message_id)) = (delivery.as_ref(), client_message_id.as_ref()) {
+    if let (Some(delivery), Some(client_message_id)) =
+        (delivery.as_ref(), client_message_id.as_ref())
+    {
         if delivery.delivery_key != *client_message_id {
-            return Err(ApiError::invalid_request("client_message_id must equal delivery_key when delivery_key is supplied"));
+            return Err(ApiError::invalid_request(
+                "client_message_id must equal delivery_key when delivery_key is supplied",
+            ));
         }
     }
-    let message_id = delivery.as_ref().map(|value| value.delivery_key.clone()).or(client_message_id).unwrap_or_else(|| state.next_message_id());
+    let message_id = delivery
+        .as_ref()
+        .map(|value| value.delivery_key.clone())
+        .or(client_message_id)
+        .unwrap_or_else(|| state.next_message_id());
     let urgency_result = input_urgency_from_body(&body);
     let input = parse_user_input(body).map_err(ApiError::from_attachment)?;
-    let content = bind_user_input_content(&state, &message_id, input)?;
+    let content =
+        bind_user_input_content(&state, &message_id, input, request_permit.clone()).await?;
     let urgency = match urgency_result {
         Ok(urgency) => urgency,
         Err(message) => {
-            let timeline_cursor = state.service.reject_user_message(
-                &message_id,
-                &content,
-                "invalid_urgency",
-                message.clone(),
-                false,
-            );
+            let service = state.service.clone();
+            let rejected_message_id = message_id.clone();
+            let rejection_message = message.clone();
+            let timeline_cursor =
+                run_message_blocking_task(request_permit.clone(), "message rejection", move || {
+                    service.reject_user_message(
+                        &rejected_message_id,
+                        &content,
+                        "invalid_urgency",
+                        rejection_message,
+                        false,
+                    )
+                })
+                .await?;
             return Err(ApiError::invalid_request(message)
                 .with_timeline_cursor(timeline_cursor.map(|cursor| cursor.to_string())));
         }
     };
     let content_summary = summarize_input_content(&content);
-    let before_enqueue_cursor = state.service.current_event_cursor();
-    let outcome = match state
-        .service
-        .enqueue_with_urgency(message_id.clone(), content, urgency)
-        .await
-    {
+    let service = state.service.clone();
+    let enqueue_message_id = message_id.clone();
+    let cursor_message_id = message_id.clone();
+    let enqueue_delivery = delivery.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let outcome = run_message_blocking_task(request_permit.clone(), "message enqueue", move || {
+        let before_enqueue_cursor = service.current_event_cursor();
+        let enqueue = match enqueue_delivery {
+            Some(delivery) => runtime.block_on(service.enqueue_delivery(
+                delivery.delivery_key,
+                delivery.request_hash,
+                content,
+                urgency,
+            )),
+            None => {
+                runtime.block_on(service.enqueue_with_urgency(enqueue_message_id, content, urgency))
+            }
+        };
+        match enqueue {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let timeline_cursor = append_safe_rejection_cursor(
+                    &service,
+                    &before_enqueue_cursor,
+                    &cursor_message_id,
+                );
+                Err((error, timeline_cursor))
+            }
+        }
+    })
+    .await?;
+    let outcome = match outcome {
         Ok(outcome) => outcome,
-        Err(error) => {
-            let timeline_cursor =
-                append_safe_rejection_cursor(&state.service, &before_enqueue_cursor, &message_id);
+        Err((error, timeline_cursor)) => {
             return Err(ApiError::from_service(error).with_timeline_cursor(timeline_cursor));
         }
     };
 
     let response = MessageResponse {
         ok: true,
-        kind: message_response_kind(outcome.submit_status),
+        kind: if delivery.is_some() && outcome.submit_status == EnqueueSubmitStatus::Duplicate {
+            "idempotent"
+        } else {
+            message_response_kind(outcome.submit_status)
+        },
         input_id: message_id.clone(),
         message_id,
         timeline_cursor: outcome.cursor.to_string(),
@@ -351,42 +526,32 @@ async fn messages_handler(
         delivery_key: delivery.as_ref().map(|value| value.delivery_key.clone()),
         request_hash: delivery.as_ref().map(|value| value.request_hash.clone()),
     };
-    if let Some(delivery) = delivery {
-        let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
-        store.put(&DeliveryReceipt {
-            delivery_key: delivery.delivery_key,
-            request_hash: delivery.request_hash,
-            message_id: response.message_id.clone(),
-            timeline_cursor: response.timeline_cursor.clone(),
-        })?;
-    }
     Ok(Json(json!(response)))
 }
 
 async fn delivery_receipt_handler(
     State(state): State<HttpState>,
-    headers: HeaderMap,
     AxumPath(delivery_key): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = state.delivery_store.as_ref().ok_or_else(ApiError::delivery_store_unavailable)?;
-    match store.get(&delivery_key)? {
+    validate_delivery_key(&delivery_key)?;
+    match state.service.delivery_receipt(&delivery_key) {
         Some(receipt) => Ok(Json(json!({
             "ok": true,
             "found": true,
             "delivery_key": receipt.delivery_key,
             "request_hash": receipt.request_hash,
             "message_id": receipt.message_id,
-            "timeline_cursor": receipt.timeline_cursor,
+            "timeline_cursor": receipt.cursor.to_string(),
         }))),
-        None => Ok(Json(json!({ "ok": true, "found": false }))),
+        None => Ok(Json(json!({"ok": true, "found": false}))),
     }
 }
 
-fn bind_user_input_content(
+async fn bind_user_input_content(
     state: &HttpState,
     message_id: &str,
     input: ParsedUserInput,
+    request_permit: Arc<OwnedSemaphorePermit>,
 ) -> Result<Vec<ContentPart>, ApiError> {
     if !input.contains_file_refs() {
         return input
@@ -398,7 +563,22 @@ fn bind_user_input_content(
         .file_store
         .as_ref()
         .ok_or_else(ApiError::file_store_unavailable)?;
-    bind_file_refs(message_id, input, store)
+    let store = store.clone();
+    let message_id = message_id.to_owned();
+    run_file_store_task("message file binding", move || {
+        let _request_permit = request_permit;
+        bind_file_refs(&message_id, input, &store)
+    })
+    .await?
+}
+
+async fn run_file_store_task<T: Send + 'static>(
+    operation: &'static str,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| ApiError::from_file_worker_join(operation, error))
 }
 
 fn bind_file_refs(
@@ -409,7 +589,8 @@ fn bind_file_refs(
     let mut file_count = 0usize;
     let mut referenced_bytes = 0u64;
     let mut content = Vec::with_capacity(input.items.len());
-    let mut file_ids = Vec::new();
+    let mut verified_records: HashMap<String, FileRecord> = HashMap::new();
+    let mut distinct_file_ids = Vec::new();
 
     for item in input.items {
         match item {
@@ -428,15 +609,21 @@ fn bind_file_refs(
                 if file_count > store.options().max_message_files {
                     return Err(ApiError::too_many_file_refs());
                 }
-                let record = store
-                    .metadata(&file_id)
-                    .map_err(ApiError::from_message_file_store)?;
+                let record = if let Some(record) = verified_records.get(&file_id) {
+                    record.clone()
+                } else {
+                    let record = store
+                        .verify_file(&file_id)
+                        .map_err(ApiError::from_message_file_store)?;
+                    distinct_file_ids.push(record.file_id.clone());
+                    verified_records.insert(file_id, record.clone());
+                    record
+                };
                 referenced_bytes = referenced_bytes.saturating_add(record.size_bytes);
                 if referenced_bytes > store.options().max_message_referenced_file_bytes {
                     return Err(ApiError::referenced_files_too_large());
                 }
                 let content_index = content.len();
-                file_ids.push(record.file_id.clone());
                 content.push(ContentPart::file(MessageFileBinding::available(
                     message_id,
                     message_id,
@@ -455,228 +642,10 @@ fn bind_file_refs(
     }
 
     store
-        .touch_many(&file_ids)
+        .touch_many(&distinct_file_ids)
         .map_err(ApiError::from_message_file_store)?;
 
     Ok(content)
-}
-
-async fn upload_files_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    multipart: Result<Multipart, MultipartRejection>,
-) -> Result<Json<FilesUploadResponse>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let multipart = multipart.map_err(ApiError::from_multipart_rejection)?;
-    let store = state
-        .file_store
-        .as_ref()
-        .ok_or_else(ApiError::file_store_unavailable)?
-        .clone();
-    let records = upload_multipart_files(&store, multipart).await?;
-
-    Ok(Json(FilesUploadResponse {
-        ok: true,
-        files: records
-            .into_iter()
-            .map(|record| record.external())
-            .collect(),
-    }))
-}
-
-async fn upload_multipart_files(
-    store: &FileStore,
-    mut multipart: Multipart,
-) -> Result<Vec<FileRecord>, ApiError> {
-    let mut records = Vec::new();
-    let mut uploaded_bytes = 0_u64;
-
-    while let Some(field) = match multipart.next_field().await {
-        Ok(field) => field,
-        Err(error) => {
-            rollback_uploaded_files(store, &records);
-            return Err(ApiError::from_multipart_error(error));
-        }
-    } {
-        if field.name() != Some("file") {
-            continue;
-        }
-        if records.len() >= store.options().max_upload_files {
-            rollback_uploaded_files(store, &records);
-            return Err(ApiError::too_many_files());
-        }
-
-        let filename = field
-            .file_name()
-            .map(str::to_owned)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                rollback_uploaded_files(store, &records);
-                ApiError::invalid_filename("multipart file part requires a filename")
-            })?;
-        let mime_type = field.content_type().map(str::to_owned);
-        let bytes = match field.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                rollback_uploaded_files(store, &records);
-                return Err(ApiError::from_multipart_error(error));
-            }
-        };
-        uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
-        if uploaded_bytes > store.options().max_upload_request_bytes {
-            rollback_uploaded_files(store, &records);
-            return Err(ApiError::upload_too_large());
-        }
-
-        match store.store_bytes(
-            &filename,
-            mime_type.as_deref(),
-            &bytes,
-            FileSource::Upload,
-            None,
-        ) {
-            Ok(record) => records.push(record),
-            Err(error) => {
-                rollback_uploaded_files(store, &records);
-                return Err(ApiError::from_upload_file_store(error));
-            }
-        }
-    }
-
-    if records.is_empty() {
-        return Err(ApiError::no_files());
-    }
-    Ok(records)
-}
-
-fn rollback_uploaded_files(store: &FileStore, records: &[FileRecord]) {
-    for record in records {
-        let _ = store.remove_file(&record.file_id);
-    }
-}
-
-async fn download_file_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    AxumPath(file_id): AxumPath<String>,
-) -> Result<Response, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = state
-        .file_store
-        .as_ref()
-        .ok_or_else(ApiError::file_store_unavailable)?;
-    let download = store
-        .download_bytes(&file_id)
-        .map_err(ApiError::from_download_file_store)?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&download.metadata.mime_type)
-            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
-    );
-    headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&download.bytes.len().to_string())
-            .expect("content length should be ascii"),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&content_disposition(&download.metadata.filename))
-            .expect("content-disposition should be ascii"),
-    );
-    headers.insert(
-        "x-botified-sha256",
-        HeaderValue::from_str(&download.metadata.sha256).expect("sha256 should be ascii"),
-    );
-    headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"{}\"", download.metadata.sha256))
-            .expect("etag should be ascii"),
-    );
-
-    Ok((headers, download.bytes).into_response())
-}
-
-async fn timeline_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Response, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-
-    let query = parse_timeline_query(uri.query().unwrap_or_default())?;
-    match query {
-        TimelineQuery::Forward {
-            cursor,
-            follow,
-            limit: _,
-        } if follow => {
-            state
-                .service
-                .timeline_forward_page(&cursor, 1)
-                .map_err(ApiError::from_timeline_store)?;
-            let body = timeline_stream_body(state.service.clone(), cursor);
-            Ok((
-                [(
-                    header::CONTENT_TYPE.as_str(),
-                    "application/x-ndjson".to_owned(),
-                )],
-                body,
-            )
-                .into_response())
-        }
-        TimelineQuery::Forward {
-            cursor,
-            follow: _,
-            limit,
-        } => {
-            let page = state
-                .service
-                .timeline_forward_page(&cursor, limit)
-                .map_err(ApiError::from_timeline_store)?;
-            Ok(timeline_forward_response(page))
-        }
-        TimelineQuery::Backward { cursor, limit } => {
-            let page = state
-                .service
-                .timeline_backward_page(&cursor, limit)
-                .map_err(ApiError::from_timeline_store)?;
-            Ok(timeline_history_response(page))
-        }
-        TimelineQuery::Tail { limit } => {
-            let page = state
-                .service
-                .timeline_tail_page(limit)
-                .map_err(ApiError::from_timeline_store)?;
-            Ok(timeline_history_response(page))
-        }
-    }
-}
-
-async fn llm_text_preview_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Response, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    if headers.contains_key("last-event-id") {
-        return Err(ApiError::unsupported_last_event_id());
-    }
-
-    let filter = parse_llm_text_preview_query(uri.query().unwrap_or_default())?;
-    let Some(subscription) = state.service.subscribe_llm_text_preview(filter) else {
-        return Err(ApiError::preview_disabled());
-    };
-
-    Ok((
-        [
-            (header::CONTENT_TYPE.as_str(), "text/event-stream"),
-            (header::CACHE_CONTROL.as_str(), "no-cache"),
-        ],
-        llm_text_preview_stream_body(subscription),
-    )
-        .into_response())
 }
 
 async fn abort_handler(
@@ -684,7 +653,25 @@ async fn abort_handler(
     headers: HeaderMap,
 ) -> Result<Json<AbortResponse>, ApiError> {
     authorize(&headers, state.service_key.as_deref())?;
-    let status = state.service.abort().await;
+    let service = state.service.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let status = run_service_mutation_blocking_task(
+        state.service_mutation_slots.clone(),
+        "service abort",
+        move || {
+            let before_abort_seq = service.current_event_cursor().seq();
+            let mut status = runtime.block_on(service.abort());
+            let abort_was_requested = service
+                .events_after(before_abort_seq)
+                .iter()
+                .any(|event| event.event_type == "agent.abort_requested");
+            if abort_was_requested && status.state == ServiceState::Idle {
+                status.state = ServiceState::Aborting;
+            }
+            status
+        },
+    )
+    .await?;
 
     Ok(Json(AbortResponse {
         ok: true,
@@ -695,96 +682,74 @@ async fn abort_handler(
 
 async fn stop_background_task_handler(
     State(state): State<HttpState>,
-    headers: HeaderMap,
     AxumPath(task_id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let service = state.service.clone();
+    let result = run_service_mutation_blocking_task(
+        state.service_mutation_slots.clone(),
+        "background task stop",
+        move || service.cancel_background_task(&task_id),
+    )
+    .await?;
+    match result {
+        Some(mut result) => {
+            result["ok"] = json!(true);
+            Ok(Json(result))
+        }
+        None => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "background_task_not_found",
+            "background task was not found",
+            false,
+        )),
+    }
+}
+
+async fn task_presets_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
     authorize(&headers, state.service_key.as_deref())?;
-    let result = state
-        .service
-        .cancel_background_task(&task_id)
-        .ok_or_else(ApiError::background_task_not_found)?;
-    let state_name = result
-        .get("state")
+    Ok(Json(state.service.task_preset_list()))
+}
+
+async fn task_preset_start_handler(
+    State(state): State<HttpState>,
+    AxumPath(preset_id): AxumPath<String>,
+    request: Request,
+) -> Result<Json<Value>, ApiError> {
+    authorize(request.headers(), state.service_key.as_deref())?;
+    let body = read_bytes_body_with_timeout(request, &state, HTTP_JSON_BODY_READ_TIMEOUT).await?;
+    parse_empty_task_preset_start_body(body)?;
+    let service = state.service.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let result = run_service_mutation_blocking_task(
+        state.service_mutation_slots.clone(),
+        "task preset start",
+        move || runtime.block_on(async move { service.task_preset_start(&preset_id) }),
+    )
+    .await?;
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(Json(result));
+    }
+    let code = result
+        .get("code")
         .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "persistence_error",
-            "background task cancellation returned an invalid state",
-            true,
-        ))?;
-    Ok(Json(json!({
-        "ok": true,
-        "task_id": task_id,
-        "state": state_name,
-    })))
-}
-
-async fn registry_ws_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = registry_store_from_state(&state)?;
-    let origin = next_registry_ws_origin();
-    Ok(ws.on_upgrade(move |socket| registry_ws_loop(socket, store, origin)))
-}
-
-async fn registry_current_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = registry_store_from_state(&state)?;
-    let query = parse_registry_http_query(
-        uri.query().unwrap_or_default(),
-        RegistryHttpQueryKind::Current,
-    )?;
-    let result = store.get(query).map_err(ApiError::from_registry)?;
-    Ok(Json(registry_get_response(
-        result,
-        None,
-        store.config().max_response_bytes,
-    )))
-}
-
-async fn registry_history_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = registry_store_from_state(&state)?;
-    let query = parse_registry_http_query(
-        uri.query().unwrap_or_default(),
-        RegistryHttpQueryKind::History,
-    )?;
-    let result = store.history(query).map_err(ApiError::from_registry)?;
-    Ok(Json(registry_history_response(
-        result,
-        None,
-        store.config().max_response_bytes,
-    )))
-}
-
-async fn registry_topics_handler(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Json<Value>, ApiError> {
-    authorize(&headers, state.service_key.as_deref())?;
-    let store = registry_store_from_state(&state)?;
-    let query = parse_registry_http_query(
-        uri.query().unwrap_or_default(),
-        RegistryHttpQueryKind::Topics,
-    )?;
-    let result = store.topics(query).map_err(ApiError::from_registry)?;
-    Ok(Json(registry_topics_response(
-        result,
-        None,
-        store.config().max_response_bytes,
-    )))
+        .unwrap_or("task_preset_start_failed");
+    let status = if code == "preset_not_found" {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    Err(ApiError::new(
+        status,
+        task_preset_start_error_code(code),
+        result
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("task preset start failed"),
+        false,
+    ))
 }
 
 fn registry_store_from_state(state: &HttpState) -> Result<RegistryStore, ApiError> {
@@ -796,451 +761,6 @@ fn registry_store_from_state(state: &HttpState) -> Result<RegistryStore, ApiErro
             false,
         )
     })
-}
-
-fn next_registry_ws_origin() -> String {
-    let id = NEXT_REGISTRY_WS_CONNECTION_ID.fetch_add(1, Ordering::SeqCst);
-    format!("ws:conn_{id}")
-}
-
-async fn registry_ws_loop(mut socket: WebSocket, store: RegistryStore, origin: String) {
-    let websocket_max_frame_bytes = store.options().websocket_max_frame_bytes;
-    while let Some(frame) = socket.recv().await {
-        let Some(response) =
-            registry_ws_frame_response(&store, &origin, websocket_max_frame_bytes, frame)
-        else {
-            return;
-        };
-        if socket
-            .send(WsMessage::Text(response.to_string()))
-            .await
-            .is_err()
-        {
-            return;
-        }
-    }
-}
-
-fn registry_ws_frame_response(
-    store: &RegistryStore,
-    origin: &str,
-    websocket_max_frame_bytes: usize,
-    frame: Result<WsMessage, axum::Error>,
-) -> Option<Value> {
-    let max_response_bytes = store.config().max_response_bytes;
-    let frame = match frame {
-        Ok(frame) => frame,
-        Err(_) => return None,
-    };
-    match frame {
-        WsMessage::Text(text) => Some(registry_ws_text_response(
-            store,
-            origin,
-            websocket_max_frame_bytes,
-            &text,
-        )),
-        WsMessage::Binary(_) => Some(bounded_registry_response(
-            registry_ws_error(
-                None,
-                "unsupported_frame",
-                "registry websocket only accepts text JSON frames",
-            ),
-            max_response_bytes,
-            RegistryResponseTruncateSide::Back,
-        )),
-        WsMessage::Ping(_) | WsMessage::Pong(_) => Some(bounded_registry_response(
-            registry_ws_error(
-                None,
-                "unsupported_frame",
-                "registry websocket only accepts text JSON frames",
-            ),
-            max_response_bytes,
-            RegistryResponseTruncateSide::Back,
-        )),
-        WsMessage::Close(_) => None,
-    }
-}
-
-fn registry_ws_text_response(
-    store: &RegistryStore,
-    origin: &str,
-    websocket_max_frame_bytes: usize,
-    text: &str,
-) -> Value {
-    let response = registry_ws_text_response_inner(store, origin, websocket_max_frame_bytes, text);
-    bounded_registry_response(
-        response,
-        store.config().max_response_bytes,
-        RegistryResponseTruncateSide::Back,
-    )
-}
-
-fn registry_ws_text_response_inner(
-    store: &RegistryStore,
-    origin: &str,
-    websocket_max_frame_bytes: usize,
-    text: &str,
-) -> Value {
-    if text.len() > websocket_max_frame_bytes {
-        return registry_ws_error(
-            None,
-            "frame_too_large",
-            "registry websocket text frame too large",
-        );
-    }
-
-    let body: Value = match serde_json::from_str(text) {
-        Ok(body) => body,
-        Err(_) => {
-            return registry_ws_error(None, "malformed_json", "request frame must be JSON");
-        }
-    };
-    let id = registry_response_id(&body);
-    let Some(object) = body.as_object() else {
-        return registry_ws_error(
-            Some(id),
-            "invalid_request",
-            "request frame must be a JSON object",
-        );
-    };
-    let Some(op) = object.get("op").and_then(Value::as_str) else {
-        return registry_ws_error(Some(id), "invalid_request", "op is required");
-    };
-
-    match op {
-        "set" => registry_ws_set(store, origin, id, object),
-        "get" => registry_ws_get(store, id, object),
-        "history" => registry_ws_history(store, id, object),
-        "subscribe" => registry_ws_error(
-            Some(id),
-            "invalid_request",
-            "registry websocket does not support subscribe",
-        ),
-        _ => registry_ws_error(
-            Some(id),
-            "invalid_request",
-            "unsupported registry websocket op",
-        ),
-    }
-}
-
-fn registry_ws_set(
-    store: &RegistryStore,
-    origin: &str,
-    id: Value,
-    object: &serde_json::Map<String, Value>,
-) -> Value {
-    if let Err(response) = reject_unknown_ws_fields(
-        object,
-        &[
-            "op", "id", "topic", "value", "source", "ttl_secs", "freq_hz",
-        ],
-        &id,
-    ) {
-        return response;
-    }
-    let topic = match required_ws_string(object, "topic", "missing_topic") {
-        Ok(topic) => topic,
-        Err(response) => return with_registry_response_id(response, &id),
-    };
-    let Some(value) = object.get("value").cloned() else {
-        return registry_ws_error(Some(id), "missing_value", "value is required");
-    };
-    let source = match object.get("source") {
-        Some(Value::String(source)) => source.clone(),
-        Some(_) => return registry_ws_error(Some(id), "invalid_source", "source must be a string"),
-        None => return registry_ws_error(Some(id), "missing_source", "source is required"),
-    };
-    let mut request = RegistrySetRequest::new(topic, value, source);
-    if let Some(ttl) = object.get("ttl_secs") {
-        let ttl = match ws_ttl(ttl) {
-            Ok(ttl) => ttl,
-            Err(response) => return with_registry_response_id(response, &id),
-        };
-        request = request.with_ttl(ttl);
-    }
-    if let Some(freq_hz) = object.get("freq_hz") {
-        let Some(freq_hz) = freq_hz.as_f64() else {
-            return registry_ws_error(Some(id), "invalid_frequency", "freq_hz must be a number");
-        };
-        request = request.with_freq_hz(freq_hz);
-    }
-
-    match store.set(
-        RegistryWriterKind::WebsocketClient,
-        origin.to_owned(),
-        request,
-    ) {
-        Ok(ack) => registry_set_response(ack, Some(id), store.config().max_response_bytes),
-        Err(error) => registry_ws_store_error(Some(id), error),
-    }
-}
-
-fn registry_ws_get(
-    store: &RegistryStore,
-    id: Value,
-    object: &serde_json::Map<String, Value>,
-) -> Value {
-    if let Err(response) = reject_unknown_ws_fields(object, &["op", "id", "topic", "limit"], &id) {
-        return response;
-    }
-    let query = match ws_query(object, false) {
-        Ok(query) => query,
-        Err(response) => return with_registry_response_id(response, &id),
-    };
-    match store.get(query) {
-        Ok(result) => registry_get_response(result, Some(id), store.config().max_response_bytes),
-        Err(error) => registry_ws_store_error(Some(id), error),
-    }
-}
-
-fn registry_ws_history(
-    store: &RegistryStore,
-    id: Value,
-    object: &serde_json::Map<String, Value>,
-) -> Value {
-    if let Err(response) =
-        reject_unknown_ws_fields(object, &["op", "id", "topic", "since_secs", "limit"], &id)
-    {
-        return response;
-    }
-    let query = match ws_query(object, true) {
-        Ok(query) => query,
-        Err(response) => return with_registry_response_id(response, &id),
-    };
-    match store.history(query) {
-        Ok(result) => {
-            registry_history_response(result, Some(id), store.config().max_response_bytes)
-        }
-        Err(error) => registry_ws_store_error(Some(id), error),
-    }
-}
-
-fn reject_unknown_ws_fields(
-    object: &serde_json::Map<String, Value>,
-    allowed: &[&str],
-    id: &Value,
-) -> Result<(), Value> {
-    if let Some(field) = object
-        .keys()
-        .find(|field| !allowed.contains(&field.as_str()))
-    {
-        return Err(registry_ws_error(
-            Some(id.clone()),
-            "invalid_request",
-            unknown_ws_field_message(field),
-        ));
-    }
-    Ok(())
-}
-
-fn unknown_ws_field_message(field: &str) -> String {
-    if !field.is_empty()
-        && field.len() <= 64
-        && field
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        format!("unknown field: {field}")
-    } else {
-        "unknown field".to_owned()
-    }
-}
-
-fn ws_query(
-    object: &serde_json::Map<String, Value>,
-    require_since: bool,
-) -> Result<RegistryQuery, Value> {
-    let topic = required_ws_string(object, "topic", "missing_topic")?;
-    let mut query = if require_since {
-        let Some(value) = object.get("since_secs") else {
-            return Err(registry_ws_error(
-                None,
-                "missing_since_secs",
-                "since_secs is required",
-            ));
-        };
-        let Some(since_secs) = value.as_f64() else {
-            return Err(registry_ws_error(
-                None,
-                "invalid_since",
-                "since_secs must be a number",
-            ));
-        };
-        RegistryQuery::history(topic, since_secs)
-    } else {
-        RegistryQuery::new(topic)
-    };
-    if let Some(limit) = object.get("limit") {
-        query = query.with_limit(ws_limit(limit)?);
-    }
-    Ok(query)
-}
-
-fn required_ws_string(
-    object: &serde_json::Map<String, Value>,
-    field: &str,
-    missing_code: &'static str,
-) -> Result<String, Value> {
-    match object.get(field) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(registry_ws_error(
-            None,
-            "invalid_request",
-            format!("{field} must be a string"),
-        )),
-        None => Err(registry_ws_error(
-            None,
-            missing_code,
-            format!("{field} is required"),
-        )),
-    }
-}
-
-fn ws_limit(value: &Value) -> Result<usize, Value> {
-    let Some(raw) = value.as_u64() else {
-        return Err(registry_ws_error(
-            None,
-            "invalid_limit",
-            "limit must be a positive integer",
-        ));
-    };
-    usize::try_from(raw)
-        .map_err(|_| registry_ws_error(None, "invalid_limit", "limit must be a positive integer"))
-}
-
-fn ws_ttl(value: &Value) -> Result<RegistryTtl, Value> {
-    if value.is_null() {
-        return Ok(RegistryTtl::Null);
-    }
-    let Some(seconds) = value.as_f64() else {
-        return Err(registry_ws_error(
-            None,
-            "invalid_ttl",
-            "ttl_secs must be a number",
-        ));
-    };
-    Ok(RegistryTtl::Seconds(seconds))
-}
-
-fn registry_ws_store_error(id: Option<Value>, error: RegistryError) -> Value {
-    registry_ws_error(id, error.code(), error.to_string())
-}
-
-fn registry_ws_error(id: Option<Value>, code: &'static str, message: impl Into<String>) -> Value {
-    json!({
-        "ok": false,
-        "op": "error",
-        "id": id.unwrap_or(Value::Null),
-        "error": {
-            "code": code,
-            "message": bounded_chars(&message.into(), REGISTRY_WS_ERROR_MESSAGE_CHARS),
-            "retryable": false
-        }
-    })
-}
-
-fn registry_response_id(body: &Value) -> Value {
-    match body.get("id") {
-        Some(Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null) => {
-            body.get("id").cloned().unwrap_or(Value::Null)
-        }
-        _ => Value::Null,
-    }
-}
-
-fn with_registry_response_id(mut response: Value, id: &Value) -> Value {
-    response["id"] = id.clone();
-    response
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RegistryHttpQueryKind {
-    Current,
-    History,
-    Topics,
-}
-
-fn parse_registry_http_query(
-    query: &str,
-    kind: RegistryHttpQueryKind,
-) -> Result<RegistryQuery, ApiError> {
-    let mut topic = None;
-    let mut since_secs = None;
-    let mut limit = None;
-    let mut seen_keys = Vec::new();
-
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = pair.split_once('=') else {
-            return Err(ApiError::invalid_request("invalid query string"));
-        };
-        if seen_keys.contains(&key) {
-            return Err(ApiError::invalid_request("duplicate query parameter"));
-        }
-        seen_keys.push(key);
-        match key {
-            "topic" => topic = Some(value.to_owned()),
-            "since_secs" if matches!(kind, RegistryHttpQueryKind::History) => {
-                since_secs = Some(parse_registry_f64(value, "since_secs")?);
-            }
-            "limit" => limit = Some(parse_registry_limit(value)?),
-            _ => return Err(ApiError::invalid_request("unknown query parameter")),
-        }
-    }
-
-    let topic = topic.ok_or_else(|| ApiError::invalid_request("topic is required"))?;
-    let mut query = match kind {
-        RegistryHttpQueryKind::History => {
-            let since_secs =
-                since_secs.ok_or_else(|| ApiError::invalid_request("since_secs is required"))?;
-            RegistryQuery::history(topic, since_secs)
-        }
-        RegistryHttpQueryKind::Current | RegistryHttpQueryKind::Topics => RegistryQuery::new(topic),
-    };
-    if let Some(limit) = limit {
-        query = query.with_limit(limit);
-    }
-    Ok(query)
-}
-
-fn parse_registry_f64(value: &str, name: &str) -> Result<f64, ApiError> {
-    value
-        .parse::<f64>()
-        .map_err(|_| ApiError::invalid_request(format!("invalid {name}")))
-}
-
-fn parse_registry_limit(value: &str) -> Result<usize, ApiError> {
-    value
-        .parse::<usize>()
-        .map_err(|_| ApiError::invalid_request("invalid limit"))
-}
-
-fn registry_set_response(
-    ack: RegistrySetAck,
-    id: Option<Value>,
-    max_response_bytes: usize,
-) -> Value {
-    let mut body = json!({
-        "ok": true,
-        "op": "ack",
-        "kind": "registry_set",
-        "topic": ack.topic,
-        "source": ack.source,
-        "writer_kind": ack.writer_kind.as_str(),
-        "origin": ack.origin,
-        "seq": ack.seq,
-        "freq_hz": ack.freq_hz,
-        "updated_at": system_time_rfc3339(ack.updated_at),
-        "expires_at": system_time_rfc3339(ack.expires_at),
-        "ttl_secs": duration_secs(ack.ttl),
-    });
-    if let Some(id) = id {
-        body["id"] = id;
-    }
-    bounded_registry_response(body, max_response_bytes, RegistryResponseTruncateSide::Back)
 }
 
 fn registry_get_response(
@@ -1258,7 +778,7 @@ fn registry_get_response(
         "ok": true,
         "op": "snapshot",
         "kind": "registry_get",
-        "server_time": system_time_rfc3339(server_time),
+        "server_time": crate::formatting::system_time_rfc3339(server_time),
         "items": items,
         "matched_count": result.matched_count,
         "returned_count": result.returned_count,
@@ -1285,7 +805,7 @@ fn registry_history_response(
         "ok": true,
         "op": "history",
         "kind": "registry_history",
-        "server_time": system_time_rfc3339(result.server_time),
+        "server_time": crate::formatting::system_time_rfc3339(result.server_time),
         "items": items,
         "oldest_seq": result.oldest_seq,
         "newest_seq": result.newest_seq,
@@ -1304,32 +824,6 @@ fn registry_history_response(
     )
 }
 
-fn registry_topics_response(
-    result: RegistryQueryResult<RegistryTopicSummary>,
-    id: Option<Value>,
-    max_response_bytes: usize,
-) -> Value {
-    let items = result
-        .items
-        .iter()
-        .map(registry_topic_json)
-        .collect::<Vec<_>>();
-    let mut body = json!({
-        "ok": true,
-        "kind": "registry_topics",
-        "server_time": system_time_rfc3339(result.server_time),
-        "items": items,
-        "matched_count": result.matched_count,
-        "returned_count": result.returned_count,
-        "truncated": result.truncated,
-        "truncated_reason": result.truncated_reason,
-    });
-    if let Some(id) = id {
-        body["id"] = id;
-    }
-    bounded_registry_response(body, max_response_bytes, RegistryResponseTruncateSide::Back)
-}
-
 #[derive(Debug, Clone, Copy)]
 enum RegistryResponseTruncateSide {
     Front,
@@ -1341,29 +835,92 @@ fn bounded_registry_response(
     max_response_bytes: usize,
     side: RegistryResponseTruncateSide,
 ) -> Value {
-    while body.to_string().len() > max_response_bytes {
-        let Some(items) = body.get_mut("items").and_then(Value::as_array_mut) else {
-            break;
-        };
-        if items.is_empty() {
-            break;
-        }
-        match side {
-            RegistryResponseTruncateSide::Front => {
-                items.remove(0);
-            }
-            RegistryResponseTruncateSide::Back => {
-                items.pop();
-            }
-        }
-        mark_registry_response_truncated(&mut body);
+    if serialized_registry_body_len(&body) <= max_response_bytes {
+        return body;
     }
 
-    if body.to_string().len() <= max_response_bytes {
+    let Some(items) = body.get_mut("items").and_then(Value::as_array_mut) else {
+        return compact_registry_response(body, max_response_bytes);
+    };
+    let mut items = std::mem::take(items);
+    if items.is_empty() {
+        return compact_registry_response(body, max_response_bytes);
+    }
+
+    let item_lengths = items
+        .iter()
+        .map(serialized_registry_item_len)
+        .collect::<Vec<_>>();
+
+    // Keep history sequence bounds unchanged while sizing non-empty results. They are
+    // cleared only when truncation removes every item, matching the response contract.
+    set_registry_response_truncated(&mut body, 0, false);
+    let scaffold_len = serialized_registry_body_len(&body);
+    let max_kept = items.len() - 1;
+    let mut kept = 0;
+    let mut serialized_items_len = 0usize;
+    for count in 1..=max_kept {
+        let index = match side {
+            RegistryResponseTruncateSide::Front => item_lengths.len() - count,
+            RegistryResponseTruncateSide::Back => count - 1,
+        };
+        serialized_items_len = serialized_items_len.saturating_add(item_lengths[index]);
+        let candidate_len = scaffold_len
+            .saturating_add(serialized_items_len)
+            .saturating_add(count - 1)
+            .saturating_add(decimal_len(count) - 1);
+        if candidate_len > max_response_bytes {
+            break;
+        }
+        kept = count;
+    }
+
+    items = match side {
+        RegistryResponseTruncateSide::Front => items.split_off(items.len() - kept),
+        RegistryResponseTruncateSide::Back => {
+            items.truncate(kept);
+            items
+        }
+    };
+    body["items"] = Value::Array(items);
+    mark_registry_response_truncated(&mut body);
+
+    if serialized_registry_body_len(&body) <= max_response_bytes {
         return body;
     }
 
     compact_registry_response(body, max_response_bytes)
+}
+
+fn serialized_registry_body_len(body: &Value) -> usize {
+    #[cfg(test)]
+    REGISTRY_SERIALIZATION_COUNTS.with(|counts| {
+        let (body_count, item_count) = counts.get();
+        counts.set((body_count + 1, item_count));
+    });
+    serde_json::to_vec(body)
+        .expect("serializing a JSON value cannot fail")
+        .len()
+}
+
+fn serialized_registry_item_len(item: &Value) -> usize {
+    #[cfg(test)]
+    REGISTRY_SERIALIZATION_COUNTS.with(|counts| {
+        let (body_count, item_count) = counts.get();
+        counts.set((body_count, item_count + 1));
+    });
+    serde_json::to_vec(item)
+        .expect("serializing a JSON value cannot fail")
+        .len()
+}
+
+fn decimal_len(mut value: usize) -> usize {
+    let mut len = 1;
+    while value >= 10 {
+        value /= 10;
+        len += 1;
+    }
+    len
 }
 
 fn mark_registry_response_truncated(body: &mut Value) {
@@ -1372,11 +929,15 @@ fn mark_registry_response_truncated(body: &mut Value) {
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
+    set_registry_response_truncated(body, returned_count, returned_count == 0);
+}
+
+fn set_registry_response_truncated(body: &mut Value, returned_count: usize, clear_bounds: bool) {
     if let Value::Object(object) = body {
         object.insert("returned_count".to_owned(), json!(returned_count));
         object.insert("truncated".to_owned(), json!(true));
         object.insert("truncated_reason".to_owned(), json!("response_bytes"));
-        if returned_count == 0 {
+        if clear_bounds {
             if object.contains_key("oldest_seq") {
                 object.insert("oldest_seq".to_owned(), Value::Null);
             }
@@ -1448,14 +1009,13 @@ fn compact_registry_error_response(body: &Value) -> Value {
                 .and_then(|error| error.get("code"))
                 .cloned()
                 .unwrap_or_else(|| json!("invalid_request")),
+            "message": "request rejected",
             "retryable": body
                 .get("error")
                 .and_then(|error| error.get("retryable"))
                 .cloned()
                 .unwrap_or(Value::Bool(false)),
-        },
-        "truncated": true,
-        "truncated_reason": "response_bytes"
+        }
     })
 }
 
@@ -1550,7 +1110,9 @@ fn current_registry_item_json(item: &RegistryItem, server_time: SystemTime) -> V
         );
         object.insert(
             "expires_in_secs".to_owned(),
-            json!(duration_between(item.expires_at, server_time)),
+            json!(item
+                .expires_at
+                .map(|expires_at| duration_between(expires_at, server_time))),
         );
     }
     value
@@ -1565,150 +1127,64 @@ fn registry_item_json(item: &RegistryItem) -> Value {
         "origin": &item.origin,
         "seq": item.seq,
         "freq_hz": item.freq_hz,
-        "updated_at": system_time_rfc3339(item.updated_at),
-        "expires_at": system_time_rfc3339(item.expires_at),
-        "ttl_secs": duration_secs(item.ttl),
+        "updated_at": crate::formatting::system_time_rfc3339(item.updated_at),
+        "expires_at": item.expires_at.map(crate::formatting::system_time_rfc3339),
+        "ttl_secs": item.ttl.map(duration_secs),
     })
 }
 
-fn registry_topic_json(topic: &RegistryTopicSummary) -> Value {
-    json!({
-        "topic": &topic.topic,
-        "writer_kind": topic.writer_kind.as_str(),
-        "origin": &topic.origin,
-        "source": &topic.source,
-        "latest_seq": topic.latest_seq,
-        "last_seen_at": system_time_rfc3339(topic.last_seen_at),
-        "current": topic.current,
-        "expires_at": topic.expires_at.map(system_time_rfc3339),
-        "sample_count_retained": topic.sample_count_retained,
-        "freq_hz": topic.freq_hz,
-    })
+async fn read_bytes_body_with_timeout(
+    request: Request,
+    state: &HttpState,
+    read_timeout: Duration,
+) -> Result<Bytes, ApiError> {
+    tokio::time::timeout(read_timeout, Bytes::from_request(request, state))
+        .await
+        .map_err(|_| ApiError::request_body_timeout())?
+        .map_err(ApiError::from_body_rejection)
 }
 
-fn parse_json_body(body: Result<Bytes, BytesRejection>) -> Result<Value, ApiError> {
-    let body = body.map_err(ApiError::from_body_rejection)?;
+fn parse_json_body(body: Bytes) -> Result<Value, ApiError> {
     if body.is_empty() {
         return Err(ApiError::invalid_request("request body must be JSON"));
     }
     serde_json::from_slice(&body).map_err(|_| ApiError::invalid_request("invalid JSON body"))
 }
 
-fn parse_timeline_query(query: &str) -> Result<TimelineQuery, ApiError> {
-    let mut cursor: Option<String> = None;
-    let mut follow = false;
-    let mut limit = None;
-    let mut direction = None;
-    let mut tail = None;
-    let mut seen_keys = Vec::new();
-
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = pair.split_once('=') else {
-            return Err(ApiError::invalid_request("invalid query string"));
-        };
-        if seen_keys.contains(&key) {
-            return Err(ApiError::invalid_request("duplicate query parameter"));
-        }
-        seen_keys.push(key);
-        match key {
-            "cursor" => {
-                EventCursor::parse_timeline(value)
-                    .map_err(|_| ApiError::invalid_request("invalid cursor"))?;
-                cursor = Some(value.to_owned());
-            }
-            "follow" => {
-                follow = match value {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err(ApiError::invalid_request("invalid follow")),
-                };
-            }
-            "limit" => {
-                limit = Some(parse_timeline_limit(value, "limit")?);
-            }
-            "direction" => {
-                direction = Some(value.to_owned());
-            }
-            "tail" => {
-                tail = Some(parse_timeline_limit(value, "tail")?);
-            }
-            _ => return Err(ApiError::invalid_request("unknown query parameter")),
-        }
+fn parse_empty_task_preset_start_body(body: Bytes) -> Result<(), ApiError> {
+    if body.is_empty() {
+        return Ok(());
     }
-
-    if let Some(tail) = tail {
-        if cursor.is_some() || direction.is_some() || limit.is_some() || follow {
-            return Err(ApiError::invalid_request("invalid timeline query"));
-        }
-        return Ok(TimelineQuery::Tail { limit: tail });
-    }
-
-    match direction.as_deref() {
-        Some("backward") => {
-            if follow {
-                return Err(ApiError::invalid_request("invalid timeline query"));
-            }
-            let cursor = cursor.ok_or_else(|| ApiError::invalid_request("cursor is required"))?;
-            let limit = limit.ok_or_else(|| ApiError::invalid_request("limit is required"))?;
-            Ok(TimelineQuery::Backward { cursor, limit })
-        }
-        Some("forward") | Some(_) => Err(ApiError::invalid_request("invalid direction")),
-        None => {
-            let cursor = cursor.ok_or_else(|| ApiError::invalid_request("cursor is required"))?;
-            if follow && limit.is_some() {
-                return Err(ApiError::invalid_request("invalid timeline query"));
-            }
-            Ok(TimelineQuery::Forward {
-                cursor,
-                follow,
-                limit: limit.unwrap_or(DEFAULT_TIMELINE_PAGE_LIMIT),
-            })
-        }
+    let value: Value = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_task_preset_start_body",
+            "request body must be empty or {}",
+            false,
+        )
+    })?;
+    if value.as_object().is_some_and(serde_json::Map::is_empty) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_task_preset_start_body",
+            "request body must be empty or {}",
+            false,
+        ))
     }
 }
 
-fn parse_timeline_limit(value: &str, name: &str) -> Result<usize, ApiError> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| ApiError::invalid_request(format!("invalid {name}")))?;
-    if !(1..=MAX_TIMELINE_PAGE_LIMIT).contains(&parsed) {
-        return Err(ApiError::invalid_request(format!("invalid {name}")));
+fn task_preset_start_error_code(code: &str) -> &'static str {
+    match code {
+        "preset_not_found" => "preset_not_found",
+        "service_unavailable" => "service_unavailable",
+        "background_task_concurrency_limit" => "background_task_concurrency_limit",
+        "output_artifact_error" => "output_artifact_error",
+        "interactive_stdio_unavailable" => "interactive_stdio_unavailable",
+        "task_preset_start_failed" => "task_preset_start_failed",
+        _ => "task_preset_start_failed",
     }
-    Ok(parsed)
-}
-
-fn parse_llm_text_preview_query(query: &str) -> Result<LlmTextPreviewFilter, ApiError> {
-    let mut filter = LlmTextPreviewFilter::default();
-    let mut seen_keys = Vec::new();
-
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = pair.split_once('=') else {
-            return Err(ApiError::invalid_request("invalid query string"));
-        };
-        if seen_keys.contains(&key) {
-            return Err(ApiError::invalid_request("duplicate query parameter"));
-        }
-        seen_keys.push(key);
-        match key {
-            "provider_request_id" => filter.provider_request_id = Some(value.to_owned()),
-            "cycle_id" => filter.cycle_id = Some(value.to_owned()),
-            "input_id" => filter.input_id = Some(value.to_owned()),
-            "cursor" | "seq" | "follow" | "replay" | "since" => {
-                return Err(ApiError::invalid_request(
-                    "llm text preview does not support replay or cursor parameters",
-                ));
-            }
-            _ => return Err(ApiError::invalid_request("unknown query parameter")),
-        }
-    }
-
-    Ok(filter)
 }
 
 fn message_id_from_body(body: &Value) -> Result<Option<String>, ApiError> {
@@ -1735,244 +1211,13 @@ fn message_id_from_body(body: &Value) -> Result<Option<String>, ApiError> {
     Ok(Some(message_id.to_owned()))
 }
 
-#[derive(Clone)]
-struct DeliveryInput {
-    delivery_key: String,
-    request_hash: String,
-}
-
-fn delivery_from_body(body: &Value) -> Result<Option<DeliveryInput>, ApiError> {
-    let Some(key) = body.get("delivery_key") else {
-        if body.get("request_hash").is_some() {
-            return Err(ApiError::invalid_request("request_hash requires delivery_key"));
-        }
-        return Ok(None);
-    };
-    let key = key.as_str().map(str::trim).filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::invalid_request("delivery_key must be a non-empty string"))?;
-    let hash = body.get("request_hash").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::invalid_request("request_hash must be a non-empty string"))?;
-    Ok(Some(DeliveryInput { delivery_key: key.to_owned(), request_hash: hash.to_owned() }))
-}
-
-fn message_response_from_receipt(receipt: DeliveryReceipt) -> Value {
-    json!({
-        "ok": true,
-        "kind": "idempotent",
-        "input_id": receipt.message_id,
-        "message_id": receipt.message_id,
-        "timeline_cursor": receipt.timeline_cursor,
-        "content_preview": "",
-        "content_bytes": 0,
-        "content_truncated": false,
-        "content_kind": "text",
-        "queue_length": 0,
-        "state": "idle",
-        "delivery_key": receipt.delivery_key,
-        "request_hash": receipt.request_hash,
-    })
-}
-
-fn timeline_stream_body(service: Service, cursor: String) -> Body {
-    Body::from_stream(stream::unfold(
-        TimelineStreamState::new(service, cursor),
-        next_timeline_stream_chunk,
-    ))
-}
-
-fn llm_text_preview_stream_body(subscription: LlmTextPreviewSubscription) -> Body {
-    Body::from_stream(stream::unfold(
-        subscription,
-        next_llm_text_preview_stream_chunk,
-    ))
-}
-
-async fn next_llm_text_preview_stream_chunk(
-    mut subscription: LlmTextPreviewSubscription,
-) -> Option<(Result<Bytes, Infallible>, LlmTextPreviewSubscription)> {
-    let frame = subscription.recv().await?;
-    Some((Ok(llm_text_preview_event_bytes(&frame)), subscription))
-}
-
-fn llm_text_preview_event_bytes(frame: &LlmTextPreviewFrame) -> Bytes {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"event: ");
-    bytes.extend_from_slice(frame.event_name().as_bytes());
-    bytes.extend_from_slice(b"\n");
-    bytes.extend_from_slice(b"data: ");
-    serde_json::to_writer(&mut bytes, frame).expect("preview frame should serialize");
-    bytes.extend_from_slice(b"\n\n");
-    Bytes::from(bytes)
-}
-
-fn timeline_envelopes_body(events: &[TimelineEnvelope]) -> Body {
-    let mut body = Vec::new();
-    for event in events {
-        push_timeline_event_line(&mut body, event).expect("timeline envelope should serialize");
-    }
-    Body::from(body)
-}
-
-fn timeline_forward_response(page: TimelineForwardPage) -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE.as_str(),
-                "application/x-ndjson".to_owned(),
-            ),
-            (NEXT_CURSOR_HEADER, page.next_cursor),
-            (HAS_MORE_AFTER_HEADER, page.has_more_after.to_string()),
-        ],
-        timeline_envelopes_body(&page.events),
-    )
-        .into_response()
-}
-
-fn timeline_history_response(page: TimelineHistoryPage) -> Response {
-    (
-        [
-            (
-                header::CONTENT_TYPE.as_str(),
-                "application/x-ndjson".to_owned(),
-            ),
-            (NEXT_CURSOR_HEADER, page.next_cursor),
-            (PAGE_START_CURSOR_HEADER, page.page_start_cursor),
-            (PAGE_END_CURSOR_HEADER, page.page_end_cursor),
-            (HAS_MORE_BEFORE_HEADER, page.has_more_before.to_string()),
-            (
-                HISTORY_BOUNDARY_HEADER,
-                history_boundary_name(page.history_boundary).to_owned(),
-            ),
-        ],
-        timeline_envelopes_body(&page.events),
-    )
-        .into_response()
-}
-
-struct TimelineStreamState {
-    service: Service,
-    cursor: String,
-    processed_seq: u64,
-    pending: VecDeque<Bytes>,
-    done: bool,
-}
-
-impl TimelineStreamState {
-    fn new(service: Service, cursor: String) -> Self {
-        let processed_seq = EventCursor::parse_timeline(&cursor)
-            .map(|cursor| cursor.seq())
-            .unwrap_or(0);
-        Self {
-            service,
-            cursor,
-            processed_seq,
-            pending: VecDeque::new(),
-            done: false,
-        }
-    }
-}
-
-async fn next_timeline_stream_chunk(
-    mut state: TimelineStreamState,
-) -> Option<(Result<Bytes, Infallible>, TimelineStreamState)> {
-    if let Some(line) = state.pending.pop_front() {
-        return Some((Ok(line), state));
-    }
-    if state.done {
-        return None;
-    }
-
-    loop {
-        let window = match state
-            .service
-            .timeline_forward_page(&state.cursor, MAX_TIMELINE_PAGE_LIMIT)
-        {
-            Ok(window) => window,
-            Err(error) => {
-                state.done = true;
-                return Some((
-                    Ok(timeline_stream_error_line(
-                        &state.service,
-                        ApiError::from_timeline_store(error),
-                    )),
-                    state,
-                ));
-            }
-        };
-
-        collect_timeline_stream_events(&mut state, window);
-
-        if let Some(line) = state.pending.pop_front() {
-            return Some((Ok(line), state));
-        }
-        if state.done {
-            return None;
-        }
-
-        let service = state.service.clone();
-        let processed_seq = state.processed_seq;
-        tokio::select! {
-            _ = service.wait_for_event_after(processed_seq) => {}
-            _ = tokio::time::sleep(TIMELINE_FOLLOW_HEARTBEAT_INTERVAL) => {
-                return Some((Ok(Bytes::from_static(b"\n")), state));
-            }
-        }
-    }
-}
-
-fn collect_timeline_stream_events(state: &mut TimelineStreamState, page: TimelineForwardPage) {
-    for event in page.events {
-        state.processed_seq = event.seq;
-        state.pending.push_back(timeline_event_line(&event));
-    }
-    state.processed_seq = EventCursor::parse_timeline(&page.next_cursor)
-        .map(|cursor| cursor.seq())
-        .unwrap_or(state.processed_seq);
-    state.cursor = page.next_cursor;
-}
-
-fn history_boundary_name(boundary: HistoryBoundary) -> &'static str {
-    match boundary {
-        HistoryBoundary::None => "none",
-        HistoryBoundary::Start => "start",
-        HistoryBoundary::Expired => "expired",
-    }
-}
-
-fn timeline_event_line(event: &TimelineEnvelope) -> Bytes {
-    let mut line = Vec::new();
-    push_timeline_event_line(&mut line, event).expect("timeline envelope should serialize");
-    Bytes::from(line)
-}
-
-fn timeline_stream_error_line(service: &Service, error: ApiError) -> Bytes {
-    let cursor = service.current_event_cursor();
-    let seq = cursor.seq();
-    let envelope = TimelineEnvelope::new(
-        seq,
-        cursor,
-        timestamp_now(),
-        service.thread_id(),
-        "service.error",
-        TimelineTrace::new(None),
-        Some(TimelineItem::new(
-            format!("err_evt_{seq}"),
-            "error",
-            "failed",
-        )),
-        json!({
-            "code": error.code,
-            "message": error.message,
-            "retryable": error.retryable
-        }),
-    )
-    .expect("current cursor should produce a timeline envelope");
-    timeline_event_line(&envelope)
-}
-
 fn authorize(headers: &HeaderMap, service_key: Option<&str>) -> Result<(), ApiError> {
     let Some(service_key) = service_key else {
-        return Ok(());
+        return if headers.contains_key(header::ORIGIN) {
+            Err(ApiError::origin_not_allowed())
+        } else {
+            Ok(())
+        };
     };
 
     let expected = format!("Bearer {service_key}");
@@ -1995,19 +1240,17 @@ fn authorize(headers: &HeaderMap, service_key: Option<&str>) -> Result<(), ApiEr
     }
 }
 
-enum TimelineQuery {
-    Forward {
-        cursor: String,
-        follow: bool,
-        limit: usize,
-    },
-    Backward {
-        cursor: String,
-        limit: usize,
-    },
-    Tail {
-        limit: usize,
-    },
+fn require_message_json_content_type(headers: &HeaderMap) -> Result<(), ApiError> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"));
+    if is_json {
+        Ok(())
+    } else {
+        Err(ApiError::unsupported_message_content_type())
+    }
 }
 
 fn message_response_kind(status: EnqueueSubmitStatus) -> &'static str {
@@ -2078,6 +1321,13 @@ fn slash_command_response(service: &Service, body: &Value) -> Option<Value> {
             "unknown slash command",
         )),
     }
+}
+
+fn is_slash_command_body(body: &Value) -> bool {
+    pure_text_message_body(body).is_some_and(|text| {
+        let command = text.trim();
+        command.starts_with('/') && !command.starts_with("//")
+    })
 }
 
 fn pure_text_message_body(body: &Value) -> Option<&str> {
@@ -2171,12 +1421,6 @@ struct AbortResponse {
     state: ServiceState,
 }
 
-#[derive(Debug, Serialize)]
-struct FilesUploadResponse {
-    ok: bool,
-    files: Vec<ExternalFileMetadata>,
-}
-
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -2208,10 +1452,6 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, false)
     }
 
-    fn delivery_store_unavailable() -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, "delivery_receipt_unavailable", "delivery receipt storage is unavailable", true)
-    }
-
     fn message_conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -2221,6 +1461,15 @@ impl ApiError {
             timeline_cursor: None,
             history_boundary: None,
         }
+    }
+
+    fn terminal_unavailable() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "terminal_unavailable",
+            "task terminal is unavailable",
+            true,
+        )
     }
 
     fn stale_cursor() -> Self {
@@ -2245,12 +1494,30 @@ impl ApiError {
         }
     }
 
-    fn background_task_not_found() -> Self {
+    fn preview_subscription_limit() -> Self {
         Self::new(
-            StatusCode::NOT_FOUND,
-            "background_task_not_found",
-            "background task was not found",
-            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "preview_subscription_limit",
+            "llm text preview subscription limit reached",
+            true,
+        )
+    }
+
+    fn timeline_follow_connection_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "timeline_follow_connection_limit",
+            "timeline follow connection limit reached",
+            true,
+        )
+    }
+
+    fn registry_ws_connection_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_ws_connection_limit",
+            "registry websocket connection limit reached",
+            true,
         )
     }
 
@@ -2286,6 +1553,87 @@ impl ApiError {
         }
     }
 
+    fn timeline_worker_failed(operation: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("{operation} worker failed"),
+            true,
+        )
+    }
+
+    fn timeline_worker_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "timeline_worker_limit",
+            "timeline worker limit reached",
+            true,
+        )
+    }
+
+    fn service_mutation_worker_failed(operation: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("{operation} worker failed"),
+            true,
+        )
+    }
+
+    fn service_mutation_worker_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_mutation_worker_limit",
+            "service mutation worker limit reached",
+            true,
+        )
+    }
+
+    fn message_worker_failed(operation: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("{operation} worker failed"),
+            true,
+        )
+    }
+
+    fn message_request_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "message_request_limit",
+            "message request limit reached",
+            true,
+        )
+    }
+
+    fn request_body_timeout() -> Self {
+        Self::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "request_body_timeout",
+            "request body read timed out",
+            true,
+        )
+    }
+
+    fn origin_not_allowed() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "origin_not_allowed",
+            "browser-origin requests require service authentication",
+            false,
+        )
+    }
+
+    fn unsupported_message_content_type() -> Self {
+        Self::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "Content-Type must be application/json",
+            false,
+        )
+    }
+
     fn from_registry(error: RegistryError) -> Self {
         let status = match error {
             RegistryError::ValueTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -2293,6 +1641,24 @@ impl ApiError {
             _ => StatusCode::BAD_REQUEST,
         };
         Self::new(status, error.code(), error.to_string(), false)
+    }
+
+    fn registry_worker_failed(operation: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("{operation} worker failed"),
+            true,
+        )
+    }
+
+    fn registry_worker_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_worker_limit",
+            "registry worker limit reached",
+            true,
+        )
     }
 
     fn from_body_rejection(error: BytesRejection) -> Self {
@@ -2341,6 +1707,37 @@ impl ApiError {
             StatusCode::INTERNAL_SERVER_ERROR,
             "storage_error",
             "file store is not configured",
+            true,
+        )
+    }
+
+    fn file_upload_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "file_upload_limit",
+            "file upload limit reached",
+            true,
+        )
+    }
+
+    fn file_download_limit() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "file_download_limit",
+            "file download limit reached",
+            true,
+        )
+    }
+
+    fn from_file_worker_join(operation: &'static str, _error: tokio::task::JoinError) -> Self {
+        Self::file_worker_failed(operation)
+    }
+
+    fn file_worker_failed(operation: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+            format!("{operation} worker failed"),
             true,
         )
     }
@@ -2546,6 +1943,14 @@ impl ApiError {
                 timeline_cursor: None,
                 history_boundary: None,
             },
+            ServiceError::Configuration { .. } => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "configuration_error",
+                message: error.to_string(),
+                retryable: false,
+                timeline_cursor: None,
+                history_boundary: None,
+            },
             ServiceError::Persistence { .. } => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "persistence_error",
@@ -2558,22 +1963,6 @@ impl ApiError {
     }
 }
 
-fn content_disposition(filename: &str) -> String {
-    let safe = filename
-        .chars()
-        .map(|ch| match ch {
-            '"' | '\\' => '_',
-            ch if ch.is_ascii_graphic() || ch == ' ' => ch,
-            _ => '_',
-        })
-        .collect::<String>();
-    format!("attachment; filename=\"{safe}\"")
-}
-
-fn bounded_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 fn duration_secs(duration: Duration) -> f64 {
     duration.as_secs_f64()
 }
@@ -2583,40 +1972,6 @@ fn duration_between(later: SystemTime, earlier: SystemTime) -> f64 {
         .duration_since(earlier)
         .unwrap_or_default()
         .as_secs_f64()
-}
-
-fn system_time_rfc3339(time: SystemTime) -> String {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = duration.as_secs();
-    let nanos = duration.subsec_nanos();
-    let days = (seconds / 86_400) as i64;
-    let seconds_of_day = seconds % 86_400;
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    let (year, month, day) = civil_from_days(days);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        let millis = nanos / 1_000_000;
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    }
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_piece = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_piece + 2) / 5 + 1;
-    let month = month_piece + if month_piece < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-
-    (year as i32, month as u32, day as u32)
 }
 
 impl IntoResponse for ApiError {
@@ -2648,39 +2003,250 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::mpsc;
+    use std::time::Duration as StdDuration;
 
-    use axum::body::to_bytes;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     use super::*;
     use crate::agent_loop::AgentConfig;
     use crate::provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
+    use crate::service::ServiceLimits;
+    use crate::session::open_or_create_session_in_home_with_cwd;
+    use crate::tasks::NewBackgroundTask;
 
-    struct PanicProvider;
+    struct TextProvider;
 
     #[async_trait::async_trait]
-    impl Provider for PanicProvider {
+    impl Provider for TextProvider {
         async fn complete(
             &self,
             _request: ProviderRequest,
             _cancel: CancellationToken,
         ) -> Result<ProviderResponse, ProviderError> {
-            panic!("provider should not be called")
+            Ok(ProviderResponse::text("done"))
+        }
+    }
+
+    struct CountingTextProvider(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Provider for CountingTextProvider {
+        async fn complete(
+            &self,
+            _request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderResponse, ProviderError> {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(ProviderResponse::text("done"))
         }
     }
 
     #[tokio::test]
-    async fn background_task_stop_route_requires_service_auth_and_returns_a_safe_missing_task_error() {
-        let service = Service::new(
-            AgentConfig::new("test").with_session("http-background-stop"),
-            Arc::new(PanicProvider),
+    async fn delivery_receipt_is_session_owned_atomic_and_restart_durable() {
+        let home = tempfile::tempdir().expect("session home");
+        let files = tempfile::tempdir().expect("file root");
+        let session =
+            open_or_create_session_in_home_with_cwd("delivery-session", home.path(), "/workspace")
+                .expect("session should open");
+        let file_store =
+            FileStore::open(crate::files::FileStoreOptions::new(files.path())).expect("file store");
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let service = Service::with_session_replay_and_limits_and_file_store(
+            AgentConfig::new("test").with_session("delivery-session"),
+            Arc::new(CountingTextProvider(provider_calls.clone())),
             Vec::new(),
+            session.replay(),
+            Some(session.recorder()),
+            Vec::new(),
+            ServiceLimits::default(),
+            file_store,
+        )
+        .expect("service should build");
+        let app = router(service, Some("service-secret".to_owned()));
+        let post = |hash: &'static str| {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", "Bearer service-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "text": "run once",
+                        "delivery_key": "delivery_task_1",
+                        "request_hash": hash,
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build")
+        };
+
+        let (first, duplicate) = tokio::join!(
+            app.clone().oneshot(post("hash-one")),
+            app.clone().oneshot(post("hash-one"))
+        );
+        let first = first.expect("first request should respond");
+        let duplicate = duplicate.expect("duplicate request should respond");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body: Value = serde_json::from_slice(
+            &to_bytes(first.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("first body should read"),
+        )
+        .expect("first body should parse");
+        assert_eq!(first_body["delivery_key"], "delivery_task_1");
+        assert_eq!(first_body["request_hash"], "hash-one");
+
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let duplicate_body: Value = serde_json::from_slice(
+            &to_bytes(duplicate.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("duplicate body should read"),
+        )
+        .expect("duplicate body should parse");
+        assert_eq!(
+            duplicate_body["timeline_cursor"],
+            first_body["timeline_cursor"]
+        );
+        let kinds = [first_body["kind"].as_str(), duplicate_body["kind"].as_str()];
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == Some("input_accepted"))
+                .count(),
+            1
+        );
+        timeout(StdDuration::from_secs(2), async {
+            while provider_calls.load(AtomicOrdering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted message should execute");
+        assert_eq!(provider_calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(
+            !files.path().join("delivery-receipts").exists(),
+            "delivery state must not be stored in the File Library"
+        );
+
+        let mismatch = app
+            .clone()
+            .oneshot(post("hash-two"))
+            .await
+            .expect("router should respond");
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("delivery-session", home.path(), "/workspace")
+                .expect("session should reopen");
+        let restarted = Service::with_session_replay_and_limits(
+            AgentConfig::new("test").with_session("delivery-session"),
+            Arc::new(TextProvider),
+            Vec::new(),
+            reopened.replay(),
+            Some(reopened.recorder()),
+            Vec::new(),
+            ServiceLimits::default(),
+        )
+        .expect("restarted service should build");
+        let receipt = router(restarted, Some("service-secret".to_owned()))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/deliveries/delivery_task_1")
+                    .header("authorization", "Bearer service-secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(receipt.status(), StatusCode::OK);
+        let receipt_body: Value = serde_json::from_slice(
+            &to_bytes(receipt.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("receipt body should read"),
+        )
+        .expect("receipt body should parse");
+        assert_eq!(receipt_body["found"], true);
+        assert_eq!(receipt_body["request_hash"], "hash-one");
+    }
+
+    #[tokio::test]
+    async fn delivered_slash_text_is_enqueued_as_user_input() {
+        let home = tempfile::tempdir().expect("session home");
+        let session =
+            open_or_create_session_in_home_with_cwd("slash-session", home.path(), "/workspace")
+                .expect("session should open");
+        let service = Service::with_session_replay_and_limits(
+            AgentConfig::new("test").with_session("slash-session"),
+            Arc::new(TextProvider),
+            Vec::new(),
+            session.replay(),
+            Some(session.recorder()),
+            Vec::new(),
+            ServiceLimits::default(),
+        )
+        .expect("service should build");
+        let app = router(service, Some("service-secret".to_owned()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("authorization", "Bearer service-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "text": "/tasks",
+                            "delivery_key": "delivery_slash_1",
+                            "request_hash": "slash-hash",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("response body should read"),
+        )
+        .expect("response body should parse");
+        assert_ne!(body["kind"], "command_result");
+        assert_ne!(body["kind"], "command_error");
+        assert_eq!(body["delivery_key"], "delivery_slash_1");
+        assert_eq!(body["request_hash"], "slash-hash");
+
+        let receipt = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/deliveries/delivery_slash_1")
+                    .header("authorization", "Bearer service-secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(receipt.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn background_stop_route_uses_runtime_success_shape_and_safe_missing_response() {
+        let service = Service::new(AgentConfig::new("test"), Arc::new(TextProvider), Vec::new())
+            .expect("service should build");
+        service.background_task_manager().start_task_with_id(
+            "task_1",
+            NewBackgroundTask::new("call_1", "bash", "sleep 30"),
         );
         let app = router(service, Some("service-secret".to_owned()));
-
         let unauthorized = app
             .clone()
             .oneshot(
@@ -2694,7 +2260,8 @@ mod tests {
             .expect("router should respond");
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
-        let response = app
+        let stopped = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2705,13 +2272,518 @@ mod tests {
             )
             .await
             .expect("router should respond");
+        assert_eq!(stopped.status(), StatusCode::OK);
+        let stopped_body: Value = serde_json::from_slice(
+            &to_bytes(stopped.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("success body should read"),
+        )
+        .expect("success body should parse");
+        assert_eq!(stopped_body["ok"], true);
+        assert_eq!(stopped_body["kind"], "task_cancel");
+        assert_eq!(stopped_body["task_id"], "task_1");
+        assert_eq!(stopped_body["state"], "cancelling");
+        assert_eq!(stopped_body["task"]["task_id"], "task_1");
+        assert_eq!(stopped_body["task"]["state"], "cancelling");
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = to_bytes(response.into_body(), MAX_HTTP_JSON_BYTES)
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/background-tasks/missing/stop")
+                    .header("authorization", "Bearer service-secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
             .await
-            .expect("response body should read");
-        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+            .expect("router should respond");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body: Value = serde_json::from_slice(
+            &to_bytes(missing.into_body(), MAX_HTTP_JSON_BYTES)
+                .await
+                .expect("missing body should read"),
+        )
+        .expect("missing body should parse");
         assert_eq!(body["error"]["code"], "background_task_not_found");
         assert_eq!(body["error"]["retryable"], false);
+    }
+
+    #[tokio::test]
+    async fn terminal_route_is_explicit_and_requires_service_auth() {
+        let service = Service::new(AgentConfig::new("test"), Arc::new(TextProvider), Vec::new())
+            .expect("service should build");
+        let without_terminal = router(service.clone(), Some("service-secret".to_owned()));
+        let missing = without_terminal
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/terminal/ws")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let app = router_with_terminal(
+            service,
+            Some("service-secret".to_owned()),
+            TerminalConfig {
+                executor_addr: "127.0.0.1:3110"
+                    .parse()
+                    .expect("executor address should parse"),
+                cwd: "/workspace".to_owned(),
+            },
+        );
+        let unauthorized = app
+            .clone()
+            .oneshot(websocket_upgrade_request(None))
+            .await
+            .expect("router should respond");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let upgrade = app
+            .oneshot(websocket_upgrade_request(Some("service-secret")))
+            .await
+            .expect("router should respond");
+        assert_eq!(upgrade.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    fn websocket_upgrade_request(service_key: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .uri("/v1/terminal/ws")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+        if let Some(service_key) = service_key {
+            request = request.header("authorization", format!("Bearer {service_key}"));
+        }
+        request
+            .body(Body::empty())
+            .expect("upgrade request should build")
+    }
+
+    #[test]
+    fn bind_file_refs_fully_verifies_each_distinct_id_once() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store =
+            FileStore::open(crate::files::FileStoreOptions::new(root.path())).expect("file store");
+        let first = store
+            .store_bytes(
+                "first.txt",
+                Some("text/plain"),
+                b"first",
+                crate::files::FileSource::Upload,
+                None,
+            )
+            .expect("first file");
+        let second = store
+            .store_bytes(
+                "second.txt",
+                Some("text/plain"),
+                b"second",
+                crate::files::FileSource::Upload,
+                None,
+            )
+            .expect("second file");
+        let input = ParsedUserInput::new(vec![
+            PublicInputItem::File {
+                file_id: first.file_id.clone(),
+            },
+            PublicInputItem::File {
+                file_id: first.file_id.clone(),
+            },
+            PublicInputItem::File {
+                file_id: second.file_id.clone(),
+            },
+            PublicInputItem::File {
+                file_id: first.file_id,
+            },
+            PublicInputItem::File {
+                file_id: second.file_id,
+            },
+        ]);
+
+        let content = bind_file_refs("duplicate-bindings", input, &store).expect("bindings");
+
+        assert_eq!(content.len(), 5);
+        assert_eq!(store.full_verification_count(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_timeline_read_does_not_block_health_work() {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let slots = Arc::new(Semaphore::new(1));
+        let read = tokio::spawn(run_timeline_blocking_task(
+            slots.clone(),
+            "timeline test read",
+            move || {
+                let _ = entered_tx.send(());
+                let released = release_rx.recv_timeout(StdDuration::from_secs(5)).is_ok();
+                json!({"released": released})
+            },
+        ));
+
+        entered_rx.await.expect("blocking read should start");
+        assert!(slots.try_acquire().is_err());
+        let health_result = timeout(Duration::from_secs(1), healthz()).await;
+        release_tx.send(()).expect("release blocking read");
+        let read_result = read.await.unwrap().unwrap();
+
+        let _ = health_result.expect("health work should run while timeline read is blocked");
+        assert_eq!(read_result, json!({"released": true}));
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_timeline_read_holds_slot_until_blocking_worker_exits() {
+        let slots = Arc::new(Semaphore::new(1));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let task = tokio::spawn(run_timeline_blocking_task(
+            slots.clone(),
+            "timeline cancelled read",
+            move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(StdDuration::from_secs(5));
+            },
+        ));
+
+        entered_rx.await.expect("blocking read should start");
+        task.abort();
+        let _ = task.await;
+        assert!(slots.try_acquire().is_err());
+
+        release_tx.send(()).expect("release blocking read");
+        timeout(Duration::from_secs(1), async {
+            while slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("slot should release after the blocking worker exits");
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn timeline_worker_limit_is_retryable_service_unavailable() {
+        let slots = Arc::new(Semaphore::new(1));
+        let _held = slots.clone().try_acquire_owned().unwrap();
+        let error = run_timeline_blocking_task(slots, "timeline limited read", || ())
+            .await
+            .expect_err("full timeline worker pool should reject immediately");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "timeline_worker_limit");
+        assert_eq!(error.message, "timeline worker limit reached");
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn service_mutation_worker_limit_is_retryable_service_unavailable() {
+        let slots = Arc::new(Semaphore::new(MAX_HTTP_SERVICE_MUTATIONS));
+        let _held = slots
+            .clone()
+            .try_acquire_many_owned(MAX_HTTP_SERVICE_MUTATIONS as u32)
+            .unwrap();
+        let error = run_service_mutation_blocking_task(slots, "limited service mutation", || ())
+            .await
+            .expect_err("full service mutation worker pool should reject immediately");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "service_mutation_worker_limit");
+        assert_eq!(error.message, "service mutation worker limit reached");
+        assert!(error.retryable);
+    }
+
+    fn quadratic_bounded_registry_response(
+        mut body: Value,
+        max_response_bytes: usize,
+        side: RegistryResponseTruncateSide,
+    ) -> Value {
+        while body.to_string().len() > max_response_bytes {
+            let Some(items) = body.get_mut("items").and_then(Value::as_array_mut) else {
+                break;
+            };
+            if items.is_empty() {
+                break;
+            }
+            match side {
+                RegistryResponseTruncateSide::Front => {
+                    items.remove(0);
+                }
+                RegistryResponseTruncateSide::Back => {
+                    items.pop();
+                }
+            }
+            mark_registry_response_truncated(&mut body);
+        }
+
+        if body.to_string().len() <= max_response_bytes {
+            body
+        } else {
+            compact_registry_response(body, max_response_bytes)
+        }
+    }
+
+    fn snapshot_body(items: Vec<Value>) -> Value {
+        json!({
+            "ok": true,
+            "op": "snapshot",
+            "kind": "registry_get",
+            "id": "request-1",
+            "server_time": "2026-07-19T00:00:00Z",
+            "matched_count": items.len(),
+            "returned_count": items.len(),
+            "items": items,
+            "truncated": false,
+            "truncated_reason": null,
+        })
+    }
+
+    fn history_body(items: Vec<Value>) -> Value {
+        json!({
+            "ok": true,
+            "op": "history",
+            "kind": "registry_history",
+            "server_time": "2026-07-19T00:00:00Z",
+            "matched_count": items.len(),
+            "returned_count": items.len(),
+            "items": items,
+            "oldest_seq": 41,
+            "newest_seq": 99,
+            "truncated": false,
+            "truncated_reason": null,
+        })
+    }
+
+    #[test]
+    fn bounded_registry_response_matches_quadratic_oracle_for_mixed_items() {
+        let items = vec![
+            json!("plain"),
+            json!("quotes: \" and slash: \\ and newline:\n"),
+            json!({"nested": [1, true, null], "unicode": "\u{754c}"}),
+            json!(["short", {"long": "x".repeat(73)}]),
+        ];
+
+        let count_boundary_items = (0..12)
+            .map(|index| json!({"index": index, "value": "z".repeat(index + 1)}))
+            .collect();
+        for body in [
+            snapshot_body(items.clone()),
+            history_body(items),
+            snapshot_body(count_boundary_items),
+        ] {
+            let initial_len = body.to_string().len();
+            for side in [
+                RegistryResponseTruncateSide::Front,
+                RegistryResponseTruncateSide::Back,
+            ] {
+                for cap in 0..=initial_len + 1 {
+                    assert_eq!(
+                        bounded_registry_response(body.clone(), cap, side),
+                        quadratic_bounded_registry_response(body.clone(), cap, side),
+                        "response differed for cap {cap} and side {side:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_registry_response_honors_exact_boundary_and_truncate_side() {
+        let body = snapshot_body(vec![
+            json!({"index": 0, "value": "a".repeat(80)}),
+            json!({"index": 1, "value": "b".repeat(80)}),
+            json!({"index": 2, "value": "c".repeat(80)}),
+        ]);
+
+        for (side, expected_indexes) in [
+            (RegistryResponseTruncateSide::Back, vec![0, 1]),
+            (RegistryResponseTruncateSide::Front, vec![1, 2]),
+        ] {
+            let mut expected = body.clone();
+            let items = expected["items"].as_array_mut().expect("items array");
+            match side {
+                RegistryResponseTruncateSide::Front => {
+                    items.remove(0);
+                }
+                RegistryResponseTruncateSide::Back => {
+                    items.pop();
+                }
+            }
+            mark_registry_response_truncated(&mut expected);
+            let exact_cap = expected.to_string().len();
+
+            let actual = bounded_registry_response(body.clone(), exact_cap, side);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.to_string().len(), exact_cap);
+            assert_eq!(actual["returned_count"], 2);
+            assert_eq!(
+                actual["items"]
+                    .as_array()
+                    .expect("items array")
+                    .iter()
+                    .map(|item| item["index"].as_u64().expect("item index"))
+                    .collect::<Vec<_>>(),
+                expected_indexes
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_registry_response_preserves_or_clears_history_bounds() {
+        let body = history_body(vec![
+            json!({"seq": 41, "value": "a".repeat(100)}),
+            json!({"seq": 99, "value": "b".repeat(100)}),
+        ]);
+        let mut one_item = body.clone();
+        one_item["items"]
+            .as_array_mut()
+            .expect("items array")
+            .remove(0);
+        mark_registry_response_truncated(&mut one_item);
+
+        let non_empty = bounded_registry_response(
+            body.clone(),
+            one_item.to_string().len(),
+            RegistryResponseTruncateSide::Front,
+        );
+        assert_eq!(non_empty["oldest_seq"], 41);
+        assert_eq!(non_empty["newest_seq"], 99);
+
+        let mut expected_empty = body.clone();
+        expected_empty["items"] = json!([]);
+        mark_registry_response_truncated(&mut expected_empty);
+        let empty = bounded_registry_response(
+            body,
+            expected_empty.to_string().len(),
+            RegistryResponseTruncateSide::Front,
+        );
+        assert_eq!(empty, expected_empty);
+        assert_eq!(empty["oldest_seq"], Value::Null);
+        assert_eq!(empty["newest_seq"], Value::Null);
+    }
+
+    #[test]
+    fn bounded_registry_response_serializes_each_item_once_and_body_constant_times() {
+        let body = snapshot_body(
+            (0..1_000)
+                .map(|index| json!({"index": index, "value": "x".repeat(32)}))
+                .collect(),
+        );
+        let cap = body.to_string().len() / 2;
+        REGISTRY_SERIALIZATION_COUNTS.with(|counts| counts.set((0, 0)));
+
+        let response = bounded_registry_response(body, cap, RegistryResponseTruncateSide::Back);
+
+        let (body_serializations, item_serializations) =
+            REGISTRY_SERIALIZATION_COUNTS.with(std::cell::Cell::get);
+        assert_eq!(item_serializations, 1_000);
+        assert_eq!(body_serializations, 3);
+        assert!(response["truncated"].as_bool().unwrap_or(false));
+        assert!(response.to_string().len() <= cap);
+    }
+
+    #[test]
+    fn bounded_registry_response_final_size_miss_goes_directly_to_compact() {
+        let mut body = history_body(vec![json!({"seq": 1, "value": "x".repeat(200)})]);
+        body["oldest_seq"] = json!(1);
+        body["newest_seq"] = json!(2);
+        let mut scaffold = body.clone();
+        scaffold["items"] = json!([]);
+        set_registry_response_truncated(&mut scaffold, 0, false);
+        let cap = scaffold.to_string().len();
+        let expected = quadratic_bounded_registry_response(
+            body.clone(),
+            cap,
+            RegistryResponseTruncateSide::Front,
+        );
+        REGISTRY_SERIALIZATION_COUNTS.with(|counts| counts.set((0, 0)));
+
+        let response = bounded_registry_response(body, cap, RegistryResponseTruncateSide::Front);
+
+        assert_eq!(response, expected);
+        assert!(response.get("server_time").is_none());
+        assert!(response.to_string().len() <= cap);
+        assert_eq!(
+            REGISTRY_SERIALIZATION_COUNTS.with(std::cell::Cell::get),
+            (3, 1)
+        );
+    }
+
+    #[test]
+    fn bounded_registry_response_fast_path_serializes_body_once() {
+        let body = snapshot_body(vec![json!({"value": "fits"})]);
+        let exact_cap = body.to_string().len();
+        REGISTRY_SERIALIZATION_COUNTS.with(|counts| counts.set((0, 0)));
+
+        assert_eq!(
+            bounded_registry_response(body.clone(), exact_cap, RegistryResponseTruncateSide::Back,),
+            body
+        );
+        assert_eq!(
+            REGISTRY_SERIALIZATION_COUNTS.with(std::cell::Cell::get),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn compact_registry_response_keeps_tiny_cap_cascade_for_all_shapes() {
+        let items = snapshot_body(vec![]);
+        let ack = json!({
+            "ok": true,
+            "op": "set",
+            "kind": "registry_set",
+            "id": "request-id-that-does-not-fit",
+            "seq": 42,
+            "writer_kind": "http"
+        });
+        let error = json!({
+            "ok": false,
+            "id": "request-id-that-does-not-fit",
+            "error": {"code": "bad", "message": "detailed failure", "retryable": false}
+        });
+
+        for body in [&items, &ack, &error] {
+            assert_eq!(compact_registry_response(body.clone(), 0), json!({}));
+        }
+
+        let mut null_id_ack = compact_registry_ack_response(&ack);
+        null_id_ack["id"] = Value::Null;
+        assert_eq!(
+            compact_registry_response(ack.clone(), null_id_ack.to_string().len()),
+            null_id_ack
+        );
+
+        let item_fallback = json!({
+            "ok": true,
+            "op": "snapshot",
+            "items": [],
+            "returned_count": 0,
+            "truncated": true
+        });
+        let ack_fallback = json!({
+            "ok": true,
+            "op": "set",
+            "kind": "registry_set",
+            "truncated": true
+        });
+        let error_fallback = json!({
+            "ok": false,
+            "op": "error",
+            "error": {"code": "bad"}
+        });
+        for (body, fallback) in [
+            (items, item_fallback),
+            (ack, ack_fallback),
+            (error, error_fallback),
+        ] {
+            assert_eq!(
+                compact_registry_response(body, fallback.to_string().len()),
+                fallback
+            );
+        }
     }
 }

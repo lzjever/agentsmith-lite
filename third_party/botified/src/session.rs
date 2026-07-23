@@ -1,13 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::agent_events::ThreadEvent;
@@ -15,8 +14,18 @@ use crate::agent_loop::{
     AcceptedInputEntry, AgentCommitError, AgentContextRecorder, DrainedMessage, InputSource,
     InputUrgency, QueuedInputMetadata,
 };
-use crate::transcript::repair_provider_transcript;
 use crate::types::{ContentPart, Message, StopReason, ToolResult};
+
+mod checkpoint;
+mod open;
+mod replay;
+mod writer;
+
+pub use open::{
+    open_or_create_session, open_or_create_session_in_home,
+    open_or_create_session_in_home_with_cwd, open_or_create_session_with_cwd,
+};
+pub(crate) use writer::{AcceptedInputUndo, SessionFileIo};
 
 const SESSION_VERSION: u32 = 1;
 pub const DEFAULT_ACCEPTED_MESSAGE_REPLAY_WINDOW: usize = 1024;
@@ -39,6 +48,8 @@ pub enum SessionError {
         line: usize,
         message: String,
     },
+    #[error("session storage state is ambiguous for {path}: {message}")]
+    AmbiguousStorage { path: PathBuf, message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +60,34 @@ pub struct OpenedSession {
     pending_messages: Vec<DrainedMessage>,
     known_user_messages: Vec<DrainedMessage>,
     message_cursors: Vec<DurableMessageCursor>,
+    pending_delivery_intents: Vec<CallbackDeliveryIntent>,
     restart_boundary: Option<SessionRestartBoundary>,
     warnings: Vec<String>,
     recorder: Arc<FileSessionRecorder>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SessionReplay {
+    pub initial_context: Vec<Message>,
+    pub pending_messages: Vec<DrainedMessage>,
+    pub known_user_messages: Vec<DrainedMessage>,
+    pub message_cursors: Vec<DurableMessageCursor>,
+    pub restart_boundary: Option<SessionRestartBoundary>,
+    pub pending_delivery_intents: Vec<CallbackDeliveryIntent>,
+}
+
 impl OpenedSession {
+    pub fn replay(&self) -> SessionReplay {
+        SessionReplay {
+            initial_context: self.initial_messages.clone(),
+            pending_messages: self.pending_messages.clone(),
+            known_user_messages: self.known_user_messages.clone(),
+            message_cursors: self.message_cursors.clone(),
+            restart_boundary: self.restart_boundary.clone(),
+            pending_delivery_intents: self.pending_delivery_intents.clone(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -79,6 +112,10 @@ impl OpenedSession {
         &self.message_cursors
     }
 
+    pub fn pending_delivery_intents(&self) -> &[CallbackDeliveryIntent] {
+        &self.pending_delivery_intents
+    }
+
     pub fn restart_boundary(&self) -> Option<&SessionRestartBoundary> {
         self.restart_boundary.as_ref()
     }
@@ -92,18 +129,42 @@ impl OpenedSession {
     }
 
     pub fn discard_unfinished_sync(&mut self) -> Result<(), SessionError> {
-        for message in &self.pending_messages {
-            self.recorder.record_pending_input_removed_sync(
-                &message.id,
-                message.source,
-                message.metadata.clone(),
-                "resume_unfinished_disabled",
-            )?;
+        let mut message_ids = self
+            .pending_messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>();
+        if let Some(boundary) = self.restart_boundary.as_ref() {
+            for message_id in boundary.active_input_ids() {
+                if !message_ids.contains(message_id) {
+                    message_ids.push(message_id.clone());
+                }
+            }
         }
-        if self.restart_boundary.is_some() {
-            self.recorder.record_restart_boundary_cleared_sync()?;
+        let projection_ids = self
+            .pending_delivery_intents
+            .iter()
+            .map(|intent| intent.projection_id.clone())
+            .collect::<Vec<_>>();
+        if message_ids.is_empty() && projection_ids.is_empty() && self.restart_boundary.is_none() {
+            return Ok(());
+        }
+
+        self.recorder.record_unfinished_work_discarded_sync(
+            &message_ids,
+            &projection_ids,
+            "resume_unfinished_disabled",
+        )?;
+        if let Some(boundary) = self.restart_boundary.as_ref() {
+            self.initial_messages
+                .truncate(boundary.current_request_start(&self.initial_messages));
         }
         self.pending_messages.clear();
+        self.known_user_messages
+            .retain(|message| !message_ids.contains(&message.id));
+        self.message_cursors
+            .retain(|cursor| !message_ids.contains(&cursor.message_id));
+        self.pending_delivery_intents.clear();
         self.restart_boundary = None;
         Ok(())
     }
@@ -111,22 +172,62 @@ impl OpenedSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRestartBoundary {
-    active_user_message_id: String,
+    active_input_ids: Vec<String>,
+    active_user_message_index: Option<usize>,
 }
 
 impl SessionRestartBoundary {
-    fn new(active_user_message_id: String) -> Self {
+    pub(crate) fn with_active_input_ids_and_active_user_message_index(
+        active_input_ids: Vec<String>,
+        active_user_message_index: Option<usize>,
+    ) -> Self {
+        assert!(
+            !active_input_ids.is_empty(),
+            "restart boundary must contain at least one active input id"
+        );
         Self {
-            active_user_message_id,
+            active_input_ids,
+            active_user_message_index,
         }
     }
 
     pub fn active_user_message_id(&self) -> &str {
-        &self.active_user_message_id
+        self.active_input_ids
+            .first()
+            .expect("restart boundary has an active input id")
+    }
+
+    pub fn active_input_ids(&self) -> &[String] {
+        &self.active_input_ids
+    }
+
+    pub(crate) fn contains_active_input_id(&self, message_id: &str) -> bool {
+        self.active_input_ids
+            .iter()
+            .any(|active_id| active_id == message_id)
     }
 
     pub fn current_request_start(&self, initial_messages: &[Message]) -> usize {
-        initial_messages.len()
+        self.active_user_message_index
+            .filter(|index| {
+                initial_messages
+                    .get(*index)
+                    .is_some_and(|message| matches!(message, Message::User { .. }))
+            })
+            .unwrap_or(initial_messages.len())
+    }
+
+    pub(crate) fn current_request_start_or_context_start(
+        &self,
+        initial_messages: &[Message],
+    ) -> usize {
+        self.active_user_message_index
+            .filter(|index| {
+                initial_messages
+                    .get(*index)
+                    .is_some_and(|message| matches!(message, Message::User { .. }))
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -141,12 +242,34 @@ pub struct DurableMessageCursor {
     pub replay_events: Vec<ThreadEvent>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallbackDeliveryEventType {
+    #[serde(rename = "task.callback_delivered")]
+    TaskDelivered,
+    #[serde(rename = "subagent.callback_delivered")]
+    SubagentDelivered,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallbackDeliveryIntent {
+    pub projection_id: String,
+    pub event_type: CallbackDeliveryEventType,
+    pub data: Value,
+}
+
+impl CallbackDeliveryIntent {
+    pub fn projection_id_for_input(input_id: &str) -> String {
+        format!("callback-delivered:{input_id}")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct LoadedSession {
     initial_messages: Vec<Message>,
     pending_messages: Vec<DrainedMessage>,
     known_user_messages: Vec<DrainedMessage>,
     message_cursors: Vec<DurableMessageCursor>,
+    pending_delivery_intents: Vec<CallbackDeliveryIntent>,
     restart_boundary: Option<SessionRestartBoundary>,
     warnings: Vec<String>,
 }
@@ -155,17 +278,18 @@ pub(crate) fn retain_recent_known_user_messages_for_replay(
     mut known_user_messages: Vec<DrainedMessage>,
     pending_messages: &[DrainedMessage],
     retained_window: usize,
+    protected_message_ids: &[String],
 ) -> Vec<DrainedMessage> {
     let pending_ids = pending_messages
         .iter()
         .map(|message| message.id.clone())
         .collect::<HashSet<_>>();
     let mut retained_ids = pending_ids.clone();
+    retained_ids.extend(protected_message_ids.iter().cloned());
     let mut retained_recent = 0usize;
 
     for message in known_user_messages.iter().rev() {
-        if pending_ids.contains(&message.id) {
-            retained_ids.insert(message.id.clone());
+        if retained_ids.contains(&message.id) {
             continue;
         }
         if retained_recent < retained_window {
@@ -191,7 +315,18 @@ pub(crate) fn retain_recent_message_cursors_for_replay(
 
 pub struct FileSessionRecorder {
     path: PathBuf,
-    file: Mutex<Box<dyn SessionFileIo>>,
+    shared: Arc<SharedSessionPath>,
+    filesystem_backed: bool,
+}
+
+struct SharedSessionPath {
+    path_lock: Arc<Mutex<()>>,
+    append: Mutex<SessionAppendState>,
+}
+
+pub(super) struct SessionAppendState {
+    pub(super) file: Box<dyn SessionFileIo>,
+    pub(super) compaction_poisoned: bool,
 }
 
 impl std::fmt::Debug for FileSessionRecorder {
@@ -203,11 +338,80 @@ impl std::fmt::Debug for FileSessionRecorder {
     }
 }
 
+fn session_path_lock(path: &Path) -> Arc<Mutex<()>> {
+    static PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let locks = PATH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut locks = locks.lock().expect("session path lock map poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+fn normalized_session_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn shared_session_paths() -> &'static Mutex<HashMap<PathBuf, Weak<SharedSessionPath>>> {
+    static PATHS: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedSessionPath>>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn existing_shared_session_path(path: &Path) -> Option<Arc<SharedSessionPath>> {
+    let key = normalized_session_path(path);
+    let mut paths = shared_session_paths()
+        .lock()
+        .expect("shared session path map poisoned");
+    paths.retain(|_, state| state.strong_count() > 0);
+    paths.get(&key).and_then(Weak::upgrade)
+}
+
+fn shared_session_path(
+    path: &Path,
+    file: File,
+    path_lock: Arc<Mutex<()>>,
+) -> Arc<SharedSessionPath> {
+    let key = normalized_session_path(path);
+    let mut paths = shared_session_paths()
+        .lock()
+        .expect("shared session path map poisoned");
+    paths.retain(|_, state| state.strong_count() > 0);
+    if let Some(state) = paths.get(&key).and_then(Weak::upgrade) {
+        return state;
+    }
+    let state = Arc::new(SharedSessionPath {
+        path_lock,
+        append: Mutex::new(SessionAppendState {
+            file: Box::new(file),
+            compaction_poisoned: false,
+        }),
+    });
+    paths.insert(key, Arc::downgrade(&state));
+    state
+}
+
 impl FileSessionRecorder {
-    fn new(path: PathBuf, file: File) -> Self {
+    fn new(path: PathBuf, shared: Arc<SharedSessionPath>) -> Self {
         Self {
             path,
-            file: Mutex::new(Box::new(file)),
+            shared,
+            filesystem_backed: true,
         }
     }
 
@@ -216,288 +420,70 @@ impl FileSessionRecorder {
         path: PathBuf,
         writer: impl SessionFileIo + 'static,
     ) -> Self {
+        let path_lock = session_path_lock(&path);
         Self {
             path,
-            file: Mutex::new(Box::new(writer)),
+            shared: Arc::new(SharedSessionPath {
+                path_lock,
+                append: Mutex::new(SessionAppendState {
+                    file: Box::new(writer),
+                    compaction_poisoned: false,
+                }),
+            }),
+            filesystem_backed: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn clone_for_test(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            shared: Arc::clone(&self.shared),
+            filesystem_backed: self.filesystem_backed,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
 
-    fn append_entry(
-        &self,
-        entry: SessionLine,
-        durability: SessionAppendDurability,
-    ) -> Result<(), SessionError> {
-        let line = serialize_session_line(&self.path, &entry)?;
-        let mut file = self.file.lock().expect("session file mutex poisoned");
-        append_serialized_session_line(&self.path, file.as_mut(), &line, durability)
-    }
+fn validate_delivery_intents(
+    path: &Path,
+    line: usize,
+    intents: &[CallbackDeliveryIntent],
+) -> Result<(), SessionError> {
+    let projection_ids = intents
+        .iter()
+        .map(|intent| intent.projection_id.clone())
+        .collect::<Vec<_>>();
+    validate_projection_ids(path, line, &projection_ids)
+}
 
-    pub fn record_message_sync(&self, message: &Message) -> Result<(), SessionError> {
-        match message {
-            Message::User { .. } => self.append_entry(
-                SessionLine::UserMessage {
-                    message_id: None,
-                    message: message.clone(),
-                },
-                SessionAppendDurability::FlushOnly,
-            ),
-            Message::Assistant { .. } => self.append_entry(
-                SessionLine::AssistantMessage {
-                    message: message.clone(),
-                },
-                SessionAppendDurability::FlushOnly,
-            ),
-            Message::ToolResult(result) => self.append_entry(
-                SessionLine::ToolResult {
-                    result: result.clone(),
-                },
-                SessionAppendDurability::FlushOnly,
-            ),
+fn validate_projection_ids(
+    path: &Path,
+    line: usize,
+    projection_ids: &[String],
+) -> Result<(), SessionError> {
+    let mut unique = HashSet::with_capacity(projection_ids.len());
+    for projection_id in projection_ids {
+        if projection_id.is_empty() {
+            return Err(SessionError::BadEntry {
+                path: path.to_path_buf(),
+                line,
+                message: "callback delivery projection_id must not be empty".to_owned(),
+            });
+        }
+        if !unique.insert(projection_id) {
+            return Err(SessionError::BadEntry {
+                path: path.to_path_buf(),
+                line,
+                message: "callback delivery projection_ids must be unique within an entry"
+                    .to_owned(),
+            });
         }
     }
-
-    pub fn record_accepted_input_sync(
-        &self,
-        entry: &AcceptedInputEntry,
-    ) -> Result<(), SessionError> {
-        self.append_entry(
-            accepted_input_session_line(entry),
-            SessionAppendDurability::SyncData,
-        )
-    }
-
-    pub(crate) fn record_accepted_input_with_undo_sync(
-        &self,
-        entry: &AcceptedInputEntry,
-    ) -> Result<AcceptedInputUndo<'_>, SessionError> {
-        let session_line = accepted_input_session_line(entry);
-        let line = serialize_session_line(&self.path, &session_line)?;
-        let mut file = self.file.lock().expect("session file mutex poisoned");
-        let old_len = file.len().map_err(|source| SessionError::Io {
-            path: self.path.clone(),
-            source,
-        })?;
-        append_serialized_session_line_from_len(
-            &self.path,
-            file.as_mut(),
-            &line,
-            SessionAppendDurability::SyncData,
-            old_len,
-        )?;
-        Ok(AcceptedInputUndo {
-            path: &self.path,
-            file,
-            old_len,
-            active: true,
-        })
-    }
-
-    pub fn record_pending_input_removed_sync(
-        &self,
-        message_id: &str,
-        source: InputSource,
-        metadata: Option<QueuedInputMetadata>,
-        reason: &str,
-    ) -> Result<(), SessionError> {
-        self.append_entry(
-            SessionLine::PendingInputRemoved {
-                message_id: message_id.to_owned(),
-                source,
-                metadata,
-                reason: reason.to_owned(),
-            },
-            SessionAppendDurability::SyncData,
-        )
-    }
-
-    pub fn record_restart_boundary_cleared_sync(&self) -> Result<(), SessionError> {
-        self.append_entry(
-            SessionLine::RestartBoundaryCleared {
-                reason: "resume_unfinished_disabled".to_owned(),
-            },
-            SessionAppendDurability::SyncData,
-        )
-    }
-
-    pub fn record_user_batch_sync(&self, messages: &[Message]) -> Result<(), SessionError> {
-        self.append_user_batch_entry(messages, None)
-    }
-
-    pub fn record_user_batch_with_ids_sync(
-        &self,
-        messages: &[Message],
-        message_ids: &[String],
-    ) -> Result<(), SessionError> {
-        self.append_user_batch_entry(messages, Some(message_ids))
-    }
-
-    fn append_user_batch_entry(
-        &self,
-        messages: &[Message],
-        message_ids: Option<&[String]>,
-    ) -> Result<(), SessionError> {
-        for message in messages {
-            if !matches!(message, Message::User { .. }) {
-                return Err(SessionError::BadEntry {
-                    path: self.path.clone(),
-                    line: 0,
-                    message: "user batch contains a non-user message".to_owned(),
-                });
-            }
-        }
-        if let Some(message_ids) = message_ids {
-            if message_ids.len() != messages.len() {
-                return Err(SessionError::BadEntry {
-                    path: self.path.clone(),
-                    line: 0,
-                    message: "user batch message id count does not match message count".to_owned(),
-                });
-            }
-        }
-        if let [message] = messages {
-            return self.append_entry(
-                SessionLine::UserMessage {
-                    message_id: message_ids.and_then(|ids| ids.first().cloned()),
-                    message: message.clone(),
-                },
-                SessionAppendDurability::SyncData,
-            );
-        }
-        self.append_entry(
-            SessionLine::UserBatch {
-                message_ids: message_ids.map(|ids| ids.to_vec()),
-                messages: messages.to_vec(),
-            },
-            SessionAppendDurability::SyncData,
-        )
-    }
-
-    pub fn record_compaction_sync(
-        &self,
-        summary: &[ContentPart],
-        retained_messages: &[Message],
-    ) -> Result<(), SessionError> {
-        self.record_compaction_with_active_user_message_id_sync(summary, retained_messages, None)
-    }
-
-    pub fn record_compaction_with_active_user_message_id_sync(
-        &self,
-        summary: &[ContentPart],
-        retained_messages: &[Message],
-        active_user_message_id: Option<&str>,
-    ) -> Result<(), SessionError> {
-        self.append_entry(
-            SessionLine::Compaction {
-                active_user_message_id: active_user_message_id.map(ToOwned::to_owned),
-                summary: summary.to_vec(),
-                retained_messages: retained_messages.to_vec(),
-            },
-            SessionAppendDurability::FlushOnly,
-        )
-    }
-
-    pub fn record_message_cursor_sync(
-        &self,
-        cursor: &DurableMessageCursor,
-    ) -> Result<(), SessionError> {
-        let terminal_seq = durable_terminal_seq(
-            cursor.replay_start_seq,
-            cursor.terminal_seq,
-            !cursor.replay_events.is_empty(),
-        );
-        self.append_entry(
-            SessionLine::MessageCursor {
-                message_id: cursor.message_id.clone(),
-                replay_start_seq: cursor.replay_start_seq,
-                terminal_seq,
-                replay_events: cursor.replay_events.clone(),
-            },
-            SessionAppendDurability::SyncData,
-        )
-    }
-}
-
-pub(crate) struct AcceptedInputUndo<'a> {
-    path: &'a Path,
-    file: MutexGuard<'a, Box<dyn SessionFileIo>>,
-    old_len: u64,
-    active: bool,
-}
-
-impl AcceptedInputUndo<'_> {
-    pub(crate) fn commit(mut self) {
-        self.active = false;
-    }
-
-    pub(crate) fn rollback(mut self) -> Result<(), SessionError> {
-        self.active = false;
-        truncate_session_file_with_writer(self.path, self.file.as_mut(), self.old_len)
-    }
-}
-
-impl Drop for AcceptedInputUndo<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            !self.active,
-            "accepted input undo must be committed or rolled back"
-        );
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionAppendDurability {
-    FlushOnly,
-    SyncData,
-}
-
-pub(crate) trait SessionFileIo: Send {
-    fn len(&mut self) -> std::io::Result<u64>;
-    fn write_line(&mut self, line: &str) -> std::io::Result<()>;
-    fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()>;
-    fn flush(&mut self) -> std::io::Result<()>;
-    fn sync_data(&mut self) -> std::io::Result<()>;
-    fn set_len(&mut self, len: u64) -> std::io::Result<()>;
-}
-
-impl SessionFileIo for File {
-    fn len(&mut self) -> std::io::Result<u64> {
-        self.metadata().map(|metadata| metadata.len())
-    }
-
-    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        writeln!(self, "{line}")
-    }
-
-    fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.write_all(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Write::flush(self)
-    }
-
-    fn sync_data(&mut self) -> std::io::Result<()> {
-        File::sync_data(self)
-    }
-
-    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
-        File::set_len(self, len)
-    }
-}
-
-fn accepted_input_session_line(entry: &AcceptedInputEntry) -> SessionLine {
-    SessionLine::AcceptedInput {
-        message_id: entry.message_id.clone(),
-        cursor_seq: entry.cursor_seq,
-        source: entry.source,
-        metadata: entry.metadata.clone(),
-        urgency: entry.urgency,
-        content: entry.content.clone(),
-    }
+    Ok(())
 }
 
 fn serialize_session_line(path: &Path, entry: &SessionLine) -> Result<String, SessionError> {
@@ -506,89 +492,6 @@ fn serialize_session_line(path: &Path, entry: &SessionLine) -> Result<String, Se
         line: 0,
         message: error.to_string(),
     })
-}
-
-fn append_serialized_session_line(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-    line: &str,
-    durability: SessionAppendDurability,
-) -> Result<(), SessionError> {
-    let old_len = file.len().map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    append_serialized_session_line_from_len(path, file, line, durability, old_len)
-}
-
-fn append_serialized_session_line_from_len(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-    line: &str,
-    durability: SessionAppendDurability,
-    old_len: u64,
-) -> Result<(), SessionError> {
-    if let Err(source) = file.write_line(line) {
-        return Err(rollback_session_append_error(
-            path,
-            file,
-            old_len,
-            SessionError::Io {
-                path: path.to_path_buf(),
-                source,
-            },
-        ));
-    }
-    if let Err(source) = file.flush() {
-        return Err(rollback_session_append_error(
-            path,
-            file,
-            old_len,
-            SessionError::Io {
-                path: path.to_path_buf(),
-                source,
-            },
-        ));
-    }
-    if durability == SessionAppendDurability::SyncData {
-        if let Err(source) = file.sync_data() {
-            return Err(rollback_session_append_error(
-                path,
-                file,
-                old_len,
-                SessionError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn rollback_session_append_error(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-    old_len: u64,
-    original: SessionError,
-) -> SessionError {
-    match truncate_session_file_with_writer(path, file, old_len) {
-        Ok(()) => original,
-        Err(rollback) => session_append_rollback_error(path, original, rollback),
-    }
-}
-
-fn session_append_rollback_error(
-    path: &Path,
-    original: SessionError,
-    rollback: SessionError,
-) -> SessionError {
-    SessionError::Io {
-        path: path.to_path_buf(),
-        source: io::Error::other(format!(
-            "session append rollback failed; original error: {original}; rollback error: {rollback}"
-        )),
-    }
 }
 
 #[async_trait]
@@ -636,7 +539,17 @@ impl AgentContextRecorder for FileSessionRecorder {
         summary: &[ContentPart],
         retained_messages: &[Message],
     ) -> Result<(), AgentCommitError> {
-        self.record_compaction_sync(summary, retained_messages)
+        self.record_compaction_with_metadata_sync(summary, retained_messages, None)
+            .map_err(|error| AgentCommitError::new(error.to_string()))
+    }
+
+    async fn record_compaction_with_metadata(
+        &self,
+        summary: &[ContentPart],
+        retained_messages: &[Message],
+        metadata: Option<&CompactionMetadata>,
+    ) -> Result<(), AgentCommitError> {
+        self.record_compaction_with_metadata_sync(summary, retained_messages, metadata)
             .map_err(|error| AgentCommitError::new(error.to_string()))
     }
 
@@ -646,149 +559,30 @@ impl AgentContextRecorder for FileSessionRecorder {
         retained_messages: &[Message],
         active_user_message_id: Option<&str>,
     ) -> Result<(), AgentCommitError> {
-        self.record_compaction_with_active_user_message_id_sync(
+        self.record_compaction_with_active_user_message_id_and_metadata_sync(
             summary,
             retained_messages,
             active_user_message_id,
+            None,
         )
         .map_err(|error| AgentCommitError::new(error.to_string()))
     }
-}
 
-pub fn open_or_create_session(name: &str) -> Result<OpenedSession, SessionError> {
-    open_or_create_session_with_cwd(name, current_dir_string()?)
-}
-
-pub fn open_or_create_session_with_cwd(
-    name: &str,
-    cwd: impl Into<String>,
-) -> Result<OpenedSession, SessionError> {
-    open_or_create_session_in_home_with_cwd(name, default_botified_home(), cwd)
-}
-
-pub fn open_or_create_session_in_home(
-    name: &str,
-    home: impl AsRef<Path>,
-) -> Result<OpenedSession, SessionError> {
-    open_or_create_session_in_home_with_cwd(name, home, current_dir_string()?)
-}
-
-pub fn open_or_create_session_in_home_with_cwd(
-    name: &str,
-    home: impl AsRef<Path>,
-    cwd: impl Into<String>,
-) -> Result<OpenedSession, SessionError> {
-    if name.trim().is_empty() {
-        return Err(SessionError::EmptyName);
+    async fn record_compaction_with_active_user_message_id_and_metadata(
+        &self,
+        summary: &[ContentPart],
+        retained_messages: &[Message],
+        active_user_message_id: Option<&str>,
+        metadata: Option<&CompactionMetadata>,
+    ) -> Result<(), AgentCommitError> {
+        self.record_compaction_with_active_user_message_id_and_metadata_sync(
+            summary,
+            retained_messages,
+            active_user_message_id,
+            metadata,
+        )
+        .map_err(|error| AgentCommitError::new(error.to_string()))
     }
-
-    let home = home.as_ref();
-    let cwd = cwd.into();
-    let sessions_dir = home.join("sessions");
-    fs::create_dir_all(&sessions_dir).map_err(|source| SessionError::Io {
-        path: sessions_dir.clone(),
-        source,
-    })?;
-
-    let path = sessions_dir.join(format!("{}.jsonl", encode_session_name(name)));
-    let loaded = if path.exists() {
-        load_existing_session(&path, name, &cwd)?
-    } else {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                write_session_header(&path, &mut file, name, &cwd)?;
-                sync_session_parent_dir(&path)?;
-                LoadedSession::default()
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                load_existing_session(&path, name, &cwd)?
-            }
-            Err(source) => {
-                return Err(SessionError::Io {
-                    path: path.clone(),
-                    source,
-                });
-            }
-        }
-    };
-
-    let file = OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .map_err(|source| SessionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-    Ok(OpenedSession {
-        name: name.to_owned(),
-        path: path.clone(),
-        initial_messages: loaded.initial_messages,
-        pending_messages: loaded.pending_messages,
-        known_user_messages: loaded.known_user_messages,
-        message_cursors: loaded.message_cursors,
-        restart_boundary: loaded.restart_boundary,
-        warnings: loaded.warnings,
-        recorder: Arc::new(FileSessionRecorder::new(path, file)),
-    })
-}
-
-fn load_existing_session(
-    path: &Path,
-    expected_name: &str,
-    cwd: &str,
-) -> Result<LoadedSession, SessionError> {
-    let metadata = fs::metadata(path).map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if metadata.len() == 0 {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .map_err(|source| SessionError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        write_session_header(path, &mut file, expected_name, cwd)?;
-        return Ok(LoadedSession {
-            warnings: vec![format!(
-                "session recovery rewrite_empty_session_header path={} line=1 offset=0",
-                path.display()
-            )],
-            ..LoadedSession::default()
-        });
-    }
-    load_session(path, expected_name)
-}
-
-fn write_session_header(
-    path: &Path,
-    file: &mut File,
-    name: &str,
-    cwd: &str,
-) -> Result<(), SessionError> {
-    write_session_header_with_writer(path, file, name, cwd)
-}
-
-fn write_session_header_with_writer(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-    name: &str,
-    cwd: &str,
-) -> Result<(), SessionError> {
-    let header = serde_json::to_string(&SessionLine::Header {
-        version: SESSION_VERSION,
-        name: name.to_owned(),
-        created_at: created_at_seconds()?,
-        cwd: cwd.to_owned(),
-    })
-    .map_err(|error| SessionError::BadHeader {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    append_serialized_session_line(path, file, &header, SessionAppendDurability::SyncData)
 }
 
 fn sync_session_parent_dir(path: &Path) -> Result<(), SessionError> {
@@ -818,498 +612,6 @@ pub fn encode_session_name(name: &str) -> String {
     encoded
 }
 
-fn default_botified_home() -> PathBuf {
-    env::var_os("BOTIFIED_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".botified")))
-        .unwrap_or_else(|| PathBuf::from(".botified"))
-}
-
-fn current_dir_string() -> Result<String, SessionError> {
-    let path = env::current_dir().map_err(|source| SessionError::Io {
-        path: PathBuf::from("."),
-        source,
-    })?;
-    Ok(path.display().to_string())
-}
-
-fn created_at_seconds() -> Result<u64, SessionError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|source| SessionError::BadHeader {
-            path: PathBuf::new(),
-            message: source.to_string(),
-        })
-}
-
-fn load_session(path: &Path, expected_name: &str) -> Result<LoadedSession, SessionError> {
-    let file = File::open(path).map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let file_len = file
-        .metadata()
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .len();
-    let mut reader = BufReader::new(file);
-    let Some(header_record) = read_raw_record(path, &mut reader, 1, 0)? else {
-        return Err(SessionError::BadHeader {
-            path: path.to_path_buf(),
-            message: "missing header".to_owned(),
-        });
-    };
-    parse_header_record(path, expected_name, &header_record)?;
-
-    let mut replay = SessionReplay::default();
-    let mut warnings = Vec::new();
-    let mut last_good_offset = header_record.end_offset;
-    let mut last_good_line = header_record.line;
-    let mut last_good_had_newline = header_record.had_newline;
-    let mut next_line = 2;
-    let mut next_offset = header_record.end_offset;
-
-    while let Some(record) = read_raw_record(path, &mut reader, next_line, next_offset)? {
-        match parse_body_record(path, record.line, record.payload()) {
-            Ok(Some(entry)) => {
-                apply_session_line(path, record.line, &mut replay, entry)?;
-                last_good_offset = record.end_offset;
-                last_good_line = record.line;
-                last_good_had_newline = record.had_newline;
-            }
-            Ok(None) => {
-                last_good_offset = record.end_offset;
-                last_good_line = record.line;
-                last_good_had_newline = record.had_newline;
-            }
-            Err(error) => {
-                if record.end_offset == file_len {
-                    truncate_session_file(path, last_good_offset)?;
-                    warnings.push(format!(
-                        "session recovery truncate_corrupt_tail path={} line={} offset={} end_offset={} truncate_to={} discarded_bytes={}",
-                        path.display(),
-                        record.line,
-                        record.start_offset,
-                        record.end_offset,
-                        last_good_offset,
-                        file_len.saturating_sub(last_good_offset)
-                    ));
-                    return Ok(replay.into_loaded(warnings));
-                }
-                return Err(error);
-            }
-        }
-        next_line += 1;
-        next_offset = record.end_offset;
-    }
-
-    if !last_good_had_newline && last_good_offset == file_len {
-        append_session_newline(path)?;
-        warnings.push(format!(
-            "session recovery append_missing_newline path={} line={} offset={} appended_bytes=1",
-            path.display(),
-            last_good_line,
-            last_good_offset
-        ));
-    }
-
-    Ok(replay.into_loaded(warnings))
-}
-
-#[derive(Debug)]
-struct RawRecord {
-    line: usize,
-    start_offset: u64,
-    end_offset: u64,
-    had_newline: bool,
-    bytes: Vec<u8>,
-}
-
-impl RawRecord {
-    fn payload(&self) -> &[u8] {
-        let mut end = self.bytes.len();
-        if end > 0 && self.bytes[end - 1] == b'\n' {
-            end -= 1;
-            if end > 0 && self.bytes[end - 1] == b'\r' {
-                end -= 1;
-            }
-        }
-        &self.bytes[..end]
-    }
-}
-
-fn read_raw_record<R: BufRead>(
-    path: &Path,
-    reader: &mut R,
-    line: usize,
-    start_offset: u64,
-) -> Result<Option<RawRecord>, SessionError> {
-    let mut bytes = Vec::new();
-    let read = reader
-        .read_until(b'\n', &mut bytes)
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if read == 0 {
-        return Ok(None);
-    }
-    let had_newline = bytes.last() == Some(&b'\n');
-    Ok(Some(RawRecord {
-        line,
-        start_offset,
-        end_offset: start_offset + read as u64,
-        had_newline,
-        bytes,
-    }))
-}
-
-fn parse_header_record(
-    path: &Path,
-    expected_name: &str,
-    record: &RawRecord,
-) -> Result<(), SessionError> {
-    let raw = std::str::from_utf8(record.payload()).map_err(|error| SessionError::BadHeader {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    let header_value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|error| SessionError::BadHeader {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?;
-    if header_value.get("type").and_then(serde_json::Value::as_str) != Some("session") {
-        return Err(SessionError::BadHeader {
-            path: path.to_path_buf(),
-            message: "first line must be a session header".to_owned(),
-        });
-    }
-
-    match serde_json::from_value(header_value).map_err(|error| SessionError::BadHeader {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })? {
-        SessionLine::Header { version, name, .. } if version == SESSION_VERSION => {
-            if name != expected_name {
-                return Err(SessionError::BadHeader {
-                    path: path.to_path_buf(),
-                    message: format!(
-                        "session name mismatch: expected {expected_name:?}, found {name:?}"
-                    ),
-                });
-            }
-            Ok(())
-        }
-        SessionLine::Header { version, .. } => Err(SessionError::BadHeader {
-            path: path.to_path_buf(),
-            message: format!("unsupported version {version}"),
-        }),
-        _ => Err(SessionError::BadHeader {
-            path: path.to_path_buf(),
-            message: "first line must be a header".to_owned(),
-        }),
-    }
-}
-
-fn parse_body_record(
-    path: &Path,
-    line: usize,
-    payload: &[u8],
-) -> Result<Option<SessionLine>, SessionError> {
-    let raw = std::str::from_utf8(payload).map_err(|error| SessionError::BadEntry {
-        path: path.to_path_buf(),
-        line,
-        message: error.to_string(),
-    })?;
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    serde_json::from_str(raw)
-        .map(Some)
-        .map_err(|error| SessionError::BadEntry {
-            path: path.to_path_buf(),
-            line,
-            message: error.to_string(),
-        })
-}
-
-#[derive(Debug, Default)]
-struct SessionReplay {
-    messages: Vec<Message>,
-    pending_messages: Vec<DrainedMessage>,
-    known_user_messages: Vec<DrainedMessage>,
-    message_cursors: Vec<DurableMessageCursor>,
-    restart_boundary: Option<SessionRestartBoundary>,
-}
-
-impl SessionReplay {
-    fn into_loaded(self, warnings: Vec<String>) -> LoadedSession {
-        let pending_messages = self.pending_messages;
-        let known_user_messages = retain_recent_known_user_messages_for_replay(
-            self.known_user_messages,
-            &pending_messages,
-            DEFAULT_ACCEPTED_MESSAGE_REPLAY_WINDOW,
-        );
-        let message_cursors = retain_recent_message_cursors_for_replay(
-            self.message_cursors,
-            DEFAULT_ACCEPTED_MESSAGE_REPLAY_WINDOW,
-        );
-        LoadedSession {
-            initial_messages: repair_provider_transcript(self.messages),
-            pending_messages,
-            known_user_messages,
-            message_cursors,
-            restart_boundary: self.restart_boundary,
-            warnings,
-        }
-    }
-}
-
-fn apply_session_line(
-    path: &Path,
-    line_no: usize,
-    replay: &mut SessionReplay,
-    entry: SessionLine,
-) -> Result<(), SessionError> {
-    match entry {
-        SessionLine::Header { .. } => Err(SessionError::BadEntry {
-            path: path.to_path_buf(),
-            line: line_no,
-            message: "header is only valid as the first line".to_owned(),
-        }),
-        SessionLine::AcceptedInput {
-            message_id,
-            cursor_seq,
-            source,
-            metadata,
-            urgency,
-            content,
-        } => {
-            let entry = SessionInputEntry {
-                message_id,
-                content,
-                source,
-                metadata,
-                urgency,
-                cursor_seq: Some(cursor_seq),
-            };
-            record_known_user_message(
-                path,
-                line_no,
-                &mut replay.known_user_messages,
-                entry.clone(),
-            )?;
-            record_pending_user_message(path, line_no, &mut replay.pending_messages, entry)
-        }
-        SessionLine::UserMessage {
-            message_id,
-            message,
-        } => {
-            if !matches!(message, Message::User { .. }) {
-                return Err(bad_role(path, line_no, "user_message"));
-            }
-            if let Some(message_id) = message_id {
-                let Message::User { content } = &message else {
-                    return Err(bad_role(path, line_no, "user_message"));
-                };
-                record_known_user_message(
-                    path,
-                    line_no,
-                    &mut replay.known_user_messages,
-                    SessionInputEntry::normal_user(message_id.clone(), content.clone()),
-                )?;
-                remove_pending_message(&mut replay.pending_messages, &message_id);
-            }
-            replay.messages.push(message);
-            Ok(())
-        }
-        SessionLine::AssistantMessage { message } => {
-            if !matches!(message, Message::Assistant { .. }) {
-                return Err(bad_role(path, line_no, "assistant_message"));
-            }
-            if is_terminal_assistant(&message) {
-                replay.restart_boundary = None;
-            }
-            if message.is_valid_assistant_for_provider_replay() {
-                replay.messages.push(message);
-            }
-            Ok(())
-        }
-        SessionLine::UserBatch {
-            message_ids,
-            messages: batch,
-        } => {
-            for message in &batch {
-                if !matches!(message, Message::User { .. }) {
-                    return Err(bad_role(path, line_no, "user_batch"));
-                }
-            }
-            if let Some(message_ids) = message_ids {
-                if message_ids.len() != batch.len() {
-                    return Err(SessionError::BadEntry {
-                        path: path.to_path_buf(),
-                        line: line_no,
-                        message: "user_batch message_ids length does not match messages".to_owned(),
-                    });
-                }
-                for (message_id, message) in message_ids.iter().zip(&batch) {
-                    let Message::User { content } = message else {
-                        return Err(bad_role(path, line_no, "user_batch"));
-                    };
-                    record_known_user_message(
-                        path,
-                        line_no,
-                        &mut replay.known_user_messages,
-                        SessionInputEntry::normal_user(message_id.clone(), content.clone()),
-                    )?;
-                }
-                for message_id in &message_ids {
-                    remove_pending_message(&mut replay.pending_messages, message_id);
-                }
-            }
-            replay.messages.extend(batch);
-            Ok(())
-        }
-        SessionLine::ToolResult { result } => {
-            replay.messages.push(Message::ToolResult(result));
-            Ok(())
-        }
-        SessionLine::PendingInputRemoved {
-            message_id,
-            source: _,
-            metadata: _,
-            reason: _,
-        } => {
-            remove_pending_message(&mut replay.pending_messages, &message_id);
-            Ok(())
-        }
-        SessionLine::RestartBoundaryCleared { reason: _ } => {
-            replay.restart_boundary = None;
-            Ok(())
-        }
-        SessionLine::Compaction {
-            active_user_message_id,
-            summary,
-            retained_messages,
-        } => {
-            replay.messages.clear();
-            replay.messages.push(Message::user(summary));
-            replay
-                .messages
-                .extend(repair_provider_transcript(retained_messages));
-            replay.restart_boundary = active_user_message_id.map(SessionRestartBoundary::new);
-            Ok(())
-        }
-        SessionLine::MessageCursor {
-            message_id,
-            replay_start_seq,
-            terminal_seq,
-            replay_events,
-        } => {
-            let terminal_seq =
-                durable_terminal_seq(replay_start_seq, terminal_seq, !replay_events.is_empty());
-            if replay
-                .restart_boundary
-                .as_ref()
-                .is_some_and(|boundary| boundary.active_user_message_id() == message_id.as_str())
-            {
-                replay.restart_boundary = None;
-            }
-            if let Some(position) = replay
-                .message_cursors
-                .iter_mut()
-                .position(|cursor| cursor.message_id == message_id)
-            {
-                let mut existing = replay.message_cursors.remove(position);
-                existing.replay_start_seq = replay_start_seq;
-                existing.terminal_seq = terminal_seq;
-                existing.replay_events = replay_events;
-                replay.message_cursors.push(existing);
-            } else {
-                replay.message_cursors.push(DurableMessageCursor {
-                    message_id,
-                    replay_start_seq,
-                    terminal_seq,
-                    replay_events,
-                });
-            }
-            Ok(())
-        }
-    }
-}
-
-fn truncate_session_file(path: &Path, len: u64) -> Result<(), SessionError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    truncate_session_file_with_writer(path, &mut file, len)
-}
-
-fn truncate_session_file_with_writer(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-    len: u64,
-) -> Result<(), SessionError> {
-    file.set_len(len).map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.flush().map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.sync_data().map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn append_session_newline(path: &Path) -> Result<(), SessionError> {
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    append_session_newline_with_writer(path, &mut file)
-}
-
-fn append_session_newline_with_writer(
-    path: &Path,
-    file: &mut dyn SessionFileIo,
-) -> Result<(), SessionError> {
-    file.write_bytes(b"\n").map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.flush().map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.sync_data().map_err(|source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn is_terminal_assistant(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::Assistant {
-            stop_reason: Some(StopReason::EndTurn),
-            ..
-        }
-    )
-}
-
 fn durable_terminal_seq(replay_start_seq: u64, raw_terminal_seq: u64, has_events: bool) -> u64 {
     let terminal_seq = if raw_terminal_seq == 0 {
         replay_start_seq
@@ -1323,116 +625,19 @@ fn durable_terminal_seq(replay_start_seq: u64, raw_terminal_seq: u64, has_events
     }
 }
 
-#[derive(Clone)]
-struct SessionInputEntry {
-    message_id: String,
-    content: Vec<ContentPart>,
-    source: InputSource,
-    metadata: Option<QueuedInputMetadata>,
-    urgency: InputUrgency,
-    cursor_seq: Option<u64>,
-}
-
-impl SessionInputEntry {
-    fn normal_user(message_id: String, content: Vec<ContentPart>) -> Self {
-        Self {
-            message_id,
-            content,
-            source: InputSource::User,
-            metadata: None,
-            urgency: InputUrgency::Normal,
-            cursor_seq: None,
-        }
-    }
-}
-
-fn record_known_user_message(
-    path: &Path,
-    line: usize,
-    known_user_messages: &mut Vec<DrainedMessage>,
-    entry: SessionInputEntry,
-) -> Result<(), SessionError> {
-    let SessionInputEntry {
-        message_id,
-        content,
-        source,
-        metadata,
-        urgency,
-        cursor_seq,
-    } = entry;
-    if let Some(position) = known_user_messages
-        .iter()
-        .position(|message| message.id == message_id)
-    {
-        let existing = &known_user_messages[position];
-        if existing.content != content {
-            return Err(SessionError::BadEntry {
-                path: path.to_path_buf(),
-                line,
-                message: "message id reused with different content".to_owned(),
-            });
-        }
-        let existing = known_user_messages.remove(position);
-        known_user_messages.push(existing);
-        return Ok(());
-    }
-
-    let mut message = DrainedMessage::new(message_id, content);
-    message.source = source;
-    message.urgency = urgency;
-    message.metadata = metadata;
-    message.cursor_seq = cursor_seq;
-    known_user_messages.push(message);
-    Ok(())
-}
-
-fn record_pending_user_message(
-    path: &Path,
-    line: usize,
-    pending_messages: &mut Vec<DrainedMessage>,
-    entry: SessionInputEntry,
-) -> Result<(), SessionError> {
-    let SessionInputEntry {
-        message_id,
-        content,
-        source,
-        metadata,
-        urgency,
-        cursor_seq,
-    } = entry;
-    if let Some(existing) = pending_messages
-        .iter()
-        .find(|message| message.id == message_id)
-    {
-        if existing.content != content {
-            return Err(SessionError::BadEntry {
-                path: path.to_path_buf(),
-                line,
-                message: "message id reused with different content".to_owned(),
-            });
-        }
-        return Ok(());
-    }
-
-    let mut message = DrainedMessage::new(message_id, content);
-    message.source = source;
-    message.urgency = urgency;
-    message.metadata = metadata;
-    message.cursor_seq = cursor_seq;
-    pending_messages.push(message);
-    Ok(())
-}
-
-fn remove_pending_message(pending_messages: &mut Vec<DrainedMessage>, message_id: &str) {
-    pending_messages.retain(|message| message.id != message_id);
-}
-
-fn bad_role(path: &Path, line: usize, entry_type: &str) -> SessionError {
-    SessionError::BadEntry {
-        path: path.to_path_buf(),
-        line,
-        message: format!("{entry_type} contains the wrong message role"),
-    }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CompactionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_request_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_usable_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1452,6 +657,8 @@ enum SessionLine {
         urgency: InputUrgency,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<QueuedInputMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<crate::agent_loop::MessageDelivery>,
         content: Vec<ContentPart>,
     },
     UserMessage {
@@ -1463,6 +670,11 @@ enum SessionLine {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_ids: Option<Vec<String>>,
         messages: Vec<Message>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        delivery_intents: Vec<CallbackDeliveryIntent>,
+    },
+    DeliveryProjected {
+        projection_ids: Vec<String>,
     },
     AssistantMessage {
         message: Message,
@@ -1478,15 +690,23 @@ enum SessionLine {
         metadata: Option<QueuedInputMetadata>,
         reason: String,
     },
-    RestartBoundaryCleared {
+    UnfinishedWorkDiscarded {
+        message_ids: Vec<String>,
+        projection_ids: Vec<String>,
         reason: String,
     },
     Compaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_user_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_input_ids: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_user_message_index: Option<usize>,
         summary: Vec<ContentPart>,
         #[serde(default)]
         retained_messages: Vec<Message>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<CompactionMetadata>,
     },
     MessageCursor {
         message_id: String,
@@ -1501,9 +721,21 @@ enum SessionLine {
 
 #[cfg(test)]
 mod durable_ack_boundary_tests {
+    use super::open::{
+        append_session_newline_with_writer, truncate_session_file_with_writer,
+        write_session_header_with_writer,
+    };
     use super::*;
+    use crate::agent_loop::AgentConfig;
+    use crate::provider::{Provider, ProviderError, ProviderRequest, ProviderResponse};
+    use crate::service::{Service, ServiceLimits, ServiceState};
+    use crate::tools::{Tool, ToolError, ToolExecutionContext, ToolSpec};
+    use crate::types::ToolCall;
     use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum SpyFileOp {
@@ -1527,9 +759,20 @@ mod durable_ack_boundary_tests {
         fail_flush: usize,
         fail_sync_data: usize,
         fail_set_len: usize,
+        fail_assistant_tool_call_sync_data: bool,
+        assistant_tool_call_sync_failure_armed: bool,
     }
 
     impl SpySessionFile {
+        fn with_assistant_tool_call_sync_data_failure() -> Self {
+            let file = Self::default();
+            file.state
+                .lock()
+                .expect("spy state mutex poisoned")
+                .fail_assistant_tool_call_sync_data = true;
+            file
+        }
+
         fn with_write_failure() -> Self {
             let file = Self::default();
             file.state
@@ -1584,6 +827,15 @@ mod durable_ack_boundary_tests {
             file
         }
 
+        fn from_bytes_with_sync_data_and_truncate_failure(bytes: Vec<u8>) -> Self {
+            let file = Self::from_bytes_with_sync_data_failure(bytes);
+            file.state
+                .lock()
+                .expect("spy state mutex poisoned")
+                .fail_set_len = 1;
+            file
+        }
+
         fn bytes(&self) -> Vec<u8> {
             self.state
                 .lock()
@@ -1625,6 +877,16 @@ mod durable_ack_boundary_tests {
             state.ops.push(SpyFileOp::Write);
             state.bytes.extend_from_slice(line.as_bytes());
             state.bytes.push(b'\n');
+            if state.fail_assistant_tool_call_sync_data
+                && serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                    record["type"] == "assistant_message"
+                        && record["message"]["tool_calls"]
+                            .as_array()
+                            .is_some_and(|tool_calls| !tool_calls.is_empty())
+                })
+            {
+                state.assistant_tool_call_sync_failure_armed = true;
+            }
             if state.fail_write > 0 {
                 state.fail_write -= 1;
                 return Err(io::Error::other("write_line failed"));
@@ -1652,6 +914,10 @@ mod durable_ack_boundary_tests {
         fn sync_data(&mut self) -> io::Result<()> {
             let mut state = self.state.lock().expect("spy state mutex poisoned");
             state.ops.push(SpyFileOp::SyncData);
+            if state.assistant_tool_call_sync_failure_armed {
+                state.assistant_tool_call_sync_failure_armed = false;
+                return Err(io::Error::other("assistant tool call sync_data failed"));
+            }
             if state.fail_sync_data > 0 {
                 state.fail_sync_data -= 1;
                 return Err(io::Error::other("sync_data failed"));
@@ -1682,6 +948,119 @@ mod durable_ack_boundary_tests {
         FileSessionRecorder::new_for_test_with_writer(PathBuf::from("session.jsonl"), spy)
     }
 
+    struct ScriptedToolCallProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedToolCallProvider {
+        async fn complete(
+            &self,
+            _request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderResponse, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderResponse::tool_calls(vec![ToolCall::new(
+                "call_session_sync_failure",
+                "counting_tool",
+                serde_json::json!({}),
+            )]))
+        }
+    }
+
+    struct CountingTool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::new(
+                "counting_tool",
+                "Counts executions in the session durability test.",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )
+        }
+
+        async fn execute(
+            &self,
+            call: ToolCall,
+            _context: ToolExecutionContext,
+            _cancel: CancellationToken,
+        ) -> Result<ToolResult, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::success(call.id, call.name, "executed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_tool_call_sync_failure_prevents_tool_execution_and_provider_retry() {
+        let spy = SpySessionFile::with_assistant_tool_call_sync_data_failure();
+        let recorder = Arc::new(recorder_with_spy(spy));
+        let provider = Arc::new(ScriptedToolCallProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let tool = Arc::new(CountingTool {
+            calls: AtomicUsize::new(0),
+        });
+        let service = Service::with_session_replay_and_limits(
+            AgentConfig::new("system").with_session("assistant-tool-call-sync-failure"),
+            provider.clone(),
+            vec![tool.clone()],
+            SessionReplay::default(),
+            Some(recorder),
+            Vec::new(),
+            ServiceLimits::default(),
+        )
+        .expect("service construction should succeed");
+
+        service
+            .enqueue(
+                "msg_session_sync_failure",
+                vec![ContentPart::text("call the counting tool")],
+            )
+            .await
+            .expect("message should enqueue before assistant persistence fails");
+        service.wait_for_state(ServiceState::Failed).await;
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+        assert!(service
+            .status()
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("assistant tool call sync_data failed")));
+    }
+
+    #[test]
+    fn failed_callback_delivery_batch_write_leaves_no_intent_or_commit() {
+        let spy = SpySessionFile::with_write_failure();
+        let recorder = recorder_with_spy(spy.clone());
+        let intent = CallbackDeliveryIntent {
+            projection_id: "projection-1".to_owned(),
+            event_type: CallbackDeliveryEventType::TaskDelivered,
+            data: serde_json::json!({"delivered": true}),
+        };
+
+        assert!(recorder
+            .record_user_batch_with_ids_and_delivery_intents_sync(
+                &[Message::user(vec![ContentPart::text("callback")])],
+                &["message-1".to_owned()],
+                &[intent],
+            )
+            .is_err());
+        assert!(spy.bytes().is_empty());
+        assert_eq!(
+            spy.operations(),
+            vec![
+                SpyFileOp::Write,
+                SpyFileOp::Truncate,
+                SpyFileOp::Flush,
+                SpyFileOp::SyncData,
+            ]
+        );
+    }
+
     fn open_or_create_session_with_durability_spy_for_test(
         name: &str,
         cwd: &str,
@@ -1706,6 +1085,7 @@ mod durable_ack_boundary_tests {
             pending_messages: Vec::new(),
             known_user_messages: Vec::new(),
             message_cursors: Vec::new(),
+            pending_delivery_intents: Vec::new(),
             restart_boundary: None,
             warnings: Vec::new(),
             recorder: Arc::new(FileSessionRecorder::new_for_test_with_writer(path, writer)),
@@ -1739,6 +1119,7 @@ mod durable_ack_boundary_tests {
             pending_messages: Vec::new(),
             known_user_messages: Vec::new(),
             message_cursors: Vec::new(),
+            pending_delivery_intents: Vec::new(),
             restart_boundary: None,
             warnings: vec![warning.to_owned()],
             recorder: Arc::new(FileSessionRecorder::new_for_test_with_writer(path, writer)),
@@ -1758,6 +1139,318 @@ mod durable_ack_boundary_tests {
             "botified-session-{test}-{}-{stamp}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn replay_infers_restart_boundary_for_unfinished_tool_result_request() {
+        let home = temp_home("open-tool-result-boundary");
+        let opened = open_or_create_session_in_home_with_cwd("open-tool-result", &home, "/repo")
+            .expect("session should open");
+        let user = Message::user(text_content("run tool before crash"));
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(&[user], &["msg_active".to_owned()])
+            .expect("user batch should persist");
+        let call = crate::types::ToolCall::new("call_1", "noop", serde_json::json!({}));
+        opened
+            .recorder()
+            .record_message_sync(&Message::Assistant {
+                content: None,
+                tool_calls: vec![call.clone()],
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::ToolCalls),
+            })
+            .expect("assistant tool call should persist");
+        opened
+            .recorder()
+            .record_message_sync(&Message::ToolResult(ToolResult::success(
+                call.id,
+                call.name,
+                "tool result before crash",
+            )))
+            .expect("tool result should persist");
+        drop(opened);
+
+        let reopened = open_or_create_session_in_home_with_cwd("open-tool-result", &home, "/repo")
+            .expect("session should reopen");
+        let boundary = reopened
+            .restart_boundary()
+            .expect("unfinished request should replay with a restart boundary");
+        assert_eq!(boundary.active_user_message_id(), "msg_active");
+        assert_eq!(
+            boundary.current_request_start(reopened.initial_messages()),
+            0
+        );
+    }
+
+    #[test]
+    fn replay_infers_restart_boundary_for_unfinished_multi_input_batch() {
+        let home = temp_home("open-multi-input-boundary");
+        let opened = open_or_create_session_in_home_with_cwd("open-multi-input", &home, "/repo")
+            .expect("session should open");
+        let users = vec![
+            Message::user(text_content("first active input")),
+            Message::user(text_content("task-originated active input")),
+        ];
+        let ids = vec!["msg_active_first".to_owned(), "task_ask_active".to_owned()];
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(&users, &ids)
+            .expect("user batch should persist");
+        let call = crate::types::ToolCall::new("call_1", "noop", serde_json::json!({}));
+        opened
+            .recorder()
+            .record_message_sync(&Message::Assistant {
+                content: None,
+                tool_calls: vec![call.clone()],
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::ToolCalls),
+            })
+            .expect("assistant tool call should persist");
+        opened
+            .recorder()
+            .record_message_sync(&Message::ToolResult(ToolResult::success(
+                call.id,
+                call.name,
+                "tool result before crash",
+            )))
+            .expect("tool result should persist");
+        drop(opened);
+
+        let reopened = open_or_create_session_in_home_with_cwd("open-multi-input", &home, "/repo")
+            .expect("session should reopen");
+        let boundary = reopened
+            .restart_boundary()
+            .expect("unfinished request should replay with a restart boundary");
+        assert_eq!(boundary.active_user_message_id(), "msg_active_first");
+        assert_eq!(boundary.active_input_ids(), ids.as_slice());
+        assert_eq!(
+            boundary.current_request_start(reopened.initial_messages()),
+            0
+        );
+    }
+
+    #[test]
+    fn replay_does_not_merge_independent_user_messages_into_active_batch() {
+        let home = temp_home("open-independent-user-boundary");
+        let opened =
+            open_or_create_session_in_home_with_cwd("open-independent-user", &home, "/repo")
+                .expect("session should open");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("first independent input"))],
+                &["msg_first".to_owned()],
+            )
+            .expect("first user should persist");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("second independent input"))],
+                &["msg_second".to_owned()],
+            )
+            .expect("second user should persist");
+        drop(opened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("open-independent-user", &home, "/repo")
+                .expect("session should reopen");
+        let boundary = reopened
+            .restart_boundary()
+            .expect("latest unfinished user should create a restart boundary");
+        assert_eq!(boundary.active_user_message_id(), "msg_second");
+        let expected_ids = vec!["msg_second".to_owned()];
+        assert_eq!(boundary.active_input_ids(), expected_ids.as_slice());
+    }
+
+    #[test]
+    fn replay_does_not_infer_restart_boundary_after_message_cursor() {
+        let home = temp_home("message-cursor-no-boundary");
+        let opened = open_or_create_session_in_home_with_cwd("message-cursor", &home, "/repo")
+            .expect("session should open");
+        let user = Message::user(text_content("run tool before cursor"));
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(&[user], &["msg_cursor_done".to_owned()])
+            .expect("user batch should persist");
+        let call = crate::types::ToolCall::new("call_1", "noop", serde_json::json!({}));
+        opened
+            .recorder()
+            .record_message_sync(&Message::Assistant {
+                content: None,
+                tool_calls: vec![call.clone()],
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::ToolCalls),
+            })
+            .expect("assistant tool call should persist");
+        opened
+            .recorder()
+            .record_message_sync(&Message::ToolResult(ToolResult::success(
+                call.id,
+                call.name,
+                "tool result before cursor",
+            )))
+            .expect("tool result should persist");
+        opened
+            .recorder()
+            .record_message_cursor_sync(&DurableMessageCursor {
+                message_id: "msg_cursor_done".to_owned(),
+                replay_start_seq: 10,
+                terminal_seq: 12,
+                replay_events: vec![ThreadEvent::TurnCompleted {
+                    usage: crate::agent_events::AgentUsage::default(),
+                }],
+            })
+            .expect("message cursor should persist");
+        drop(opened);
+
+        let reopened = open_or_create_session_in_home_with_cwd("message-cursor", &home, "/repo")
+            .expect("session should reopen");
+        assert!(
+            reopened.restart_boundary().is_none(),
+            "message cursor is the durable replay boundary and must suppress open-request inference"
+        );
+    }
+
+    #[test]
+    fn replay_infers_restart_boundary_after_failed_message_cursor() {
+        let home = temp_home("failed-message-cursor-boundary");
+        let opened =
+            open_or_create_session_in_home_with_cwd("failed-message-cursor", &home, "/repo")
+                .expect("session should open");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("retry after failed turn"))],
+                &["msg_failed_cursor".to_owned()],
+            )
+            .expect("user batch should persist");
+        opened
+            .recorder()
+            .record_message_cursor_sync(&DurableMessageCursor {
+                message_id: "msg_failed_cursor".to_owned(),
+                replay_start_seq: 10,
+                terminal_seq: 12,
+                replay_events: vec![ThreadEvent::TurnFailed {
+                    error: crate::agent_events::EventError {
+                        message: "transient failure".to_owned(),
+                    },
+                }],
+            })
+            .expect("failed message cursor should persist");
+        drop(opened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("failed-message-cursor", &home, "/repo")
+                .expect("session should reopen");
+        let boundary = reopened
+            .restart_boundary()
+            .expect("failed turn cursor should not suppress provider restart boundary");
+        assert_eq!(boundary.active_user_message_id(), "msg_failed_cursor");
+    }
+
+    #[test]
+    fn replay_infers_restart_boundary_for_user_only_completed_cursor() {
+        let home = temp_home("user-only-completed-cursor-boundary");
+        let opened =
+            open_or_create_session_in_home_with_cwd("user-only-completed-cursor", &home, "/repo")
+                .expect("session should open");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content(
+                    "oversized input finished locally without durable removal",
+                ))],
+                &["msg_user_only_completed".to_owned()],
+            )
+            .expect("user batch should persist");
+        opened
+            .recorder()
+            .record_message_cursor_sync(&DurableMessageCursor {
+                message_id: "msg_user_only_completed".to_owned(),
+                replay_start_seq: 10,
+                terminal_seq: 12,
+                replay_events: vec![ThreadEvent::TurnCompleted {
+                    usage: crate::agent_events::AgentUsage::default(),
+                }],
+            })
+            .expect("completed message cursor should persist");
+        drop(opened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("user-only-completed-cursor", &home, "/repo")
+                .expect("session should reopen");
+        let boundary = reopened.restart_boundary().expect(
+            "a completed cursor without assistant/tool progress must not suppress restart recovery",
+        );
+        assert_eq!(boundary.active_user_message_id(), "msg_user_only_completed");
+    }
+
+    #[test]
+    fn replay_does_not_infer_restart_boundary_after_terminal_assistant() {
+        let home = temp_home("terminal-assistant-no-boundary");
+        let opened = open_or_create_session_in_home_with_cwd("terminal-assistant", &home, "/repo")
+            .expect("session should open");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("complete request"))],
+                &["msg_done".to_owned()],
+            )
+            .expect("user batch should persist");
+        opened
+            .recorder()
+            .record_message_sync(&Message::Assistant {
+                content: Some("done".to_owned()),
+                tool_calls: Vec::new(),
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::EndTurn),
+            })
+            .expect("assistant should persist");
+        drop(opened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("terminal-assistant", &home, "/repo")
+                .expect("session should reopen");
+        assert!(reopened.restart_boundary().is_none());
+    }
+
+    #[test]
+    fn replay_does_not_infer_restart_boundary_after_tool_terminated_assistant() {
+        let home = temp_home("tool-terminated-assistant-no-boundary");
+        let opened =
+            open_or_create_session_in_home_with_cwd("tool-terminated-assistant", &home, "/repo")
+                .expect("session should open");
+        opened
+            .recorder()
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("request terminated by tool"))],
+                &["msg_tool_terminated".to_owned()],
+            )
+            .expect("user batch should persist");
+        opened
+            .recorder()
+            .record_message_sync(&Message::Assistant {
+                content: Some("tool terminated the turn".to_owned()),
+                tool_calls: Vec::new(),
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::ToolTerminated),
+            })
+            .expect("tool terminated assistant should persist");
+        drop(opened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("tool-terminated-assistant", &home, "/repo")
+                .expect("session should reopen");
+        assert!(
+            reopened.restart_boundary().is_none(),
+            "tool_terminated is a completed agent turn and must not replay as an open request"
+        );
     }
 
     #[test]
@@ -1783,7 +1476,7 @@ mod durable_ack_boundary_tests {
     }
 
     #[test]
-    fn user_batch_tombstones_and_message_cursor_use_durable_append_boundary() {
+    fn user_batch_pending_removal_and_message_cursor_use_durable_append_boundary() {
         let user_batch_spy = SpySessionFile::default();
         recorder_with_spy(user_batch_spy.clone())
             .record_user_batch_with_ids_sync(
@@ -1813,15 +1506,6 @@ mod durable_ack_boundary_tests {
             vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
         );
 
-        let restart_boundary_spy = SpySessionFile::default();
-        recorder_with_spy(restart_boundary_spy.clone())
-            .record_restart_boundary_cleared_sync()
-            .expect("restart boundary tombstone should sync before success");
-        assert_eq!(
-            restart_boundary_spy.operations(),
-            vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
-        );
-
         let cursor_spy = SpySessionFile::default();
         recorder_with_spy(cursor_spy.clone())
             .record_message_cursor_sync(&DurableMessageCursor {
@@ -1838,13 +1522,33 @@ mod durable_ack_boundary_tests {
     }
 
     #[test]
-    fn ordinary_transcript_and_compaction_remain_flush_only() {
-        let message_spy = SpySessionFile::default();
-        recorder_with_spy(message_spy.clone())
+    fn ordinary_transcript_remains_flush_only_and_compaction_syncs_truth() {
+        let user_spy = SpySessionFile::default();
+        recorder_with_spy(user_spy.clone())
+            .record_message_sync(&Message::user(text_content("hello")))
+            .expect("ordinary user transcript append should flush");
+        assert_eq!(
+            user_spy.operations(),
+            vec![SpyFileOp::Write, SpyFileOp::Flush]
+        );
+
+        let assistant_spy = SpySessionFile::default();
+        recorder_with_spy(assistant_spy.clone())
             .record_message_sync(&Message::assistant_text("ok"))
             .expect("ordinary transcript append should flush");
         assert_eq!(
-            message_spy.operations(),
+            assistant_spy.operations(),
+            vec![SpyFileOp::Write, SpyFileOp::Flush]
+        );
+
+        let tool_result_spy = SpySessionFile::default();
+        recorder_with_spy(tool_result_spy.clone())
+            .record_message_sync(&Message::ToolResult(ToolResult::success(
+                "call_1", "lookup", "done",
+            )))
+            .expect("tool result transcript append should flush");
+        assert_eq!(
+            tool_result_spy.operations(),
             vec![SpyFileOp::Write, SpyFileOp::Flush]
         );
 
@@ -1854,7 +1558,212 @@ mod durable_ack_boundary_tests {
             .expect("compaction append should flush");
         assert_eq!(
             compaction_spy.operations(),
-            vec![SpyFileOp::Write, SpyFileOp::Flush]
+            vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
+        );
+    }
+
+    #[test]
+    fn compaction_truth_failures_roll_back_before_returning_ordinary_error() {
+        for (name, spy, expected) in [
+            (
+                "write",
+                SpySessionFile::with_write_failure(),
+                vec![
+                    SpyFileOp::Write,
+                    SpyFileOp::Truncate,
+                    SpyFileOp::Flush,
+                    SpyFileOp::SyncData,
+                ],
+            ),
+            (
+                "flush",
+                SpySessionFile::with_flush_failure(),
+                vec![
+                    SpyFileOp::Write,
+                    SpyFileOp::Flush,
+                    SpyFileOp::Truncate,
+                    SpyFileOp::Flush,
+                    SpyFileOp::SyncData,
+                ],
+            ),
+            (
+                "sync_data",
+                SpySessionFile::with_sync_data_failure(),
+                vec![
+                    SpyFileOp::Write,
+                    SpyFileOp::Flush,
+                    SpyFileOp::SyncData,
+                    SpyFileOp::Truncate,
+                    SpyFileOp::Flush,
+                    SpyFileOp::SyncData,
+                ],
+            ),
+        ] {
+            let recorder = recorder_with_spy(spy.clone());
+            let error = recorder
+                .record_compaction_sync(&text_content("summary"), &[])
+                .expect_err("compaction truth failure should reject the append");
+
+            assert!(
+                !error.to_string().contains("ambiguous"),
+                "{name} rollback success should remain an ordinary failure"
+            );
+            assert_eq!(spy.operations(), expected, "{name}");
+            assert!(spy.bytes().is_empty(), "{name} rollback should truncate");
+        }
+    }
+
+    #[test]
+    fn compaction_rollback_ambiguity_poisons_all_shared_recorders_before_io() {
+        let spy = SpySessionFile::with_sync_data_and_truncate_failure();
+        let recorder = recorder_with_spy(spy.clone());
+        let second_recorder = recorder.clone_for_test();
+
+        let error = recorder
+            .record_compaction_sync(&text_content("summary"), &[])
+            .expect_err("ambiguous compaction rollback should fail terminally");
+        assert!(error.to_string().contains("ambiguous"));
+        let ops_after_poison = spy.operations();
+
+        for recorder in [&recorder, &second_recorder] {
+            let error = recorder
+                .record_message_sync(&Message::assistant_text("must fail fast"))
+                .expect_err("poison must stop every recorder before persistent io");
+            assert!(error.to_string().contains("ambiguous"));
+            assert_eq!(spy.operations(), ops_after_poison);
+        }
+    }
+
+    #[test]
+    fn poisoned_second_open_fails_before_cleanup_or_replay_mutation() {
+        let home = temp_home("poisoned-second-open");
+        let opened =
+            open_or_create_session_in_home_with_cwd("poisoned-second-open", &home, "/repo")
+                .expect("session should open");
+        let path = opened.path().to_path_buf();
+        let mut bytes = std::fs::read(&path).expect("session should read");
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        std::fs::write(&path, &bytes).expect("fixture should remove the final newline");
+        let checkpoint_temp = path.with_file_name(format!(
+            ".{}.checkpoint-review.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&checkpoint_temp, b"must not be cleaned")
+            .expect("checkpoint temp fixture should write");
+
+        let recorder = opened.recorder();
+        let spy = SpySessionFile::from_bytes_with_sync_data_and_truncate_failure(bytes.clone());
+        recorder
+            .shared
+            .append
+            .lock()
+            .expect("session append state mutex poisoned")
+            .file = Box::new(spy);
+        let poison_error = recorder
+            .record_compaction_sync(&text_content("ambiguous"), &[])
+            .expect_err("compaction rollback ambiguity should poison the path");
+        assert!(matches!(
+            poison_error,
+            SessionError::AmbiguousStorage { .. }
+        ));
+        let bytes_before_reopen = std::fs::read(&path).expect("session should read");
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("poisoned-second-open", &home, "/repo");
+
+        assert_eq!(
+            std::fs::read(&path).expect("session should read"),
+            bytes_before_reopen,
+            "poisoned second open must not repair the missing newline"
+        );
+        assert!(
+            checkpoint_temp.exists(),
+            "poisoned second open must not clean checkpoint temps"
+        );
+        assert!(matches!(
+            reopened,
+            Err(SessionError::AmbiguousStorage { .. })
+        ));
+        drop(recorder);
+        drop(opened);
+
+        let restarted =
+            open_or_create_session_in_home_with_cwd("poisoned-second-open", &home, "/repo")
+                .expect("dropping the weak shared state should allow restart replay recovery");
+        assert!(
+            std::fs::read(&path)
+                .expect("restarted session should read")
+                .ends_with(b"\n"),
+            "restart replay should repair the missing newline"
+        );
+        assert!(
+            !checkpoint_temp.exists(),
+            "restart replay should resume checkpoint temp cleanup"
+        );
+        drop(restarted);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn healthy_shared_session_can_still_reopen_normally() {
+        let home = temp_home("healthy-shared-reopen");
+        let opened =
+            open_or_create_session_in_home_with_cwd("healthy-shared-reopen", &home, "/repo")
+                .expect("session should open");
+        opened
+            .recorder()
+            .record_message_sync(&Message::assistant_text("healthy shared append"))
+            .expect("message should persist");
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("healthy-shared-reopen", &home, "/repo")
+                .expect("healthy shared session should reopen");
+        assert_eq!(
+            reopened.initial_messages(),
+            &[Message::assistant_text("healthy shared append")]
+        );
+        drop(reopened);
+        drop(opened);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn ordinary_append_rollback_ambiguity_does_not_set_compaction_poison() {
+        let spy = SpySessionFile::with_sync_data_and_truncate_failure();
+        let recorder = recorder_with_spy(spy.clone());
+        recorder
+            .record_accepted_input_sync(&AcceptedInputEntry {
+                message_id: "msg_ambiguous".to_owned(),
+                content: text_content("ordinary durable append"),
+                cursor_seq: 1,
+                source: InputSource::User,
+                metadata: None,
+                urgency: InputUrgency::Normal,
+            })
+            .expect_err("ordinary append rollback ambiguity should still return an error");
+        let ops_before_followup = spy.operations();
+
+        recorder
+            .record_message_sync(&Message::assistant_text("ordinary writes remain enabled"))
+            .expect("only compaction rollback ambiguity may poison the path");
+        assert!(spy.operations().len() > ops_before_followup.len());
+    }
+
+    #[test]
+    fn assistant_tool_calls_sync_data_before_success() {
+        let assistant_spy = SpySessionFile::default();
+        recorder_with_spy(assistant_spy.clone())
+            .record_message_sync(&Message::assistant_tool_calls(vec![
+                crate::types::ToolCall::new(
+                    "call_1",
+                    "lookup",
+                    serde_json::json!({"query": "status"}),
+                ),
+            ]))
+            .expect("assistant tool call should sync before success");
+        assert_eq!(
+            assistant_spy.operations(),
+            vec![SpyFileOp::Write, SpyFileOp::Flush, SpyFileOp::SyncData]
         );
     }
 
@@ -1864,8 +1773,8 @@ mod durable_ack_boundary_tests {
             "accepted_input",
             "user_batch",
             "pending_input_removed",
-            "restart_boundary_cleared",
             "message_cursor",
+            "assistant_tool_call",
         ] {
             let spy = SpySessionFile::with_sync_data_failure();
             let recorder = recorder_with_spy(spy.clone());
@@ -1888,15 +1797,21 @@ mod durable_ack_boundary_tests {
                     None,
                     "stale_task_request",
                 ),
-                "restart_boundary_cleared" => {
-                    recorder.record_restart_boundary_cleared_sync()
-                }
                 "message_cursor" => recorder.record_message_cursor_sync(&DurableMessageCursor {
                     message_id: "msg_1".to_owned(),
                     replay_start_seq: 2,
                     terminal_seq: 3,
                     replay_events: Vec::new(),
                 }),
+                "assistant_tool_call" => {
+                    recorder.record_message_sync(&Message::assistant_tool_calls(vec![
+                        crate::types::ToolCall::new(
+                            "call_1",
+                            "lookup",
+                            serde_json::json!({"query": "status"}),
+                        ),
+                    ]))
+                }
                 _ => unreachable!(),
             };
 
@@ -2073,63 +1988,91 @@ mod durable_ack_boundary_tests {
     }
 
     #[test]
-    fn discard_unfinished_is_durable_and_preserves_completed_context() {
-        let home = temp_home("discard-unfinished");
-        let opened = open_or_create_session_in_home_with_cwd(
-            "discard-unfinished",
-            &home,
-            "/repo",
-        )
-        .expect("session should open");
+    fn cold_start_discard_is_durable_for_queued_running_and_delivery_intent() {
+        let home = temp_home("cold-start-discard");
+        let opened = open_or_create_session_in_home_with_cwd("cold-start-discard", &home, "/repo")
+            .expect("session should open");
         let recorder = opened.recorder();
         recorder
-            .record_compaction_with_active_user_message_id_sync(
-                &text_content("completed summary"),
-                &[Message::assistant_text("completed answer")],
-                Some("msg_interrupted"),
+            .record_user_batch_with_ids_sync(
+                &[Message::user(text_content("completed request"))],
+                &["msg_completed".to_owned()],
             )
-            .expect("restart boundary should persist");
+            .expect("completed request should persist");
+        recorder
+            .record_message_sync(&Message::assistant_text("completed answer"))
+            .expect("completed answer should persist");
+
+        let intent = CallbackDeliveryIntent {
+            projection_id: "callback-delivered:msg_running".to_owned(),
+            event_type: CallbackDeliveryEventType::TaskDelivered,
+            data: serde_json::json!({"input_id": "msg_running"}),
+        };
+        recorder
+            .record_user_batch_with_ids_and_delivery_intents_sync(
+                &[Message::user(text_content("running request"))],
+                &["msg_running".to_owned()],
+                &[intent],
+            )
+            .expect("running request and delivery intent should persist");
+        let running_call =
+            crate::types::ToolCall::new("call_running", "noop", serde_json::json!({}));
+        recorder
+            .record_message_sync(&Message::Assistant {
+                content: None,
+                tool_calls: vec![running_call.clone()],
+                assistant_replay: None,
+                usage: None,
+                stop_reason: Some(StopReason::ToolCalls),
+            })
+            .expect("running tool call should persist");
+        recorder
+            .record_message_sync(&Message::ToolResult(ToolResult::success(
+                running_call.id,
+                running_call.name,
+                "tool output before restart",
+            )))
+            .expect("running tool result should persist");
         recorder
             .record_accepted_input_sync(&AcceptedInputEntry {
                 message_id: "msg_queued".to_owned(),
-                content: text_content("queued input"),
+                content: text_content("queued request"),
                 cursor_seq: 1,
                 source: InputSource::User,
                 metadata: None,
                 urgency: InputUrgency::Normal,
             })
-            .expect("queued input should persist");
+            .expect("queued request should persist");
         drop(recorder);
         drop(opened);
 
-        let mut replayed = open_or_create_session_in_home_with_cwd(
-            "discard-unfinished",
-            &home,
-            "/repo",
-        )
-        .expect("unfinished session should reopen");
-        let completed_context = replayed.initial_messages().to_vec();
-        assert_eq!(replayed.pending_messages().len(), 1);
-        assert!(replayed.restart_boundary().is_some());
+        let mut reopened =
+            open_or_create_session_in_home_with_cwd("cold-start-discard", &home, "/repo")
+                .expect("unfinished session should reopen");
+        assert_eq!(reopened.pending_messages().len(), 1);
+        assert!(reopened.restart_boundary().is_some());
+        assert_eq!(reopened.pending_delivery_intents().len(), 1);
 
-        replayed
+        reopened
             .discard_unfinished_sync()
-            .expect("unfinished replay should be durably discarded");
-        assert!(replayed.pending_messages().is_empty());
-        assert!(replayed.restart_boundary().is_none());
-        assert_eq!(replayed.initial_messages(), completed_context);
-        drop(replayed);
-
-        let reopened = open_or_create_session_in_home_with_cwd(
-            "discard-unfinished",
-            &home,
-            "/repo",
-        )
-        .expect("discarded session should reopen idle");
+            .expect("cold-start discard should persist atomically");
         assert!(reopened.pending_messages().is_empty());
+        assert_eq!(reopened.known_user_messages().len(), 1);
+        assert_eq!(reopened.known_user_messages()[0].id, "msg_completed");
         assert!(reopened.restart_boundary().is_none());
-        assert_eq!(reopened.initial_messages(), completed_context);
-        let _ = std::fs::remove_dir_all(home);
+        assert!(reopened.pending_delivery_intents().is_empty());
+        assert_eq!(reopened.initial_messages().len(), 2);
+        drop(reopened);
+
+        let reopened =
+            open_or_create_session_in_home_with_cwd("cold-start-discard", &home, "/repo")
+                .expect("discarded session should reopen");
+        assert!(reopened.pending_messages().is_empty());
+        assert_eq!(reopened.known_user_messages().len(), 1);
+        assert_eq!(reopened.known_user_messages()[0].id, "msg_completed");
+        assert!(reopened.restart_boundary().is_none());
+        assert!(reopened.pending_delivery_intents().is_empty());
+        assert_eq!(reopened.initial_messages().len(), 2);
     }
 
     #[test]

@@ -289,7 +289,7 @@ pub fn render_requested_skill_contexts_for_content(
     render_requested_skill_contexts_for_contents(std::iter::once(content), skills, cwd).contexts
 }
 
-pub(crate) fn render_requested_skill_contexts_for_contents<'a>(
+fn render_requested_skill_contexts_for_contents<'a>(
     contents: impl IntoIterator<Item = &'a [ContentPart]>,
     skills: &[Skill],
     cwd: &Path,

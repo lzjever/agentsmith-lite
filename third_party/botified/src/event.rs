@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::formatting::unix_timestamp_now;
 use crate::timeline::TimelineActiveProjection;
 
 pub const DEFAULT_EVENT_LOG_CAPACITY: usize = 1024;
@@ -169,7 +170,7 @@ impl ServiceEvent {
     ) -> Self {
         Self {
             seq,
-            time: timestamp_now(),
+            time: unix_timestamp_now(),
             event_type: event_type.into(),
             session: session.map(ToOwned::to_owned),
             turn_id: turn_id.map(ToOwned::to_owned),
@@ -503,11 +504,4 @@ fn is_image_payload(object: &Map<String, Value>) -> bool {
             .get("mime_type")
             .and_then(Value::as_str)
             .is_some_and(|value| value.to_ascii_lowercase().starts_with("image/"))
-}
-
-fn timestamp_now() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("unix:{}", duration.as_secs())
 }

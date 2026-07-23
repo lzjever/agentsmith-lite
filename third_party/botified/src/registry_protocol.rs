@@ -1,7 +1,8 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
+use crate::formatting::bounded_chars;
 use crate::registry::{RegistryItem, RegistryQueryResult};
 
 pub const DEFAULT_STDIO_REGISTRY_RESPONSE_BYTES: usize = 4 * 1024;
@@ -64,7 +65,7 @@ fn registry_snapshot_stdio_body(
     let body = json!({
         "op": "registry_snapshot",
         "id": id,
-        "server_time": system_time_rfc3339(server_time),
+        "server_time": crate::formatting::system_time_rfc3339(server_time),
         "items": items,
         "matched_count": result.matched_count,
         "returned_count": result.returned_count,
@@ -162,6 +163,10 @@ fn fit_compact_registry_response(mut compact: Value, max_response_bytes: usize) 
         }
     }
 
+    if compact.get("op").and_then(Value::as_str) == Some("registry_snapshot") {
+        return fit_compact_registry_snapshot_response(compact, max_response_bytes);
+    }
+
     if let Some(object) = compact.as_object_mut() {
         object.insert("id".to_owned(), Value::Null);
         object.remove("items");
@@ -179,6 +184,31 @@ fn fit_compact_registry_response(mut compact: Value, max_response_bytes: usize) 
     })
 }
 
+fn fit_compact_registry_snapshot_response(mut compact: Value, max_response_bytes: usize) -> Value {
+    if let Some(object) = compact.as_object_mut() {
+        object.insert("id".to_owned(), Value::Null);
+        object.insert("items".to_owned(), json!([]));
+    }
+    if compact.to_string().len() <= max_response_bytes {
+        return compact;
+    }
+
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("matched_count");
+        object.remove("returned_count");
+    }
+    if compact.to_string().len() <= max_response_bytes {
+        return compact;
+    }
+
+    json!({
+        "op": "registry_snapshot",
+        "items": [],
+        "truncated": true,
+        "truncated_reason": "response_bytes"
+    })
+}
+
 fn current_registry_item_json(item: &RegistryItem, server_time: SystemTime) -> Value {
     let mut value = registry_item_json(item);
     if let Value::Object(object) = &mut value {
@@ -188,7 +218,9 @@ fn current_registry_item_json(item: &RegistryItem, server_time: SystemTime) -> V
         );
         object.insert(
             "expires_in_secs".to_owned(),
-            json!(duration_between(item.expires_at, server_time)),
+            json!(item
+                .expires_at
+                .map(|expires_at| duration_between(expires_at, server_time))),
         );
     }
     value
@@ -203,14 +235,10 @@ fn registry_item_json(item: &RegistryItem) -> Value {
         "origin": &item.origin,
         "seq": item.seq,
         "freq_hz": item.freq_hz,
-        "updated_at": system_time_rfc3339(item.updated_at),
-        "expires_at": system_time_rfc3339(item.expires_at),
-        "ttl_secs": duration_secs(item.ttl),
+        "updated_at": crate::formatting::system_time_rfc3339(item.updated_at),
+        "expires_at": item.expires_at.map(crate::formatting::system_time_rfc3339),
+        "ttl_secs": item.ttl.map(duration_secs),
     })
-}
-
-fn bounded_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }
 
 fn duration_secs(duration: Duration) -> f64 {
@@ -224,42 +252,11 @@ fn duration_between(later: SystemTime, earlier: SystemTime) -> f64 {
         .as_secs_f64()
 }
 
-fn system_time_rfc3339(time: SystemTime) -> String {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = duration.as_secs();
-    let nanos = duration.subsec_nanos();
-    let days = (seconds / 86_400) as i64;
-    let seconds_of_day = seconds % 86_400;
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    let (year, month, day) = civil_from_days(days);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        let millis = nanos / 1_000_000;
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    }
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i32 + era as i32 * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + i32::from(month <= 2);
-    (year, month, day)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::RegistryWriterKind;
+    use std::time::UNIX_EPOCH;
 
     fn botified_body(frame: &str) -> Value {
         let body = frame
@@ -282,8 +279,31 @@ mod tests {
                 seq: 7,
                 freq_hz: Some(30.0),
                 updated_at: now,
-                expires_at: now + Duration::from_secs(5),
-                ttl: Duration::from_secs(5),
+                expires_at: Some(now + Duration::from_secs(5)),
+                ttl: Some(Duration::from_secs(5)),
+            }],
+            matched_count: 1,
+            returned_count: 1,
+            truncated: false,
+            truncated_reason: None,
+        }
+    }
+
+    fn small_result() -> RegistryQueryResult<RegistryItem> {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        RegistryQueryResult {
+            server_time: now,
+            items: vec![RegistryItem {
+                topic: "robot.pose".to_owned(),
+                value: json!({"x": 1}),
+                source: "localization".to_owned(),
+                writer_kind: RegistryWriterKind::ManagedTask,
+                origin: "task:reader".to_owned(),
+                seq: 8,
+                freq_hz: Some(10.0),
+                updated_at: now,
+                expires_at: Some(now + Duration::from_secs(5)),
+                ttl: Some(Duration::from_secs(5)),
             }],
             matched_count: 1,
             returned_count: 1,
@@ -298,6 +318,23 @@ mod tests {
         assert_eq!(
             stdio_registry_response_cap(usize::MAX),
             DEFAULT_STDIO_REGISTRY_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
+    fn stdio_registry_snapshot_uses_items_field_without_entries_alias() {
+        let frame = registry_snapshot_stdio_frame(
+            "read-items",
+            small_result(),
+            DEFAULT_STDIO_REGISTRY_RESPONSE_BYTES,
+        );
+
+        let body = botified_body(&frame);
+        assert_eq!(body["op"], json!("registry_snapshot"));
+        assert_eq!(body["items"][0]["topic"], json!("robot.pose"));
+        assert!(
+            body.get("entries").is_none(),
+            "entries is not a wire field: {body}"
         );
     }
 
@@ -320,6 +357,29 @@ mod tests {
             !frame.contains(&"x".repeat(128)),
             "snapshot frame should not leak oversized item values: {frame}"
         );
+    }
+
+    #[test]
+    fn stdio_registry_snapshot_retains_items_array_after_compact_fallback() {
+        let cap = stdio_registry_response_cap(16);
+        let frame =
+            registry_snapshot_stdio_frame(&"read-items".repeat(64), oversized_result(), cap);
+
+        assert!(
+            frame.len() <= cap,
+            "snapshot frame should fit effective stdio cap: {} > {}\n{frame}",
+            frame.len(),
+            cap
+        );
+        let body = botified_body(&frame);
+        assert_eq!(body["op"], json!("registry_snapshot"));
+        assert_eq!(body["items"], json!([]));
+        assert!(
+            body.get("entries").is_none(),
+            "entries is not a wire field: {body}"
+        );
+        assert_eq!(body["truncated"], json!(true));
+        assert_eq!(body["truncated_reason"], json!("response_bytes"));
     }
 
     #[test]

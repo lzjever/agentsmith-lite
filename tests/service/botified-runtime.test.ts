@@ -29,7 +29,6 @@ describe("botified runtime integration", () => {
     });
 
     assert.deepEqual(Object.keys(config).sort(), [
-      "compact",
       "context_files",
       "files",
       "llm_text_preview",
@@ -48,29 +47,24 @@ describe("botified runtime integration", () => {
     assert.equal(Array.isArray(config.providers), true);
     assert.equal(config.providers.length, 1);
     assert.deepEqual(Object.keys(config.providers[0] ?? {}).sort(), [
+      "api_compat",
       "api_key_env",
       "base_url",
       "capabilities",
       "model",
       "name",
       "priority",
-      "request_timeout_secs",
-      "thinking"
+      "request_timeout_secs"
     ].sort());
     assert.deepEqual(config.providers[0], {
       name: "model",
+      api_compat: "standard",
       base_url: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/t1/runs/r1/v1",
       model: "gpt-compatible",
       api_key_env: "BOTIFIED_SERVICE_KEY",
       request_timeout_secs: 30,
       priority: 10,
-      capabilities: ["text", "tool_calls"],
-      thinking: {
-        format: "none",
-        level: "off",
-        level_map: {},
-        budget_tokens: null
-      }
+      capabilities: ["text", "tool_calls"]
     });
     assert.equal(config.service.host, "0.0.0.0");
     assert.equal(config.service.port, 3099);
@@ -95,6 +89,8 @@ describe("botified runtime integration", () => {
     assert.equal(config.context_files.max_total_bytes > 0, true);
     assert.equal(config.registry.enabled, false);
     assert.equal(config.subagents.enabled, false);
+    assert.equal("model_aliases" in config.subagents, false);
+    assert.equal("compact" in config, false);
     assert.equal(config.profiling.enabled, false);
     assert.equal(config.llm_text_preview.enabled, true);
   });
@@ -110,7 +106,7 @@ describe("botified runtime integration", () => {
       task: {
         taskId: "t1", taskHomePath: "/runner/task-home", botifiedDataPath: "/runner/botified-data",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY", providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerBaseUrl: "http://broker/v1", resumeUnfinished: false
+        providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1", resumeUnfinished: false
       }
     });
 
@@ -128,7 +124,7 @@ describe("botified runtime integration", () => {
       task: {
         taskId: "t1", taskHomePath: "/runner/task-home",
         botifiedDataPath: "/runner/botified-data", serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY", providerBaseUrl: "http://broker/v1"
+        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY", providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
 
@@ -165,7 +161,7 @@ describe("botified runtime integration", () => {
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerBaseUrl: "http://broker/v1",
+        providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1",
         servicePort: 4100
       }
     });
@@ -199,7 +195,7 @@ describe("botified runtime integration", () => {
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerBaseUrl: "http://broker/v1"
+        providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
 
@@ -231,7 +227,7 @@ describe("botified runtime integration", () => {
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
         serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
         providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerBaseUrl: "http://broker/v1"
+        providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
 

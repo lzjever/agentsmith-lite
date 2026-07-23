@@ -1,21 +1,24 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::{Certificate, Client, StatusCode};
+use reqwest::Client;
 use serde_json::{json, Map, Number, Value};
-use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::OpenAiCompatibleConfig;
+use crate::config::{
+    is_loopback_http_provider_base_url, validate_provider_base_url, OpenAiCompatibleConfig,
+};
 use crate::llm_text_preview::{LlmTextPreviewFrame, ProviderPreviewContext};
 use crate::message_render::render_file_manifest;
 use crate::profiling::{
     CsvEventRow, ProfilingTimestamp, ProviderProfilingContext, ProviderRequestSequence,
     SharedProfiler,
 };
-use crate::provider::thinking::{ThinkingConfig, ThinkingFormat, ThinkingLevel};
+use crate::provider::api_compat::ProviderApiCompat;
+use crate::provider::thinking::{ThinkingConfig, ThinkingLevel};
 use crate::provider::Provider;
 use crate::provider::{
     ProviderError, ProviderErrorDiagnostic, ProviderMetadata, ProviderRequest, ProviderResponse,
@@ -27,30 +30,73 @@ use crate::types::{
     ModelInput, StopReason, ToolCall, Usage,
 };
 
+mod error;
+mod request;
+mod response;
+mod stream;
+
+use error::{
+    cancelled_error, error_body_to_message, invalid_response_error, map_reqwest_error,
+    missing_api_key_error, non_json_error, validate_api_key,
+};
+pub use error::{parse_provider_error, OpenAiChatError};
+pub use request::build_chat_completions_request;
+use request::{enable_streaming_request, ProviderRequestDialect};
+pub use response::parse_chat_completions_response;
+#[cfg(test)]
+use stream::StreamingToolCallAssembler;
+use stream::{ChatCompletionsStreamParser, SseEventBuffer};
+
 const MAX_PROVIDER_SUCCESS_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PROVIDER_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_PROVIDER_ERROR_MESSAGE_CHARS: usize = 4096;
-const TRUNCATED_MARKER: &str = "... [truncated]";
 
-#[derive(Debug, Error)]
-pub enum OpenAiChatError {
-    #[error("invalid OpenAI Chat Completions request: {message}")]
-    InvalidRequest { message: String },
-    #[error("invalid OpenAI Chat Completions response: {message}")]
-    InvalidResponse { message: String },
+#[derive(Debug, Clone, Copy)]
+struct ProviderApiCompatPolicy {
+    api_compat: ProviderApiCompat,
+    thinking_level: ThinkingLevel,
 }
 
-impl OpenAiChatError {
-    fn invalid_request(message: impl Into<String>) -> Self {
-        Self::InvalidRequest {
-            message: message.into(),
-        }
+impl ProviderApiCompatPolicy {
+    fn from_config(config: &OpenAiCompatibleConfig) -> Result<Self, OpenAiChatError> {
+        Self::new(config.api_compat, &config.thinking)
     }
 
-    fn invalid_response(message: impl Into<String>) -> Self {
-        Self::InvalidResponse {
-            message: message.into(),
+    fn new(
+        api_compat: ProviderApiCompat,
+        thinking: &ThinkingConfig,
+    ) -> Result<Self, OpenAiChatError> {
+        thinking
+            .validate()
+            .map_err(|error| OpenAiChatError::invalid_request(error.to_string()))?;
+        api_compat
+            .validate_thinking_level(thinking.level)
+            .map_err(OpenAiChatError::invalid_request)?;
+        Ok(Self {
+            api_compat,
+            thinking_level: thinking.level,
+        })
+    }
+
+    fn reasoning_replay(self) -> ProviderReasoningReplayPolicy {
+        ProviderReasoningReplayPolicy {
+            enabled: matches!(
+                self.api_compat,
+                ProviderApiCompat::Deepseek
+                    | ProviderApiCompat::DashscopeGlm
+                    | ProviderApiCompat::ZaiGlm
+            ) && !self.thinking_level.is_off(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderReasoningReplayPolicy {
+    enabled: bool,
+}
+
+impl ProviderReasoningReplayPolicy {
+    fn store_assistant_replay(self, tool_calls: &[ToolCall]) -> bool {
+        self.enabled && !tool_calls.is_empty()
     }
 }
 
@@ -64,37 +110,25 @@ pub struct OpenAiChatProvider {
 impl OpenAiChatProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, ProviderError> {
         validate_api_key(&config)?;
+        validate_provider_base_url(&config.profile, &config.base_url)
+            .map_err(|error| ProviderError::config(error.message()))?;
         config
             .thinking
             .validate()
             .map_err(|error| ProviderError::config(error.to_string()))?;
-        let mut builder = Client::builder().timeout(config.request_timeout);
-        if let Some(ca_bundle_path) = config.ca_bundle_path.as_ref() {
-            let pem = std::fs::read(ca_bundle_path).map_err(|error| {
-                ProviderError::config(format!(
-                    "failed to read provider CA bundle {}: {error}",
-                    ca_bundle_path.display()
-                ))
-            })?;
-            let certificates = Certificate::from_pem_bundle(&pem).map_err(|error| {
-                ProviderError::config(format!(
-                    "failed to parse provider CA bundle {}: {error}",
-                    ca_bundle_path.display()
-                ))
-            })?;
-            if certificates.is_empty() {
-                return Err(ProviderError::config(format!(
-                    "provider CA bundle {} did not contain any PEM certificates",
-                    ca_bundle_path.display()
-                )));
-            }
-            for certificate in certificates {
-                builder = builder.add_root_certificate(certificate);
-            }
+        config
+            .api_compat
+            .validate_thinking_level(config.thinking.level)
+            .map_err(ProviderError::config)?;
+        let mut client_builder = Client::builder()
+            .timeout(config.request_timeout)
+            .redirect(reqwest::redirect::Policy::none());
+        if is_loopback_http_provider_base_url(&config.base_url) {
+            client_builder = client_builder.no_proxy();
         }
-        let client = builder
+        let client = client_builder
             .build()
-            .map_err(|error| ProviderError::request_failed(error.to_string()))?;
+            .map_err(|error| ProviderError::config(error.to_string()))?;
         Ok(Self {
             config,
             client,
@@ -113,7 +147,10 @@ impl Provider for OpenAiChatProvider {
     fn metadata_for_request(&self, _request: &ProviderRequest) -> Option<ProviderMetadata> {
         Some(
             ProviderMetadata::new(self.config.profile.clone())
-                .with_model(self.config.model.clone()),
+                .with_model(self.config.model.clone())
+                .with_api_compat(self.config.api_compat)
+                .with_optional_context_window_tokens(self.config.context_window_tokens)
+                .with_optional_max_output_tokens(self.config.max_output_tokens),
         )
     }
 
@@ -131,14 +168,10 @@ impl Provider for OpenAiChatProvider {
         let mut response_body_bytes = None;
         let mut http_status = None;
 
-        let mut body = match build_chat_completions_request(
-            &self.config.model,
-            &self.config.thinking,
-            &request,
-        ) {
-            Ok(body) => body,
+        let policy = match ProviderApiCompatPolicy::from_config(&self.config) {
+            Ok(policy) => policy,
             Err(error) => {
-                let error = ProviderError::request_failed(error.to_string());
+                let error = ProviderError::config(error.to_string());
                 self.finish_profile(
                     profiling,
                     request_body_bytes,
@@ -149,8 +182,30 @@ impl Provider for OpenAiChatProvider {
                 return Err(error);
             }
         };
+
+        let mut body = match build_chat_completions_request(&self.config, &request) {
+            Ok(body) => body,
+            Err(error) => {
+                let error = ProviderError::config(error.to_string());
+                self.finish_profile(
+                    profiling,
+                    request_body_bytes,
+                    response_body_bytes,
+                    http_status,
+                    Err(&error),
+                );
+                return Err(error);
+            }
+        };
+        let request_dialect = ProviderRequestDialect::from_policy(policy);
         let preview_context = request.preview_context().cloned();
-        if preview_context.is_some() {
+        let force_streaming_transport = request_dialect.requires_streaming_transport(&request);
+        let stream_preview_context = if force_streaming_transport {
+            None
+        } else {
+            preview_context.as_ref()
+        };
+        if stream_preview_context.is_some() {
             enable_streaming_request(&mut body);
         }
         request_body_bytes = serde_json::to_vec(&body).ok().map(|bytes| bytes.len());
@@ -186,7 +241,7 @@ impl Provider for OpenAiChatProvider {
             return Err(error);
         }
 
-        if let Some(context) = preview_context.as_ref() {
+        if let Some(context) = stream_preview_context {
             context
                 .sink
                 .publish(LlmTextPreviewFrame::started(&context.metadata));
@@ -205,12 +260,12 @@ impl Provider for OpenAiChatProvider {
             Ok(Ok(response)) => {
                 let status = response.status();
                 http_status = Some(status.as_u16());
-                if let Some(context) = preview_context.as_ref() {
+                if stream_preview_context.is_some() || force_streaming_transport {
                     if status.is_success() {
                         match read_streaming_response(
                             response,
-                            &self.config.thinking,
-                            context,
+                            policy,
+                            stream_preview_context,
                             &cancel,
                         )
                         .await
@@ -227,14 +282,18 @@ impl Provider for OpenAiChatProvider {
                                 response_body_bytes = Some(json_response.body_bytes);
                                 let error =
                                     parse_provider_error(status.as_u16(), &json_response.value);
-                                publish_preview_error(context, &error);
+                                if let Some(context) = stream_preview_context {
+                                    publish_preview_error(context, &error);
+                                }
                                 Err(error)
                             }
                             Err(error) => {
-                                if cancel.is_cancelled() {
-                                    publish_preview_aborted(context);
-                                } else {
-                                    publish_preview_error(context, &error);
+                                if let Some(context) = stream_preview_context {
+                                    if cancel.is_cancelled() {
+                                        publish_preview_aborted(context);
+                                    } else {
+                                        publish_preview_error(context, &error);
+                                    }
                                 }
                                 Err(error)
                             }
@@ -245,11 +304,10 @@ impl Provider for OpenAiChatProvider {
                         Ok(json_response) => {
                             response_body_bytes = Some(json_response.body_bytes);
                             if status.is_success() {
-                                parse_chat_completions_response(
-                                    &json_response.value,
-                                    &self.config.thinking,
-                                )
-                                .map_err(|error| ProviderError::request_failed(error.to_string()))
+                                parse_chat_completions_response(&json_response.value, &self.config)
+                                    .map_err(|error| {
+                                        invalid_response_error(status, error.to_string())
+                                    })
                             } else {
                                 Err(parse_provider_error(status.as_u16(), &json_response.value))
                             }
@@ -260,7 +318,7 @@ impl Provider for OpenAiChatProvider {
             }
             Ok(Err(error)) => {
                 let error = map_reqwest_error(error);
-                if let Some(context) = preview_context.as_ref() {
+                if let Some(context) = stream_preview_context {
                     if cancel.is_cancelled() {
                         publish_preview_aborted(context);
                     } else {
@@ -270,7 +328,7 @@ impl Provider for OpenAiChatProvider {
                 Err(error)
             }
             Err(error) => {
-                if let Some(context) = preview_context.as_ref() {
+                if let Some(context) = stream_preview_context {
                     if cancel.is_cancelled() {
                         publish_preview_aborted(context);
                     } else {
@@ -411,7 +469,7 @@ fn provider_profile_row(
     match result {
         Ok(response) => {
             row = row
-                .field("stop_reason", stop_reason_name(response.stop_reason))
+                .field("stop_reason", response.stop_reason.as_str())
                 .field("tool_call_count", response.tool_calls.len());
             if let Some(usage) = response.usage {
                 row = row
@@ -479,213 +537,6 @@ fn provider_error_is_cancelled(error: &ProviderError) -> bool {
         .contains("cancelled")
 }
 
-fn stop_reason_name(stop_reason: StopReason) -> &'static str {
-    match stop_reason {
-        StopReason::EndTurn => "end_turn",
-        StopReason::ToolCalls => "tool_calls",
-        StopReason::ToolTerminated => "tool_terminated",
-        StopReason::ProviderStop => "provider_stop",
-    }
-}
-
-pub fn build_chat_completions_request(
-    model: &str,
-    thinking: &ThinkingConfig,
-    request: &ProviderRequest,
-) -> Result<Value, OpenAiChatError> {
-    if model.trim().is_empty() {
-        return Err(OpenAiChatError::invalid_request("model is required"));
-    }
-    thinking
-        .validate()
-        .map_err(|error| OpenAiChatError::invalid_request(error.to_string()))?;
-
-    let include_reasoning_content = thinking.includes_reasoning_content_replay();
-    let model_input = request.model_input();
-    validate_provider_model_input(&model_input).map_err(|error| {
-        OpenAiChatError::invalid_request(format!("invalid transcript: {error}"))
-    })?;
-    let mut messages = Vec::with_capacity(model_input.len());
-    for input in &model_input {
-        messages.push(map_model_input(input, include_reasoning_content)?);
-    }
-
-    let mut body = Map::new();
-    body.insert("model".to_owned(), Value::String(model.to_owned()));
-    body.insert("messages".to_owned(), Value::Array(messages));
-
-    if !request.tools.is_empty() {
-        body.insert(
-            "tools".to_owned(),
-            Value::Array(request.tools.iter().map(map_tool_spec).collect()),
-        );
-    }
-    if let Some(temperature) = request.temperature {
-        let temperature = Number::from_f64(temperature)
-            .ok_or_else(|| OpenAiChatError::invalid_request("temperature must be finite"))?;
-        body.insert("temperature".to_owned(), Value::Number(temperature));
-    }
-    if let Some(max_tokens) = request.max_tokens {
-        body.insert(
-            "max_tokens".to_owned(),
-            Value::Number(Number::from(u64::from(max_tokens))),
-        );
-    }
-    apply_thinking_config(&mut body, thinking)?;
-
-    Ok(Value::Object(body))
-}
-
-fn enable_streaming_request(body: &mut Value) {
-    let Some(object) = body.as_object_mut() else {
-        return;
-    };
-    object.insert("stream".to_owned(), Value::Bool(true));
-    object.insert(
-        "stream_options".to_owned(),
-        json!({ "include_usage": true }),
-    );
-}
-
-pub fn parse_chat_completions_response(
-    value: &Value,
-    thinking: &ThinkingConfig,
-) -> Result<ProviderResponse, OpenAiChatError> {
-    let choice = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .ok_or_else(|| OpenAiChatError::invalid_response("missing first choice"))?;
-    let message = choice
-        .get("message")
-        .and_then(Value::as_object)
-        .ok_or_else(|| OpenAiChatError::invalid_response("missing assistant message"))?;
-    let text = parse_assistant_text(message)?;
-    let tool_calls = parse_tool_calls(message.get("tool_calls"))?;
-    let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
-    let stop_reason = map_finish_reason(finish_reason, &tool_calls);
-    if !assistant_payload_is_compatible(finish_reason, text.as_deref(), &tool_calls, stop_reason) {
-        return Err(OpenAiChatError::invalid_response(
-            "assistant message must include non-empty content or tool_calls, and finish_reason tool_calls must include tool_calls",
-        ));
-    }
-    let assistant_replay =
-        parse_reasoning_content(message, thinking.includes_reasoning_content_replay())?
-            .map(AssistantMessageReplay::reasoning_content);
-
-    Ok(ProviderResponse {
-        text,
-        tool_calls,
-        assistant_replay,
-        usage: parse_usage(value.get("usage"))?,
-        stop_reason,
-        metadata: None,
-    })
-}
-
-pub fn parse_provider_error(status: u16, value: &Value) -> ProviderError {
-    let error = value.get("error").unwrap_or(value);
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("provider returned an error");
-    let code = error
-        .get("code")
-        .and_then(value_to_string)
-        .or_else(|| error.get("type").and_then(value_to_string));
-
-    ProviderError::provider_returned(
-        Some(status),
-        code,
-        truncate_text(message, MAX_PROVIDER_ERROR_MESSAGE_CHARS, false),
-    )
-}
-
-fn apply_thinking_config(
-    body: &mut Map<String, Value>,
-    thinking: &ThinkingConfig,
-) -> Result<(), OpenAiChatError> {
-    match (thinking.format, thinking.level) {
-        (ThinkingFormat::None, ThinkingLevel::Off) => {}
-        (ThinkingFormat::OpenAi, ThinkingLevel::Off) => {
-            if let Some(effort) = thinking
-                .mapped_off_level()
-                .map_err(|error| OpenAiChatError::invalid_request(error.to_string()))?
-            {
-                body.insert("reasoning_effort".to_owned(), Value::String(effort));
-            }
-        }
-        (ThinkingFormat::OpenAi, _) => {
-            body.insert(
-                "reasoning_effort".to_owned(),
-                Value::String(mapped_non_off_level(thinking)?),
-            );
-        }
-        (ThinkingFormat::Deepseek, ThinkingLevel::Off) => {
-            body.insert("thinking".to_owned(), thinking_type("disabled"));
-        }
-        (ThinkingFormat::Deepseek, _) => {
-            body.insert("thinking".to_owned(), thinking_type("enabled"));
-            body.insert(
-                "reasoning_effort".to_owned(),
-                Value::String(mapped_non_off_level(thinking)?),
-            );
-        }
-        (ThinkingFormat::Qwen, ThinkingLevel::Off) => {
-            body.insert("enable_thinking".to_owned(), Value::Bool(false));
-        }
-        (ThinkingFormat::Qwen, _) => {
-            body.insert("enable_thinking".to_owned(), Value::Bool(true));
-            if let Some(budget_tokens) = thinking.budget_tokens {
-                body.insert(
-                    "thinking_budget".to_owned(),
-                    Value::Number(Number::from(u64::from(budget_tokens))),
-                );
-            }
-        }
-        (ThinkingFormat::Glm, ThinkingLevel::Off) => {
-            body.insert("thinking".to_owned(), thinking_type("disabled"));
-        }
-        (ThinkingFormat::Glm, _) => {
-            body.insert("thinking".to_owned(), thinking_type("enabled"));
-        }
-        (ThinkingFormat::None, _) => {
-            return Err(OpenAiChatError::invalid_request(
-                "thinking format none requires level off",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn mapped_non_off_level(thinking: &ThinkingConfig) -> Result<String, OpenAiChatError> {
-    thinking
-        .mapped_non_off_level()
-        .map_err(|error| OpenAiChatError::invalid_request(error.to_string()))
-}
-
-fn thinking_type(value: &str) -> Value {
-    json!({ "type": value })
-}
-
-fn validate_api_key(config: &OpenAiCompatibleConfig) -> Result<(), ProviderError> {
-    match config.api_key.as_deref() {
-        Some(api_key) if !api_key.trim().is_empty() => Ok(()),
-        _ => Err(missing_api_key_error()),
-    }
-}
-
-fn missing_api_key_error() -> ProviderError {
-    ProviderError::config(
-        "missing OpenAI-compatible provider API key; set the environment variable named by providers[].api_key_env in botified.yaml, or run botified serve with --mock-provider for local development",
-    )
-}
-
-fn cancelled_error() -> ProviderError {
-    ProviderError::request_failed("provider request cancelled")
-}
-
 async fn await_with_cancel<T>(
     future: impl Future<Output = T>,
     cancel: &CancellationToken,
@@ -710,9 +561,12 @@ async fn read_json_response(
     let body_bytes = body.bytes.len();
     if body.truncated {
         if status.is_success() {
-            return Err(ProviderError::request_failed(format!(
-                "provider response exceeded {MAX_PROVIDER_SUCCESS_RESPONSE_BYTES} byte limit"
-            )));
+            return Err(invalid_response_error(
+                status,
+                format!(
+                    "provider response exceeded {MAX_PROVIDER_SUCCESS_RESPONSE_BYTES} byte limit"
+                ),
+            ));
         }
         return Ok(JsonResponse {
             value: non_json_error(status, error_body_to_message(&body.bytes, true)),
@@ -722,9 +576,10 @@ async fn read_json_response(
 
     match serde_json::from_slice(&body.bytes) {
         Ok(value) => Ok(JsonResponse { value, body_bytes }),
-        Err(error) if status.is_success() => Err(ProviderError::request_failed(format!(
-            "invalid provider JSON response: {error}"
-        ))),
+        Err(error) if status.is_success() => Err(invalid_response_error(
+            status,
+            format!("invalid provider JSON response: {error}"),
+        )),
         Err(_) => Ok(JsonResponse {
             value: non_json_error(status, error_body_to_message(&body.bytes, false)),
             body_bytes,
@@ -744,22 +599,22 @@ struct StreamingResponse {
 
 async fn read_streaming_response(
     response: reqwest::Response,
-    thinking: &ThinkingConfig,
-    preview_context: &ProviderPreviewContext,
+    policy: ProviderApiCompatPolicy,
+    preview_context: Option<&ProviderPreviewContext>,
     cancel: &CancellationToken,
 ) -> Result<StreamingResponse, ProviderError> {
+    let status = response.status();
     let mut stream = response.bytes_stream();
-    let mut parser = ChatCompletionsStreamParser::new(
-        thinking.includes_reasoning_content_replay(),
-        preview_context.clone(),
-    );
-    let mut buffer = Vec::new();
+    let mut parser = ChatCompletionsStreamParser::new(policy, preview_context.cloned());
+    let mut buffer = SseEventBuffer::default();
     let mut body_bytes = 0usize;
 
     loop {
         let next = tokio::select! {
             _ = cancel.cancelled() => {
-                publish_preview_aborted(preview_context);
+                if let Some(context) = preview_context {
+                    publish_preview_aborted(context);
+                }
                 return Err(cancelled_error());
             }
             next = stream.next() => next,
@@ -767,17 +622,21 @@ async fn read_streaming_response(
 
         let Some(chunk) = next else {
             let error = ProviderError::request_failed("provider stream ended before [DONE]");
-            publish_preview_error(preview_context, &error);
+            if let Some(context) = preview_context {
+                publish_preview_error(context, &error);
+            }
             return Err(error);
         };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
                 let error = map_reqwest_error(error);
-                if cancel.is_cancelled() {
-                    publish_preview_aborted(preview_context);
-                } else {
-                    publish_preview_error(preview_context, &error);
+                if let Some(context) = preview_context {
+                    if cancel.is_cancelled() {
+                        publish_preview_aborted(context);
+                    } else {
+                        publish_preview_error(context, &error);
+                    }
                 }
                 return Err(error);
             }
@@ -785,382 +644,39 @@ async fn read_streaming_response(
         body_bytes = match body_bytes.checked_add(chunk.len()) {
             Some(total) if total <= MAX_PROVIDER_SUCCESS_RESPONSE_BYTES => total,
             _ => {
-                let error = ProviderError::request_failed(format!(
-                    "provider response exceeded {MAX_PROVIDER_SUCCESS_RESPONSE_BYTES} byte limit"
-                ));
-                publish_preview_error(preview_context, &error);
+                let error = invalid_response_error(
+                    status,
+                    format!(
+                        "provider response exceeded {MAX_PROVIDER_SUCCESS_RESPONSE_BYTES} byte limit"
+                    ),
+                );
+                if let Some(context) = preview_context {
+                    publish_preview_error(context, &error);
+                }
                 return Err(error);
             }
         };
-        buffer.extend_from_slice(&chunk);
+        buffer.extend(&chunk);
 
-        while let Some((index, separator_len)) = find_sse_event_separator(&buffer) {
-            let event = buffer[..index].to_vec();
-            buffer.drain(..index + separator_len);
-            if let Err(error) = parser.process_event(&event) {
-                let error = ProviderError::request_failed(error.to_string());
-                publish_preview_error(preview_context, &error);
+        while let Some(event) = buffer.next_event() {
+            if let Err(error) = parser.process_event(event) {
+                let error = invalid_response_error(status, error.to_string());
+                if let Some(context) = preview_context {
+                    publish_preview_error(context, &error);
+                }
                 return Err(error);
             }
             if parser.done {
                 return parser.finish(body_bytes).map_err(|error| {
-                    let error = ProviderError::request_failed(error.to_string());
-                    publish_preview_error(preview_context, &error);
+                    let error = invalid_response_error(status, error.to_string());
+                    if let Some(context) = preview_context {
+                        publish_preview_error(context, &error);
+                    }
                     error
                 });
             }
         }
-    }
-}
-
-fn find_sse_event_separator(buffer: &[u8]) -> Option<(usize, usize)> {
-    let lf = buffer.windows(2).position(|window| window == b"\n\n");
-    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
-    match (crlf, lf) {
-        (Some(crlf), Some(lf)) if crlf <= lf => Some((crlf, 4)),
-        (Some(_), Some(lf)) => Some((lf, 2)),
-        (Some(crlf), None) => Some((crlf, 4)),
-        (None, Some(lf)) => Some((lf, 2)),
-        (None, None) => None,
-    }
-}
-
-struct ChatCompletionsStreamParser {
-    include_reasoning_content: bool,
-    preview_context: ProviderPreviewContext,
-    text: String,
-    reasoning_content: String,
-    tool_calls: StreamingToolCallAssembler,
-    usage: Option<Usage>,
-    finish_reason: Option<String>,
-    text_emitted: bool,
-    done: bool,
-}
-
-impl ChatCompletionsStreamParser {
-    fn new(include_reasoning_content: bool, preview_context: ProviderPreviewContext) -> Self {
-        Self {
-            include_reasoning_content,
-            preview_context,
-            text: String::new(),
-            reasoning_content: String::new(),
-            tool_calls: StreamingToolCallAssembler::default(),
-            usage: None,
-            finish_reason: None,
-            text_emitted: false,
-            done: false,
-        }
-    }
-
-    fn process_event(&mut self, event: &[u8]) -> Result<(), OpenAiChatError> {
-        let event = std::str::from_utf8(event).map_err(|error| {
-            OpenAiChatError::invalid_response(format!("invalid SSE UTF-8: {error}"))
-        })?;
-        let mut data_lines = Vec::new();
-        for raw_line in event.lines() {
-            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            if let Some(data) = line.strip_prefix("data:") {
-                data_lines.push(data.strip_prefix(' ').unwrap_or(data));
-            }
-        }
-        if data_lines.is_empty() {
-            return Ok(());
-        }
-        let data = data_lines.join("\n");
-        if data.trim() == "[DONE]" {
-            self.done = true;
-            return Ok(());
-        }
-        let value: Value = serde_json::from_str(&data).map_err(|error| {
-            OpenAiChatError::invalid_response(format!("invalid streaming JSON chunk: {error}"))
-        })?;
-        self.process_json_chunk(&value)
-    }
-
-    fn process_json_chunk(&mut self, value: &Value) -> Result<(), OpenAiChatError> {
-        let choices = value
-            .get("choices")
-            .and_then(Value::as_array)
-            .ok_or_else(|| OpenAiChatError::invalid_response("streaming chunk missing choices"))?;
-        if choices.is_empty() {
-            if value.get("usage").is_some() {
-                self.usage = parse_usage(value.get("usage"))?;
-            }
-            return Ok(());
-        }
-
-        if value.get("usage").is_some() {
-            self.usage = parse_usage(value.get("usage"))?;
-        }
-
-        let choice = choices
-            .first()
-            .ok_or_else(|| OpenAiChatError::invalid_response("missing first choice"))?;
-        if let Some(finish_reason) = choice.get("finish_reason") {
-            match finish_reason {
-                Value::String(value) => self.finish_reason = Some(value.clone()),
-                Value::Null => {}
-                _ => {
-                    return Err(OpenAiChatError::invalid_response(
-                        "finish_reason must be a string",
-                    ));
-                }
-            }
-        }
-        let Some(delta) = choice.get("delta") else {
-            return Ok(());
-        };
-        let delta = delta
-            .as_object()
-            .ok_or_else(|| OpenAiChatError::invalid_response("delta must be an object"))?;
-
-        self.accumulate_visible_delta(delta, "content")?;
-        self.accumulate_visible_delta(delta, "refusal")?;
-
-        self.accumulate_reasoning(delta);
-        if let Some(tool_calls) = delta.get("tool_calls") {
-            self.tool_calls.push_delta(tool_calls)?;
-        }
-        Ok(())
-    }
-
-    fn accumulate_visible_delta(
-        &mut self,
-        delta: &Map<String, Value>,
-        key: &str,
-    ) -> Result<(), OpenAiChatError> {
-        match delta.get(key) {
-            Some(Value::String(content)) if !content.is_empty() => {
-                self.text.push_str(content);
-                self.text_emitted = true;
-                self.preview_context
-                    .sink
-                    .publish(LlmTextPreviewFrame::text_delta(
-                        &self.preview_context.metadata,
-                        content,
-                    ));
-            }
-            Some(Value::String(_)) | Some(Value::Null) | None => {}
-            Some(_) => {
-                return Err(OpenAiChatError::invalid_response(format!(
-                    "delta {key} must be a string"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn accumulate_reasoning(&mut self, delta: &Map<String, Value>) {
-        if !self.include_reasoning_content {
-            return;
-        }
-        for key in [
-            "reasoning_content",
-            "reasoning",
-            "thinking",
-            "chain_of_thought",
-        ] {
-            if let Some(value) = delta.get(key).and_then(Value::as_str) {
-                self.reasoning_content.push_str(value);
-            }
-        }
-    }
-
-    fn finish(self, body_bytes: usize) -> Result<StreamingResponse, OpenAiChatError> {
-        let tool_calls = self.tool_calls.finish()?;
-        let text = (!self.text.is_empty()).then_some(self.text);
-        let finish_reason = self.finish_reason.as_deref();
-        let stop_reason = map_finish_reason(finish_reason, &tool_calls);
-        if !assistant_payload_is_compatible(
-            finish_reason,
-            text.as_deref(),
-            &tool_calls,
-            stop_reason,
-        ) {
-            return Err(OpenAiChatError::invalid_response(
-                "assistant message must include non-empty content or tool_calls, and finish_reason tool_calls must include tool_calls",
-            ));
-        }
-        let assistant_replay = (!self.reasoning_content.is_empty())
-            .then(|| AssistantMessageReplay::reasoning_content(self.reasoning_content));
-        self.preview_context
-            .sink
-            .publish(LlmTextPreviewFrame::finished(
-                &self.preview_context.metadata,
-                self.text_emitted,
-                stop_reason,
-            ));
-
-        Ok(StreamingResponse {
-            response: ProviderResponse {
-                text,
-                tool_calls,
-                assistant_replay,
-                usage: self.usage,
-                stop_reason,
-                metadata: None,
-            },
-            body_bytes,
-        })
-    }
-}
-
-fn map_finish_reason(finish_reason: Option<&str>, tool_calls: &[ToolCall]) -> StopReason {
-    if !tool_calls.is_empty() || finish_reason == Some("tool_calls") {
-        StopReason::ToolCalls
-    } else if finish_reason == Some("stop") {
-        StopReason::EndTurn
-    } else {
-        StopReason::ProviderStop
-    }
-}
-
-fn assistant_payload_is_compatible(
-    finish_reason: Option<&str>,
-    text: Option<&str>,
-    tool_calls: &[ToolCall],
-    stop_reason: StopReason,
-) -> bool {
-    if finish_reason == Some("tool_calls") && tool_calls.is_empty() {
-        return false;
-    }
-    assistant_payload_is_valid(text, tool_calls)
-        || matches!(stop_reason, StopReason::EndTurn | StopReason::ProviderStop)
-}
-
-#[derive(Default)]
-struct StreamingToolCallAssembler {
-    parts: BTreeMap<usize, StreamingToolCallPart>,
-}
-
-impl StreamingToolCallAssembler {
-    fn push_delta(&mut self, value: &Value) -> Result<(), OpenAiChatError> {
-        let calls = value.as_array().ok_or_else(|| {
-            OpenAiChatError::invalid_response("delta.tool_calls must be an array")
-        })?;
-        for call in calls {
-            let index = call
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-                .ok_or_else(|| {
-                    OpenAiChatError::invalid_response("delta.tool_calls missing valid index")
-                })?;
-            let part = self.parts.entry(index).or_default();
-            match call.get("type") {
-                Some(Value::String(call_type)) if call_type == "function" => {}
-                Some(Value::String(_)) => {
-                    return Err(OpenAiChatError::invalid_response(
-                        "tool call type must be function",
-                    ));
-                }
-                Some(Value::Null) | None => {}
-                Some(_) => {
-                    return Err(OpenAiChatError::invalid_response(
-                        "tool call type must be function",
-                    ));
-                }
-            }
-            if let Some(id) = call
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            {
-                part.set_id(id);
-            }
-            let Some(function) = call.get("function") else {
-                continue;
-            };
-            let function = function.as_object().ok_or_else(|| {
-                OpenAiChatError::invalid_response("delta.tool_calls function must be an object")
-            })?;
-            if let Some(name) = function
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-            {
-                part.set_name(name);
-            }
-            match function.get("arguments") {
-                Some(Value::String(arguments)) => part.arguments.push_str(arguments),
-                Some(Value::Null) | None => {}
-                Some(_) => {
-                    return Err(OpenAiChatError::invalid_response(
-                        "delta.tool_calls function.arguments must be a string",
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> Result<Vec<ToolCall>, OpenAiChatError> {
-        self.parts
-            .into_iter()
-            .map(|(index, part)| part.finish(index))
-            .collect()
-    }
-}
-
-#[derive(Default)]
-struct StreamingToolCallPart {
-    id: Option<String>,
-    name: Option<String>,
-    arguments: String,
-    conflict: Option<String>,
-}
-
-impl StreamingToolCallPart {
-    fn set_id(&mut self, id: &str) {
-        match self.id.as_deref() {
-            Some(existing) if existing != id => {
-                self.conflict = Some("conflicting tool call id fragments".to_owned());
-            }
-            Some(_) => {}
-            None => self.id = Some(id.to_owned()),
-        }
-    }
-
-    fn set_name(&mut self, name: &str) {
-        match self.name.as_deref() {
-            Some(existing) if existing != name => {
-                self.conflict = Some("conflicting tool call name fragments".to_owned());
-            }
-            Some(_) => {}
-            None => self.name = Some(name.to_owned()),
-        }
-    }
-
-    fn finish(self, index: usize) -> Result<ToolCall, OpenAiChatError> {
-        let id = self.id.ok_or_else(|| {
-            OpenAiChatError::invalid_response(format!("tool call {index} missing id"))
-        })?;
-        let name = self.name.ok_or_else(|| {
-            OpenAiChatError::invalid_response(format!("tool call {index} missing name"))
-        })?;
-        let arguments = if self.arguments.is_empty() {
-            "{}".to_owned()
-        } else {
-            self.arguments
-        };
-        if let Some(conflict) = self.conflict {
-            return Ok(ToolCall::invalid_arguments(id, name, arguments, conflict));
-        }
-        Ok(match serde_json::from_str::<Value>(&arguments) {
-            Ok(arguments_value) if arguments_value.is_object() => {
-                ToolCall::new(id, name, arguments_value)
-            }
-            Ok(_) => ToolCall::invalid_arguments(
-                id,
-                name,
-                arguments,
-                "tool arguments must be a JSON object",
-            ),
-            Err(error) => ToolCall::invalid_arguments(id, name, arguments, error.to_string()),
-        })
+        buffer.compact();
     }
 }
 
@@ -1210,364 +726,373 @@ async fn read_response_body(
     Ok(ResponseBody { bytes, truncated })
 }
 
-fn non_json_error(status: StatusCode, text: String) -> Value {
-    let message = if text.trim().is_empty() {
-        status.to_string()
-    } else {
-        text
-    };
-    json!({ "error": { "message": message } })
-}
-
-fn error_body_to_message(bytes: &[u8], truncated: bool) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    truncate_text(&text, MAX_PROVIDER_ERROR_MESSAGE_CHARS, truncated)
-}
-
-fn truncate_text(text: &str, max_chars: usize, force_marker: bool) -> String {
-    let mut truncated = text.chars().count() > max_chars;
-    let mut result: String = text.chars().take(max_chars).collect();
-    if force_marker {
-        truncated = true;
-    }
-    if truncated {
-        result.push_str(TRUNCATED_MARKER);
-    }
-    result
-}
-
-fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
-    if error.is_timeout() {
-        ProviderError::request_failed("provider request timed out")
-    } else {
-        ProviderError::request_failed(error.to_string())
-    }
-}
-
-fn map_model_input(
-    input: &ModelInput,
-    include_reasoning_content: bool,
-) -> Result<Value, OpenAiChatError> {
-    match input {
-        ModelInput::Context { role, content } => Ok(json!({
-            "role": map_context_role(*role),
-            "content": content
-        })),
-        ModelInput::Message { message } => map_message(message, include_reasoning_content),
-    }
-}
-
-fn map_context_role(role: ContextRole) -> &'static str {
-    match role {
-        ContextRole::System => "system",
-        ContextRole::Developer => "system",
-        ContextRole::User => "user",
-    }
-}
-
-fn map_message(
-    message: &Message,
-    include_reasoning_content: bool,
-) -> Result<Value, OpenAiChatError> {
-    match message {
-        Message::User { content } => Ok(json!({
-            "role": "user",
-            "content": content
-                .iter()
-                .map(map_content_part)
-                .collect::<Vec<_>>()
-        })),
-        Message::Assistant {
-            content,
-            tool_calls,
-            assistant_replay,
-            ..
-        } => {
-            if !assistant_payload_is_valid(content.as_deref(), tool_calls) {
-                return Err(OpenAiChatError::invalid_request(
-                    "assistant message must include non-empty content or tool_calls",
-                ));
-            }
-            let mut object = Map::new();
-            object.insert("role".to_owned(), Value::String("assistant".to_owned()));
-            object.insert(
-                "content".to_owned(),
-                content.clone().map(Value::String).unwrap_or(Value::Null),
-            );
-            if include_reasoning_content {
-                if let Some(reasoning_content) = assistant_replay
-                    .as_ref()
-                    .and_then(|replay| replay.reasoning_content.as_deref())
-                    .filter(|reasoning_content| !reasoning_content.is_empty())
-                {
-                    object.insert(
-                        "reasoning_content".to_owned(),
-                        Value::String(reasoning_content.to_owned()),
-                    );
-                }
-            }
-            if !tool_calls.is_empty() {
-                object.insert(
-                    "tool_calls".to_owned(),
-                    Value::Array(tool_calls.iter().map(map_tool_call).collect()),
-                );
-            }
-            Ok(Value::Object(object))
-        }
-        Message::ToolResult(result) => Ok(json!({
-            "role": "tool",
-            "tool_call_id": result.tool_call_id,
-            "content": result.text
-        })),
-    }
-}
-
-fn map_content_part(part: &ContentPart) -> Value {
-    match part {
-        ContentPart::Text { text } => json!({
-            "type": "text",
-            "text": text
-        }),
-        ContentPart::ImageUrl { url } => json!({
-            "type": "image_url",
-            "image_url": {"url": url}
-        }),
-        ContentPart::ImageBase64 { mime_type, data } => json!({
-            "type": "image_url",
-            "image_url": {"url": format!("data:{mime_type};base64,{data}")}
-        }),
-        ContentPart::File { binding } => json!({
-            "type": "text",
-            "text": render_file_manifest(binding)
-        }),
-        ContentPart::Skill {
-            name,
-            path,
-            arguments,
-        } => json!({
-            "type": "text",
-            "text": format!(
-                "Requested skill: name={}, path={}, arguments={}",
-                name.as_deref().unwrap_or(""),
-                path.as_deref().unwrap_or(""),
-                arguments.as_deref().unwrap_or("")
-            )
-        }),
-    }
-}
-
-fn map_tool_spec(spec: &ToolSpec) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": spec.name,
-            "description": spec.description,
-            "parameters": spec.input_schema
-        }
-    })
-}
-
-fn map_tool_call(call: &ToolCall) -> Value {
-    json!({
-        "id": call.id,
-        "type": "function",
-        "function": {
-            "name": call.name,
-            "arguments": call.arguments_json_string()
-        }
-    })
-}
-
-fn parse_tool_calls(value: Option<&Value>) -> Result<Vec<ToolCall>, OpenAiChatError> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let calls = value
-        .as_array()
-        .ok_or_else(|| OpenAiChatError::invalid_response("tool_calls must be an array"))?;
-    calls
-        .iter()
-        .map(|call| {
-            if call.get("type").and_then(Value::as_str) != Some("function") {
-                return Err(OpenAiChatError::invalid_response(
-                    "tool call type must be function",
-                ));
-            }
-            let id = required_str(call, "id")?;
-            let function = call
-                .get("function")
-                .and_then(Value::as_object)
-                .ok_or_else(|| OpenAiChatError::invalid_response("tool call missing function"))?;
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| OpenAiChatError::invalid_response("tool call missing name"))?;
-            let arguments = match function.get("arguments") {
-                Some(Value::String(arguments)) => arguments.as_str(),
-                Some(_) => {
-                    return Err(OpenAiChatError::invalid_response(
-                        "tool call arguments must be a string",
-                    ))
-                }
-                None => "{}",
-            };
-            Ok(match serde_json::from_str::<Value>(arguments) {
-                Ok(arguments) if arguments.is_object() => ToolCall::new(id, name, arguments),
-                Ok(_) => ToolCall::invalid_arguments(
-                    id,
-                    name,
-                    arguments,
-                    "tool arguments must be a JSON object",
-                ),
-                Err(error) => ToolCall::invalid_arguments(id, name, arguments, error.to_string()),
-            })
-        })
-        .collect()
-}
-
-fn parse_usage(value: Option<&Value>) -> Result<Option<Usage>, OpenAiChatError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-
-    Ok(Some(Usage {
-        input_tokens: required_u64(value, "prompt_tokens")?,
-        output_tokens: required_u64(value, "completion_tokens")?,
-        total_tokens: required_u64(value, "total_tokens")?,
-        cached_input_tokens: optional_nested_u64(value, "prompt_tokens_details", "cached_tokens"),
-        reasoning_output_tokens: optional_nested_u64(
-            value,
-            "completion_tokens_details",
-            "reasoning_tokens",
-        ),
-    }))
-}
-
-fn parse_reasoning_content(
-    message: &Map<String, Value>,
-    include_reasoning_content: bool,
-) -> Result<Option<String>, OpenAiChatError> {
-    if !include_reasoning_content {
-        return Ok(None);
-    }
-
-    match message.get("reasoning_content") {
-        Some(Value::String(reasoning_content)) if !reasoning_content.is_empty() => {
-            Ok(Some(reasoning_content.clone()))
-        }
-        Some(Value::String(_)) | Some(Value::Null) | None => Ok(None),
-        _ => Err(OpenAiChatError::invalid_response(
-            "assistant reasoning_content must be a string",
-        )),
-    }
-}
-
-fn parse_assistant_text(message: &Map<String, Value>) -> Result<Option<String>, OpenAiChatError> {
-    if let Some(refusal) = message.get("refusal").and_then(Value::as_str) {
-        if !refusal.is_empty() {
-            return Ok(Some(refusal.to_owned()));
-        }
-    }
-
-    match message.get("content") {
-        Some(Value::String(content)) if !content.is_empty() => Ok(Some(content.clone())),
-        Some(Value::String(_)) | Some(Value::Null) | None => Ok(None),
-        Some(Value::Array(parts)) => parse_assistant_content_parts(parts),
-        _ => Err(OpenAiChatError::invalid_response(
-            "assistant content must be a string or content parts array",
-        )),
-    }
-}
-
-fn parse_assistant_content_parts(parts: &[Value]) -> Result<Option<String>, OpenAiChatError> {
-    let mut text = Vec::new();
-    for part in parts {
-        let part_type = part.get("type").and_then(Value::as_str);
-        match part_type {
-            Some("text") => {
-                if let Some(value) = part.get("text").and_then(Value::as_str) {
-                    if !value.is_empty() {
-                        text.push(value.to_owned());
-                    }
-                }
-            }
-            Some("refusal") => {
-                if let Some(value) = part.get("refusal").and_then(Value::as_str) {
-                    if !value.is_empty() {
-                        text.push(value.to_owned());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if text.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(text.join("\n")))
-    }
-}
-
-fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, OpenAiChatError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| OpenAiChatError::invalid_response(format!("missing string field {key}")))
-}
-
-fn required_u64(value: &Value, key: &str) -> Result<u64, OpenAiChatError> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| OpenAiChatError::invalid_response(format!("missing integer field {key}")))
-}
-
-fn optional_nested_u64(value: &Value, object_key: &str, key: &str) -> u64 {
-    value
-        .get(object_key)
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
-}
-
-fn value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) if !value.is_empty() => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm_text_preview::{
         LlmTextPreviewFilter, LlmTextPreviewHub, LlmTextPreviewMetadata,
     };
-    use std::path::PathBuf;
+    use crate::types::ToolResult;
+
+    fn provider_config(
+        api_compat: ProviderApiCompat,
+        thinking_level: ThinkingLevel,
+    ) -> OpenAiCompatibleConfig {
+        OpenAiCompatibleConfig::new("test", "https://provider.example/v1", "same-model")
+            .with_api_compat(api_compat)
+            .with_thinking(ThinkingConfig::new(thinking_level))
+    }
+
+    fn stream_policy(parse_reasoning: bool) -> ProviderApiCompatPolicy {
+        let (api_compat, thinking) = if parse_reasoning {
+            (
+                ProviderApiCompat::Deepseek,
+                ThinkingConfig::new(ThinkingLevel::High),
+            )
+        } else {
+            (
+                ProviderApiCompat::Standard,
+                ThinkingConfig::new(ThinkingLevel::Off),
+            )
+        };
+        ProviderApiCompatPolicy::new(api_compat, &thinking).expect("stream policy should be valid")
+    }
+
+    fn request_dialect(
+        api_compat: ProviderApiCompat,
+        thinking_level: ThinkingLevel,
+    ) -> ProviderRequestDialect {
+        let thinking = ThinkingConfig::new(thinking_level);
+        let policy = ProviderApiCompatPolicy::new(api_compat, &thinking)
+            .expect("request dialect policy should be valid");
+        ProviderRequestDialect::from_policy(policy)
+    }
+
+    fn request_with_tools(with_tools: bool) -> ProviderRequest {
+        let tools = if with_tools {
+            vec![ToolSpec::new(
+                "status",
+                "Check status.",
+                json!({"type": "object"}),
+            )]
+        } else {
+            Vec::new()
+        };
+        ProviderRequest::new(
+            "system",
+            vec![Message::user(vec![ContentPart::text("hello")])],
+            tools,
+        )
+    }
 
     #[test]
-    fn ca_bundle_path_is_loaded_when_building_openai_chat_provider() {
-        let path = temp_file_path("ca-bundle-invalid.pem");
-        std::fs::write(&path, b"not a pem certificate").expect("write invalid CA bundle");
+    fn reasoning_replay_parse_path_is_policy_gated() {
+        let value = json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": "Need the working directory before answering.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": "{\"command\":\"pwd\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
 
-        let error = match OpenAiChatProvider::new(
-            OpenAiCompatibleConfig::new("local-openai", "https://models.local.test/v1", "gpt")
-                .with_api_key("sk-test")
-                .with_ca_bundle_path(path.clone()),
-        ) {
-            Ok(_) => panic!("invalid CA bundle should fail provider construction"),
-            Err(error) => error,
-        };
+        for (api_compat, thinking_level, expected_replay) in [
+            (
+                ProviderApiCompat::Deepseek,
+                ThinkingLevel::High,
+                Some("Need the working directory before answering."),
+            ),
+            (ProviderApiCompat::DashscopeQwen, ThinkingLevel::XHigh, None),
+        ] {
+            let response = parse_chat_completions_response(
+                &value,
+                &provider_config(api_compat, thinking_level),
+            )
+            .expect("response with reasoning_content should parse");
 
-        let message = error.to_string();
-        assert!(message.contains("CA bundle"));
-        assert!(message.contains(&path.display().to_string()));
-        let _ = std::fs::remove_file(path);
+            assert_eq!(
+                response
+                    .assistant_replay
+                    .as_ref()
+                    .and_then(|replay| replay.reasoning_content.as_deref()),
+                expected_replay,
+                "{api_compat:?} {thinking_level:?}"
+            );
+        }
+
+        let malformed = json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": {"private": "malformed"},
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": "{\"command\":\"pwd\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let response = parse_chat_completions_response(
+            &malformed,
+            &provider_config(ProviderApiCompat::Deepseek, ThinkingLevel::Off),
+        )
+        .expect("disabled replay must ignore malformed reasoning_content");
+        assert_eq!(response.assistant_replay, None);
+    }
+
+    #[test]
+    fn reasoning_replay_build_path_is_policy_and_tool_call_gated() {
+        fn request_with_replay_tool_call() -> ProviderRequest {
+            ProviderRequest::new(
+                "system",
+                vec![
+                    Message::assistant_tool_calls_with_replay(
+                        vec![ToolCall::new("call_1", "bash", json!({"command": "pwd"}))],
+                        AssistantMessageReplay::reasoning_content(
+                            "Need the working directory before answering.",
+                        ),
+                    ),
+                    Message::tool_result(ToolResult::success("call_1", "bash", "/tmp")),
+                    Message::user(vec![ContentPart::text("now continue")]),
+                ],
+                Vec::new(),
+            )
+        }
+
+        for (api_compat, thinking_level, expected_replay) in [
+            (
+                ProviderApiCompat::Deepseek,
+                ThinkingLevel::High,
+                Some("Need the working directory before answering."),
+            ),
+            (ProviderApiCompat::DashscopeQwen, ThinkingLevel::XHigh, None),
+            (ProviderApiCompat::Deepseek, ThinkingLevel::Off, None),
+        ] {
+            let body = build_chat_completions_request(
+                &provider_config(api_compat, thinking_level),
+                &request_with_replay_tool_call(),
+            )
+            .expect("request with replay tool call should build");
+
+            assert_eq!(
+                body["messages"][1]
+                    .get("reasoning_content")
+                    .and_then(Value::as_str),
+                expected_replay,
+                "{api_compat:?} {thinking_level:?}"
+            );
+        }
+
+        let text_request = ProviderRequest::new(
+            "system",
+            vec![Message::Assistant {
+                content: Some("final answer".to_owned()),
+                tool_calls: Vec::new(),
+                assistant_replay: Some(AssistantMessageReplay::reasoning_content(
+                    "Private reasoning summary.",
+                )),
+                usage: None,
+                stop_reason: Some(StopReason::EndTurn),
+            }],
+            Vec::new(),
+        );
+        let body = build_chat_completions_request(
+            &provider_config(ProviderApiCompat::Deepseek, ThinkingLevel::High),
+            &text_request,
+        )
+        .expect("text assistant with replay should build");
+        assert!(body["messages"][1].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_replay_policy_matrix_matches_provider_requirements() {
+        let replay_providers = [
+            ProviderApiCompat::Deepseek,
+            ProviderApiCompat::DashscopeGlm,
+            ProviderApiCompat::ZaiGlm,
+        ];
+        let non_replay_providers = [ProviderApiCompat::DashscopeQwen];
+        let thinking_on_levels = [
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+        ];
+
+        for api_compat in replay_providers {
+            let thinking = ThinkingConfig::new(ThinkingLevel::Off);
+            let policy = ProviderApiCompatPolicy::new(api_compat, &thinking)
+                .expect("off thinking should be valid");
+            assert!(
+                !policy.reasoning_replay().enabled,
+                "{api_compat:?} off thinking must not replay"
+            );
+
+            for thinking_level in thinking_on_levels {
+                let thinking = ThinkingConfig::new(thinking_level);
+                let policy = ProviderApiCompatPolicy::new(api_compat, &thinking)
+                    .expect("thinking level should be valid");
+                assert!(
+                    policy.reasoning_replay().enabled,
+                    "{api_compat:?} {thinking_level:?} should replay"
+                );
+            }
+        }
+
+        for api_compat in non_replay_providers {
+            for thinking_level in [
+                ThinkingLevel::Off,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::XHigh,
+            ] {
+                let thinking = ThinkingConfig::new(thinking_level);
+                let policy = ProviderApiCompatPolicy::new(api_compat, &thinking)
+                    .expect("thinking level should be valid");
+                assert!(
+                    !policy.reasoning_replay().enabled,
+                    "{api_compat:?} {thinking_level:?} must not replay"
+                );
+            }
+        }
+
+        let thinking = ThinkingConfig::new(ThinkingLevel::Off);
+        let policy = ProviderApiCompatPolicy::new(ProviderApiCompat::Standard, &thinking)
+            .expect("standard off thinking should be valid");
+        assert!(!policy.reasoning_replay().enabled);
+    }
+
+    #[test]
+    fn request_dialect_streaming_transport_matrix_matches_provider_requirements() {
+        for (api_compat, thinking_level, with_tools, expected) in [
+            (
+                ProviderApiCompat::DashscopeQwen,
+                ThinkingLevel::Off,
+                false,
+                false,
+            ),
+            (
+                ProviderApiCompat::DashscopeQwen,
+                ThinkingLevel::XHigh,
+                false,
+                true,
+            ),
+            (
+                ProviderApiCompat::DashscopeGlm,
+                ThinkingLevel::XHigh,
+                false,
+                false,
+            ),
+            (
+                ProviderApiCompat::DashscopeGlm,
+                ThinkingLevel::Off,
+                true,
+                true,
+            ),
+            (ProviderApiCompat::ZaiGlm, ThinkingLevel::XHigh, true, false),
+        ] {
+            let request = request_with_tools(with_tools);
+            assert_eq!(
+                request_dialect(api_compat, thinking_level).requires_streaming_transport(&request),
+                expected,
+                "{api_compat:?} {thinking_level:?} with_tools={with_tools}"
+            );
+        }
+    }
+
+    #[test]
+    fn sse_event_buffer_handles_lf_and_crlf_separators_in_one_chunk() {
+        let mut buffer = SseEventBuffer::default();
+        buffer.extend(b"first\n\nsecond\r\n\r\n");
+
+        assert_eq!(buffer.next_event(), Some(b"first".as_slice()));
+        assert_eq!(buffer.next_event(), Some(b"second".as_slice()));
+        assert_eq!(buffer.next_event(), None);
+
+        buffer.compact();
+        assert_eq!(buffer.pending_len(), 0);
+    }
+
+    #[test]
+    fn sse_event_buffer_handles_separators_split_across_chunks() {
+        let mut buffer = SseEventBuffer::default();
+        let mut events = Vec::new();
+
+        for chunk in [
+            b"first\r".as_slice(),
+            b"\n\r".as_slice(),
+            b"\nsecond\n".as_slice(),
+            b"\n".as_slice(),
+        ] {
+            buffer.extend(chunk);
+            while let Some(event) = buffer.next_event() {
+                events.push(event.to_vec());
+            }
+            buffer.compact();
+        }
+
+        assert_eq!(events, [b"first".as_slice(), b"second".as_slice()]);
+        assert_eq!(buffer.pending_len(), 0);
+    }
+
+    #[test]
+    fn sse_event_buffer_compacts_once_after_a_batch_of_events() {
+        let mut buffer = SseEventBuffer::default();
+        buffer.extend(b"one\n\ntwo\n\npartial");
+
+        assert_eq!(buffer.next_event(), Some(b"one".as_slice()));
+        assert_eq!(buffer.next_event(), Some(b"two".as_slice()));
+        assert_eq!(buffer.next_event(), None);
+        assert_eq!(buffer.pending_len(), b"one\n\ntwo\n\npartial".len());
+
+        buffer.compact();
+        assert_eq!(buffer.pending_bytes(), b"partial");
+    }
+
+    #[test]
+    fn sse_event_buffer_scans_large_chunked_event_near_linearly() {
+        const TOTAL_BYTES: usize = MAX_PROVIDER_SUCCESS_RESPONSE_BYTES;
+        const CHUNK_BYTES: usize = 4 * 1024;
+
+        let mut buffer = SseEventBuffer::default();
+        let chunk = vec![b'x'; CHUNK_BYTES];
+        for _ in 0..TOTAL_BYTES / CHUNK_BYTES {
+            buffer.extend(&chunk);
+            assert_eq!(buffer.next_event(), None);
+        }
+
+        assert_eq!(buffer.pending_len(), TOTAL_BYTES);
+        assert!(
+            buffer.scanned_bytes() <= TOTAL_BYTES + 3 * (TOTAL_BYTES / CHUNK_BYTES),
+            "incremental SSE scan revisited too much data: scanned={} buffered={TOTAL_BYTES}",
+            buffer.scanned_bytes()
+        );
     }
 
     #[test]
@@ -1582,8 +1107,8 @@ mod tests {
             input_ids: vec!["msg_1".to_owned()],
         };
         let context = ProviderPreviewContext::new(metadata, hub.sink());
-        let mut parser = ChatCompletionsStreamParser::new(true, context);
-        let mut buffer = Vec::new();
+        let mut parser = ChatCompletionsStreamParser::new(stream_policy(true), Some(context));
+        let mut buffer = SseEventBuffer::default();
         let chunks = split_chunks(vec![
             b": comment\r\n\r\n".to_vec(),
             b"\r\n".to_vec(),
@@ -1620,12 +1145,11 @@ mod tests {
 
         for chunk in chunks {
             body_bytes += chunk.len();
-            buffer.extend_from_slice(&chunk);
-            while let Some((index, separator_len)) = find_sse_event_separator(&buffer) {
-                let event = buffer[..index].to_vec();
-                buffer.drain(..index + separator_len);
-                parser.process_event(&event).expect("event should parse");
+            buffer.extend(&chunk);
+            while let Some(event) = buffer.next_event() {
+                parser.process_event(event).expect("event should parse");
             }
+            buffer.compact();
         }
 
         assert!(parser.done);
@@ -1635,13 +1159,7 @@ mod tests {
             .response;
         assert_eq!(response.text.as_deref(), Some("hi 世界"));
         assert_eq!(response.stop_reason, StopReason::EndTurn);
-        assert_eq!(
-            response
-                .assistant_replay
-                .as_ref()
-                .and_then(|replay| replay.reasoning_content.as_deref()),
-            Some("private")
-        );
+        assert_eq!(response.assistant_replay, None);
 
         let first_delta = serde_json::to_value(
             subscription
@@ -1683,8 +1201,8 @@ mod tests {
             input_ids: vec!["msg_1".to_owned()],
         };
         let context = ProviderPreviewContext::new(metadata, hub.sink());
-        let mut parser = ChatCompletionsStreamParser::new(true, context);
-        let mut buffer = Vec::new();
+        let mut parser = ChatCompletionsStreamParser::new(stream_policy(true), Some(context));
+        let mut buffer = SseEventBuffer::default();
         let chunks = [
             sse_json(json!({
                 "choices": [
@@ -1699,12 +1217,11 @@ mod tests {
         let body_bytes = chunks.iter().map(Vec::len).sum();
 
         for chunk in chunks {
-            buffer.extend_from_slice(&chunk);
-            while let Some((index, separator_len)) = find_sse_event_separator(&buffer) {
-                let event = buffer[..index].to_vec();
-                buffer.drain(..index + separator_len);
-                parser.process_event(&event).expect("event should parse");
+            buffer.extend(&chunk);
+            while let Some(event) = buffer.next_event() {
+                parser.process_event(event).expect("event should parse");
             }
+            buffer.compact();
         }
 
         assert!(parser.done);
@@ -1740,7 +1257,7 @@ mod tests {
             input_ids: vec!["msg_1".to_owned()],
         };
         let context = ProviderPreviewContext::new(metadata, hub.sink());
-        let mut parser = ChatCompletionsStreamParser::new(true, context);
+        let mut parser = ChatCompletionsStreamParser::new(stream_policy(true), Some(context));
         parser
             .process_event(&sse_json(json!({
                 "choices": [
@@ -1786,7 +1303,7 @@ mod tests {
             input_ids: vec!["msg_1".to_owned()],
         };
         let context = ProviderPreviewContext::new(metadata, hub.sink());
-        let mut parser = ChatCompletionsStreamParser::new(false, context);
+        let mut parser = ChatCompletionsStreamParser::new(stream_policy(false), Some(context));
         parser
             .process_event(&sse_json(json!({
                 "choices": [
@@ -1808,6 +1325,204 @@ mod tests {
         assert!(error
             .to_string()
             .contains("finish_reason tool_calls must include tool_calls"));
+    }
+
+    #[test]
+    fn dashscope_glm_tool_stream_parser_aggregates_arguments_without_preview() {
+        let thinking = ThinkingConfig::new(ThinkingLevel::Off);
+        let policy = ProviderApiCompatPolicy::new(ProviderApiCompat::DashscopeGlm, &thinking)
+            .expect("dashscope glm off thinking should be valid");
+        let mut parser = ChatCompletionsStreamParser::new(policy, None);
+
+        for event in [
+            sse_json(json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": "{\"command\""
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            sse_json(json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": ":\"pwd\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ]
+            })),
+            sse_json(json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18
+                }
+            })),
+            b"data: [DONE]\n\n".to_vec(),
+        ] {
+            parser.process_event(&event).expect("event should parse");
+        }
+
+        assert!(parser.done);
+        let response = parser
+            .finish(256)
+            .expect("glm tool stream should finish")
+            .response;
+
+        assert_eq!(response.text, None);
+        assert_eq!(response.stop_reason, StopReason::ToolCalls);
+        assert_eq!(
+            response.tool_calls,
+            vec![ToolCall::new("call_1", "bash", json!({"command": "pwd"}))]
+        );
+        assert_eq!(
+            response.usage,
+            Some(Usage {
+                input_tokens: 11,
+                output_tokens: 7,
+                total_tokens: 18,
+                cached_input_tokens: 0,
+                reasoning_output_tokens: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn stream_parser_tool_calls_win_over_stop_and_length_finish_reasons() {
+        for finish_reason in ["stop", "length"] {
+            let mut parser = ChatCompletionsStreamParser::new(stream_policy(false), None);
+
+            for event in [
+                sse_json(json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "bash",
+                                            "arguments": "{\"command\""
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                })),
+                sse_json(json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {
+                                            "arguments": ":\"pwd\"}"
+                                        }
+                                    }
+                                ]
+                            },
+                            "finish_reason": finish_reason
+                        }
+                    ]
+                })),
+                b"data: [DONE]\n\n".to_vec(),
+            ] {
+                parser.process_event(&event).expect("event should parse");
+            }
+
+            let response = parser
+                .finish(256)
+                .expect("tool stream should finish")
+                .response;
+
+            assert_eq!(response.text, None);
+            assert_eq!(response.stop_reason, StopReason::ToolCalls);
+            assert_eq!(
+                response.tool_calls,
+                vec![ToolCall::new("call_1", "bash", json!({"command": "pwd"}))]
+            );
+        }
+    }
+
+    #[test]
+    fn stream_parser_replays_only_deepseek_reasoning_content_field() {
+        let mut parser = ChatCompletionsStreamParser::new(stream_policy(true), None);
+
+        for event in [
+            sse_json(json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "official replay",
+                            "thinking": " private thinking must not replay",
+                            "chain_of_thought": " private chain must not replay",
+                            "reasoning": " private generic reasoning must not replay"
+                        }
+                    }
+                ]
+            })),
+            sse_json(json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": "{}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ]
+            })),
+            b"data: [DONE]\n\n".to_vec(),
+        ] {
+            parser.process_event(&event).expect("event should parse");
+        }
+
+        let response = parser
+            .finish(256)
+            .expect("deepseek tool stream should finish")
+            .response;
+
+        assert_eq!(
+            response
+                .assistant_replay
+                .as_ref()
+                .and_then(|replay| replay.reasoning_content.as_deref()),
+            Some("official replay")
+        );
     }
 
     #[test]
@@ -1854,6 +1569,32 @@ mod tests {
                 ToolCall::new("call_a", "bash", json!({"command": "pwd"})),
                 ToolCall::new("call_b", "status", json!({})),
             ]
+        );
+    }
+
+    #[test]
+    fn llm_text_preview_tool_call_assembler_defaults_empty_arguments_to_empty_object() {
+        let mut assembler = StreamingToolCallAssembler::default();
+
+        assembler
+            .push_delta(&json!([
+                {
+                    "index": 0,
+                    "id": "call_empty",
+                    "type": "function",
+                    "function": {
+                        "name": "status"
+                    }
+                }
+            ]))
+            .expect("tool call without argument fragments should parse");
+
+        let calls = assembler
+            .finish()
+            .expect("empty arguments should default to an empty object");
+        assert_eq!(
+            calls,
+            vec![ToolCall::new("call_empty", "status", json!({}))]
         );
     }
 
@@ -2010,16 +1751,5 @@ mod tests {
             }
         }
         split
-    }
-
-    fn temp_file_path(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "botified-openai-chat-{name}-{}-{stamp}",
-            std::process::id()
-        ))
     }
 }

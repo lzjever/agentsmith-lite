@@ -6,10 +6,13 @@ pub mod config;
 pub mod context_files;
 pub mod event;
 pub mod files;
+mod formatting;
 pub mod http;
 pub mod llm_text_preview;
 pub mod message_render;
 pub mod path_utils;
+#[doc(hidden)]
+pub mod private_fs;
 pub mod profiling;
 pub mod provider;
 pub mod registry;
@@ -29,16 +32,14 @@ pub mod types;
 
 pub use agent_events::{AgentUsage, CommandExecutionStatus, EventError, ThreadEvent, ThreadItem};
 pub use agent_loop::{
-    run_agent, run_agent_with_input_drainer, AcceptedInputEntry, AgentCommitError, AgentConfig,
-    AgentContextRecorder, AgentInputDrainer, AgentRunError, AgentRunErrorKind, AgentRunResult,
-    DrainBatch, DrainedMessage, InputSource, InputUrgency, PromptRefreshConfig,
-    QueuedInputMetadata, ToolExecutionPolicy,
+    run_agent, run_agent_with_compaction_hook, run_agent_with_input_drainer, AcceptedInputEntry,
+    AgentCommitError, AgentCompactionHook, AgentCompactionSafePoint, AgentCompactionUpdate,
+    AgentConfig, AgentContextRecorder, AgentInputDrainer, AgentRunError, AgentRunErrorKind,
+    AgentRunResult, DrainBatch, DrainedMessage, InputSource, InputUrgency, PromptRefreshConfig,
+    QueuedInputMetadata, TaskCallbackExecutionState, ToolExecutionPolicy,
 };
 pub use attachments::{
     parse_user_input, AttachmentError, ParsedUserInput, PublicInputItem, MAX_IMAGE_BASE64_BYTES,
-};
-pub use compact::{
-    CompactConfig, DEFAULT_COMPACT_KEEP_RECENT_TOKENS, DEFAULT_COMPACT_THRESHOLD_TOKENS,
 };
 pub use context_files::{
     load_context_files, ContextFile, ContextFileLoadConfig, LoadedContextFiles,
@@ -61,9 +62,9 @@ pub use provider::{
     Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 pub use registry::{
-    RegistryConfig, RegistryError, RegistryHistoryResult, RegistryItem, RegistryQuery,
-    RegistryQueryResult, RegistrySetAck, RegistrySetRequest, RegistryStore, RegistryTopicSummary,
-    RegistryTtl, RegistryWriterKind,
+    RegistryConfig, RegistryDeleteAck, RegistryError, RegistryHistoryResult, RegistryItem,
+    RegistryQuery, RegistryQueryResult, RegistrySetAck, RegistrySetRequest, RegistryStore,
+    RegistryTopicSummary, RegistryTtl, RegistryWriterKind,
 };
 pub use service::{
     EnqueueOutcome, EnqueueSubmitStatus, Service, ServiceError, ServiceLimits, ServiceState,
@@ -71,7 +72,8 @@ pub use service::{
 };
 pub use session::{
     encode_session_name, open_or_create_session, open_or_create_session_in_home,
-    DurableMessageCursor, FileSessionRecorder, OpenedSession, SessionError, SessionRestartBoundary,
+    CallbackDeliveryEventType, CallbackDeliveryIntent, DurableMessageCursor, FileSessionRecorder,
+    OpenedSession, SessionError, SessionReplay, SessionRestartBoundary,
     DEFAULT_ACCEPTED_MESSAGE_REPLAY_WINDOW,
 };
 pub use skills::{
@@ -89,17 +91,22 @@ pub use system_prompt::{
     RuntimeEnvironmentContext,
 };
 pub use task_observer::{
-    FinalTextObservation, FinalTextObservationKind, TaskConversationObserver, TaskObserveMode,
+    FinalTextObservation, FinalTextObservationKind, TaskConversationObserver,
     TaskObserverDiagnostic,
 };
 pub use tasks::{
-    task_exception_frame, task_response_frame, BackgroundTaskManager, BotifiedFrameEvent,
-    BotifiedFrameScan, BotifiedFrameScanner, BoundedTaskOutputSink, CallbackDelivery,
-    NewBackgroundTask, SharedTaskStdinWriter, TaskCallbackPayloadSnapshot, TaskCancelTool,
-    TaskFrameDiagnostic, TaskListTool, TaskOutputPolicy, TaskOutputSnapshot, TaskOutputUpdate,
-    TaskRegistryGetFrame, TaskRegistrySetFrame, TaskReplyOutcome, TaskReplyStatus,
-    TaskRequestAdmission, TaskRequestFrame, TaskRequestSnapshot, TaskRequestState, TaskSnapshot,
-    TaskState, TaskStdinWriter,
+    task_exception_frame, task_observe_done_frame, task_observe_error_frame,
+    task_observe_result_disabled_frame, task_observe_result_enabled_frame,
+    task_observe_result_failure_frame, task_observe_text_frames, task_response_frame,
+    BackgroundTaskManager, BotifiedFrameEvent, BotifiedFrameScan, BotifiedFrameScanner,
+    BoundedTaskOutputSink, CallbackDelivery, NewBackgroundTask, SharedTaskStdinWriter,
+    TaskCallbackPayloadSnapshot, TaskCancelTool, TaskFrameDiagnostic, TaskListTool,
+    TaskObserveConfig, TaskObserveDelivery, TaskObserveException, TaskObserveRequestAction,
+    TaskObserveRequestFrame, TaskObserveRequestRejectedFrame, TaskObserveSource,
+    TaskObserveTextMetadata, TaskOutputPolicy, TaskOutputSnapshot, TaskOutputUpdate,
+    TaskRegistryDeleteFrame, TaskRegistryGetFrame, TaskRegistrySetFrame, TaskReplyOutcome,
+    TaskReplyStatus, TaskRequestAdmission, TaskRequestFrame, TaskRequestSnapshot, TaskRequestState,
+    TaskSnapshot, TaskState, TaskStdinWriter,
 };
 pub use timeline::{
     TimelineEnvelope, TimelineEnvelopeError, TimelineItem, TimelineTrace, TIMELINE_VERSION,

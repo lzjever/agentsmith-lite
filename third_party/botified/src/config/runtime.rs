@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -9,8 +9,10 @@ use std::time::Duration;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{non_empty_env, ConfigError, OpenAiCompatibleConfig};
-use crate::compact::CompactConfig;
+use super::{
+    non_empty_env, validate_provider_base_url, ConfigError, OpenAiCompatibleConfig,
+    ProviderApiCompat, DEFAULT_PROVIDER_TIMEOUT,
+};
 use crate::files::{
     DEFAULT_FILES_ROOT_DIR, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_MESSAGE_FILES,
     DEFAULT_MAX_MESSAGE_REFERENCED_FILE_BYTES, DEFAULT_MAX_STORE_BYTES, DEFAULT_MAX_UPLOAD_FILES,
@@ -20,7 +22,7 @@ use crate::path_utils::lexical_absolute;
 use crate::provider::router::ProviderCapability;
 use crate::provider::thinking::ThinkingConfig;
 use crate::provider::ProviderMetadata;
-use crate::registry::{RegistryConfig, RegistryStoreOptions};
+use crate::registry::{RegistryConfig, RegistryStoreOptions, MIN_REGISTRY_WS_MESSAGE_BYTES};
 
 pub const RUNTIME_CONFIG_VERSION: u32 = 1;
 
@@ -40,27 +42,35 @@ pub struct RuntimeConfig {
     pub context_files: RuntimeContextFilesConfig,
     #[serde(default)]
     pub subagents: RuntimeSubagentsConfig,
-    pub compact: CompactConfig,
     #[serde(default)]
     pub profiling: RuntimeProfilingConfig,
     #[serde(default)]
     pub llm_text_preview: RuntimeLlmTextPreviewConfig,
     #[serde(default)]
     pub registry: RuntimeRegistryConfig,
+    #[serde(default)]
+    pub task_presets: RuntimeTaskPresetsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProviderConfig {
     pub name: String,
+    #[serde(default)]
+    pub api_compat: ProviderApiCompat,
     pub base_url: String,
     pub model: String,
     pub api_key_env: String,
-    #[serde(default)]
-    pub ca_bundle_path: Option<PathBuf>,
+    #[serde(default = "default_provider_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    #[serde(default = "default_provider_priority")]
     pub priority: i32,
     pub capabilities: Vec<ProviderCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "ThinkingConfig::is_off")]
     pub thinking: ThinkingConfig,
 }
 
@@ -240,6 +250,7 @@ pub struct RuntimeFilesConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSkillsConfig {
     pub default_discovery: bool,
+    #[serde(default)]
     pub explicit: Vec<String>,
 }
 
@@ -247,6 +258,7 @@ pub struct RuntimeSkillsConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeContextFilesConfig {
     pub enabled: bool,
+    #[serde(default = "default_context_files_max_total_bytes")]
     pub max_total_bytes: usize,
 }
 
@@ -259,8 +271,6 @@ pub struct RuntimeSubagentsConfig {
     pub max_parallel: usize,
     #[serde(default = "default_subagents_max_branches")]
     pub max_branches: usize,
-    #[serde(default)]
-    pub model_aliases: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,12 +296,14 @@ pub struct RuntimeLlmTextPreviewConfig {
 pub struct RuntimeRegistryConfig {
     #[serde(default = "default_registry_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_registry_retention_secs")]
-    pub retention_secs: RuntimeSeconds,
+    #[serde(default = "default_registry_history_retention_secs")]
+    pub history_retention_secs: RuntimeSeconds,
     #[serde(default = "default_registry_default_ttl_secs")]
     pub default_ttl_secs: RuntimeSeconds,
     #[serde(default = "default_registry_max_topics")]
     pub max_topics: usize,
+    #[serde(default = "default_registry_max_subscriptions")]
+    pub max_subscriptions: usize,
     #[serde(default = "default_registry_max_topic_len")]
     pub max_topic_len: usize,
     #[serde(default = "default_registry_max_source_len")]
@@ -312,6 +324,22 @@ pub struct RuntimeRegistryConfig {
     pub websocket_max_frame_bytes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTaskPresetsConfig {
+    #[serde(default)]
+    pub presets: BTreeMap<String, RuntimeTaskPresetConfig>,
+    #[serde(default)]
+    pub start_on_boot: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTaskPresetConfig {
+    pub description: String,
+    pub command: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProviderConfig {
     pub name: String,
@@ -326,12 +354,6 @@ pub struct ResolvedRuntimePaths {
     pub startup_dir: PathBuf,
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeConfigLoad {
-    Loaded(Box<RuntimeConfig>),
-    GeneratedExample { path: PathBuf },
 }
 
 impl RuntimeConfig {
@@ -365,51 +387,6 @@ impl RuntimeConfig {
         Ok(config)
     }
 
-    pub fn write_default_example(path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent).map_err(|error| {
-                ConfigError::new(format!(
-                    "failed to create runtime config directory {}: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        fs::write(path, default_example_yaml()).map_err(|error| {
-            ConfigError::new(format!(
-                "failed to write default runtime config example {}: {error}",
-                path.display()
-            ))
-        })
-    }
-
-    pub fn load_or_write_example(path: &Path) -> Result<RuntimeConfigLoad, ConfigError> {
-        match fs::read_to_string(path) {
-            Ok(raw) => {
-                let config: Self = serde_yaml::from_str(&raw).map_err(|error| {
-                    ConfigError::new(format!(
-                        "failed to parse runtime config {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                config.validate()?;
-                Ok(RuntimeConfigLoad::Loaded(Box::new(config)))
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Self::write_default_example(path)?;
-                Ok(RuntimeConfigLoad::GeneratedExample {
-                    path: path.to_path_buf(),
-                })
-            }
-            Err(error) => Err(ConfigError::new(format!(
-                "failed to read runtime config {}: {error}",
-                path.display()
-            ))),
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.version != RUNTIME_CONFIG_VERSION {
             return Err(ConfigError::new(format!(
@@ -417,15 +394,14 @@ impl RuntimeConfig {
                 self.version
             )));
         }
-        if self.providers.is_empty() {
-            return Err(ConfigError::new(
-                "runtime config requires at least one provider",
-            ));
-        }
-
         let mut provider_names = HashSet::new();
         for provider in &self.providers {
             provider.validate()?;
+            if provider.name == "auto" {
+                return Err(ConfigError::new(
+                    "provider name auto is reserved for runtime automatic selection",
+                ));
+            }
             if !provider_names.insert(provider.name.clone()) {
                 return Err(ConfigError::new(format!(
                     "duplicate provider name {}",
@@ -437,15 +413,14 @@ impl RuntimeConfig {
         self.tools.validate()?;
         self.service.validate()?;
         self.registry.validate()?;
-        self.validate_service_tool_auth()?;
+        self.task_presets.validate()?;
         self.validate_tool_provider_capabilities()?;
         self.runtime.validate()?;
         self.timeline.validate()?;
         self.files.validate()?;
         self.skills.validate()?;
         self.context_files.validate()?;
-        self.subagents.validate(&provider_names)?;
-        validate_compact_config(&self.compact)?;
+        self.subagents.validate()?;
         self.profiling.validate()?;
         Ok(())
     }
@@ -468,7 +443,10 @@ impl RuntimeConfig {
                 ProviderMetadata::new(provider.name.clone())
                     .with_name(provider.name.clone())
                     .with_model(provider.model.clone())
+                    .with_api_compat(provider.api_compat)
                     .with_capabilities(provider.capabilities.clone())
+                    .with_optional_context_window_tokens(provider.context_window_tokens)
+                    .with_optional_max_output_tokens(provider.max_output_tokens)
             })
             .collect()
     }
@@ -513,22 +491,6 @@ impl RuntimeConfig {
             })
     }
 
-    fn validate_service_tool_auth(&self) -> Result<(), ConfigError> {
-        if is_loopback_host(&self.service.host) {
-            return Ok(());
-        }
-        if self.service.service_key_env.is_some() {
-            return Ok(());
-        }
-        if self.tools.enabled.is_empty() && !self.registry.enabled {
-            return Ok(());
-        }
-
-        Err(ConfigError::new(
-            "tools.enabled or registry.enabled requires service.service_key_env when service.host is not loopback/localhost",
-        ))
-    }
-
     fn validate_tool_provider_capabilities(&self) -> Result<(), ConfigError> {
         if !self.tools.enabled.contains(&RuntimeTool::ViewImage) {
             return Ok(());
@@ -551,22 +513,39 @@ impl RuntimeProviderConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         validate_non_empty_string("provider name", &self.name)?;
         validate_non_empty_string(&format!("provider {} base_url", self.name), &self.base_url)?;
+        validate_provider_base_url(&self.name, &self.base_url)?;
         validate_non_empty_string(&format!("provider {} model", self.name), &self.model)?;
-        validate_non_empty_string(
+        validate_shell_env_identifier(
             &format!("provider {} api_key_env", self.name),
             &self.api_key_env,
         )?;
-        if let Some(ca_bundle_path) = &self.ca_bundle_path {
-            validate_non_empty_path(
-                &format!("provider {} ca_bundle_path", self.name),
-                ca_bundle_path,
-            )?;
-        }
         if self.request_timeout_secs == 0 {
             return Err(ConfigError::new(format!(
                 "provider {} request_timeout_secs must be greater than 0",
                 self.name
             )));
+        }
+        if matches!(self.context_window_tokens, Some(0)) {
+            return Err(ConfigError::new(format!(
+                "provider {} context_window_tokens must be greater than 0",
+                self.name
+            )));
+        }
+        if matches!(self.max_output_tokens, Some(0)) {
+            return Err(ConfigError::new(format!(
+                "provider {} max_output_tokens must be greater than 0",
+                self.name
+            )));
+        }
+        if let (Some(max_output_tokens), Some(context_window_tokens)) =
+            (self.max_output_tokens, self.context_window_tokens)
+        {
+            if max_output_tokens >= context_window_tokens {
+                return Err(ConfigError::new(format!(
+                    "provider {} max_output_tokens must be less than context_window_tokens",
+                    self.name
+                )));
+            }
         }
         if self.capabilities.is_empty() {
             return Err(ConfigError::new(format!(
@@ -588,6 +567,9 @@ impl RuntimeProviderConfig {
         self.thinking
             .validate()
             .map_err(|error| ConfigError::new(format!("provider {} {error}", self.name)))?;
+        self.api_compat
+            .validate_thinking_level(self.thinking.level)
+            .map_err(|error| ConfigError::new(format!("provider {} {error}", self.name)))?;
         Ok(())
     }
 
@@ -607,9 +589,11 @@ impl RuntimeProviderConfig {
             priority: self.priority,
             capabilities: self.capabilities.clone(),
             config: OpenAiCompatibleConfig::new(&self.name, &self.base_url, &self.model)
+                .with_api_compat(self.api_compat)
                 .with_api_key(api_key)
-                .with_optional_ca_bundle_path(self.ca_bundle_path.clone())
                 .with_request_timeout(Duration::from_secs(self.request_timeout_secs))
+                .with_optional_context_window_tokens(self.context_window_tokens)
+                .with_optional_max_output_tokens(self.max_output_tokens)
                 .with_thinking(self.thinking.clone()),
         })
     }
@@ -667,11 +651,18 @@ impl Default for RuntimeToolExecutionConfig {
 
 impl RuntimeToolExecutionConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        let executor_addr = self.bash_executor_addr.parse::<std::net::SocketAddr>().map_err(|error| {
-            ConfigError::new(format!("tools.execution.bash_executor_addr must be a socket address: {error}"))
-        })?;
+        let executor_addr = self
+            .bash_executor_addr
+            .parse::<std::net::SocketAddr>()
+            .map_err(|error| {
+                ConfigError::new(format!(
+                    "tools.execution.bash_executor_addr must be a socket address: {error}"
+                ))
+            })?;
         if !executor_addr.ip().is_loopback() {
-            return Err(ConfigError::new("tools.execution.bash_executor_addr must use a loopback address"));
+            return Err(ConfigError::new(
+                "tools.execution.bash_executor_addr must use a loopback address",
+            ));
         }
         validate_positive_seconds(
             "tools.execution.default_detach_after_secs",
@@ -727,8 +718,60 @@ impl RuntimeToolExecutionConfig {
     }
 }
 
+impl RuntimeTaskPresetsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (id, preset) in &self.presets {
+            validate_task_preset_id(id)?;
+            preset.validate(id)?;
+        }
+
+        let mut boot_ids = HashSet::new();
+        for id in &self.start_on_boot {
+            validate_non_empty_string("task_presets.start_on_boot entry", id)?;
+            if !boot_ids.insert(id) {
+                return Err(ConfigError::new(format!(
+                    "duplicate task_presets.start_on_boot entry {id}"
+                )));
+            }
+            if !self.presets.contains_key(id) {
+                return Err(ConfigError::new(format!(
+                    "task_presets.start_on_boot references unknown preset {id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeTaskPresetConfig {
+    fn validate(&self, id: &str) -> Result<(), ConfigError> {
+        validate_non_empty_string(
+            &format!("task_presets.presets.{id}.description"),
+            &self.description,
+        )?;
+        validate_non_empty_string(&format!("task_presets.presets.{id}.command"), &self.command)?;
+        Ok(())
+    }
+}
+
 fn default_execution_max_task_ask_pending_secs() -> RuntimeSeconds {
     RuntimeToolsConfig::DEFAULT_EXECUTION_MAX_TASK_ASK_PENDING_SECS
+}
+
+fn default_provider_request_timeout_secs() -> u64 {
+    DEFAULT_PROVIDER_TIMEOUT.as_secs()
+}
+
+fn default_provider_priority() -> i32 {
+    100
+}
+
+fn default_context_files_max_total_bytes() -> usize {
+    RuntimeContextFilesConfig::DEFAULT_MAX_TOTAL_BYTES
+}
+
+fn default_resume_unfinished() -> bool {
+    true
 }
 
 impl RuntimeServiceConfig {
@@ -738,7 +781,11 @@ impl RuntimeServiceConfig {
             return Err(ConfigError::new("service port must be greater than 0"));
         }
         if let Some(service_key_env) = &self.service_key_env {
-            validate_non_empty_string("service service_key_env", service_key_env)?;
+            validate_shell_env_identifier("service service_key_env", service_key_env.trim())?;
+        } else if !is_explicit_loopback_ip(&self.host) {
+            return Err(ConfigError::new(
+                "service.service_key_env is required when service.host is not an explicit loopback IP address",
+            ));
         }
         if self.max_queue_messages == 0 {
             return Err(ConfigError::new(
@@ -826,6 +873,8 @@ impl RuntimeSkillsConfig {
 }
 
 impl RuntimeContextFilesConfig {
+    pub const DEFAULT_MAX_TOTAL_BYTES: usize = 32_768;
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.max_total_bytes == 0 {
             return Err(ConfigError::new(
@@ -842,29 +891,14 @@ impl Default for RuntimeSubagentsConfig {
             enabled: false,
             max_parallel: default_subagents_max_parallel(),
             max_branches: default_subagents_max_branches(),
-            model_aliases: HashMap::new(),
         }
     }
 }
 
 impl RuntimeSubagentsConfig {
-    fn validate(&self, provider_names: &HashSet<String>) -> Result<(), ConfigError> {
+    fn validate(&self) -> Result<(), ConfigError> {
         validate_positive_usize("subagents max_parallel", self.max_parallel)?;
         validate_positive_usize("subagents max_branches", self.max_branches)?;
-
-        for (alias, provider_name) in &self.model_aliases {
-            validate_non_empty_string("subagents model_aliases alias", alias)?;
-            validate_non_empty_string(
-                &format!("subagents model_aliases.{alias} provider"),
-                provider_name,
-            )?;
-            if !provider_names.contains(provider_name) {
-                return Err(ConfigError::new(format!(
-                    "subagents model_aliases.{alias} references unknown provider {provider_name}"
-                )));
-            }
-        }
-
         Ok(())
     }
 }
@@ -885,13 +919,14 @@ impl Default for RuntimeRegistryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            retention_secs: RuntimeSeconds::from_millis(
-                RegistryConfig::DEFAULT_RETENTION.as_millis() as u64,
+            history_retention_secs: RuntimeSeconds::from_millis(
+                RegistryConfig::DEFAULT_HISTORY_RETENTION.as_millis() as u64,
             ),
             default_ttl_secs: RuntimeSeconds::from_millis(
                 RegistryConfig::DEFAULT_TTL.as_millis() as u64
             ),
             max_topics: RegistryConfig::DEFAULT_MAX_TOPICS,
+            max_subscriptions: RegistryConfig::DEFAULT_MAX_SUBSCRIPTIONS,
             max_topic_len: RegistryConfig::DEFAULT_MAX_TOPIC_LEN,
             max_source_len: RegistryConfig::DEFAULT_MAX_SOURCE_LEN,
             max_value_bytes: RegistryConfig::DEFAULT_MAX_VALUE_BYTES,
@@ -907,14 +942,13 @@ impl Default for RuntimeRegistryConfig {
 
 impl RuntimeRegistryConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        validate_positive_seconds("registry retention_secs", self.retention_secs)?;
+        validate_positive_seconds(
+            "registry history_retention_secs",
+            self.history_retention_secs,
+        )?;
         validate_positive_seconds("registry default_ttl_secs", self.default_ttl_secs)?;
-        if self.default_ttl_secs > self.retention_secs {
-            return Err(ConfigError::new(
-                "registry default_ttl_secs must be less than or equal to retention_secs",
-            ));
-        }
         validate_positive_usize("registry max_topics", self.max_topics)?;
+        validate_positive_usize("registry max_subscriptions", self.max_subscriptions)?;
         validate_positive_usize("registry max_topic_len", self.max_topic_len)?;
         validate_positive_usize("registry max_source_len", self.max_source_len)?;
         validate_positive_usize("registry max_value_bytes", self.max_value_bytes)?;
@@ -922,11 +956,17 @@ impl RuntimeRegistryConfig {
         validate_positive_usize("registry max_history_bytes", self.max_history_bytes)?;
         validate_positive_usize("registry default_query_limit", self.default_query_limit)?;
         validate_positive_usize("registry max_query_limit", self.max_query_limit)?;
-        validate_positive_usize("registry max_response_bytes", self.max_response_bytes)?;
-        validate_positive_usize(
-            "registry websocket_max_frame_bytes",
-            self.websocket_max_frame_bytes,
-        )?;
+        let effective_ws_limit = self.max_response_bytes.min(self.websocket_max_frame_bytes);
+        if effective_ws_limit < MIN_REGISTRY_WS_MESSAGE_BYTES {
+            let field = if self.max_response_bytes <= self.websocket_max_frame_bytes {
+                "max_response_bytes"
+            } else {
+                "websocket_max_frame_bytes"
+            };
+            return Err(ConfigError::new(format!(
+                "registry effective websocket limit min(max_response_bytes, websocket_max_frame_bytes) must be greater than or equal to {MIN_REGISTRY_WS_MESSAGE_BYTES}; {field} is too small"
+            )));
+        }
         if self.default_query_limit > self.max_query_limit {
             return Err(ConfigError::new(
                 "registry default_query_limit must be less than or equal to max_query_limit",
@@ -937,9 +977,10 @@ impl RuntimeRegistryConfig {
 
     pub fn store_config(&self) -> RegistryConfig {
         RegistryConfig {
-            retention: self.retention_secs.as_duration(),
+            history_retention: self.history_retention_secs.as_duration(),
             default_ttl: self.default_ttl_secs.as_duration(),
             max_topics: self.max_topics,
+            max_subscriptions: self.max_subscriptions,
             max_topic_len: self.max_topic_len,
             max_source_len: self.max_source_len,
             max_value_bytes: self.max_value_bytes,
@@ -968,48 +1009,63 @@ pub fn default_example_yaml() -> &'static str {
 
 providers:
   - name: text-main
+    api_compat: standard
     base_url: https://text-provider.example/v1
     model: text-tool-model
     api_key_env: BOTIFIED_TEXT_API_KEY
     request_timeout_secs: 60
     priority: 10
     capabilities: [text, tool_calls]
-    thinking:
-      format: none
-      level: off
-      level_map: {}
-      budget_tokens: null
+    context_window_tokens: 131072
+    max_output_tokens: 32768
 
   - name: vision-main
+    api_compat: dashscope_qwen
     base_url: https://vision-provider.example/v1
     model: vision-model
     api_key_env: BOTIFIED_VISION_API_KEY
     request_timeout_secs: 60
     priority: 20
     capabilities: [text, image]
-    thinking:
-      format: qwen
-      level: off
-      level_map: {}
-      budget_tokens: null
+    context_window_tokens: 131072
+    max_output_tokens: 32768
 
   - name: reasoning-main
+    api_compat: deepseek
     base_url: https://reasoning-provider.example/v1
     model: reasoning-model
     api_key_env: BOTIFIED_REASONING_API_KEY
     request_timeout_secs: 120
     priority: 30
     capabilities: [text, tool_calls]
+    context_window_tokens: 131072
+    max_output_tokens: 32768
     thinking:
-      format: deepseek
-      level: high
-      level_map:
-        minimal: null
-        low: null
-        medium: high
-        high: high
-        xhigh: max
-      budget_tokens: null
+      level: xhigh
+
+  - name: glm-tools
+    api_compat: dashscope_glm
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: glm-model
+    api_key_env: BOTIFIED_GLM_API_KEY
+    request_timeout_secs: 120
+    priority: 40
+    capabilities: [text, tool_calls]
+    context_window_tokens: 131072
+    max_output_tokens: 32768
+    thinking:
+      level: xhigh
+
+  - name: zai-glm-coding
+    api_compat: zai_glm
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    model: glm-5.2
+    api_key_env: BOTIFIED_ZAI_GLM_API_KEY
+    request_timeout_secs: 300
+    priority: 50
+    capabilities: [text, tool_calls]
+    context_window_tokens: 131072
+    max_output_tokens: 32768
 
 tools:
   enabled: [bash, view_image]
@@ -1035,9 +1091,10 @@ service:
 
 registry:
   enabled: true
-  retention_secs: 300
+  history_retention_secs: 300
   default_ttl_secs: 5
   max_topics: 4096
+  max_subscriptions: 64
   max_topic_len: 256
   max_source_len: 128
   max_value_bytes: 8192
@@ -1047,6 +1104,10 @@ registry:
   max_query_limit: 1000
   max_response_bytes: 262144
   websocket_max_frame_bytes: 65536
+
+task_presets:
+  presets: {}
+  start_on_boot: []
 
 runtime:
   cwd: .
@@ -1079,12 +1140,6 @@ subagents:
   enabled: true
   max_parallel: 3
   max_branches: 32
-  model_aliases: {}
-
-compact:
-  enabled: true
-  threshold_tokens: 1000000
-  keep_recent_tokens: 32000
 
 profiling:
   enabled: false
@@ -1140,20 +1195,6 @@ fn validate_resolved_cwd(cwd: &Path) -> Result<(), ConfigError> {
             cwd.display()
         )))
     }
-}
-
-fn validate_compact_config(compact: &CompactConfig) -> Result<(), ConfigError> {
-    if compact.threshold_tokens == 0 {
-        return Err(ConfigError::new(
-            "compact threshold_tokens must be greater than 0",
-        ));
-    }
-    if compact.keep_recent_tokens == 0 {
-        return Err(ConfigError::new(
-            "compact keep_recent_tokens must be greater than 0",
-        ));
-    }
-    Ok(())
 }
 
 fn runtime_seconds_from_f64(seconds: f64) -> Result<RuntimeSeconds, String> {
@@ -1212,12 +1253,34 @@ fn validate_non_empty_string(field: &str, value: &str) -> Result<(), ConfigError
     }
 }
 
-fn default_timeline_retention_days() -> u64 {
-    RuntimeTimelineConfig::DEFAULT_RETENTION_DAYS
+fn validate_shell_env_identifier(field: &str, value: &str) -> Result<(), ConfigError> {
+    let mut bytes = value.bytes();
+    if matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::new(format!(
+            "{field} must match [A-Za-z_][A-Za-z0-9_]*"
+        )))
+    }
 }
 
-fn default_resume_unfinished() -> bool {
-    true
+fn validate_task_preset_id(id: &str) -> Result<(), ConfigError> {
+    validate_non_empty_string("task_presets.presets id", id)?;
+    if id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Ok(());
+    }
+    Err(ConfigError::new(format!(
+        "task_presets.presets id {id} must contain only ASCII letters, digits, '_' or '-'"
+    )))
+}
+
+fn default_timeline_retention_days() -> u64 {
+    RuntimeTimelineConfig::DEFAULT_RETENTION_DAYS
 }
 
 fn default_files_root_dir() -> PathBuf {
@@ -1264,8 +1327,8 @@ fn default_registry_enabled() -> bool {
     true
 }
 
-fn default_registry_retention_secs() -> RuntimeSeconds {
-    RuntimeRegistryConfig::default().retention_secs
+fn default_registry_history_retention_secs() -> RuntimeSeconds {
+    RuntimeRegistryConfig::default().history_retention_secs
 }
 
 fn default_registry_default_ttl_secs() -> RuntimeSeconds {
@@ -1274,6 +1337,10 @@ fn default_registry_default_ttl_secs() -> RuntimeSeconds {
 
 fn default_registry_max_topics() -> usize {
     RuntimeRegistryConfig::default().max_topics
+}
+
+fn default_registry_max_subscriptions() -> usize {
+    RuntimeRegistryConfig::default().max_subscriptions
 }
 
 fn default_registry_max_topic_len() -> usize {
@@ -1320,81 +1387,46 @@ fn validate_non_empty_path(field: &str, value: &Path) -> Result<(), ConfigError>
     }
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
+fn is_explicit_loopback_ip(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 #[cfg(test)]
-mod tests {
+mod lite_tests {
     use super::*;
 
     #[test]
-    fn resume_unfinished_defaults_true_and_accepts_false() {
-        let without_field = default_example_yaml().replace("  resume_unfinished: true\n", "");
-        let defaulted = RuntimeConfig::from_yaml_str(&without_field)
-            .expect("older runtime config should keep crash recovery enabled");
-        assert!(defaulted.runtime.resume_unfinished);
+    fn parses_lite_executor_cold_start_and_internal_broker_contract() {
+        let yaml = default_example_yaml()
+            .replace(
+                "    base_url: https://text-provider.example/v1",
+                "    base_url: http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/task_1/runs/run_1/v1",
+            )
+            .replace(
+                "  session: null\n  resume_unfinished: true\n",
+                "  session: task_1\n  resume_unfinished: false\n",
+            );
 
-        let explicit_false = default_example_yaml().replace(
-            "  resume_unfinished: true\n",
-            "  resume_unfinished: false\n",
-        );
-        let disabled = RuntimeConfig::from_yaml_str(&explicit_false)
-            .expect("runtime config should allow an explicit discard boundary");
-        assert!(!disabled.runtime.resume_unfinished);
+        let config = RuntimeConfig::from_yaml_str(&yaml)
+            .expect("AgentSmith Lite runtime config should parse");
+
+        assert_eq!(config.tools.execution.bash_executor_addr, "127.0.0.1:3110");
+        assert!(!config.runtime.resume_unfinished);
     }
 
     #[test]
-    fn ca_bundle_path_resolves_into_openai_compatible_provider_config() {
-        let provider = RuntimeProviderConfig {
-            name: "local-openai".to_owned(),
-            base_url: "https://models.local.test/v1".to_owned(),
-            model: "gpt-compatible".to_owned(),
-            api_key_env: "MODEL_API_KEY".to_owned(),
-            ca_bundle_path: Some(PathBuf::from("/etc/agentsmith-lite/model-ca/ca.crt")),
-            request_timeout_secs: 30,
-            priority: 10,
-            capabilities: vec![ProviderCapability::Text, ProviderCapability::ToolCalls],
-            thinking: ThinkingConfig::default(),
-        };
-        provider.validate().expect("CA bundle path should validate");
-
-        let resolved = provider
-            .resolve(&HashMap::from([(
-                "MODEL_API_KEY".to_owned(),
-                "sk-test-value".to_owned(),
-            )]))
-            .expect("provider should resolve");
-
-        assert_eq!(
-            resolved.config.ca_bundle_path,
-            Some(PathBuf::from("/etc/agentsmith-lite/model-ca/ca.crt"))
-        );
-        assert_eq!(resolved.config.api_key.as_deref(), Some("sk-test-value"));
-    }
-
-    #[test]
-    fn ca_bundle_path_must_not_be_empty() {
-        let provider = RuntimeProviderConfig {
-            name: "local-openai".to_owned(),
-            base_url: "https://models.local.test/v1".to_owned(),
-            model: "gpt-compatible".to_owned(),
-            api_key_env: "MODEL_API_KEY".to_owned(),
-            ca_bundle_path: Some(PathBuf::new()),
-            request_timeout_secs: 30,
-            priority: 10,
-            capabilities: vec![ProviderCapability::Text],
-            thinking: ThinkingConfig::default(),
-        };
-
-        let error = provider
-            .validate()
-            .expect_err("empty CA bundle path should fail validation");
-
-        assert!(error.message().contains("ca_bundle_path"));
+    fn rejects_non_agentsmith_plaintext_provider_hosts() {
+        for base_url in [
+            "http://models.example.test/v1",
+            "http://agentsmith-lite-api.attacker.example/v1",
+            "http://agentsmith-lite-api.bad.namespace.svc.cluster.local/v1",
+            "http://other.agentsmith.svc.cluster.local/v1",
+        ] {
+            let yaml = default_example_yaml().replace("https://text-provider.example/v1", base_url);
+            assert!(
+                RuntimeConfig::from_yaml_str(&yaml).is_err(),
+                "plaintext provider URL should be rejected: {base_url}"
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::event::{EventCursor, ServiceEvent};
 
@@ -250,6 +250,16 @@ pub struct TimelineEnvelope {
 }
 
 impl TimelineEnvelope {
+    pub fn active_item(&self) -> Option<TimelineActiveItem> {
+        self.item.as_ref().map(|item| TimelineActiveItem {
+            id: item.id.clone(),
+            item_type: item.item_type.clone(),
+            status: item.status.clone(),
+            trace: Some(self.trace.clone()),
+            data: self.data.clone(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         seq: u64,
@@ -323,6 +333,10 @@ pub(crate) fn input_item_id(input_id: &str) -> String {
     format!("inp_{}", short_hash_len_prefixed_parts(&[input_id]))
 }
 
+pub(crate) fn task_ask_item_id(task_id: &str, request_id: &str) -> String {
+    format!("task_ask_{task_id}_{request_id}")
+}
+
 struct ProjectedEvent {
     event_type: String,
     cycle_id: Option<String>,
@@ -362,6 +376,7 @@ fn project_event_fields(event: &ServiceEvent) -> ProjectedEvent {
         | "subagent.callback"
         | "subagent.callback_delivered" => subagent_event(event),
         "service.status" => service_status_event(event),
+        event_type if event_type.starts_with("compact.") => compact_service_event(event),
         "agent.error" | "agent.aborted" if cycle_id_from_data(event).is_some() => {
             cycle_failed_event(event)
         }
@@ -380,7 +395,7 @@ fn input_event(event: &ServiceEvent, event_type: &str, status: &str) -> Projecte
     let mut data = json!({
         "input_id": input_id,
         "input_kind": string_field(&event.data, "input_kind", "user_message"),
-        "source": string_field(&event.data, "source", "user"),
+        "source": string_field(&event.data, "source", "unknown"),
         "message_id": string_field(&event.data, "message_id", input_id),
         "content_preview": string_field(&event.data, "content_preview", ""),
         "content_bytes": u64_field(&event.data, "content_bytes", 0),
@@ -399,6 +414,24 @@ fn input_event(event: &ServiceEvent, event_type: &str, status: &str) -> Projecte
     }
     if let Some(urgency) = event.data.get("urgency") {
         data["urgency"] = urgency.clone();
+    }
+    if let Some(object) = data.as_object_mut() {
+        for key in [
+            "task_id",
+            "ask_id",
+            "tell_id",
+            "subagent_id",
+            "callback_id",
+            "callback_kind",
+            "callback_status",
+            "task_label",
+            "label",
+            "summary",
+        ] {
+            if let Some(value) = event.data.get(key).filter(|value| !value.is_null()) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
     }
     if event_type == "input.rejected" {
         let reason = event
@@ -745,7 +778,6 @@ fn output_tail(event: &ServiceEvent) -> String {
     event
         .data
         .get("output_tail")
-        .or_else(|| event.data.get("aggregated_output"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
@@ -767,6 +799,7 @@ fn background_task_event(event: &ServiceEvent) -> ProjectedEvent {
         "task.failed" => ("failed", "failed"),
         "task.cancelled" => ("cancelled", "cancelled"),
         "task.timed_out" => ("timed_out", "timed_out"),
+        "task.lost" => ("lost", "lost"),
         "task.callback_pending" => ("callback_pending", "completed"),
         "task.callback_queued" => ("callback_queued", "completed"),
         "task.callback_delivered" => ("callback_delivered", "completed"),
@@ -806,7 +839,7 @@ fn task_request_event(event: &ServiceEvent) -> ProjectedEvent {
         event_type: event.event_type.clone(),
         cycle_id: cycle_id_from_data(event),
         item: Some(TimelineItem::new(
-            format!("task_ask_{task_id}_{request_id}"),
+            task_ask_item_id(task_id, request_id),
             "task_ask",
             status,
         )),
@@ -817,13 +850,8 @@ fn task_request_event(event: &ServiceEvent) -> ProjectedEvent {
 fn task_reply_event(event: &ServiceEvent) -> ProjectedEvent {
     let task_id = string_field(&event.data, "task_id", "unknown");
     let request_id = string_field(&event.data, "ask_id", "unknown");
-    let item = task_reply_item_status(event).map(|status| {
-        TimelineItem::new(
-            format!("task_ask_{task_id}_{request_id}"),
-            "task_ask",
-            status,
-        )
-    });
+    let item = task_reply_item_status(event)
+        .map(|status| TimelineItem::new(task_ask_item_id(task_id, request_id), "task_ask", status));
     ProjectedEvent {
         event_type: event.event_type.clone(),
         cycle_id: cycle_id_from_data(event),
@@ -937,20 +965,40 @@ fn subagent_event(event: &ServiceEvent) -> ProjectedEvent {
         "purpose": bounded_text(string_field(&event.data, "purpose", ""), MAX_TIMELINE_TEXT_CHARS).0,
         "status": bounded_text(status, MAX_TIMELINE_LABEL_CHARS).0,
         "status_summary": bounded_text(status_summary, MAX_TIMELINE_LABEL_CHARS).0,
-        "latest_result": optional_bounded_string_field(&event.data, "latest_result", MAX_TIMELINE_TEXT_CHARS),
-        "latest_error": optional_bounded_string_field(&event.data, "latest_error", MAX_TIMELINE_TEXT_CHARS),
+        "latest_result": optional_string_field(&event.data, "latest_result"),
+        "latest_error": optional_string_field(&event.data, "latest_error"),
         "owned_task_count": u64_field(&event.data, "owned_task_count", 0),
         "latest_callback": bounded_callback_summary(event.data.get("latest_callback")),
     });
 
     if let Some(object) = data.as_object_mut() {
-        for key in ["callback_id", "callback_kind", "callback_status"] {
+        for key in [
+            "projection_id",
+            "callback_id",
+            "callback_kind",
+            "callback_status",
+            "semantic_kind",
+            "semantic_status",
+            "task_id",
+            "ask_id",
+            "tell_id",
+            "task_label",
+            "label",
+            "summary",
+            "reply_status",
+        ] {
             if let Some(value) = optional_bounded_string_field_value(&event.data, key) {
                 object.insert(key.to_owned(), value);
             }
         }
         if let Some(callbacks) = bounded_callback_summaries(event.data.get("callbacks")) {
             object.insert("callbacks".to_owned(), callbacks);
+        }
+        for key in ["task_message", "question", "notice"] {
+            let value = optional_string_field(&event.data, key);
+            if !value.is_null() {
+                object.insert(key.to_owned(), value);
+            }
         }
     }
 
@@ -1041,20 +1089,68 @@ fn service_error_event(event: &ServiceEvent) -> ProjectedEvent {
 
 fn service_status_event(event: &ServiceEvent) -> ProjectedEvent {
     let state = string_field(&event.data, "state", "updated");
+    let mut data = json!({
+        "state": state,
+        "queue_length": u64_field(&event.data, "queue_length", 0),
+        "tasks": event.data.get("tasks").cloned().unwrap_or_else(|| json!({
+            "running": 0,
+            "cancelling": 0,
+            "pending_callbacks": 0
+        })),
+        "last_error": event.data.get("last_error").cloned().unwrap_or(Value::Null),
+    });
+    if let Some(context_maintenance) = event.data.get("context_maintenance") {
+        data["context_maintenance"] = context_maintenance.clone();
+    }
     ProjectedEvent {
         event_type: "service.status".to_owned(),
         cycle_id: cycle_id_from_data(event),
         item: Some(TimelineItem::new("service", "service_status", state)),
-        data: json!({
-            "state": state,
-            "queue_length": u64_field(&event.data, "queue_length", 0),
-            "tasks": event.data.get("tasks").cloned().unwrap_or_else(|| json!({
-                "running": 0,
-                "cancelling": 0,
-                "pending_callbacks": 0
-            })),
-            "last_error": event.data.get("last_error").cloned().unwrap_or(Value::Null),
-        }),
+        data,
+    }
+}
+
+fn compact_service_event(event: &ServiceEvent) -> ProjectedEvent {
+    let mut data = Map::new();
+    data.insert(
+        "raw_event_type".to_owned(),
+        Value::String(event.event_type.clone()),
+    );
+    if let Some(status) = event
+        .event_type
+        .strip_prefix("compact.")
+        .filter(|status| !status.is_empty())
+    {
+        data.insert(
+            "status".to_owned(),
+            json!(bounded_text(status, MAX_TIMELINE_LABEL_CHARS).0),
+        );
+    }
+    for key in ["reason", "source"] {
+        if let Some(value) = event.data.get(key).and_then(Value::as_str) {
+            data.insert(
+                key.to_owned(),
+                json!(bounded_text(value, MAX_TIMELINE_LABEL_CHARS).0),
+            );
+        }
+    }
+    if let Some(summary) = event.data.get("summary").and_then(Value::as_str) {
+        data.insert(
+            "summary".to_owned(),
+            json!(bounded_text(summary, MAX_TIMELINE_TEXT_CHARS).0),
+        );
+    }
+    for key in ["degraded", "volatile"] {
+        if let Some(value) = event.data.get(key).and_then(Value::as_bool) {
+            data.insert(key.to_owned(), json!(value));
+        }
+    }
+
+    ProjectedEvent {
+        event_type: "service.event".to_owned(),
+        cycle_id: cycle_id_from_data(event),
+        item: None,
+        data: Value::Object(data),
     }
 }
 
@@ -1110,6 +1206,13 @@ fn optional_bounded_string_field(data: &Value, key: &str, max_chars: usize) -> V
     data.get(key)
         .and_then(Value::as_str)
         .map(|value| json!(bounded_text(value, max_chars).0))
+        .unwrap_or(Value::Null)
+}
+
+fn optional_string_field(data: &Value, key: &str) -> Value {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(|value| json!(value))
         .unwrap_or(Value::Null)
 }
 
@@ -1363,7 +1466,7 @@ mod tests {
                 "tool_call_id": "call-cancelled",
                 "tool_name": "bash",
                 "command": "sleep 120",
-                "aggregated_output": "tool execution aborted",
+                "output_tail": "tool execution aborted",
                 "exit_code": Value::Null,
                 "status": "cancelled"
             }),

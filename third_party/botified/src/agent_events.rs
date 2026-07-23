@@ -34,7 +34,7 @@ pub enum ThreadItem {
     CommandExecution {
         id: String,
         command: String,
-        aggregated_output: String,
+        output_tail: String,
         exit_code: Option<i32>,
         status: CommandExecutionStatus,
     },
@@ -182,7 +182,7 @@ fn command_execution_started(event: &ServiceEvent) -> Option<ThreadEvent> {
         item: ThreadItem::CommandExecution {
             id: command_execution_item_id(tool_call_id),
             command: command.to_owned(),
-            aggregated_output: String::new(),
+            output_tail: String::new(),
             exit_code: None,
             status: CommandExecutionStatus::InProgress,
         },
@@ -203,10 +203,11 @@ fn command_execution_completed(event: &ServiceEvent) -> Option<ThreadEvent> {
     }
     let tool_call_id = event.data.get("tool_call_id").and_then(Value::as_str)?;
     let command = event.data.get("command").and_then(Value::as_str)?;
-    let aggregated_output = event
+    let output_tail = event
         .data
-        .get("aggregated_output")
+        .get("output_tail")
         .and_then(Value::as_str)
+        .map(|value| crate::types::bounded_text_tail(value, 4096))
         .unwrap_or_default();
     let exit_code = event
         .data
@@ -223,7 +224,7 @@ fn command_execution_completed(event: &ServiceEvent) -> Option<ThreadEvent> {
         item: ThreadItem::CommandExecution {
             id: command_execution_item_id(tool_call_id),
             command: command.to_owned(),
-            aggregated_output: aggregated_output.to_owned(),
+            output_tail: output_tail.to_owned(),
             exit_code,
             status,
         },

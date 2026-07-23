@@ -1,6 +1,8 @@
 # Botified Runtime
 
-P0 Botified consumption is fixed as vendored source from pinned commit:
+Botified consumption is fixed as vendored server source from upstream stable `v0.4.37`
+commit `3cb852daae060faa6e26cc538f6c12d940d89ed5`, plus the narrow Lite runtime
+extensions recorded in the pin:
 
 - pin file: `third_party/botified/PINNED_SOURCE.json`
 - runtime entrypoint: `botified serve`
@@ -11,7 +13,17 @@ AgentSmith server uses Botified exclusively through its service API. The runner 
 botified serve --config /etc/botified/botified-config.yaml
 ```
 
-AgentSmith owns the `bash-executor` sidecar and its loopback protocol; the pinned vendored Botified fork is the compatible runtime for that boundary. Do not substitute the stock Botified v0.4.14 release: it publishes no external executor or MCP client and runs built-in Bash inside the Botified process.
+Only the server runtime is vendored. TUI modules, TUI/bin targets, setup commands,
+and unrelated optional components are not part of the runner. There is no stock
+binary fallback.
+
+AgentSmith owns the `bash-executor` sidecar and its loopback NDJSON protocol.
+`tools.execution.bash_executor_addr` is loopback-only, and the Lite runner always
+configures it. Botified sends explicitly typed `tool` and `terminal` requests.
+Tool execution uses piped output and only pipes stdin when interactive stdio is
+present; terminal execution alone uses a PTY. Botified retains the v0.4.37 Bash
+credential filtering, bounded output accounting, cancellation, process-reaping,
+and detached-task semantics around that external execution boundary.
 
 `packages/botified-runtime` owns:
 
@@ -26,28 +38,52 @@ AgentSmith owns the `bash-executor` sidecar and its loopback protocol; the pinne
 
 - `version: 1`
 - `providers` is an array, not a keyed object.
+- Provider entries use `api_compat: standard`. Lite does not emit legacy CA,
+  thinking-shape, or provider alias fields.
+- Provider `base_url` normally requires HTTPS. Plain HTTP is accepted only for a
+  literal loopback IP or the exact AgentSmith API service form
+  `agentsmith-lite-api.<namespace>.svc.cluster.local[:port]`; other plaintext
+  hosts remain invalid.
 - `service.host` is `0.0.0.0` for the runner service and `service.service_key_env` names the per-task service-key environment variable.
 - `runtime.cwd` points at the task home and `runtime.data_dir` points at the Botified state directory. `runtime.session` is the Lite task id.
-- `runtime.resume_unfinished` is `true` for first start and same-Run recovery. The first start after an explicit Sandbox release sets it to `false`, which clears queued and interrupted work before the service accepts requests while retaining completed session history.
+- `runtime.resume_unfinished` is `true` for first start and same-Run recovery. The first start after an explicit Sandbox release sets it to `false`, which durably discards queued input, the interrupted request boundary, its deduplication cursors, and pending callback delivery intents before the service accepts requests while retaining completed session history.
 - `registry.enabled`, `subagents.enabled`, and `profiling.enabled` are disabled for Lite runner use. `llm_text_preview.enabled` is enabled for transient server-relayed assistant previews.
 - `skills.default_discovery` is disabled; Lite supplies no product skill discovery in the runner.
 - `bash` is enabled only in this sandbox runner config. `view_image` is enabled only when the configured model endpoint advertises both `text` and `image`.
 
-The Rust config loader uses strict unknown-field rejection, so Lite must not emit legacy fields such as `providers.default` or `runtime.project_mount`.
+The Rust config loader uses strict unknown-field rejection. Lite does not emit
+removed fields such as top-level `compact`, `subagents.model_aliases`,
+`ca_bundle_path`, `providers.default`, or `runtime.project_mount`.
 
 ## HTTP Client Contract
 
 The Botified service exposes `/healthz` without auth. All Lite runtime control/data endpoints use the per-task service key:
 
 - `POST /v1/messages`
+- `GET /v1/deliveries/{deliveryKey}`
 - `GET /v1/timeline`
 - `GET /v1/state`
 - `POST /v1/files`
 - `POST /v1/abort`
 - `POST /v1/background-tasks/{taskId}/stop`
+- `GET /v1/terminal/ws` (WebSocket upgrade)
 - `GET /v1/llm-text-preview`
 
 The HTTP adapter sends `Authorization: Bearer <serviceKey>` to those endpoints and does not send it to `/healthz`.
+
+AgentSmith message delivery supplies `delivery_key` and `request_hash`.
+Botified records that identity on the canonical durable accepted-input session
+event, rebuilds its bounded message index during session replay, returns the
+existing receipt for the same key/hash, rejects reuse with a different hash, and
+serves receipt reconciliation through `GET /v1/deliveries/{deliveryKey}`. Receipt
+lifetime follows the existing accepted-message replay window and session
+lifecycle; receipts are not stored in the File Library.
+
+The terminal WebSocket is a thin authenticated proxy to the configured
+loopback `bash-executor`. It starts `exec bash -il` in the task working
+directory and forwards executor NDJSON frames without adding a CLI or TUI path.
+Background stop is likewise a thin authenticated route over v0.4.37's internal
+task cancellation capability.
 
 Timeline responses are Botified NDJSON. Blank lines are heartbeat frames and are ignored by the adapter. A stale cursor is represented as a structured history gap. `TaskService` recovers canonical history by paging from a history boundary, then forward to the current cursor; when an earlier boundary cannot be recovered it persists and exposes `historyStatus: "gap"` rather than resetting to a tail page.
 

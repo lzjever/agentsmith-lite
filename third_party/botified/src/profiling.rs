@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::config::RuntimeProfilingConfig;
+use crate::formatting::utc_compact_timestamp;
 use crate::path_utils::lexical_absolute;
+use crate::private_fs::{ensure_private_dir, open_private_file, private_open_options};
 
 pub type SharedProfiler = Arc<Mutex<CsvProfiler>>;
 
@@ -314,17 +316,22 @@ impl CsvProfiler {
         let run_label = config.run_label.unwrap_or_else(|| "auto".to_owned());
         let run_id = format!(
             "{}_{}_{}",
-            format_run_timestamp(SystemTime::now()),
+            utc_compact_timestamp(SystemTime::now()),
             process_id,
             run_label
         );
         let report_dir = config.base_dir.join(&run_id);
-        fs::create_dir_all(&report_dir)?;
+        ensure_private_dir(&config.base_dir)?;
+        ensure_private_dir(&report_dir)?;
 
         let events_path = report_dir.join("events.csv");
         let summary_path = report_dir.join("summary.csv");
-        let mut events = BufWriter::new(File::create(&events_path)?);
-        let mut summary = BufWriter::new(File::create(&summary_path)?);
+        let mut events_options = private_open_options();
+        events_options.write(true).create(true).truncate(true);
+        let mut summary_options = private_open_options();
+        summary_options.write(true).create(true).truncate(true);
+        let mut events = BufWriter::new(open_private_file(&events_options, &events_path)?);
+        let mut summary = BufWriter::new(open_private_file(&summary_options, &summary_path)?);
         write_csv_record(&mut events, EVENT_COLUMNS)?;
         events.flush()?;
         write_csv_record(&mut summary, SUMMARY_COLUMNS)?;
@@ -720,30 +727,4 @@ fn percentile_ms(values: &[u128], percentile: usize) -> String {
 
 fn us_to_ms_string(value: u128) -> String {
     (value / 1_000).to_string()
-}
-
-fn format_run_timestamp(time: SystemTime) -> String {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let total_seconds = duration.as_secs() as i64;
-    let days = total_seconds.div_euclid(86_400);
-    let seconds_of_day = total_seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2).div_euclid(153);
-    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
 }

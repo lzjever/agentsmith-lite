@@ -392,14 +392,3 @@ fn publish_error(
     }
     ToolResult::error(call.id, call.name, message, details)
 }
-
-trait ToolResultDetailsExt {
-    fn with_details(self, details: Value) -> Self;
-}
-
-impl ToolResultDetailsExt for ToolResult {
-    fn with_details(mut self, details: Value) -> Self {
-        self.details = details;
-        self
-    }
-}

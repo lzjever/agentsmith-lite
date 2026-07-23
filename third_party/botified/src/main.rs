@@ -1,31 +1,39 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::future::{Future, IntoFuture};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::io;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use botified::config::{
-    resolve_files_root_dir, resolve_runtime_paths, RuntimeConfig, RuntimeConfigLoad, RuntimeTool,
-    RuntimeToolExecutionConfig,
-};
-use botified::files::{FileStore, FileStoreOptions};
-use botified::http::router;
-use botified::profiling::{resolve_profiling_config, CsvProfiler, SharedProfiler};
-use botified::provider::openai_chat::OpenAiChatProvider;
-use botified::session::open_or_create_session_in_home_with_cwd;
-use botified::{
-    load_context_files, try_load_skills, AgentConfig, BashTool, ContextFileLoadConfig, Provider,
-    ProviderEndpoint, ProviderError, ProviderRequest, ProviderResponse, ProviderRouter,
-    RegistryStore, Service, ServiceLimits, ServiceSubagentOptions, SkillLoadConfig, SubagentLimits,
-    TaskOutputPolicy, Tool, ToolExecutionPolicy, ViewImageTool,
-};
+use botified::http::router_with_terminal;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+mod cli;
+mod http_server;
+mod runtime_assembly;
+mod serve_data_dir_lock;
+
+#[cfg(test)]
+use cli::DEFAULT_CONFIG_PATH;
+use cli::{usage, CliAction, ServeArgs};
+
 const HTTP_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+fn missing_config_message(path: &Path, mock_provider: bool) -> String {
+    let mock_hint = if mock_provider {
+        " (mock provider requested)"
+    } else {
+        ""
+    };
+    format!(
+        "runtime config not found{}: {}; provide the AgentSmith-generated config and restart botified serve",
+        mock_hint,
+        path.display()
+    )
+}
 
 #[tokio::main]
 async fn main() {
@@ -48,215 +56,83 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
 async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let startup_dir = env::current_dir()?;
-    let config_path = botified::path_utils::lexical_absolute(&args.config_path, &startup_dir);
-    let runtime_config = match RuntimeConfig::load_or_write_example(&config_path)? {
-        RuntimeConfigLoad::Loaded(config) => *config,
-        RuntimeConfigLoad::GeneratedExample { path } => {
-            eprintln!("{}", generated_config_message(&path));
-            return Ok(());
-        }
-    };
-
-    let paths = resolve_runtime_paths(&config_path, &startup_dir, &runtime_config.runtime)?;
-    eprintln!(
-        "botified runtime paths: config_path={} startup_dir={} cwd={} data_dir={}",
-        paths.config_path.display(),
-        paths.startup_dir.display(),
-        paths.cwd.display(),
-        paths.data_dir.display()
+    let mut assembly =
+        runtime_assembly::assemble_runtime(&args.config_path, args.mock_provider, &startup_dir)?;
+    assembly.service.start_pending_if_needed().await;
+    let service_key = assembly.service_key.take();
+    let app = router_with_terminal(
+        assembly.service.clone(),
+        service_key,
+        assembly.terminal.clone(),
     );
-    let cwd = paths.cwd;
-    let data_dir = paths.data_dir;
-    let profiler = match resolve_profiling_config(&runtime_config.profiling, &data_dir)? {
-        Some(config) => {
-            let profiler = CsvProfiler::create_shared(config)?;
-            let report_dir = profiler
-                .lock()
-                .expect("profiler mutex poisoned")
-                .report_dir()
-                .to_path_buf();
-            eprintln!("botified profiling report dir: {}", report_dir.display());
-            Some(profiler)
-        }
-        None => None,
-    };
-    let service_key = runtime_config.resolve_service_key(env::vars())?;
-    let skill_load_config = SkillLoadConfig {
-        cwd: cwd.clone(),
-        data_dir: Some(data_dir.clone()),
-        botified_home: None,
-        explicit: runtime_config.skills.explicit.clone(),
-        default_discovery: runtime_config.skills.default_discovery,
-    };
-    let context_file_load_config = ContextFileLoadConfig {
-        cwd: cwd.clone(),
-        data_dir: Some(data_dir.clone()),
-        botified_home: None,
-        default_discovery: runtime_config.context_files.enabled,
-        max_total_bytes: runtime_config.context_files.max_total_bytes,
-    };
-    let loaded_context_files = load_context_files(&context_file_load_config);
-    let loaded_skills = try_load_skills(&skill_load_config)?;
-    let mut startup_warnings = loaded_context_files.warnings.clone();
-    startup_warnings.extend(loaded_skills.warnings.clone());
-    let base_system_prompt = "You are Botified, a minimal headless agent service.";
-    let mut config = AgentConfig::new(base_system_prompt)
-        .with_cwd(cwd.display().to_string())
-        .with_skills(loaded_skills.skills)
-        .with_tool_execution_policy(tool_execution_policy(&runtime_config.tools.execution))
-        .with_task_output_policy(task_output_policy(
-            data_dir.clone(),
-            &runtime_config.tools.execution,
-        ))
-        .with_prompt_refresh(
-            base_system_prompt,
-            skill_load_config,
-            context_file_load_config,
-        );
-    config.compact = runtime_config.compact.clone();
-    let (
-        initial_context,
-        pending_messages,
-        known_user_messages,
-        message_cursors,
-        restart_boundary,
-        recorder,
-    ): (
-        Vec<_>,
-        Vec<_>,
-        Vec<_>,
-        Vec<_>,
-        Option<botified::SessionRestartBoundary>,
-        Option<Arc<botified::FileSessionRecorder>>,
-    ) = if let Some(session) = runtime_config.runtime.session.clone() {
-        let mut session =
-            open_or_create_session_in_home_with_cwd(&session, &data_dir, config.cwd.clone())?;
-        if !runtime_config.runtime.resume_unfinished {
-            session.discard_unfinished_sync()?;
-        }
-        startup_warnings.extend(session.warnings().iter().cloned());
-        config = config.with_session(session.name().to_owned());
-        (
-            session.initial_messages().to_vec(),
-            session.pending_messages().to_vec(),
-            session.known_user_messages().to_vec(),
-            session.message_cursors().to_vec(),
-            session.restart_boundary().cloned(),
-            Some(session.recorder()),
-        )
-    } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None, None)
-    };
-    for warning in &startup_warnings {
-        eprintln!("warning: {warning}");
-    }
-
-    let provider_endpoints = build_provider_endpoints(
-        &runtime_config,
-        args.mock_provider,
-        env::vars(),
-        profiler.clone(),
-    )?;
-    let subagent_options = build_subagent_options(&runtime_config, &provider_endpoints)?;
-    let provider = Arc::new(ProviderRouter::new(provider_endpoints)) as Arc<dyn Provider>;
-    let tools = build_tools(
-        &runtime_config.tools.enabled,
-        provider.clone(),
-        &runtime_config.tools.execution.bash_executor_addr,
-    )
-    .map_err(StartupError::new)?;
-    let limits = ServiceLimits::new(runtime_config.service.max_queue_messages)
-        .with_max_queue_bytes(runtime_config.service.max_queue_bytes);
-    let files_root_dir = resolve_files_root_dir(&runtime_config.files, &data_dir);
-    let file_store = FileStore::open(
-        FileStoreOptions::new(files_root_dir.clone())
-            .with_max_file_bytes(runtime_config.files.max_file_bytes)
-            .with_max_upload_files(runtime_config.files.max_upload_files)
-            .with_max_upload_request_bytes(runtime_config.files.max_upload_request_bytes)
-            .with_max_message_files(runtime_config.files.max_message_files)
-            .with_max_message_referenced_file_bytes(
-                runtime_config.files.max_message_referenced_file_bytes,
-            )
-            .with_max_store_bytes(runtime_config.files.max_store_bytes)
-            .with_retention_secs(runtime_config.files.retention_secs),
-    )?;
-    eprintln!("botified files root: {}", files_root_dir.display());
-    let registry_store = build_registry_store(&runtime_config)?;
-    let service = Service::with_session_replay_and_restart_boundary_and_limits_and_file_store_and_registry_store_and_subagent_options(
-        config,
-        provider,
-        tools,
-        initial_context,
-        pending_messages,
-        known_user_messages,
-        message_cursors,
-        restart_boundary,
-        recorder,
-        startup_warnings,
-        limits,
-        file_store,
-        registry_store,
-        subagent_options,
-        runtime_config.timeline.retention_days,
-    )
-    .with_provider_summaries(runtime_config.provider_summaries())
-    .with_profiler(profiler.clone())
-    .with_llm_text_preview_enabled(runtime_config.llm_text_preview.enabled);
-    service.start_pending_if_needed().await;
-    let app = router(service.clone(), service_key);
-    let bind = format!(
-        "{}:{}",
-        runtime_config.service.host, runtime_config.service.port
-    );
-    let listener = TcpListener::bind((
-        runtime_config.service.host.as_str(),
-        runtime_config.service.port,
-    ))
-    .await?;
+    let bind = format!("{}:{}", assembly.host, assembly.port);
+    let listener = TcpListener::bind((assembly.host.as_str(), assembly.port)).await?;
 
     eprintln!("botified service listening on http://{bind}");
-    let shutdown_token = CancellationToken::new();
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_token.clone().cancelled_owned())
-        .into_future();
-    tokio::pin!(server);
+    let graceful_shutdown = CancellationToken::new();
+    let force_shutdown = CancellationToken::new();
+    let mut server = tokio::spawn(http_server::serve(
+        listener,
+        app,
+        graceful_shutdown.clone(),
+        force_shutdown.clone(),
+    ));
+    for result in assembly.service.start_task_presets_on_boot() {
+        if !result
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            eprintln!("warning: failed to start task preset on boot: {result}");
+        }
+    }
 
     tokio::select! {
         result = &mut server => {
-            result?;
+            flatten_http_server_result(result)?;
         }
         () = shutdown_signal() => {
             eprintln!("botified service shutting down");
-            shutdown_token.cancel();
-            let shutdown = service.shutdown();
-            let server_shutdown =
-                graceful_shutdown_completed_before_timeout(&mut server, HTTP_SHUTDOWN_GRACE);
+            graceful_shutdown.cancel();
+            let shutdown = assembly.service.shutdown();
+            let server_shutdown = shutdown_http_server_before_timeout(
+                &mut server,
+                force_shutdown,
+                HTTP_SHUTDOWN_GRACE,
+            );
             let (serve_result, _) = tokio::join!(server_shutdown, shutdown);
-            if !serve_result? {
-                eprintln!(
-                    "botified service forcing shutdown after waiting {}s for HTTP clients",
-                    HTTP_SHUTDOWN_GRACE.as_secs()
-                );
-            }
+            serve_result?;
         }
     }
     Ok(())
 }
 
-async fn graceful_shutdown_completed_before_timeout<F, E>(
-    server: F,
+async fn shutdown_http_server_before_timeout(
+    server: &mut tokio::task::JoinHandle<io::Result<()>>,
+    force_shutdown: CancellationToken,
     grace: Duration,
-) -> Result<bool, E>
-where
-    F: Future<Output = Result<(), E>>,
-{
-    match tokio::time::timeout(grace, server).await {
-        Ok(result) => {
-            result?;
-            Ok(true)
+) -> io::Result<()> {
+    match tokio::time::timeout(grace, &mut *server).await {
+        Ok(result) => flatten_http_server_result(result),
+        Err(_) => {
+            eprintln!(
+                "botified service forcing shutdown after waiting {}s for HTTP clients",
+                grace.as_secs()
+            );
+            force_shutdown.cancel();
+            server.abort();
+            match server.await {
+                Err(error) if error.is_cancelled() => Ok(()),
+                result => flatten_http_server_result(result),
+            }
         }
-        Err(_) => Ok(false),
     }
+}
+
+fn flatten_http_server_result(
+    result: Result<io::Result<()>, tokio::task::JoinError>,
+) -> io::Result<()> {
+    result.map_err(|error| io::Error::other(format!("HTTP server task failed: {error}")))?
 }
 
 #[cfg(unix)]
@@ -281,289 +157,6 @@ async fn shutdown_signal() {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum CliAction {
-    Help,
-    Serve(ServeArgs),
-}
-
-impl CliAction {
-    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
-        let mut args = args.into_iter();
-        let Some(command) = args.next() else {
-            return Err(usage());
-        };
-        if is_help_flag(&command) {
-            if let Some(extra) = args.next() {
-                return Err(format!("unknown argument: {extra}\n{}", usage()));
-            }
-            return Ok(Self::Help);
-        }
-        if command != "serve" {
-            return Err(usage());
-        }
-
-        parse_serve_action(args)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ServeArgs {
-    config_path: PathBuf,
-    mock_provider: bool,
-}
-
-#[cfg(test)]
-impl ServeArgs {
-    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
-        match CliAction::parse(args)? {
-            CliAction::Serve(args) => Ok(args),
-            CliAction::Help => Err(usage()),
-        }
-    }
-}
-
-const DEFAULT_CONFIG_PATH: &str = "./botified.yaml";
-
-fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next()
-        .filter(|value| !value.trim().is_empty() && !looks_like_flag(value))
-        .ok_or_else(|| format!("missing value for {flag}"))
-}
-
-fn parse_serve_action(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
-    let mut args = args;
-    let mut parsed = ServeArgs {
-        config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
-        mock_provider: false,
-    };
-    let mut config_seen = false;
-    let mut help_seen = false;
-
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--config" => {
-                if config_seen {
-                    return Err("duplicate argument: --config".to_owned());
-                }
-                config_seen = true;
-                parsed.config_path = PathBuf::from(next_value(&mut args, "--config")?);
-            }
-            value if value.starts_with("--config=") => {
-                if config_seen {
-                    return Err("duplicate argument: --config".to_owned());
-                }
-                config_seen = true;
-                let (_, value) = value.split_once('=').expect("--config= prefix matched");
-                if value.trim().is_empty() {
-                    return Err("missing value for --config".to_owned());
-                }
-                parsed.config_path = PathBuf::from(value);
-            }
-            "--mock-provider" => parsed.mock_provider = true,
-            value if is_help_flag(value) => help_seen = true,
-            other if legacy_serve_flag(other) => return Err(legacy_flag_error(other)),
-            other => return Err(format!("unknown argument: {other}\n{}", usage())),
-        }
-    }
-
-    if help_seen {
-        Ok(CliAction::Help)
-    } else {
-        Ok(CliAction::Serve(parsed))
-    }
-}
-
-fn is_help_flag(value: &str) -> bool {
-    matches!(value, "-h" | "--help")
-}
-
-fn looks_like_flag(value: &str) -> bool {
-    is_help_flag(value) || value == "-nc" || value.starts_with("--")
-}
-
-fn usage() -> String {
-    "usage: botified serve [--config PATH] [--mock-provider]".to_owned()
-}
-
-fn legacy_serve_flag(flag: &str) -> bool {
-    matches!(
-        flag,
-        "--cwd"
-            | "--host"
-            | "--port"
-            | "--service-key"
-            | "--session"
-            | "--profile"
-            | "--base-url"
-            | "--model"
-            | "--provider-timeout-secs"
-            | "--max-turns"
-            | "--max-queue-messages"
-            | "--max-queue-bytes"
-            | "--skill"
-            | "--no-skills"
-            | "--no-context-files"
-            | "-nc"
-            | "--tools"
-            | "--no-tools"
-    ) || [
-        "--cwd=",
-        "--host=",
-        "--port=",
-        "--service-key=",
-        "--session=",
-        "--profile=",
-        "--base-url=",
-        "--model=",
-        "--provider-timeout-secs=",
-        "--max-turns=",
-        "--max-queue-messages=",
-        "--max-queue-bytes=",
-        "--skill=",
-        "--tools=",
-    ]
-    .iter()
-    .any(|prefix| flag.starts_with(prefix))
-}
-
-fn legacy_flag_error(flag: &str) -> String {
-    let flag = flag.split_once('=').map_or(flag, |(flag, _)| flag);
-    format!(
-        "{flag} is no longer supported; configure runtime settings in botified.yaml and pass --config PATH if needed"
-    )
-}
-
-fn generated_config_message(path: &Path) -> String {
-    format!(
-        "generated default Botified runtime config at {}. Edit this file, set the credential environment variables named by api_key_env and service_key_env, then restart with botified serve --config {}. No HTTP service was started.",
-        path.display(),
-        path.display()
-    )
-}
-
-fn build_subagent_options(
-    runtime_config: &RuntimeConfig,
-    endpoints: &[ProviderEndpoint],
-) -> Result<ServiceSubagentOptions, Box<dyn Error>> {
-    if !runtime_config.subagents.enabled {
-        return Ok(ServiceSubagentOptions::disabled());
-    }
-
-    let mut options = ServiceSubagentOptions::enabled(SubagentLimits::new(
-        runtime_config.subagents.max_parallel,
-        runtime_config.subagents.max_branches,
-    ));
-    for (alias, provider_name) in &runtime_config.subagents.model_aliases {
-        let endpoint = endpoints
-            .iter()
-            .find(|endpoint| endpoint.name() == provider_name)
-            .ok_or_else(|| {
-                StartupError::new(format!(
-                    "subagents model_aliases.{alias} references unknown provider {provider_name}"
-                ))
-            })?;
-        options = options.with_model_alias(alias.clone(), endpoint.as_single_provider());
-    }
-    Ok(options)
-}
-
-fn build_registry_store(
-    runtime_config: &RuntimeConfig,
-) -> Result<Option<RegistryStore>, StartupError> {
-    if !runtime_config.registry.enabled {
-        return Ok(None);
-    }
-
-    RegistryStore::with_options(
-        runtime_config.registry.store_config(),
-        runtime_config.registry.store_options(),
-    )
-    .map(Some)
-    .map_err(|error| StartupError::new(error.to_string()))
-}
-
-fn build_provider_endpoints(
-    runtime_config: &RuntimeConfig,
-    mock_provider: bool,
-    env: impl IntoIterator<Item = (String, String)>,
-    profiler: Option<SharedProfiler>,
-) -> Result<Vec<ProviderEndpoint>, Box<dyn Error>> {
-    runtime_config.validate()?;
-    if mock_provider {
-        return Ok(runtime_config
-            .providers
-            .iter()
-            .map(|provider| {
-                ProviderEndpoint::new(
-                    provider.name.clone(),
-                    provider.priority,
-                    provider.capabilities.clone(),
-                    Arc::new(DevelopmentMockProvider) as Arc<dyn Provider>,
-                )
-                .with_model(provider.model.clone())
-            })
-            .collect());
-    }
-
-    runtime_config
-        .resolved_provider_configs(env)?
-        .into_iter()
-        .map(|resolved| {
-            let model = resolved.config.model.clone();
-            let provider =
-                Arc::new(OpenAiChatProvider::new(resolved.config)?.with_profiler(profiler.clone()))
-                    as Arc<dyn Provider>;
-            Ok(ProviderEndpoint::new(
-                resolved.name,
-                resolved.priority,
-                resolved.capabilities,
-                provider,
-            ))
-            .map(|endpoint| endpoint.with_model(model))
-        })
-        .collect::<Result<Vec<_>, ProviderError>>()
-        .map_err(|error| Box::new(error) as Box<dyn Error>)
-}
-
-fn build_tools(
-    enabled: &[RuntimeTool],
-    provider: Arc<dyn Provider>,
-    bash_executor_addr: &str,
-) -> Result<Vec<Arc<dyn Tool>>, String> {
-    let mut tools: Vec<Arc<dyn Tool>> = Vec::with_capacity(enabled.len());
-    for tool in enabled {
-        match tool {
-            RuntimeTool::Bash => tools.push(Arc::new(BashTool::new().with_executor_addr(bash_executor_addr)?)),
-            RuntimeTool::ViewImage => tools.push(Arc::new(ViewImageTool::new(provider.clone()))),
-        }
-    }
-    Ok(tools)
-}
-
-fn tool_execution_policy(execution: &RuntimeToolExecutionConfig) -> ToolExecutionPolicy {
-    ToolExecutionPolicy::default()
-        .with_default_detach_after(execution.default_detach_after_secs.as_duration())
-        .with_max_detach_after(execution.max_detach_after_secs.as_duration())
-        .with_default_timeout(execution.default_timeout_secs.as_duration())
-        .with_max_timeout(execution.max_timeout_secs.as_duration())
-        .with_max_concurrent_tasks(execution.max_concurrent_tasks)
-        .with_max_retained_tasks(execution.max_retained_tasks)
-        .with_task_retention(Duration::from_secs(execution.task_retention_secs))
-        .with_max_task_request_pending(execution.max_task_ask_pending_secs.as_duration())
-}
-
-fn task_output_policy(
-    data_dir: PathBuf,
-    execution: &RuntimeToolExecutionConfig,
-) -> TaskOutputPolicy {
-    TaskOutputPolicy::new(
-        data_dir,
-        execution.callback_output_tail_bytes,
-        execution.max_task_output_bytes,
-    )
-}
-
 #[derive(Debug)]
 struct StartupError {
     message: String,
@@ -584,99 +177,6 @@ impl fmt::Display for StartupError {
 }
 
 impl Error for StartupError {}
-
-struct DevelopmentMockProvider;
-
-const RELEASE_CHECK_TRIGGER: &str = "BOTIFIED_RELEASE_CHECK_BASH";
-const RELEASE_CHECK_TOOL_CALL_ID: &str = "release_check_bash";
-const RELEASE_CHECK_PUBLISH_TOOL_CALL_ID: &str = "release_check_publish_file";
-const RELEASE_CHECK_OUTPUT_MARKER: &str = "BOTIFIED_RELEASE_CHECK_OUTPUT";
-const RELEASE_CHECK_ARTIFACT_FILENAME: &str = "botified-release-check.txt";
-
-#[async_trait]
-impl Provider for DevelopmentMockProvider {
-    async fn complete(
-        &self,
-        request: ProviderRequest,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderResponse, ProviderError> {
-        let messages = request.transcript_messages();
-        if pending_release_check_tool_result(&messages, RELEASE_CHECK_PUBLISH_TOOL_CALL_ID) {
-            return Ok(ProviderResponse::text("release check bash complete"));
-        }
-        if pending_release_check_tool_result(&messages, RELEASE_CHECK_TOOL_CALL_ID)
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == botified::PUBLISH_FILE_TOOL_NAME)
-        {
-            return Ok(ProviderResponse::tool_calls(vec![botified::ToolCall::new(
-                RELEASE_CHECK_PUBLISH_TOOL_CALL_ID,
-                botified::PUBLISH_FILE_TOOL_NAME,
-                serde_json::json!({
-                    "path": RELEASE_CHECK_ARTIFACT_FILENAME,
-                    "filename": RELEASE_CHECK_ARTIFACT_FILENAME,
-                    "mime_type": "text/plain",
-                    "description": "release check artifact"
-                }),
-            )]));
-        }
-
-        let text = latest_user_text(&messages).unwrap_or("message received");
-        if text.contains(RELEASE_CHECK_TRIGGER)
-            && request.tools.iter().any(|tool| tool.name == "bash")
-        {
-            return Ok(ProviderResponse::tool_calls(vec![botified::ToolCall::new(
-                RELEASE_CHECK_TOOL_CALL_ID,
-                "bash",
-                serde_json::json!({
-                    "command": format!(
-                        "sleep 1; printf '%s\\n' '{RELEASE_CHECK_OUTPUT_MARKER}' > {RELEASE_CHECK_ARTIFACT_FILENAME}; printf '%s\\n' '{RELEASE_CHECK_OUTPUT_MARKER}'"
-                    ),
-                    "timeout_secs": 5
-                }),
-            )]));
-        }
-
-        Ok(ProviderResponse::text(format!(
-            "development mock response: {text}"
-        )))
-    }
-}
-
-fn latest_user_text(messages: &[botified::Message]) -> Option<&str> {
-    messages.iter().rev().find_map(|message| match message {
-        botified::Message::User { content } => content.iter().find_map(|part| match part {
-            botified::ContentPart::Text { text } => Some(text.as_str()),
-            botified::ContentPart::ImageUrl { .. }
-            | botified::ContentPart::ImageBase64 { .. }
-            | botified::ContentPart::File { .. }
-            | botified::ContentPart::Skill { .. } => None,
-        }),
-        botified::Message::Assistant { .. } | botified::Message::ToolResult(_) => None,
-    })
-}
-
-fn pending_release_check_tool_result(messages: &[botified::Message], tool_call_id: &str) -> bool {
-    for message in messages.iter().rev() {
-        match message {
-            botified::Message::ToolResult(result)
-                if result.tool_call_id == tool_call_id && !result.is_error =>
-            {
-                return true;
-            }
-            botified::Message::Assistant {
-                content: Some(_),
-                tool_calls,
-                ..
-            } if tool_calls.is_empty() => return false,
-            botified::Message::User { .. }
-            | botified::Message::Assistant { .. }
-            | botified::Message::ToolResult(_) => {}
-        }
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {
@@ -738,6 +238,14 @@ mod tests {
 
             assert_eq!(action, CliAction::Help);
         }
+    }
+
+    #[test]
+    fn cli_help_with_extra_argument_is_rejected() {
+        assert_eq!(
+            CliAction::parse(["--help", "extra"].into_iter().map(str::to_owned)),
+            Err(format!("unknown argument: extra\n{}", usage()))
+        );
     }
 
     #[test]
@@ -805,141 +313,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_timeout_does_not_wait_forever_for_open_http_clients() {
-        let completed = graceful_shutdown_completed_before_timeout(
-            std::future::pending::<Result<(), std::io::Error>>(),
+    async fn graceful_shutdown_timeout_forces_and_joins_http_server() {
+        let force_shutdown = CancellationToken::new();
+        let mut server = tokio::spawn(std::future::pending::<io::Result<()>>());
+
+        shutdown_http_server_before_timeout(
+            &mut server,
+            force_shutdown.clone(),
             Duration::from_millis(1),
         )
         .await
         .expect("pending server timeout should not be an IO error");
 
-        assert!(!completed);
+        assert!(force_shutdown.is_cancelled());
+        assert!(server.is_finished());
     }
 
     #[tokio::test]
     async fn graceful_shutdown_reports_completed_server() {
-        let completed = graceful_shutdown_completed_before_timeout(
-            async { Ok::<(), std::io::Error>(()) },
+        let force_shutdown = CancellationToken::new();
+        let mut server = tokio::spawn(async { Ok::<(), io::Error>(()) });
+
+        shutdown_http_server_before_timeout(
+            &mut server,
+            force_shutdown.clone(),
             Duration::from_secs(1),
         )
         .await
         .expect("completed server should not be an IO error");
 
-        assert!(completed);
+        assert!(!force_shutdown.is_cancelled());
+        assert!(server.is_finished());
     }
 
     #[test]
     fn usage_mentions_config_and_mock_provider_only() {
         let usage = usage();
 
+        assert!(usage.contains("botified serve"));
         assert!(usage.contains("--config"));
         assert!(usage.contains("--mock-provider"));
+        assert!(!usage.contains("setup"));
         assert!(!usage.contains("--base-url"));
         assert!(!usage.contains("--session"));
         assert!(!usage.contains("--tools"));
-    }
-
-    #[test]
-    fn generated_config_message_explains_path_and_credentials() {
-        let message = generated_config_message(Path::new("/tmp/botified.yaml"));
-
-        assert!(message.contains("/tmp/botified.yaml"));
-        assert!(message.contains("generated"));
-        assert!(message.contains("credential environment variables"));
-        assert!(message.contains("api_key_env"));
-        assert!(message.contains("service_key_env"));
-        assert!(message.contains("No HTTP service was started"));
-    }
-
-    #[test]
-    fn runtime_paths_resolve_relative_to_config_and_agent_cwd() {
-        let startup = test_temp_dir("runtime-paths").join("startup");
-        let cwd = startup.join("config").join("workspace");
-        std::fs::create_dir_all(&cwd).expect("create runtime cwd");
-
-        let mut config = RuntimeConfig::example();
-        config.runtime.cwd = PathBuf::from("workspace");
-        config.runtime.data_dir = PathBuf::from(".botified/state");
-        let paths =
-            resolve_runtime_paths(Path::new("config/botified.yaml"), &startup, &config.runtime)
-                .expect("runtime paths should resolve");
-
-        assert_eq!(paths.cwd, cwd);
-        assert_eq!(paths.data_dir, paths.cwd.join(".botified").join("state"));
-    }
-
-    #[test]
-    fn build_tools_maps_bash_view_image_and_empty_config() {
-        let provider = Arc::new(DevelopmentMockProvider) as Arc<dyn Provider>;
-        let enabled = RuntimeConfig::example().tools.enabled;
-        let tools =
-            build_tools(&enabled, provider.clone(), "127.0.0.1:3110").expect("default example tools should build");
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].spec().name, "bash");
-        assert_eq!(tools[1].spec().name, "view_image");
-
-        let tools = build_tools(&[], provider, "127.0.0.1:3110").expect("empty tool config should build");
-        assert!(tools.is_empty());
-    }
-
-    #[test]
-    fn provider_endpoints_follow_runtime_config() {
-        let mut config = RuntimeConfig::example();
-        config.tools.enabled = vec![RuntimeTool::Bash];
-
-        let endpoints = build_provider_endpoints(
-            &config,
-            false,
-            [
-                (
-                    "BOTIFIED_TEXT_API_KEY".to_owned(),
-                    "text-secret-value".to_owned(),
-                ),
-                (
-                    "BOTIFIED_VISION_API_KEY".to_owned(),
-                    "vision-secret-value".to_owned(),
-                ),
-                (
-                    "BOTIFIED_REASONING_API_KEY".to_owned(),
-                    "reasoning-secret-value".to_owned(),
-                ),
-            ],
-            None,
-        )
-        .expect("provider endpoints should build");
-
-        assert_eq!(endpoints.len(), config.providers.len());
-        assert_eq!(endpoints[0].name(), "text-main");
-        assert_eq!(endpoints[0].priority(), 10);
-        assert_eq!(
-            endpoints[0].capabilities(),
-            &config.providers[0].capabilities
-        );
-    }
-
-    #[test]
-    fn mock_provider_endpoints_do_not_require_api_key_env() {
-        let mut config = RuntimeConfig::example();
-        config.tools.enabled = vec![RuntimeTool::Bash];
-
-        let endpoints =
-            build_provider_endpoints(&config, true, std::iter::empty::<(String, String)>(), None)
-                .expect("mock provider endpoints should build without provider API keys");
-
-        assert_eq!(endpoints.len(), config.providers.len());
-        assert_eq!(endpoints[1].name(), "vision-main");
-    }
-
-    fn test_temp_dir(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        let path = env::temp_dir().join(format!(
-            "botified-main-{name}-{}-{stamp}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        path
     }
 }

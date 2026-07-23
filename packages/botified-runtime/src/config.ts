@@ -57,12 +57,6 @@ export interface BotifiedConfig {
     enabled: false;
     max_parallel: number;
     max_branches: number;
-    model_aliases: Record<string, string>;
-  };
-  compact: {
-    enabled: boolean;
-    threshold_tokens: number;
-    keep_recent_tokens: number;
   };
   profiling: {
     enabled: false;
@@ -75,19 +69,13 @@ export interface BotifiedConfig {
 
 export interface BotifiedProviderConfig {
   name: string;
+  api_compat: "standard";
   base_url: string;
   model: string;
   api_key_env: string;
-  ca_bundle_path?: string;
   request_timeout_secs: number;
   priority: number;
   capabilities: EndpointCapability[];
-  thinking: {
-    format: "none";
-    level: "off";
-    level_map: Record<string, never>;
-    budget_tokens: null;
-  };
 }
 
 export type BotifiedTool = "bash" | "view_image";
@@ -174,13 +162,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     subagents: {
       enabled: false,
       max_parallel: 3,
-      max_branches: 32,
-      model_aliases: {}
-    },
-    compact: {
-      enabled: true,
-      threshold_tokens: 1_000_000,
-      keep_recent_tokens: 32_000
+      max_branches: 32
     },
     profiling: {
       enabled: false,
@@ -199,18 +181,13 @@ export function serializeBotifiedConfig(config: BotifiedConfig): string {
 function providerConfig(endpoint: ModelEndpoint, task: BotifiedTaskRuntimeInput): BotifiedProviderConfig {
   return {
     name: endpoint.name,
+    api_compat: "standard",
     base_url: task.providerBaseUrl,
     model: endpoint.model,
     api_key_env: task.providerApiKeyEnv,
     request_timeout_secs: endpoint.requestTimeoutSecs,
     priority: 10,
-    capabilities: endpoint.capabilities,
-    thinking: {
-      format: "none",
-      level: "off",
-      level_map: {},
-      budget_tokens: null
-    }
+    capabilities: endpoint.capabilities
   };
 }
 
