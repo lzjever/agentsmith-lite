@@ -1066,7 +1066,9 @@ export class TaskService {
     const run=await this.activeSandboxRun(task);
     if(!run||run.phase!=="running")throw new ProductError("Task terminal is available while the sandbox is running",409);
     if(!await this.taskExecutionEligible(task))throw new ProductError("Task terminal is no longer available for this task",409);
-    const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
+    if(this.abortingTaskIds.has(task.id))throw new ProductError("Task terminal is unavailable while the current turn is aborting",409);
+    const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);const state=await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
+    if(!botifiedStateAllowsTerminal(state.state))throw new ProductError("Task terminal is available only while Botified is running or idle",409);
     return task;
   }
 
@@ -1803,7 +1805,7 @@ export class TaskService {
       const serviceKey = this.serviceKeyForTask(task);
       const runtime = await this.readRuntimeState(task, serviceKey);
       const state = await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
-      return { runState:runState ?? (state.state === "running" ? "running" : "idle"), reachability:"reachable" };
+      return { runState:runState ?? botifiedTaskRunState(state.state), reachability:"reachable" };
     } catch {
       return { runState:runState ?? "reconnecting", reachability:"unreachable" };
     }
@@ -1826,7 +1828,7 @@ export class TaskService {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn: canInteract && task.executionMode === "live" && runState === "running",
-      openTerminal: canInteract && task.executionMode === "live" && (coldStartable||(run?.phase==="running"&&runState==="running")) && !this.occupiedTerminalTaskIds.has(task.id),
+      openTerminal: canInteract && task.executionMode === "live" && (coldStartable||(run?.phase==="running"&&(runState==="running"||runState==="idle"))) && !this.occupiedTerminalTaskIds.has(task.id),
       editTask: canWrite && !task.deletedAt,
       releaseSandbox: canWrite && !task.deletedAt && Boolean(ownedRun) && ownedRun?.cleanupStatus!=="cleanup_requested" && ownedRun?.cleanupStatus!=="deleting",
       archiveTask: canWrite && !task.deletedAt && !task.archivedAt && !task.activeReservation && releaseConfirmed,
@@ -2421,6 +2423,21 @@ function isBotifiedSessionQuiescent(state: BotifiedRuntimeStateResult, timelineC
     if (["input", "task_ask", "subagent"].includes(String(item.type))) return true;
     return item.type === "background_task" && ["running", "cancelling"].includes(String(item.status));
   });
+}
+
+function botifiedTaskRunState(state:string|undefined):TaskRunState {
+  switch(state){
+    case "idle": return "idle";
+    case "running": return "running";
+    case "aborting": return "aborting";
+    case "failed": return "terminal";
+    case "shutting_down": return "finalizing";
+    default: return "reconnecting";
+  }
+}
+
+function botifiedStateAllowsTerminal(state:string|undefined):boolean {
+  return state==="running"||state==="idle";
 }
 
 function isInteractionLifecycleStatus(status: AgentTaskStatus): status is Extract<AgentTaskStatus, "queued" | "starting" | "running" | "stopping"> {

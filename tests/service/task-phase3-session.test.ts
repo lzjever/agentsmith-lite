@@ -46,6 +46,12 @@ describe("Phase 3 durable Botified task sessions", () => {
     assert.equal(ready.currentTurn.state,"ready");
     assert.equal(ready.lifecycle.state,"active");
     assert.equal(ready.sandboxState.state,"active");
+    assert.equal(ready.capabilities.openTerminal,true);
+    assert.equal((await setup.services.tasks.openTaskTerminal(setup.userId,task.id)).serviceKey,"service-key");
+    assert.equal((await setup.services.tasks.getTaskDetail(setup.userId,task.id)).capabilities.openTerminal,false);
+    await assert.rejects(()=>setup.services.tasks.openTaskTerminal(setup.userId,task.id),/already open/i);
+    setup.services.tasks.closeTaskTerminal(task.id);
+    assert.equal((await setup.services.tasks.getTaskDetail(setup.userId,task.id)).capabilities.openTerminal,true);
     await setup.services.tasks.sendTaskMessage(setup.userId, task.id, "next turn", "next-key");
 
     assert.deepEqual(setup.botified.posts.filter((post) => post.taskId === task.id).map((post) => post.input.text), ["initial", "queued while running", "next turn"]);
@@ -53,6 +59,41 @@ describe("Phase 3 durable Botified task sessions", () => {
     assert.equal(stored?.terminalReason, null);
     assert.equal(stored?.status, "running");
     assert.equal((await setup.store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
+  });
+
+  it("denies Terminal while Botified is not running or truly idle",async()=>{
+    for(const state of ["aborting","failed","shutting_down"]){
+      const setup=await fixture();
+      const task=await setup.create(`terminal ${state}`);
+      setup.botified.sessions.set(task.id,task.id);
+      await setup.services.tasks.syncActiveTasksOnce();
+      setup.botified.runtimeStates.set(task.id,state);
+
+      const detail=await setup.services.tasks.getTaskDetail(setup.userId,task.id);
+      assert.equal(detail.capabilities.openTerminal,false,state);
+      await assert.rejects(()=>setup.services.tasks.openTaskTerminal(setup.userId,task.id),/running or idle/i,state);
+    }
+  });
+
+  it("denies direct Terminal open while a turn abort is in flight",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("terminal abort in flight");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    const started=deferred(),release=deferred();
+    setup.botified.abortStarted=started.resolve;
+    setup.botified.abortWait=release.promise;
+    const aborting=setup.services.tasks.abortTaskTurn(setup.userId,task.id,"abort-in-flight");
+    await started.promise;
+
+    assert.equal((await setup.services.tasks.getTaskDetail(setup.userId,task.id)).capabilities.openTerminal,false);
+    try{
+      await assert.rejects(()=>setup.services.tasks.openTaskTerminal(setup.userId,task.id),/abort/i);
+    }finally{
+      setup.services.tasks.closeTaskTerminal(task.id);
+      release.resolve();
+      await aborting;
+    }
   });
 
   it("recovers a duplicate accepted delivery after restart without reposting", async () => {
@@ -255,6 +296,8 @@ class BotifiedClient implements BotifiedRuntimeHttpClient {
   posts: Array<{ taskId:string; input:BotifiedDeliveryMessageInput }> = [];
   receipts = new Map<string,BotifiedDeliveryReceipt>();
   abortTaskIds: string[] = [];
+  abortStarted:(()=>void)|null=null;
+  abortWait:Promise<void>|null=null;
   throwAfterAccept = false;
   async health() { return { status:"ok" as const }; }
   taskId(baseUrl:string){for(const taskId of this.sessions.keys())if(baseUrl.includes(taskId.replaceAll("_","-")))return taskId;return taskIdFromUrl(baseUrl);}
@@ -265,7 +308,7 @@ class BotifiedClient implements BotifiedRuntimeHttpClient {
   async readTimeline(baseUrl:string){const taskId=this.taskId(baseUrl);return this.timelines.get(taskId)?.shift()??{status:"ok" as const,events:[]};}
   async uploadFile(_base:string,_key:string,_file:BotifiedUploadFileInput){return{files:[]};}
   async downloadFile(){return{bytes:new Uint8Array(),sizeBytes:0};}
-  async abort(baseUrl:string){this.abortTaskIds.push(this.taskId(baseUrl));return{aborted:true};}
+  async abort(baseUrl:string){this.abortTaskIds.push(this.taskId(baseUrl));this.abortStarted?.();if(this.abortWait)await this.abortWait;return{aborted:true};}
 }
 
 class SandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
@@ -279,5 +322,6 @@ class SandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesRea
 
 function event(sessionId:string,seq:number,type:string,data:Record<string,unknown>={}){return{version:"botified.timeline.v1",seq,cursor:`evt_${token(sessionId)}_${seq}`,time:"2026-07-19T00:00:00.000Z",session_id:sessionId,type,trace:{cycle_id:`cycle-${seq}`},item:null,data};}
 function message(taskId:string,id:string,content:string,createdAt:string){return{id,taskId,actorId:null,content,deliveryKey:`delivery_message_${id}`,requestHash:`hash-${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending" as const,claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt,updatedAt:createdAt,deletedAt:null};}
+function deferred(){let resolve!:()=>void;const promise=new Promise<void>((done)=>{resolve=done;});return{promise,resolve};}
 function token(value:string){return value.replace(/[^A-Za-z0-9]/g,"");}
 function taskIdFromUrl(baseUrl:string){const match=/\/(task_[A-Za-z0-9_-]+)(?:\/|:|\.|$)/.exec(baseUrl);if(match?.[1])return match[1];const host=new URL(baseUrl).hostname;const task=host.match(/task-[a-z0-9-]+/i)?.[0]?.replace(/^task-/,"task_");if(task)return task;throw new Error(`Task ID missing from ${baseUrl}`);}
