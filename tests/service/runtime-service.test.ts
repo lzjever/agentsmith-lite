@@ -58,20 +58,58 @@ describe("live sandbox runtime service", () => {
     assert.equal((await store.sandboxRuns.get(task.runId))?.startupFailure, undefined);
   });
 
-  it("records Pod readiness once before a failing Botified readiness probe",async()=>{
+  it("settles startup cleanup through RuntimeService without starting usage before Pod readiness",async()=>{
+    const botified=new FakeBotifiedClient([]);
+    const livePort=new FakeLiveSandboxPort();
+    livePort.queueReadiness("failed");
+    const {services,store,userId,projectId,endpointId}=await setupRuntimeServices(botified,livePort,{readinessTimeoutMs:0,taskRetryDelayMs:0});
+    const task=await services.tasks.createTask(userId,projectId,taskInput("Pod fails early",endpointId));
+
+    const runtime=new RuntimeService(services.tasks,services.sandboxLifecycle);
+    await runtime.tickOnce();
+
+    const failedRun=await store.sandboxRuns.get(task.runId);
+    assert.equal(failedRun?.startedAt,null);
+    assert.equal(failedRun?.phase,"cleaned");
+    assert.equal(failedRun?.cleanupStatus,"cleaned");
+    assert.equal(failedRun?.releaseReason,"failed");
+    assert.ok(failedRun?.startupFailure);
+    assert.equal((await store.listTaskMessages(task.id))[0]?.deliveryStatus,"failed");
+    assert.equal((await store.findTask(task.id))?.activeReservation,false);
+    const settlements=await store.listSandboxUsageSettlements(projectId,userId);
+    assert.equal(settlements.length,1);
+    assert.equal(settlements[0]?.startedAt,null);
+    assert.equal(settlements[0]?.durationSeconds,0);
+    await runtime.tickOnce();
+    assert.equal((await store.listSandboxUsageSettlements(projectId,userId)).length,1);
+    assert.equal((await store.listProjectAuditEvents(projectId)).filter((event)=>event.action==="sandbox.started").length,0);
+  });
+
+  it("settles startup cleanup through RuntimeService while retaining Pod-ready usage start",async()=>{
     const botified=new FakeBotifiedClient([],[new Error("service endpoint is not ready")]);
     const livePort=new FakeLiveSandboxPort();
     const {services,store,userId,projectId,endpointId}=await setupRuntimeServices(botified,livePort,{readinessTimeoutMs:0,taskRetryDelayMs:0});
     const task=await services.tasks.createTask(userId,projectId,taskInput("Botified starts late",endpointId));
 
-    await services.tasks.syncActiveTasksOnce();
+    const runtime=new RuntimeService(services.tasks,services.sandboxLifecycle);
+    await runtime.tickOnce();
     const afterFailure=await store.sandboxRuns.get(task.runId);
     assert.ok(afterFailure?.startedAt);
-    const firstStartedAt=afterFailure.startedAt;
+    assert.equal(afterFailure.phase,"cleaned");
+    assert.equal(afterFailure.cleanupStatus,"cleaned");
+    assert.equal(afterFailure.releaseReason,"failed");
+    assert.ok(afterFailure.startupFailure);
+    assert.equal((await store.listTaskMessages(task.id))[0]?.deliveryStatus,"failed");
+    assert.equal((await store.findTask(task.id))?.activeReservation,false);
+    const settlements=await store.listSandboxUsageSettlements(projectId,userId);
+    assert.equal(settlements.length,1);
+    assert.equal(settlements[0]?.startedAt,afterFailure.startedAt);
 
-    const second=await services.tasks.syncActiveTasksOnce();
-    assert.deepEqual(second.syncedTaskIds,[task.id]);
-    assert.equal((await store.sandboxRuns.get(task.runId))?.startedAt,firstStartedAt);
+    await runtime.tickOnce();
+    assert.equal((await store.sandboxRuns.get(task.runId))?.startedAt,afterFailure.startedAt);
+    assert.equal((await store.listSandboxUsageSettlements(projectId,userId)).length,1);
+    assert.equal(botified.healthCalls.length,1);
+    assert.equal(botified.postMessageCalls.length,0);
     assert.equal((await store.listProjectAuditEvents(projectId)).filter((event)=>event.action==="sandbox.started").length,1);
   });
 
@@ -440,6 +478,10 @@ class FakeLiveSandboxPort implements SandboxKubernetesMutationPort, SandboxKuber
 
   async getPodReadiness(): Promise<PodReadiness> {
     return this.readiness.shift() ?? "ready";
+  }
+
+  queueReadiness(...readiness:PodReadiness[]):void {
+    this.readiness.splice(0,this.readiness.length,...readiness);
   }
 
   markPodFailed(): void {

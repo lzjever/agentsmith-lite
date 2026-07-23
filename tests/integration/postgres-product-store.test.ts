@@ -117,6 +117,35 @@ postgresDescribe("postgres product store", () => {
     assert.deepEqual((await store.listUserNotifications("user_membership_target")).map((item)=>[item.id,item.readAt]),[["notification_late_after_membership_revoke",null]]);
   });
 
+  it("atomically activates an exact Task Run across concurrent and repeated calls",async()=>{
+    const timestamp="2026-07-23T00:00:00.000Z";
+    const task:TaskFixture={id:"task_pg_activate",workspaceId:"ws_pg_activate",projectId:"proj_pg_activate",endpointId:"endpoint_pg_activate",fileLibraryId:"library_task_pg_activate",createdByUserId:"user_pg_activate",prompt:"activate",status:"starting",runId:"run_pg_activate",executionMode:"live",sandbox:{namespace:"agentsmith",resources:[]},activeReservation:true,createdAt:timestamp,updatedAt:timestamp};
+    await store.createUser({id:task.createdByUserId!,email:"activate@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
+    await store.createWorkspace({id:task.workspaceId,name:"Activate",ownerUserId:task.createdByUserId!,createdAt:timestamp,updatedAt:timestamp});
+    await store.createProject({id:task.projectId,workspaceId:task.workspaceId,name:"Activate",ownerUserId:task.createdByUserId!,rootPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+    await createTestCredential(store,task.projectId,"cred_pg_activate",timestamp);
+    await store.createEndpoint(endpointRecord(task.endpointId,task.projectId,"cred_pg_activate",timestamp));
+    assert.equal((await createTaskWithLibrary(store,task,true)).kind,"created");
+    const run=sandboxRun({workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId:task.runId,fileLibraryId:task.fileLibraryId!,startedByUserId:task.createdByUserId!,projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,createdAt:timestamp,updatedAt:timestamp});
+    await store.sandboxRuns.put(run);
+    const started=await store.confirmSandboxRunStarted({runId:run.runId,expectedFencingToken:run.fencingToken,startedAt:"2026-07-23T00:01:00.000Z",auditEvent:{id:"audit_pg_activate_started",projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-23T00:01:00.000Z"}});
+    assert.notEqual(started.kind,"conflict");
+    if(started.kind==="conflict")return;
+    const input={taskId:task.id,runId:run.runId,expectedFencingToken:started.run.fencingToken,activatedAt:"2026-07-23T00:02:00.000Z"};
+
+    const concurrent=await Promise.all([store.activateTaskSandboxRun(input),store.activateTaskSandboxRun(input)]);
+    assert.deepEqual(concurrent.map((result)=>result.kind).sort(),["activated","already_running"]);
+    assert.equal((await store.findTask(task.id))?.status,"running");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.phase,"running");
+
+    const projected=await store.updateTaskStatusIfNonterminal(task.id,"queued","2026-07-23T00:03:00.000Z");
+    assert.equal(projected?.status,"queued");
+    const repeated=await store.activateTaskSandboxRun(input);
+    assert.equal(repeated.kind,"already_running");
+    assert.equal((await store.findTask(task.id))?.status,"queued");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.phase,"running");
+  });
+
   it("keeps project pins user-scoped and removes them with membership", async () => {
     const timestamp="2026-07-15T00:00:00.000Z";
     await store.createUser({id:"user_pin_owner",email:"pin-owner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});

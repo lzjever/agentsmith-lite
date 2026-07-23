@@ -56,6 +56,8 @@ import type {
   TaskSandboxReleaseMutationResult,
   ConfirmSandboxRunStartedInput,
   ConfirmSandboxRunStartedResult,
+  ActivateTaskSandboxRunInput,
+  ActivateTaskSandboxRunResult,
   CompleteSandboxRunReleaseInput,
   CompleteSandboxRunReleaseResult,
   SandboxUsageSettlement,
@@ -505,6 +507,9 @@ export class InMemoryProductStore implements ProductStore {
   async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
   async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{
     return this.sandboxRuns.confirmStarted(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
+  }
+  async activateTaskSandboxRun(input:ActivateTaskSandboxRunInput):Promise<ActivateTaskSandboxRunResult>{
+    return this.sandboxRuns.activateTask(input,()=>this.tasks.get(input.taskId),(task)=>this.tasks.set(task.id,clone(task)));
   }
   async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{
     try{return await this.sandboxRuns.completeRelease(input,(replay)=>{
@@ -1218,6 +1223,38 @@ class InMemorySandboxRunStore {
     });
   }
 
+  async activateTask(
+    input:ActivateTaskSandboxRunInput,
+    readTask:()=>PersistedAgentTask|undefined,
+    commitTask:(task:PersistedAgentTask)=>void
+  ):Promise<ActivateTaskSandboxRunResult>{
+    return this.serializeMutation(async()=>{
+      if(!(this.jsonDocs instanceof InMemoryJsonDocStore))return{kind:"conflict"};
+      const document=this.jsonDocs.getSync("sandbox_run_state",input.runId);
+      const run=document?sandboxRunFromDocument(document):null;
+      const task=readTask();
+      if(!run||!task||!taskRunIdentityMatches(task,run,input))return{kind:"conflict"};
+      if(run.phase==="running"&&run.cleanupStatus==="active"&&task.executionMode==="live"&&!task.deletedAt&&!task.archivedAt&&task.activeReservation&&(task.status==="running"||task.status==="queued")){
+        return{kind:"already_running",task:clone(task),run};
+      }
+      if(run.phase!=="starting"||run.cleanupStatus!=="active"||!run.startedAt||run.fencingToken!==input.expectedFencingToken||task.executionMode!=="live"||task.deletedAt||task.archivedAt||task.status!=="starting"||!task.activeReservation){
+        return{kind:"conflict"};
+      }
+      const activatedRun={...run,phase:"running" as const,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
+      const activatedTask={...task,status:"running" as const,updatedAt:input.activatedAt};
+      const prepared=prepareSandboxRunDocument(activatedRun);
+      try{
+        this.jsonDocs.putSync("sandbox_run_state",run.runId,prepared);
+        commitTask(activatedTask);
+        return{kind:"activated",task:clone(activatedTask),run:sandboxRunFromDocument(prepared)};
+      }catch(error){
+        this.jsonDocs.putSync("sandbox_run_state",run.runId,prepareSandboxRunDocument(run));
+        commitTask(task);
+        throw error;
+      }
+    });
+  }
+
   async completeRelease(input:CompleteSandboxRunReleaseInput,commit:(replay:boolean)=>void):Promise<CompleteSandboxRunReleaseResult>{
     return this.serializeMutation(async()=>{
       const current=await this.get(input.runId);
@@ -1242,6 +1279,7 @@ class InMemorySandboxRunStore {
 }
 
 function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.startedAt===right.startedAt&&JSON.stringify(left.resourceLimits)===JSON.stringify(right.resourceLimits)&&JSON.stringify(left.resourceSnapshot)===JSON.stringify(right.resourceSnapshot)}
+function taskRunIdentityMatches(task:PersistedAgentTask,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.runId===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return JSON.stringify(left)===JSON.stringify(right)}
 function isConfirmedCleanedRun(run:PersistedSandboxRunState):boolean{return run.cleanupStatus==="cleaned"||run.phase==="cleaned"}
 function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,cleaned:PersistedSandboxRunState):boolean{const duration=current.startedAt===null?0:Math.max(0,(Date.parse(cleaned.updatedAt)-Date.parse(current.startedAt))/1000);return value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===cleaned.updatedAt&&value.durationSeconds===duration&&value.releaseReason===cleaned.releaseReason&&JSON.stringify(value.resources)===JSON.stringify(current.resourceSnapshot)}

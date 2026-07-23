@@ -14,6 +14,7 @@ import type {
   BotifiedTimelineReadResult,
   BotifiedUploadFileInput
 } from "../../packages/ports/src/botified.js";
+import { BotifiedHttpError } from "../../packages/ports/src/botified.js";
 import type { KubernetesResourceRef, PodReadiness, SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 
 describe("Phase 3 durable Botified task sessions", () => {
@@ -127,20 +128,346 @@ describe("Phase 3 durable Botified task sessions", () => {
     assert.equal((await setup.store.findTaskMessage("message_later"))?.deliveryStatus,"pending");
   });
 
-  it("fails closed for Botified state and timeline session mismatches", async () => {
+  it("never promotes a Run with a mismatched Botified session", async () => {
     const setup = await fixture();
     const task = await setup.create("identity");
     setup.botified.sessions.set(task.id, "another-task");
+    const updates:Array<{phase:string;cleanupStatus:string;releaseReason?:string|null;startupFailure?:unknown}>=[];
+    const originalUpdate=setup.store.sandboxRuns.updateWithFencing.bind(setup.store.sandboxRuns);
+    setup.store.sandboxRuns.updateWithFencing=async(runId,expectedFencingToken,run)=>{
+      updates.push(run);
+      return originalUpdate(runId,expectedFencingToken,run);
+    };
     const first = await setup.services.tasks.syncActiveTasksOnce();
     assert.deepEqual(first.failedTaskIds, [task.id]);
     assert.equal(setup.botified.posts.length, 0);
+    assert.equal(updates.some((run)=>run.phase==="running"),false);
+    assert.equal(updates.some((run)=>run.phase==="stopping"&&run.cleanupStatus==="cleanup_requested"&&run.releaseReason==="failed"&&Boolean(run.startupFailure)),true);
+    const failedRun=await setup.store.sandboxRuns.get(task.runId);
+    assert.equal(failedRun?.phase,"stopping");
+    assert.equal(failedRun?.cleanupStatus,"cleanup_requested");
+    assert.equal(failedRun?.releaseReason,"failed");
+    assert.ok(failedRun?.startupFailure);
+    assert.equal((await setup.store.findTask(task.id))?.status,"starting");
+    assert.equal((await setup.store.listTaskMessages(task.id))[0]?.deliveryStatus,"failed");
+    assert.equal((await setup.store.findTask(task.id))?.terminalReason,null);
+    assert.ok((await setup.store.findTask(task.id))?.fileLibraryId);
+  });
 
-    setup.botified.sessions.set(task.id, task.id);
+  it("fails closed for timeline session mismatches after startup",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("timeline identity");
+    setup.botified.sessions.set(task.id,task.id);
     await setup.services.tasks.syncActiveTasksOnce();
     setup.botified.timelines.set(task.id, [{ status:"ok", events:[event("another-task", 1, "cycle.completed")], nextCursor:"evt_other_1", historyBoundary:"start" }]);
     const second = await setup.services.tasks.syncActiveTasksOnce();
     assert.deepEqual(second.failedTaskIds, [task.id]);
     assert.equal((await setup.store.findTask(task.id))?.terminalReason, null);
+  });
+
+  it("keeps a Run starting until verified state and promotes it exactly once",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("verified startup");
+    setup.botified.sessions.set(task.id,task.id);
+    const phasesAtStateRead:string[]=[];
+    setup.botified.beforeReadState=async()=>{
+      phasesAtStateRead.push((await setup.store.sandboxRuns.get(task.runId))?.phase??"missing");
+    };
+    const originalActivate=setup.store.activateTaskSandboxRun.bind(setup.store);
+    let runningTransitions=0;
+    setup.store.activateTaskSandboxRun=async(input)=>{
+      const result=await originalActivate(input);
+      if(result.kind==="activated")runningTransitions+=1;
+      return result;
+    };
+
+    await setup.services.tasks.syncActiveTasksOnce();
+
+    assert.equal(phasesAtStateRead[0],"starting");
+    assert.equal((await setup.store.sandboxRuns.get(task.runId))?.phase,"running");
+    assert.equal((await setup.store.findTask(task.id))?.status,"running");
+    assert.equal(runningTransitions,1);
+  });
+
+  it("atomically promotes one exact Task Run and treats a concurrent retry as success",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("atomic activation");
+    const run=await setup.store.sandboxRuns.get(task.runId);
+    assert.ok(run);
+    const started=await setup.store.confirmSandboxRunStarted({
+      runId:run.runId,
+      expectedFencingToken:run.fencingToken,
+      startedAt:"2026-07-19T00:01:00.000Z",
+      auditEvent:{id:`audit_sandbox_started_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-19T00:01:00.000Z"}
+    });
+    assert.notEqual(started.kind,"conflict");
+    if(started.kind==="conflict")return;
+    const atomicStore=setup.store as typeof setup.store&{activateTaskSandboxRun(input:{taskId:string;runId:string;expectedFencingToken:number;activatedAt:string}):Promise<{kind:string}>};
+    const input={taskId:task.id,runId:run.runId,expectedFencingToken:started.run.fencingToken,activatedAt:"2026-07-19T00:02:00.000Z"};
+
+    const results=await Promise.all([atomicStore.activateTaskSandboxRun(input),atomicStore.activateTaskSandboxRun(input)]);
+
+    assert.deepEqual(results.map((result)=>result.kind).sort(),["activated","already_running"]);
+    assert.equal((await setup.store.findTask(task.id))?.status,"running");
+    assert.equal((await setup.store.sandboxRuns.get(run.runId))?.phase,"running");
+  });
+
+  it("does not revive a Run when release wins the startup fence",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("release race");
+    setup.botified.sessions.set(task.id,task.id);
+    setup.botified.beforeReadState=async()=>{
+      const current=await setup.store.sandboxRuns.get(task.runId);
+      assert.ok(current);
+      const released=await setup.store.sandboxRuns.updateWithFencing(task.runId,current.fencingToken,{
+        ...current,
+        phase:"stopping",
+        cleanupStatus:"cleanup_requested",
+        releaseReason:"requested",
+        fencingToken:current.fencingToken+1,
+        updatedAt:"2026-07-19T00:10:00.000Z"
+      });
+      assert.ok(released);
+      setup.botified.beforeReadState=null;
+    };
+
+    await assert.rejects(()=>setup.services.tasks.openTaskTerminal(setup.userId,task.id),/no longer eligible|fencing token changed/i);
+
+    const released=await setup.store.sandboxRuns.get(task.runId);
+    assert.equal(released?.phase,"stopping");
+    assert.equal(released?.cleanupStatus,"cleanup_requested");
+    assert.equal(released?.releaseReason,"requested");
+    assert.equal((await setup.store.findTask(task.id))?.status,"starting");
+  });
+
+  it("serializes Terminal and initial message through one startup gate and one Run",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("shared startup");
+    setup.botified.sessions.set(task.id,task.id);
+    const stateRead=deferred(),releaseState=deferred();
+    let stateReads=0;
+    setup.botified.beforeReadState=async()=>{
+      stateReads+=1;
+      if(stateReads===1){
+        stateRead.resolve();
+        await releaseState.promise;
+      }
+    };
+    const terminal=setup.services.tasks.openTaskTerminal(setup.userId,task.id);
+    await stateRead.promise;
+    const messageSync=setup.services.tasks.syncActiveTasksOnce();
+    await new Promise<void>((resolve)=>setImmediate(resolve));
+    assert.equal(setup.botified.posts.length,0);
+    releaseState.resolve();
+
+    const [connection]=await Promise.all([terminal,messageSync]);
+    assert.equal(connection.serviceKey,"service-key");
+    assert.equal(setup.botified.posts.length,1);
+    assert.equal((await setup.store.sandboxRuns.list()).filter((run)=>run.taskId===task.id).length,1);
+    assert.equal(setup.port.resources.filter((resource)=>resource.kind==="Pod").length,1);
+  });
+
+  it("lets two TaskService instances activate the same Run without cleanup",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("multi instance startup");
+    setup.botified.sessions.set(task.id,task.id);
+    const second=setup.restart();
+    const bothAtState=deferred(),releaseState=deferred();
+    let stateReads=0;
+    setup.botified.beforeReadState=async()=>{
+      stateReads+=1;
+      if(stateReads<=2){
+        if(stateReads===2)bothAtState.resolve();
+        await releaseState.promise;
+      }
+    };
+    const firstTerminal=setup.services.tasks.openTaskTerminal(setup.userId,task.id);
+    const secondTerminal=second.tasks.openTaskTerminal(setup.userId,task.id);
+    await bothAtState.promise;
+    releaseState.resolve();
+
+    const connections=await Promise.all([firstTerminal,secondTerminal]);
+
+    assert.deepEqual(connections.map((value)=>value.serviceKey),["service-key","service-key"]);
+    const active=await setup.store.sandboxRuns.get(task.runId);
+    assert.equal(active?.phase,"running");
+    assert.equal(active?.cleanupStatus,"active");
+    assert.equal(active?.startupFailure,undefined);
+    assert.equal((await setup.store.findTask(task.id))?.status,"running");
+    setup.services.tasks.closeTaskTerminal(task.id);
+    second.tasks.closeTaskTerminal(task.id);
+  });
+
+  it("adopts an exact active Run when a slower startup fails after another instance activates it",async()=>{
+    for(const failureStage of ["health","state"] as const){
+      const setup=await fixture({readinessTimeoutMs:failureStage==="health"?0:10});
+      const task=await setup.create(`slow ${failureStage} startup`);
+      setup.botified.sessions.set(task.id,task.id);
+      const second=setup.restart();
+      const slowAtGate=deferred(),releaseSlow=deferred();
+      let gateCalls=0;
+      const failSlowCall=async()=>{
+        gateCalls+=1;
+        if(gateCalls!==1)return;
+        slowAtGate.resolve();
+        await releaseSlow.promise;
+        throw new Error(`slow local ${failureStage} failure`);
+      };
+      if(failureStage==="health")setup.botified.beforeHealth=failSlowCall;
+      else setup.botified.beforeReadState=failSlowCall;
+      const slowTerminal=setup.services.tasks.openTaskTerminal(setup.userId,task.id);
+      await slowAtGate.promise;
+      const fastTerminal=await second.tasks.openTaskTerminal(setup.userId,task.id);
+      await setup.store.updateTaskStatusIfNonterminal(task.id,"queued",new Date().toISOString());
+      setup.botified.beforeHealth=null;
+      setup.botified.beforeReadState=null;
+      releaseSlow.resolve();
+
+      const adoptedTerminal=await slowTerminal;
+
+      assert.equal(fastTerminal.serviceKey,"service-key");
+      assert.equal(adoptedTerminal.serviceKey,"service-key");
+      assert.equal((await setup.store.findTask(task.id))?.status,"queued");
+      const active=await setup.store.sandboxRuns.get(task.runId);
+      assert.equal(active?.phase,"running");
+      assert.equal(active?.cleanupStatus,"active");
+      assert.equal(active?.startupFailure,undefined);
+      setup.services.tasks.closeTaskTerminal(task.id);
+      second.tasks.closeTaskTerminal(task.id);
+    }
+  });
+
+  it("fails an expired claimed message after cleanup without querying Botified",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("cleanup claim recovery");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    const claimedMessage=message(task.id,"message_cleanup_claim","claimed before cleanup","2026-07-19T00:00:01.000Z");
+    const laterMessage=message(task.id,"message_after_cleanup_claim","later","2026-07-19T00:00:02.000Z");
+    await setup.store.createTaskMessage(claimedMessage);
+    await setup.store.createTaskMessage(laterMessage);
+    await setup.store.claimTaskMessage({id:claimedMessage.id,claimToken:"cleanup-claim",claimedAt:"2026-07-19T00:00:03.000Z",leaseExpiresAt:"2026-07-19T00:00:04.000Z"});
+    const run=await setup.store.sandboxRuns.get(task.runId);
+    assert.ok(run);
+    await setup.store.sandboxRuns.updateWithFencing(run.runId,run.fencingToken,{...run,phase:"stopping",cleanupStatus:"cleanup_requested",releaseReason:"requested",fencingToken:run.fencingToken+1,updatedAt:"2026-07-19T00:00:05.000Z"});
+    const queryCallsBefore=setup.botified.queryDeliveryCalls;
+
+    await setup.restart().tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.findTaskMessage(claimedMessage.id))?.deliveryStatus,"failed");
+    assert.equal((await setup.store.findTaskMessage(laterMessage.id))?.deliveryStatus,"failed");
+    assert.equal(setup.botified.queryDeliveryCalls,queryCallsBefore);
+  });
+
+  it("fails nonretryable Botified errors and defers retryable transport errors",async()=>{
+    for(const retryable of [false,true]){
+      const setup=await fixture();
+      const task=await setup.create(`delivery ${retryable}`);
+      setup.botified.sessions.set(task.id,task.id);
+      await setup.services.tasks.syncActiveTasksOnce();
+      setup.botified.deliveryErrors.push(new BotifiedHttpError({status:retryable?503:400,code:retryable?"temporarily_unavailable":"invalid_delivery",message:retryable?"try later":"invalid message",retryable,responseBody:{}}));
+
+      const receipt=await setup.services.tasks.sendTaskMessage(setup.userId,task.id,`delivery error ${retryable}`,`delivery-error-${retryable}`);
+      const stored=await setup.store.findTaskMessage(receipt.messageId);
+
+      assert.equal(stored?.deliveryStatus,retryable?"dispatching":"failed");
+      assert.match(stored?.safeError??"",retryable?/try later/i:/invalid message/i);
+    }
+  });
+
+  it("fails a claimed message when its delivery receipt identity does not match",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("receipt mismatch");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.throwAfterAccept=true;
+
+    const receipt=await setup.services.tasks.sendTaskMessage(setup.userId,task.id,"identity-bound delivery","receipt-mismatch-key");
+    const claimed=await setup.store.findTaskMessage(receipt.messageId);
+    assert.equal(claimed?.deliveryStatus,"dispatching");
+    assert.ok(claimed?.deliveryKey);
+    setup.botified.receipts.set(claimed.deliveryKey,{
+      accepted:true,
+      deliveryKey:claimed.deliveryKey,
+      requestHash:"mismatched-request-hash",
+      messageId:"remote-mismatch"
+    });
+
+    await setup.restart().tasks.syncActiveTasksOnce();
+
+    const failed=await setup.store.findTaskMessage(claimed.id);
+    assert.equal(failed?.deliveryStatus,"failed");
+    assert.match(failed?.safeError??"",/receipt identity mismatch/i);
+  });
+
+  it("fails a message when the delivery response identity does not match",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("delivery response mismatch");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.nextDeliveryReceipt={
+      accepted:true,
+      deliveryKey:"wrong-delivery-key",
+      requestHash:"wrong-request-hash",
+      messageId:"remote-response-mismatch"
+    };
+
+    const receipt=await setup.services.tasks.sendTaskMessage(setup.userId,task.id,"reject mismatched response","response-mismatch-key");
+
+    const failed=await setup.store.findTaskMessage(receipt.messageId);
+    assert.equal(failed?.deliveryStatus,"failed");
+    assert.match(failed?.safeError??"",/receipt identity mismatch/i);
+  });
+
+  it("cleans an active Run and fails its message on session mismatch",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("active identity");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.sessions.set(task.id,"another-task");
+
+    const receipt=await setup.services.tasks.sendTaskMessage(setup.userId,task.id,"must not retry","active-identity-message");
+
+    const run=await setup.store.sandboxRuns.get(task.runId);
+    assert.equal(run?.phase,"stopping");
+    assert.equal(run?.cleanupStatus,"cleanup_requested");
+    assert.equal(run?.releaseReason,"failed");
+    assert.ok(run?.startupFailure);
+    assert.equal((await setup.store.findTaskMessage(receipt.messageId))?.deliveryStatus,"failed");
+  });
+
+  it("cleans an active Run when Terminal observes a session mismatch",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("terminal active identity");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.sessions.set(task.id,"another-task");
+
+    await assert.rejects(()=>setup.services.tasks.openTaskTerminal(setup.userId,task.id),/session identity mismatch/i);
+
+    assert.equal((await setup.store.sandboxRuns.get(task.runId))?.cleanupStatus,"cleanup_requested");
+  });
+
+  it("retries cleanup persistence before permanently failing a mismatched-session message",async()=>{
+    const setup=await fixture();
+    const task=await setup.create("identity cleanup retry");
+    setup.botified.sessions.set(task.id,task.id);
+    await setup.services.tasks.syncActiveTasksOnce();
+    setup.botified.sessions.set(task.id,"another-task");
+    const originalUpdate=setup.store.sandboxRuns.updateWithFencing.bind(setup.store.sandboxRuns);
+    setup.store.sandboxRuns.updateWithFencing=async(runId,expectedFencingToken,run)=>run.phase==="stopping"?null:originalUpdate(runId,expectedFencingToken,run);
+
+    await assert.rejects(()=>setup.services.tasks.sendTaskMessage(setup.userId,task.id,"retry cleanup intent","identity-cleanup-retry"),/cleanup intent changed concurrently/i);
+
+    assert.equal((await setup.store.sandboxRuns.get(task.runId))?.phase,"running");
+    const claimed=(await setup.store.listTaskMessages(task.id)).find((message)=>message.content==="retry cleanup intent");
+    assert.equal(claimed?.deliveryStatus,"dispatching");
+    setup.store.sandboxRuns.updateWithFencing=originalUpdate;
+
+    await setup.restart().tasks.syncActiveTasksOnce();
+
+    assert.equal((await setup.store.sandboxRuns.get(task.runId))?.cleanupStatus,"cleanup_requested");
+    assert.equal((await setup.store.findTaskMessage(claimed!.id))?.deliveryStatus,"failed");
   });
 
   it("fences broker authorization on the Task session identity",async()=>{
@@ -263,7 +590,7 @@ describe("Phase 3 durable Botified task sessions", () => {
     assert.equal((await setup.store.sandboxRuns.get(task.runId))?.cleanupStatus, "active");
   });
 
-  async function fixture() {
+  async function fixture(options:{readinessTimeoutMs?:number}={}) {
     const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-phase3-session-"));
     roots.push(dataRoot);
     const store = createLocalInMemoryProductStore();
@@ -274,7 +601,7 @@ describe("Phase 3 durable Botified task sessions", () => {
       builtinAdminPassword:"production-admin-password", sessionSecret:"production-session-secret-at-least-32-chars",
       providerClient:{ completeChat:async()=>{ throw new Error("not used"); }, validateEndpoint:async()=>({ status:"healthy" as const }) },
       taskDeliveryLeaseMs:0, taskRetryDelayMs:0,
-      liveSandbox:{ port, readinessTimeoutMs:10, readinessPollMs:1, sleep:async()=>undefined }
+      liveSandbox:{ port, readinessTimeoutMs:options.readinessTimeoutMs??10, readinessPollMs:1, sleep:async()=>undefined }
     } as const;
     const services = createApplicationServices(applicationInput);
     const { user } = await services.auth.loginAfterBootstrap("production-admin-password");
@@ -298,13 +625,18 @@ class BotifiedClient implements BotifiedRuntimeHttpClient {
   abortTaskIds: string[] = [];
   abortStarted:(()=>void)|null=null;
   abortWait:Promise<void>|null=null;
+  beforeHealth:(()=>Promise<void>|void)|null=null;
+  beforeReadState:(()=>Promise<void>|void)|null=null;
+  deliveryErrors:Error[]=[];
+  queryDeliveryCalls=0;
+  nextDeliveryReceipt:BotifiedDeliveryReceipt|null=null;
   throwAfterAccept = false;
-  async health() { return { status:"ok" as const }; }
+  async health() { await this.beforeHealth?.();return { status:"ok" as const }; }
   taskId(baseUrl:string){for(const taskId of this.sessions.keys())if(baseUrl.includes(taskId.replaceAll("_","-")))return taskId;return taskIdFromUrl(baseUrl);}
-  async readState(baseUrl:string):Promise<BotifiedRuntimeStateResult> { const taskId=this.taskId(baseUrl);const sessionId=this.sessions.get(taskId)??taskId;const state=this.runtimeStates.get(taskId)??"running";return { sessionId, state, snapshot:{ session_id:sessionId, state, active_items:state==="running"?[{ id:"cycle", type:"cycle", status:"running" }]:[] }, activeItems:[] }; }
+  async readState(baseUrl:string):Promise<BotifiedRuntimeStateResult> { await this.beforeReadState?.();const taskId=this.taskId(baseUrl);const sessionId=this.sessions.get(taskId)??taskId;const state=this.runtimeStates.get(taskId)??"running";return { sessionId, state, snapshot:{ session_id:sessionId, state, active_items:state==="running"?[{ id:"cycle", type:"cycle", status:"running" }]:[] }, activeItems:[] }; }
   async postMessage() { return { accepted:true }; }
-  async postMessageWithDelivery(baseUrl:string,_key:string,input:BotifiedDeliveryMessageInput) { const taskId=this.taskId(baseUrl);this.posts.push({taskId,input});const receipt={accepted:true,deliveryKey:input.deliveryKey,requestHash:input.requestHash,messageId:`remote-${input.deliveryKey}`} satisfies BotifiedDeliveryReceipt;this.receipts.set(input.deliveryKey,receipt);if(this.throwAfterAccept){this.throwAfterAccept=false;throw new Error("restart after acceptance");}return receipt; }
-  async queryDeliveryReceipt(_base:string,_key:string,deliveryKey:string){return this.receipts.get(deliveryKey)??null;}
+  async postMessageWithDelivery(baseUrl:string,_key:string,input:BotifiedDeliveryMessageInput) { const error=this.deliveryErrors.shift();if(error)throw error;const taskId=this.taskId(baseUrl);this.posts.push({taskId,input});const receipt=this.nextDeliveryReceipt??{accepted:true,deliveryKey:input.deliveryKey,requestHash:input.requestHash,messageId:`remote-${input.deliveryKey}`};this.nextDeliveryReceipt=null;this.receipts.set(input.deliveryKey,receipt);if(this.throwAfterAccept){this.throwAfterAccept=false;throw new Error("restart after acceptance");}return receipt; }
+  async queryDeliveryReceipt(_base:string,_key:string,deliveryKey:string){this.queryDeliveryCalls+=1;return this.receipts.get(deliveryKey)??null;}
   async readTimeline(baseUrl:string){const taskId=this.taskId(baseUrl);return this.timelines.get(taskId)?.shift()??{status:"ok" as const,events:[]};}
   async uploadFile(_base:string,_key:string,_file:BotifiedUploadFileInput){return{files:[]};}
   async downloadFile(){return{bytes:new Uint8Array(),sizeBytes:0};}

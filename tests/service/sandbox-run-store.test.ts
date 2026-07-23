@@ -165,6 +165,65 @@ describe("sandbox run store", () => {
     assert.equal((await store.sandboxRuns.get(run.runId))?.phase, "running");
   });
 
+  it("atomically activates the exact Task and Run with an idempotent concurrent loser",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun();
+    const timestamp=run.createdAt;
+    const task={
+      id:run.taskId,
+      workspaceId:run.workspaceId,
+      projectId:run.projectId,
+      endpointId:"endpoint1",
+      fileLibraryId:run.fileLibraryId,
+      createdByUserId:run.startedByUserId,
+      title:"Task",
+      prompt:"work",
+      status:"starting" as const,
+      runId:run.runId,
+      executionMode:"live" as const,
+      activeReservation:true,
+      sandbox:{namespace:run.namespace,resources:[]},
+      createdAt:timestamp,
+      updatedAt:timestamp
+    };
+    const created=await store.createTaskAtomically({
+      task,
+      newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Task Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
+      reserveActive:false,
+      sandboxRun:run
+    });
+    assert.equal(created.kind,"created");
+    if(created.kind!=="created")return;
+    await store.updateTask({...created.task,activeReservation:true});
+    const started=await store.confirmSandboxRunStarted({
+      runId:run.runId,
+      expectedFencingToken:run.fencingToken,
+      startedAt:"2026-07-04T00:01:00.000Z",
+      auditEvent:{id:`audit_sandbox_started_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:"2026-07-04T00:01:00.000Z"}
+    });
+    assert.notEqual(started.kind,"conflict");
+    if(started.kind==="conflict")return;
+    const input={taskId:task.id,runId:run.runId,expectedFencingToken:started.run.fencingToken,activatedAt:"2026-07-04T00:02:00.000Z"};
+
+    const results=await Promise.all([store.activateTaskSandboxRun(input),store.activateTaskSandboxRun(input)]);
+    const wrongTask=await store.activateTaskSandboxRun({...input,taskId:"task-other",expectedFencingToken:(await store.sandboxRuns.get(run.runId))!.fencingToken});
+    const runningTask=await store.findTask(task.id);
+    assert.ok(runningTask);
+    await store.updateTask({...runningTask,status:"queued",updatedAt:"2026-07-04T00:03:00.000Z"});
+    const queuedRetry=await store.activateTaskSandboxRun(input);
+    const queuedTask=await store.findTask(task.id);
+    assert.ok(queuedTask);
+    await store.updateTask({...queuedTask,activeReservation:false,updatedAt:"2026-07-04T00:04:00.000Z"});
+    const unreservedRetry=await store.activateTaskSandboxRun(input);
+
+    assert.deepEqual(results.map((result)=>result.kind).sort(),["activated","already_running"]);
+    assert.equal(wrongTask.kind,"conflict");
+    assert.equal(queuedRetry.kind,"already_running");
+    assert.equal(unreservedRetry.kind,"conflict");
+    assert.equal((await store.findTask(task.id))?.status,"queued");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.phase,"running");
+  });
+
   it("rejects secret values in persisted sandbox run state", async () => {
     const store = createLocalInMemoryProductStore();
 

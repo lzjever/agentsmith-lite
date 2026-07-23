@@ -743,11 +743,21 @@ export class TaskService {
     const timestamp = nowIso();
     if (message.deliveryStatus === "dispatching") {
       if (!message.claimToken || !message.leaseExpiresAt || message.leaseExpiresAt > timestamp) return message;
-      const reconciled = await this.reconcileTaskMessageDelivery(message, source);
-      if (reconciled) {
-        await this.persistMessageInteraction(reconciled);
-        if (completeIdempotency && isSettledMessage(reconciled)) await this.completeMessageIdempotency(reconciled);
-        return reconciled;
+      const run=await this.exactTaskMessageRun(source);
+      if(!run||!runAllowsMessageDelivery(run)){
+        return this.failClaimedTaskMessage(message,"Sandbox run was released before this message was delivered",completeIdempotency);
+      }
+      if(run.phase==="running"){
+        try{
+          const reconciled = await this.reconcileTaskMessageDelivery(message, source);
+          if (reconciled) {
+            await this.persistMessageInteraction(reconciled);
+            if (completeIdempotency && isSettledMessage(reconciled)) await this.completeMessageIdempotency(reconciled);
+            return reconciled;
+          }
+        }catch(error){
+          return this.settleClaimedTaskMessageError(message,source,error,completeIdempotency);
+        }
       }
       source = await this.store.findTask(source.id) ?? source;
       const reclaimed = await this.store.reclaimTaskMessage({ id:message.id, expectedClaimToken:message.claimToken, claimToken:newId("delivery_claim"), claimedAt:timestamp, leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs()) });
@@ -761,20 +771,19 @@ export class TaskService {
       await this.persistMessageInteraction(message);
       source = await this.store.findTask(source.id) ?? source;
     }
+    const unavailable=await this.failClaimedTaskMessageIfRunUnavailable(message,source,completeIdempotency);
+    if(unavailable)return unavailable;
     const claimToken = message.claimToken!;
     try {
+      const startupActorId=message.actorId??source.createdByUserId;
+      if(!startupActorId)throw new ProductError("Task sandbox startup actor is unavailable",409);
+      source=await this.ensureLiveSandbox(startupActorId,source);
       const serviceKey = this.serviceKeyForTask(source);
       const runtime = await this.readRuntimeState(source, serviceKey);
       const run=await this.store.sandboxRuns.get(source.runId);
       if(!run||run.taskId!==source.id)throw new ProductError("Task sandbox runtime state not found",409);
       if(run.cleanupStatus!=="active")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
-      if(run.phase==="starting"){
-        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(source.projectId,source.endpointId);
-        requireTaskEndpointCapabilities(endpoint);
-        await this.startLiveSandbox({endpoint,task:source,run,serviceKey});
-        await this.claimLiveRunForPrompt(run.runId);
-        source=await this.store.updateTaskStatusIfStarting(source.id,"running",nowIso())??source;
-      }else if(run.phase!=="running")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
+      if(run.phase!=="running")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
       await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
       const receipt = await this.postDeliveryMessage(runtime.baseUrl, serviceKey, message.content, message.deliveryKey!, message.requestHash!);
       if (!receipt.accepted) {
@@ -792,10 +801,47 @@ export class TaskService {
       if (completeIdempotency) await this.completeMessageIdempotency(accepted);
       return accepted;
     } catch (error) {
-      const deferred = await this.store.deferTaskMessage({ id:message.id, claimToken, safeError:safeTaskStageError(error), nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()), updatedAt:nowIso() });
-      if (deferred) await this.persistMessageInteraction(deferred);
-      return await this.store.findTaskMessage(message.id) ?? message;
+      const startupFailure=error instanceof ProductError&&error.code==="sandbox_startup_failed";
+      const settled=await this.settleClaimedTaskMessageError(message,source,error,completeIdempotency);
+      if(startupFailure)throw error;
+      return settled;
     }
+  }
+
+  private async exactTaskMessageRun(task:PersistedAgentTask):Promise<PersistedSandboxRunState|null>{
+    const run=await this.store.sandboxRuns.get(task.runId);
+    return run&&run.runId===task.runId&&run.taskId===task.id&&run.workspaceId===task.workspaceId&&run.projectId===task.projectId&&run.fileLibraryId===task.fileLibraryId?run:null;
+  }
+
+  private async failClaimedTaskMessageIfRunUnavailable(message:PersistedTaskMessage,task:PersistedAgentTask,completeIdempotency:boolean):Promise<PersistedTaskMessage|null>{
+    const run=await this.exactTaskMessageRun(task);
+    return run&&runAllowsMessageDelivery(run)?null:this.failClaimedTaskMessage(message,"Sandbox run was released before this message was delivered",completeIdempotency);
+  }
+
+  private async failClaimedTaskMessage(message:PersistedTaskMessage,safeError:string,completeIdempotency:boolean):Promise<PersistedTaskMessage>{
+    if(!message.claimToken)return await this.store.findTaskMessage(message.id)??message;
+    const failed=await this.store.failTaskMessage({id:message.id,claimToken:message.claimToken,safeError,updatedAt:nowIso()});
+    const settled=failed??await this.store.findTaskMessage(message.id)??message;
+    if(failed)await this.persistMessageInteraction(failed);
+    if(completeIdempotency&&isSettledMessage(settled))await this.completeMessageIdempotency(settled);
+    return settled;
+  }
+
+  private async settleClaimedTaskMessageError(message:PersistedTaskMessage,task:PersistedAgentTask,error:unknown,completeIdempotency:boolean):Promise<PersistedTaskMessage>{
+    if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
+    const sessionMismatch=error instanceof ProductError&&error.code==="botified_session_mismatch";
+    const run=await this.exactTaskMessageRun(task);
+    const permanent=
+      sessionMismatch ||
+      error instanceof ProductError&&error.code==="botified_delivery_receipt_identity_mismatch" ||
+      error instanceof ProductError&&error.code==="sandbox_startup_failed" ||
+      error instanceof BotifiedTaskPortError&&!error.retryable ||
+      !run ||
+      !runAllowsMessageDelivery(run);
+    if(permanent)return this.failClaimedTaskMessage(message,safeTaskStageError(error),completeIdempotency);
+    const deferred=await this.store.deferTaskMessage({id:message.id,claimToken:message.claimToken!,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});
+    if(deferred)await this.persistMessageInteraction(deferred);
+    return await this.store.findTaskMessage(message.id)??message;
   }
 
   private async reconcileTaskMessageDelivery(message: PersistedTaskMessage, source: PersistedAgentTask): Promise<PersistedTaskMessage | null> {
@@ -804,16 +850,9 @@ export class TaskService {
     const state = await this.readRuntimeState(source, serviceKey);
     await this.readVerifiedBotifiedState(source,state.baseUrl,serviceKey);
     if (!this.botified.queryDeliveryReceipt) throw new ProductError("Botified delivery query API is required", 502);
-    let receipt: BotifiedDeliveryReceipt | null;
-    try {
-      receipt = await this.botified.queryDeliveryReceipt(state.baseUrl, serviceKey, message.deliveryKey);
-    } catch (error) {
-      const deferred = await this.store.deferTaskMessage({ id:message.id, claimToken:message.claimToken, safeError:safeTaskStageError(error), nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()), updatedAt:nowIso() });
-      if (deferred) await this.persistMessageInteraction(deferred);
-      return message;
-    }
+    const receipt=await this.callBotified("send message",()=>this.botified.queryDeliveryReceipt!(state.baseUrl,serviceKey,message.deliveryKey!));
     if (!receipt) return null;
-    if (receipt.deliveryKey !== message.deliveryKey || receipt.requestHash !== message.requestHash) throw new ProductError("Botified task message delivery receipt identity mismatch", 409);
+    if (receipt.deliveryKey !== message.deliveryKey || receipt.requestHash !== message.requestHash) throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
     const receiptCursor = safeRuntimeCursor(receipt.cursor) ?? null;
     return await this.store.recordTaskMessageReceipt({ id:message.id, claimToken:message.claimToken, receipt, timelineCursor:receiptCursor, updatedAt:nowIso() })
       ?? await this.store.findTaskMessage(message.id);
@@ -1051,12 +1090,23 @@ export class TaskService {
       if(!run)throw new ProductError("Task sandbox restart did not create an active run",409);
     }
     if(run.phase==="starting"||run.phase==="queued"){
-      const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
-      requireTaskEndpointCapabilities(endpoint);
-      const serviceKey=this.serviceKeyForTask(task);
-      await this.startLiveSandbox({endpoint,task,run,serviceKey});
-      await this.claimLiveRunForPrompt(run.runId);
-      task=await this.store.updateTaskStatusIfStarting(task.id,"running",nowIso())??await this.store.findTask(task.id)??task;
+      let operation="start sandbox";
+      try{
+        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
+        requireTaskEndpointCapabilities(endpoint);
+        const serviceKey=this.serviceKeyForTask(task);
+        await this.startLiveSandbox({endpoint,task,run,serviceKey});
+        operation="read state";
+        const runtime=await this.readRuntimeState(task,serviceKey);
+        await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
+        operation="activate sandbox";
+        task=await this.confirmLiveRunRunning(task,run.runId);
+      }catch(error){
+        if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
+        const adopted=await this.persistStartingRunFailureOrAdopt(task,run.runId,operation,error);
+        if(adopted)task=adopted;
+        else throw new ProductError(safeTaskStageError(error),error instanceof ProductError?error.statusCode:502,"sandbox_startup_failed");
+      }
     }
     return task;
   }
@@ -1312,7 +1362,11 @@ export class TaskService {
 
   private async readVerifiedBotifiedState(task:PersistedAgentTask,baseUrl:string,serviceKey:string):Promise<BotifiedRuntimeStateResult>{
     const state=await this.callBotified("read state",()=>this.botified.readState(baseUrl,serviceKey));
-    if(state.sessionId!==task.id)throw new ProductError("Botified session identity mismatch",409);
+    if(state.sessionId!==task.id){
+      const mismatch=new ProductError("Botified session identity mismatch",409,"botified_session_mismatch");
+      await this.persistRuntimeIdentityFailure(task,"read state",mismatch);
+      throw mismatch;
+    }
     return state;
   }
 
@@ -1324,7 +1378,9 @@ export class TaskService {
 
   private async postDeliveryMessage(baseUrl:string,serviceKey:string,text:string,deliveryKey:string,requestHash:string):Promise<BotifiedDeliveryReceipt>{
     if (!this.botified.postMessageWithDelivery) throw new ProductError("Botified delivery API is required",502);
-    return this.callBotified("send message",()=>this.botified.postMessageWithDelivery!(baseUrl,serviceKey,{text,deliveryKey,requestHash}));
+    const receipt=await this.callBotified("send message",()=>this.botified.postMessageWithDelivery!(baseUrl,serviceKey,{text,deliveryKey,requestHash}));
+    if(receipt.deliveryKey!==deliveryKey||receipt.requestHash!==requestHash)throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
+    return receipt;
   }
 
   private async downloadTaskArtifactForInteraction(
@@ -1614,53 +1670,109 @@ export class TaskService {
     }
   }
 
-  private async bestEffortPersistLiveStartupFailure(
+  private async persistStartingRunFailureOrAdopt(
+    task: PersistedAgentTask,
     runId: string,
-    operation: BotifiedOperation,
+    operation: string,
     error: unknown
-  ): Promise<void> {
-    try {
+  ): Promise<PersistedAgentTask|null> {
+    const failureAt=nowIso();
+    const startupFailure={
+      operation,
+      message:redactSecretLikeText(error instanceof Error?error.message:"Unknown sandbox startup error").slice(0,300),
+      status:error instanceof ProductError?error.statusCode:502,
+      at:failureAt
+    };
+    for(let attempt=0;attempt<5;attempt+=1){
       const current = await this.store.sandboxRuns.get(runId);
-      if (!current) {
-        return;
+      if(!current)return null;
+      if(!taskMatchesExactSandboxRun(task,current))return null;
+      if(current.phase==="running"&&current.cleanupStatus==="active"){
+        const currentTask=await this.store.findTask(task.id);
+        return currentTask&&taskAllowsActivatedRunAdoption(currentTask,current)?currentTask:null;
       }
-      const message = redactSecretLikeText(error instanceof Error ? error.message : "Unknown Botified error").slice(0, 300);
-      const status = error instanceof ProductError ? error.statusCode : 502;
-      await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
-        ...current,
-        startupFailure: {
-          operation,
-          message,
-          status,
-          at: nowIso()
-        },
-        fencingToken: current.fencingToken + 1,
-        updatedAt: nowIso()
-      });
-    } catch {
-      // Startup cleanup and the original failure must not depend on the failure metadata write.
+      if(current.cleanupStatus!=="active"||!["queued","starting"].includes(current.phase))return null;
+      const updatedAt=nowIso();
+      let updated:PersistedSandboxRunState|null;
+      try{
+        updated=await this.store.sandboxRuns.updateWithFencing(runId,current.fencingToken,{
+          ...current,
+          phase:"stopping",
+          cleanupStatus:"cleanup_requested",
+          releaseReason:current.releaseReason??"failed",
+          startupFailure:current.startupFailure??startupFailure,
+          fencingToken:current.fencingToken+1,
+          updatedAt
+        });
+      }catch{
+        throw new ProductError("Sandbox startup cleanup intent could not be persisted",503,"sandbox_cleanup_intent_conflict");
+      }
+      if(updated)return null;
+    }
+    const current=await this.store.sandboxRuns.get(runId);
+    if(current&&taskMatchesExactSandboxRun(task,current)&&current.phase==="running"&&current.cleanupStatus==="active"){
+      const currentTask=await this.store.findTask(task.id);
+      return currentTask&&taskAllowsActivatedRunAdoption(currentTask,current)?currentTask:null;
+    }
+    if(current&&taskMatchesExactSandboxRun(task,current)&&current.cleanupStatus==="active"&&["queued","starting"].includes(current.phase)){
+      throw new ProductError("Sandbox startup cleanup intent changed concurrently; retry",409,"sandbox_cleanup_intent_conflict");
+    }
+    return null;
+  }
+
+  private async persistRuntimeIdentityFailure(
+    task:PersistedAgentTask,
+    operation:string,
+    error:unknown
+  ):Promise<void>{
+    const runId=task.runId;
+    const failureAt=nowIso();
+    const startupFailure={
+      operation,
+      message:redactSecretLikeText(error instanceof Error?error.message:"Unknown sandbox runtime identity error").slice(0,300),
+      status:error instanceof ProductError?error.statusCode:502,
+      at:failureAt
+    };
+    for(let attempt=0;attempt<5;attempt+=1){
+      const current=await this.store.sandboxRuns.get(runId);
+      if(!current||!taskMatchesExactSandboxRun(task,current)||current.cleanupStatus!=="active"||!["queued","starting","running"].includes(current.phase))return;
+      let updated:PersistedSandboxRunState|null;
+      try{
+        const updatedAt=nowIso();
+        updated=await this.store.sandboxRuns.updateWithFencing(runId,current.fencingToken,{
+          ...current,
+          phase:"stopping",
+          cleanupStatus:"cleanup_requested",
+          releaseReason:current.releaseReason??"failed",
+          startupFailure:current.startupFailure??startupFailure,
+          fencingToken:current.fencingToken+1,
+          updatedAt
+        });
+      }catch{
+        throw new ProductError("Sandbox runtime cleanup intent could not be persisted",503,"sandbox_cleanup_intent_conflict");
+      }
+      if(updated)return;
+    }
+    const current=await this.store.sandboxRuns.get(runId);
+    if(current&&taskMatchesExactSandboxRun(task,current)&&current.cleanupStatus==="active"&&["queued","starting","running"].includes(current.phase)){
+      throw new ProductError("Sandbox runtime cleanup intent changed concurrently; retry",409,"sandbox_cleanup_intent_conflict");
     }
   }
 
-  private async claimLiveRunForPrompt(runId: string): Promise<void> {
+  private async confirmLiveRunRunning(task:PersistedAgentTask,runId: string): Promise<PersistedAgentTask> {
     const current = await this.store.sandboxRuns.get(runId);
     if (
       !current ||
-      current.phase !== "starting" ||
-      current.cleanupStatus !== "active"
+      current.taskId!==task.id ||
+      current.runId!==task.runId
     ) {
-      throw new ProductError("Sandbox run is no longer eligible to receive a prompt", 409);
+      throw new ProductError("Sandbox run is no longer eligible to start",409);
     }
-    const updated = await this.store.sandboxRuns.updateWithFencing(runId, current.fencingToken, {
-      ...current,
-      phase: "running",
-      cleanupStatus: "active",
-      fencingToken: current.fencingToken + 1,
-      updatedAt: nowIso()
-    });
-    if (!updated) {
+    const activated=await this.store.activateTaskSandboxRun({taskId:task.id,runId,expectedFencingToken:current.fencingToken,activatedAt:nowIso()});
+    if(activated.kind==="conflict"){
       throw new ProductError("Sandbox run state fencing token changed", 409);
     }
+    return activated.task;
   }
 
   private async ensureTaskConversation(task: PersistedAgentTask): Promise<void> {
@@ -2444,8 +2556,22 @@ function isInteractionLifecycleStatus(status: AgentTaskStatus): status is Extrac
   return status === "queued" || status === "starting" || status === "running" || status === "stopping";
 }
 
+function runAllowsMessageDelivery(run:PersistedSandboxRunState):boolean{
+  return run.cleanupStatus==="active"&&["queued","starting","running"].includes(run.phase);
+}
+
 function isActiveTaskStatus(status: AgentTaskStatus): boolean {
   return status === "queued" || status === "starting" || status === "running" || status === "stopping";
+}
+
+function taskAllowsActivatedRunAdoption(task:PersistedAgentTask,run:PersistedSandboxRunState):boolean{
+  return !task.deletedAt&&!task.archivedAt&&task.activeReservation===true&&
+    (task.status==="running"||task.status==="queued")&&taskMatchesExactSandboxRun(task,run);
+}
+
+function taskMatchesExactSandboxRun(task:PersistedAgentTask,run:PersistedSandboxRunState):boolean{
+  return task.executionMode==="live"&&task.id===run.taskId&&task.runId===run.runId&&task.workspaceId===run.workspaceId&&
+    task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId;
 }
 
 

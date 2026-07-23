@@ -308,6 +308,17 @@ export type ConfirmSandboxRunStartedResult = {
   run: PersistedSandboxRunState;
 } | { kind: "conflict" };
 
+export interface ActivateTaskSandboxRunInput {
+  taskId: string;
+  runId: string;
+  expectedFencingToken: number;
+  activatedAt: string;
+}
+
+export type ActivateTaskSandboxRunResult =
+  | { kind: "activated" | "already_running"; task: PersistedAgentTask; run: PersistedSandboxRunState }
+  | { kind: "conflict" };
+
 export interface CompleteSandboxRunReleaseInput {
   runId: string;
   expectedFencingToken: number;
@@ -489,6 +500,7 @@ export interface ProductStore {
   listProjectAuditEvents(projectId: string): Promise<ProjectAuditEvent[]>;
   queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery): Promise<{ items: ProjectAuditEvent[]; nextCursor: string | null }>;
   confirmSandboxRunStarted(input: ConfirmSandboxRunStartedInput): Promise<ConfirmSandboxRunStartedResult>;
+  activateTaskSandboxRun(input: ActivateTaskSandboxRunInput): Promise<ActivateTaskSandboxRunResult>;
   completeSandboxRunRelease(input: CompleteSandboxRunReleaseInput): Promise<CompleteSandboxRunReleaseResult>;
   listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;
 

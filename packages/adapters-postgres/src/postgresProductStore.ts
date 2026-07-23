@@ -56,6 +56,8 @@ import type {
   TaskSandboxReleaseMutationInput,
   ConfirmSandboxRunStartedInput,
   ConfirmSandboxRunStartedResult,
+  ActivateTaskSandboxRunInput,
+  ActivateTaskSandboxRunResult,
   CompleteSandboxRunReleaseInput,
   CompleteSandboxRunReleaseResult,
   SandboxUsageSettlement,
@@ -540,6 +542,25 @@ export class PostgresProductStore implements ProductStore {
     const run={...current,startedAt:input.startedAt,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
     await client.query("update postgres_json_docs set document=$2::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1",[input.runId,JSON.stringify(prepareSandboxRunDocument(run))]);
     await insertAuditEventWithClient(client,input.auditEvent);return{kind:"started" as const,run};
+  })}
+  async activateTaskSandboxRun(input:ActivateTaskSandboxRunInput):Promise<ActivateTaskSandboxRunResult>{return transaction(this.pool,async(client)=>{
+    const lockedRun=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.runId]);
+    const run=lockedRun.rows[0]?.document?sandboxRunFromDocument(asRecord(lockedRun.rows[0].document)):null;
+    const lockedTask=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId]);
+    const task=lockedTask.rows[0];
+    if(!run||!task||!taskRunRowIdentityMatches(task,run,input))return{kind:"conflict" as const};
+    if(run.phase==="running"&&run.cleanupStatus==="active"&&task.execution_mode==="live"&&task.deleted_at===null&&task.archived_at===null&&task.active_reservation&&(task.status==="running"||task.status==="queued")){
+      return{kind:"already_running" as const,task:mapTask(task),run};
+    }
+    if(run.phase!=="starting"||run.cleanupStatus!=="active"||!run.startedAt||run.fencingToken!==input.expectedFencingToken||task.execution_mode!=="live"||task.deleted_at!==null||task.archived_at!==null||task.status!=="starting"||!task.active_reservation){
+      return{kind:"conflict" as const};
+    }
+    const activatedRun={...run,phase:"running" as const,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
+    const updatedTask=await client.query<AgentTaskRow>("update agent_tasks set status='running',updated_at=$3 where id=$1 and run_id=$2 and status='starting' and active_reservation=true returning *",[input.taskId,input.runId,input.activatedAt]);
+    if(!updatedTask.rows[0])throw new Error("Task sandbox activation lost its task lock");
+    const updatedRun=await client.query<{document:unknown}>("update postgres_json_docs set document=$3::jsonb,updated_at=now() where collection='sandbox_run_state' and id=$1 and (document->>'fencingToken')::bigint=$2 returning document",[input.runId,input.expectedFencingToken,JSON.stringify(prepareSandboxRunDocument(activatedRun))]);
+    if(!updatedRun.rows[0]?.document)throw new Error("Task sandbox activation lost its run lock");
+    return{kind:"activated" as const,task:mapTask(updatedTask.rows[0]),run:sandboxRunFromDocument(asRecord(updatedRun.rows[0].document))};
   })}
   async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{return transaction(this.pool,async(client)=>{
     const locked=await client.query<{document:unknown}>("select document from postgres_json_docs where collection='sandbox_run_state' and id=$1 for update",[input.runId]);
@@ -1781,6 +1802,7 @@ function mapAlert(row: ProjectAlertRow): ProjectAlert { return { id: row.id, pro
 function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, subjectUserId:row.subject_user_id??null, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
 function mapSandboxUsageSettlement(row:SandboxUsageSettlementRow):SandboxUsageSettlement{return{runId:row.run_id,workspaceId:row.workspace_id,projectId:row.project_id,taskId:row.task_id,fileLibraryId:row.file_library_id,startedByUserId:row.started_by_user_id,startedAt:row.started_at?toIso(row.started_at):null,releasedAt:toIso(row.released_at),durationSeconds:Number(row.duration_seconds),resources:{cpuRequestMillis:String(row.cpu_request_millis),memoryRequestBytes:String(row.memory_request_bytes),cpuLimitMillis:String(row.cpu_limit_millis),memoryLimitBytes:String(row.memory_limit_bytes)},releaseReason:row.release_reason}}
 function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.startedAt===right.startedAt&&JSON.stringify(left.resourceLimits)===JSON.stringify(right.resourceLimits)&&JSON.stringify(left.resourceSnapshot)===JSON.stringify(right.resourceSnapshot)}
+function taskRunRowIdentityMatches(task:AgentTaskRow,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.run_id===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspace_id===run.workspaceId&&task.project_id===run.projectId&&task.file_library_id===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return JSON.stringify(left)===JSON.stringify(right)}
 function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,cleaned:PersistedSandboxRunState):boolean{const duration=current.startedAt===null?0:Math.max(0,(Date.parse(cleaned.updatedAt)-Date.parse(current.startedAt))/1000);return value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===cleaned.updatedAt&&value.durationSeconds===duration&&value.releaseReason===cleaned.releaseReason&&JSON.stringify(value.resources)===JSON.stringify(current.resourceSnapshot)}
 function taskMatchesActiveSandboxRunRow(task:SandboxReleaseTaskRow|undefined,run:PersistedSandboxRunState):task is SandboxReleaseTaskRow{return Boolean(task&&task.deleted_at===null&&task.execution_mode==="live"&&task.active_reservation===true&&task.id===run.taskId&&task.run_id===run.runId&&task.project_id===run.projectId&&task.workspace_id===run.workspaceId&&task.file_library_id===run.fileLibraryId&&task.project_workspace_id===run.workspaceId&&(task.created_by_user_id??task.project_owner_user_id)===run.startedByUserId)}
