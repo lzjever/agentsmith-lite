@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { apiClient } from "../../src/lib/api/client.js";
+import { apiClient, taskArtifactDownloadUrlForApiBase } from "../../src/lib/api/client.js";
 
 describe("task artifact download client", () => {
+  it("builds an encoded download URL with the application base path exactly once", () => {
+    assert.equal(
+      taskArtifactDownloadUrlForApiBase("/app/api/v1", "task/with spaces", "artifact?#1"),
+      "/app/api/v1/tasks/task%2Fwith%20spaces/artifacts/artifact%3F%231/download"
+    );
+  });
+
   it("downloads a task artifact from its authorized API route with same-origin credentials", async () => {
     const original = globalThis.fetch;
     let request: Request | undefined;

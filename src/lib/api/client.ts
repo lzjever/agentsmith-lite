@@ -134,6 +134,11 @@ export interface ProjectPolicyInput {
 export type ProjectPolicyUpdate = ProjectPolicyInput & { expectedUpdatedAt: string };
 
 const apiBasePath = process.env.NEXT_PUBLIC_API_BASE_PATH || "/api/v1";
+
+export function taskArtifactDownloadUrlForApiBase(basePath: string, taskId: string, artifactId: string): string {
+  return `${basePath.replace(/\/$/, "")}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
 let csrfToken: string | undefined;
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = init.method?.toUpperCase() || "GET";
@@ -353,9 +358,9 @@ export const apiClient = {
   archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<Task>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
   taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
-  artifactDownloadUrl: (taskId: string, artifactId: string) => `${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+  artifactDownloadUrl: (taskId: string, artifactId: string) => taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId),
   async downloadTaskArtifact(taskId: string, artifactId: string, signal?: AbortSignal): Promise<Blob> {
-    const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`, { credentials: "same-origin", ...(signal ? { signal } : {}) }));
+    const response = observeSession(await fetch(taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId), { credentials: "same-origin", ...(signal ? { signal } : {}) }));
     if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
     return response.blob();
   }

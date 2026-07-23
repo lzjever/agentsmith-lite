@@ -27,7 +27,7 @@ export function TaskArtifactActions({ taskId, artifact, available = true, classN
   if (!available) return null;
 
   return <div className={className}>
-    <div className="flex min-h-9 items-center justify-end gap-1">{safeText ? <Button label={textOpen ? "Hide preview" : "Preview"} variant="ghost" size="sm" onClick={() => setTextOpen((open) => !open)} /> : null}{safeImage ? <IconButton label={`View ${artifact.name}`} tooltip={`View ${artifact.name}`} variant="ghost" icon={<ImageIcon size={16} />} onClick={() => setImageOpen(true)} /> : null}<IconButton label={`Download ${artifact.name}`} tooltip={`Download ${artifact.name}`} variant="ghost" icon={<Download size={16} />} href={apiClient.artifactDownloadUrl(taskId, artifact.id)} /></div>
+    <div className="flex min-h-9 items-center justify-end gap-1">{safeText ? <Button label={textOpen ? "Hide preview" : "Preview"} variant="ghost" size="sm" onClick={() => setTextOpen((open) => !open)} /> : null}{safeImage ? <IconButton label={`View ${artifact.name}`} tooltip={`View ${artifact.name}`} variant="ghost" icon={<ImageIcon size={16} />} onClick={() => setImageOpen(true)} /> : null}<IconButton as="a" label={`Download ${artifact.name}`} tooltip={`Download ${artifact.name}`} variant="ghost" icon={<Download size={16} />} href={apiClient.artifactDownloadUrl(taskId, artifact.id)} /></div>
     {textOpen && safeText ? <ArtifactTextPreview taskId={taskId} artifact={artifact} /> : null}
     {safeImage ? <ArtifactImageViewer taskId={taskId} artifact={artifact} open={imageOpen} onOpenChange={setImageOpen} /> : null}
   </div>;
