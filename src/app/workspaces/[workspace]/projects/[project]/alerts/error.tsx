@@ -1,5 +1,5 @@
 "use client";
 
-import { ResourceRouteError } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteErrorPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function AlertsError({ reset }: { reset: () => void }) { return <ResourceRouteError title="Alerts" reset={reset} />; }
+export default function AlertsError({ reset }: { reset: () => void }) { return <RouteErrorPage title="Alerts" message="The alerts view could not be opened." onRetry={reset} />; }

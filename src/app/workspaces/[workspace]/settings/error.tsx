@@ -1,3 +1,5 @@
 "use client";
-import { SettingsRouteError } from "../../../../components/settings/SettingsRouteState";
-export default function Error({ reset }: { error: Error; reset: () => void }) { return <SettingsRouteError reset={reset} />; }
+
+import { RouteErrorPage } from "../../../../components/layout/RouteStatePage";
+
+export default function WorkspaceSettingsError({ error, reset }: { error: Error; reset: () => void }) { return <RouteErrorPage title="Workspace settings" message={error.message || "The settings page could not be loaded."} onRetry={reset} />; }

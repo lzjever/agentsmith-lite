@@ -1,5 +1,5 @@
 "use client";
 
-import { ResourceRouteError } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteErrorPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function PolicyError({ reset }: { reset: () => void }) { return <ResourceRouteError title="Resource policy" reset={reset} />; }
+export default function PolicyError({ reset }: { reset: () => void }) { return <RouteErrorPage title="Resource policy" message="The resource policy view could not be opened." onRetry={reset} />; }

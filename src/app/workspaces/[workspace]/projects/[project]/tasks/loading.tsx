@@ -1,6 +1,3 @@
-import { PageLayout } from "../../../../../../components/layout/PageLayout";
-import { PageState } from "../../../../../../components/layout/PageState";
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function LoadingTasks() {
-  return <PageLayout><PageState>Loading tasks...</PageState></PageLayout>;
-}
+export default function TasksLoading() { return <RouteLoadingPage title="Tasks" />; }

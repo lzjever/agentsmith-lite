@@ -1,2 +1,3 @@
-import { PageState } from "../../../../../../components/layout/PageState";
-export default function MembersLoading() { return <PageState><span className="text-secondary">Loading members...</span></PageState>; }
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
+
+export default function MembersLoading() { return <RouteLoadingPage title="Members" />; }

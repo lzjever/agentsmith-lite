@@ -1,3 +1,3 @@
-import { Spinner } from "@astryxdesign/core";
-import { PageState } from "../../../../../../components/layout/PageState";
-export default function Loading() { return <PageState state="loading"><Spinner label="Loading credentials..." /></PageState>; }
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
+
+export default function CredentialsLoading() { return <RouteLoadingPage title="Project credentials" />; }

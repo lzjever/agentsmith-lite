@@ -1,3 +1,3 @@
-import { ResourceRouteLoading } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function PolicyLoading() { return <ResourceRouteLoading label="resource policy" />; }
+export default function PolicyLoading() { return <RouteLoadingPage title="Resource policy" />; }

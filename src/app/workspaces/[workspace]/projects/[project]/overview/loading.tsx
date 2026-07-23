@@ -1,1 +1,3 @@
-export default function OverviewLoading() { return <div className="px-[var(--layout-padding)] py-6 text-secondary">Loading project overview...</div>; }
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
+
+export default function OverviewLoading() { return <RouteLoadingPage title="Project overview" />; }

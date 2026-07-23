@@ -1,3 +1,3 @@
-import { ResourceRouteLoading } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function UsageLoading() { return <ResourceRouteLoading label="usage" />; }
+export default function UsageLoading() { return <RouteLoadingPage title="Usage" />; }

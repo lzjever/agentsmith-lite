@@ -1,1 +1,3 @@
-export default function ProjectsLoading() { return <div className="px-[var(--layout-padding)] py-6 text-secondary">Loading projects...</div>; }
+import { RouteLoadingPage } from "../../../../components/layout/RouteStatePage";
+
+export default function ProjectsLoading() { return <RouteLoadingPage title="Projects" />; }

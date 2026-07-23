@@ -1,2 +1,3 @@
-import { PageState } from "../../../../../../components/layout/PageState";
-export default function EndpointsLoading() { return <PageState><span className="text-secondary">Loading endpoints...</span></PageState>; }
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
+
+export default function EndpointsLoading() { return <RouteLoadingPage title="Endpoints" />; }

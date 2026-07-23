@@ -1,3 +1,3 @@
-import { ResourceRouteLoading } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteLoadingPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function AlertsLoading() { return <ResourceRouteLoading label="alerts" />; }
+export default function AlertsLoading() { return <RouteLoadingPage title="Alerts" />; }

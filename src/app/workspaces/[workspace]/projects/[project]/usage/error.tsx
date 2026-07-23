@@ -1,5 +1,5 @@
 "use client";
 
-import { ResourceRouteError } from "../../../../../../components/resources/ResourceRouteState";
+import { RouteErrorPage } from "../../../../../../components/layout/RouteStatePage";
 
-export default function UsageError({ reset }: { reset: () => void }) { return <ResourceRouteError title="Usage" reset={reset} />; }
+export default function UsageError({ reset }: { reset: () => void }) { return <RouteErrorPage title="Usage" message="The usage view could not be opened." onRetry={reset} />; }
