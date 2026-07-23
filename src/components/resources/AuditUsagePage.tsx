@@ -1,7 +1,16 @@
 "use client";
 
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
-import { Badge, Button, Dialog, DialogHeader, IconButton, Selector } from "@astryxdesign/core";
+import {
+  Badge,
+  Button,
+  DateTimeInput,
+  Dialog,
+  DialogHeader,
+  IconButton,
+  Selector,
+  type ISODateTimeString,
+} from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PROJECT_AUDIT_ACTIONS,
@@ -18,7 +27,6 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ErrorState } from "../ui/error-state";
-import { Input } from "../ui/input";
 import { UsageView } from "./UsageView";
 import { auditResourceIdentity } from "./audit-resource-identity";
 import {
@@ -358,8 +366,8 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [resourceId, setResourceId] = useState("");
   const [queryProjectId, setQueryProjectId] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState<ISODateTimeString>();
+  const [to, setTo] = useState<ISODateTimeString>();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -376,17 +384,19 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     setState("loading");
     setSelected(null);
     try {
+      const fromTimestamp = auditTimeQueryFromInput(from ?? "");
+      const toTimestamp = auditTimeQueryFromInput(to ?? "");
       const page = await apiClient.audit(projectId, {
         limit: 20,
-        cursor,
-        actorId: actorId === "all" ? undefined : actorId,
-        subjectUserId: subjectUserId === "all" ? undefined : subjectUserId,
-        action: action === "all" ? undefined : action,
-        status: status === "all" ? undefined : status,
-        resourceKind: kind === "all" ? undefined : kind,
-        resourceId: resourceId || undefined,
-        from: auditTimeQueryFromInput(from) ?? undefined,
-        to: auditTimeQueryFromInput(to) ?? undefined,
+        ...(cursor ? { cursor } : {}),
+        ...(actorId === "all" ? {} : { actorId }),
+        ...(subjectUserId === "all" ? {} : { subjectUserId }),
+        ...(action === "all" ? {} : { action }),
+        ...(status === "all" ? {} : { status }),
+        ...(kind === "all" ? {} : { resourceKind: kind }),
+        ...(resourceId ? { resourceId } : {}),
+        ...(fromTimestamp ? { from: fromTimestamp } : {}),
+        ...(toTimestamp ? { to: toTimestamp } : {}),
       });
       if (!active.current || revision !== requestRevision.current) return;
       setItems(page.items);
@@ -426,8 +436,10 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     setActorId(requestedActor || "all");
     setSubjectUserId(requestedSubject || "all");
     setResourceId(query.get("resourceId") ?? "");
-    setFrom(auditTimeInputFromQuery(query.get("from")));
-    setTo(auditTimeInputFromQuery(query.get("to")));
+    const fromInput = auditTimeInputFromQuery(query.get("from"));
+    const toInput = auditTimeInputFromQuery(query.get("to"));
+    setFrom(fromInput ? fromInput as ISODateTimeString : undefined);
+    setTo(toInput ? toInput as ISODateTimeString : undefined);
     setMembers([]);
     void apiClient.members(projectId).then((listed) => { if (active.current) setMembers(listed); }).catch(() => undefined);
     setCursors([undefined]);
@@ -449,9 +461,9 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
     reset();
   }
 
-  function changeTimeFilter(key: "from" | "to", value: string) {
+  function changeTimeFilter(key: "from" | "to", value: ISODateTimeString | undefined) {
     const query = browserQuery();
-    const timestamp = auditTimeQueryFromInput(value);
+    const timestamp = auditTimeQueryFromInput(value ?? "");
     if (timestamp) query.set(key, timestamp);
     else query.delete(key);
     replaceBrowserQuery(query);
@@ -584,24 +596,28 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             values={kinds}
             formatValue={auditResourceLabel}
           />
-          <div className="grid gap-1">
-            <span className="text-xs text-secondary">From</span>
-            <Input
-              aria-label="From timestamp"
-              type="datetime-local"
-              value={from}
-              onChange={(event) => changeTimeFilter("from", event.target.value)}
-            />
-          </div>
-          <div className="grid gap-1">
-            <span className="text-xs text-secondary">To</span>
-            <Input
-              aria-label="To timestamp"
-              type="datetime-local"
-              value={to}
-              onChange={(event) => changeTimeFilter("to", event.target.value)}
-            />
-          </div>
+          <DateTimeInput
+            label="From"
+            {...(from ? { value: from } : {})}
+            {...(to ? { max: to } : {})}
+            onChange={(value) => changeTimeFilter("from", value)}
+            isOptional
+            hasClear
+            hourFormat="24h"
+            size="lg"
+            width="100%"
+          />
+          <DateTimeInput
+            label="To"
+            {...(to ? { value: to } : {})}
+            {...(from ? { min: from } : {})}
+            onChange={(value) => changeTimeFilter("to", value)}
+            isOptional
+            hasClear
+            hourFormat="24h"
+            size="lg"
+            width="100%"
+          />
         </div>
         {state === "loading" ? (
           <PageState state="loading">Loading audit events...</PageState>

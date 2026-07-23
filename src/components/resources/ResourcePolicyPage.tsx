@@ -14,25 +14,25 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { PageState } from "../layout/PageState";
 import { ErrorState } from "../ui/error-state";
-import { Input } from "../ui/input";
-import { Banner, Button, Selector, Spinner } from "@astryxdesign/core";
+import { Banner, Button, NumberInput, Selector, Spinner } from "@astryxdesign/core";
 import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
 type PolicyDraft = Omit<Required<ProjectPolicyInput>, "activeTasksLimit"> & { activeTasksLimit: number | null };
 
+const MEBIBYTE = 1024 * 1024;
 const limits = [
-  { key: "activeTasksLimit", label: "Active tasks", step: "1", required: true },
-  { key: "providerRequestsLimit", label: "Provider requests", step: "1", required: false },
-  { key: "providerTokensLimit", label: "Provider tokens", step: "1", required: false },
-  { key: "providerCostLimit", label: "Provider cost (USD)", step: "any", required: false },
-  { key: "projectFileBytesLimit", label: "Project file storage (MiB)", step: "any", required: false },
+  { key: "activeTasksLimit", label: "Active tasks", step: 1, units: "tasks", isIntegerOnly: true, required: true },
+  { key: "providerRequestsLimit", label: "Provider requests", step: 1, units: "requests", isIntegerOnly: true, required: false },
+  { key: "providerTokensLimit", label: "Provider tokens", step: 1, units: "tokens", isIntegerOnly: true, required: false },
+  { key: "providerCostLimit", label: "Provider cost", step: 0.000001, units: "USD", isIntegerOnly: false, required: false },
+  { key: "projectFileBytesLimit", label: "Project file storage", step: 0.000001, units: "MiB", isIntegerOnly: false, required: false },
 ] as const;
 const endpointMetrics = [
-  { value: "providerRequests", label: "Requests", step: "1" },
-  { value: "providerTokens", label: "Tokens", step: "1" },
-  { value: "providerCost", label: "Cost (USD)", step: "any" },
+  { value: "providerRequests", label: "Requests", step: 1, units: "requests", isIntegerOnly: true },
+  { value: "providerTokens", label: "Tokens", step: 1, units: "tokens", isIntegerOnly: true },
+  { value: "providerCost", label: "Cost", step: 0.000001, units: "USD", isIntegerOnly: false },
 ] as const;
 const endpointWindowOptions = [
   { value: 3600, label: "1 hour" },
@@ -212,38 +212,69 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <h2 className="type-title">Project limits</h2>
             <div className="mt-3 divide-y divide-border border-y border-border">
               {limits.map((limit) => (
-                <label
-                  className="grid gap-2 py-2.5 sm:grid-cols-[1fr_12rem] sm:items-center"
+                <div
+                  className={canManage ? "py-2.5" : "grid gap-2 py-2.5 sm:grid-cols-[1fr_12rem] sm:items-center"}
                   key={limit.key}
                 >
-                  <span className="text-sm text-foreground">{limit.label}</span>
                   {canManage ? (
-                    <Input
-                      aria-label={limit.label}
-                      className="h-9"
-                      name={limit.key}
-                      type="number"
-                      min="0"
-                      step={limit.step}
-                      required={limit.required}
-                      disabled={saving}
-                      value={policyInputValue(limit.key, draft[limit.key])}
-                      placeholder={limit.required ? "Required" : "Unlimited"}
-                      onChange={(event) =>
-                        setDraft((current) =>
-                          current
-                            ? {
-                                ...current,
-                                [limit.key]: policyInputNumber(limit.key, event.target.value),
-                              }
-                            : current,
-                        )
-                      }
-                    />
+                    limit.required ? (
+                      <NumberInput
+                        label={limit.label}
+                        value={policyInputValue(limit.key, draft[limit.key])}
+                        onChange={(value) =>
+                          setDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  [limit.key]: policyInputNumber(limit.key, value),
+                                }
+                              : current,
+                          )
+                        }
+                        min={0}
+                        step={limit.step}
+                        units={limit.units}
+                        isIntegerOnly={limit.isIntegerOnly}
+                        isRequired
+                        isDisabled={saving}
+                        htmlName={limit.key}
+                        size="lg"
+                        width="100%"
+                      />
+                    ) : (
+                      <NumberInput
+                        label={limit.label}
+                        value={policyInputValue(limit.key, draft[limit.key])}
+                        onChange={(value) =>
+                          setDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  [limit.key]: policyInputNumber(limit.key, value),
+                                }
+                              : current,
+                          )
+                        }
+                        min={0}
+                        step={limit.step}
+                        units={limit.units}
+                        isIntegerOnly={limit.isIntegerOnly}
+                        isOptional
+                        isDisabled={saving}
+                        htmlName={limit.key}
+                        placeholder="Unlimited"
+                        hasClear
+                        size="lg"
+                        width="100%"
+                      />
+                    )
                   ) : (
-                    <strong>{policyLimitValue(limit.key, policy[limit.key], limit.required)}</strong>
+                    <>
+                      <span className="text-sm text-foreground">{limit.label}</span>
+                      <strong>{policyLimitValue(limit.key, policy[limit.key], limit.required)}</strong>
+                    </>
                   )}
-                </label>
+                </div>
               ))}
             </div>
           </section>
@@ -284,39 +315,39 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                   );
                   return (
                     <div
-                      className="mt-1.5 grid gap-2 sm:grid-cols-[1fr_10rem_10rem] sm:items-center"
+                      className="mt-2 grid gap-2 sm:grid-cols-[1fr_10rem] sm:items-end"
                       key={metric.value}
                     >
-                      <span className="text-sm text-secondary">
-                        {metric.label}
-                      </span>
                       {canManage ? (
                         <>
-                          <Input
-                            aria-label={`${endpoint.name} ${metric.label} limit`}
-                            className="h-9"
-                            type="number"
-                            min="0"
-                            step={metric.step}
-                            disabled={saving}
-                            value={current?.limit ?? ""}
-                            placeholder="Unlimited"
-                            onChange={(event) =>
-                              setDraft((value) =>
-                                value
+                          <NumberInput
+                            label={`${metric.label} limit`}
+                            value={current?.limit ?? null}
+                            onChange={(value) =>
+                              setDraft((draftValue) =>
+                                draftValue
                                   ? updateEndpointLimit(
-                                      value,
+                                      draftValue,
                                       endpoint.id,
                                       metric.value,
-                                      event.target.value,
+                                      value,
                                     )
-                                  : value,
+                                  : draftValue,
                               )
                             }
+                            min={0}
+                            step={metric.step}
+                            units={metric.units}
+                            isIntegerOnly={metric.isIntegerOnly}
+                            isOptional
+                            isDisabled={saving}
+                            placeholder="Unlimited"
+                            hasClear
+                            size="lg"
+                            width="100%"
                           />
                           <Selector
-                            label={`${endpoint.name} ${metric.label} window`}
-                            isLabelHidden
+                            label={`${metric.label} window`}
                             options={[
                               { value: "", label: "No window", disabled: true },
                               ...(current && !endpointWindowOptions.some((option) => option.value === current.windowSeconds)
@@ -343,11 +374,16 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                           />
                         </>
                       ) : (
-                        <strong className="text-sm">
-                          {current
-                            ? `${current.limit} / ${windowLabel(current.windowSeconds)}`
-                            : "Unlimited"}
-                        </strong>
+                        <>
+                          <span className="text-sm text-secondary">
+                            {metric.label}
+                          </span>
+                          <strong className="text-sm">
+                            {current
+                              ? `${current.limit} / ${windowLabel(current.windowSeconds)}`
+                              : "Unlimited"}
+                          </strong>
+                        </>
                       )}
                     </div>
                   );
@@ -432,13 +468,8 @@ function sameEndpointWindows(left: EndpointWindow[], right: EndpointWindow[]): b
   });
 }
 
-function numberOrNull(value: string): number | null {
-  return value.trim() === "" ? null : Number(value);
-}
-
-const MEBIBYTE = 1024 * 1024;
-function policyInputValue(key:(typeof limits)[number]["key"],value:number|null):number|string{return value===null?"":key==="projectFileBytesLimit"?value/MEBIBYTE:value}
-function policyInputNumber(key:(typeof limits)[number]["key"],value:string):number|null{const parsed=numberOrNull(value);return parsed===null?null:key==="projectFileBytesLimit"?Math.round(parsed*MEBIBYTE):parsed}
+function policyInputValue(key:(typeof limits)[number]["key"],value:number|null):number|null{return value===null?null:key==="projectFileBytesLimit"?value/MEBIBYTE:value}
+function policyInputNumber(key:(typeof limits)[number]["key"],value:number|null):number|null{return value===null?null:key==="projectFileBytesLimit"?Math.round(value*MEBIBYTE):value}
 function policyLimitValue(key:(typeof limits)[number]["key"],value:number|null,required:boolean):string|number{if(value===null)return required?"Not configured":"Unlimited";if(key==="projectFileBytesLimit")return formatBytes(value);if(key==="providerCostLimit")return `$${value.toLocaleString(undefined,{maximumFractionDigits:6})}`;return value}
 function formatBytes(value:number):string{if(value<1024)return `${value} B`;if(value<1024*1024)return `${(value/1024).toLocaleString(undefined,{maximumFractionDigits:2})} KiB`;return `${(value/MEBIBYTE).toLocaleString(undefined,{maximumFractionDigits:2})} MiB`}
 
@@ -446,7 +477,7 @@ function updateEndpointLimit(
   draft: PolicyDraft,
   endpointId: string,
   metric: EndpointWindow["metric"],
-  rawValue: string,
+  limit: number | null,
 ): PolicyDraft {
   const current = draft.endpointWindows.find(
     (item) => item.endpointId === endpointId && item.metric === metric,
@@ -454,7 +485,7 @@ function updateEndpointLimit(
   const remaining = draft.endpointWindows.filter(
     (item) => item.endpointId !== endpointId || item.metric !== metric,
   );
-  if (rawValue.trim() === "") return { ...draft, endpointWindows: remaining };
+  if (limit === null) return { ...draft, endpointWindows: remaining };
   return {
     ...draft,
     endpointWindows: [
@@ -462,7 +493,7 @@ function updateEndpointLimit(
       {
         endpointId,
         metric,
-        limit: Number(rawValue),
+        limit,
         windowSeconds: current?.windowSeconds ?? 3600,
       },
     ],
