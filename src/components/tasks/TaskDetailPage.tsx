@@ -9,6 +9,7 @@ import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtif
 import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
+import { RouteLoadingPage } from "../layout/RouteStatePage";
 import { PageState } from "../layout/PageState";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
@@ -181,7 +182,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     }
   }
 
-  if (taskState === "loading") return <PageLayout><PageState>Loading task...</PageState></PageLayout>;
+  if (taskState === "loading") return <RouteLoadingPage title={artifactsOnly ? "Artifacts" : "Task"} />;
   if (taskState === "missing") return <TaskLoadFailure title="Task not found" detail="This task does not exist or is no longer available." basePath={basePath} />;
   if (taskState === "forbidden") return <TaskLoadFailure title="Task unavailable" detail="You no longer have permission to access this task." basePath={basePath} />;
   if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void loadTask()} />;
@@ -236,7 +237,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
 }
 
 function TaskLoadFailure({ title, detail, basePath, onRetry }: { title: string; detail: string; basePath: string; onRetry?: () => void }) {
-  return <PageLayout><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><h1 className="type-section-heading">{title}</h1><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <AstryxButton label="Try again" variant="secondary" onClick={onRetry} /> : null}</div></div></PageState></PageLayout>;
+  return <PageLayout header={<PageHeader title={title} />}><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <AstryxButton label="Try again" variant="secondary" onClick={onRetry} /> : null}</div></div></PageState></PageLayout>;
 }
 
 function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMessage, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; emptyMessage?: string; onRetry: () => Promise<void> }) {
