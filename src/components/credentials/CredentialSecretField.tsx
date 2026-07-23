@@ -1,3 +1,5 @@
-import { Input } from "../ui/input";
+import { TextInput } from "@astryxdesign/core";
 
-export function CredentialSecretField({ disabled = false }: { disabled?: boolean }) { return <label className="grid gap-2 text-sm">API key<Input required name="secret" type="password" autoComplete="new-password" disabled={disabled} /></label>; }
+export function CredentialSecretField({ value, onChange, disabled = false }: { value: string; onChange: (value: string) => void; disabled?: boolean }) {
+  return <TextInput label="API key" htmlName="secret" type="password" value={value} onChange={onChange} isRequired isDisabled={disabled} width="100%" />;
+}
