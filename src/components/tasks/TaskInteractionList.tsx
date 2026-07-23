@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Square, Wrench } from "lucide-react";
-import { Button, Tooltip } from "@astryxdesign/core";
+import { Button, IconButton } from "@astryxdesign/core";
 import { useState, type ReactNode } from "react";
 import type { TaskInteractionItem, TaskInteractionStreamEvent } from "../../lib/api/client";
 import { Markdown } from "../ui/markdown";
@@ -52,8 +52,8 @@ function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind:
       toast.error("Message could not be copied");
     }
   }
-  const action = item.body ? <Tooltip content="Copy message" delay={350} hasHoverIndication={false}><button type="button" className="grid size-7 place-items-center text-tertiary opacity-0 transition-opacity hover:bg-hover hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100" aria-label="Copy message" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}</button></Tooltip> : null;
-  return <li><article className="group border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={item.occurredAt} status={item.status} action={action} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
+  const action = item.body ? <IconButton label={copied ? "Message copied" : "Copy message"} tooltip={copied ? "Message copied" : "Copy message"} variant="ghost" size="sm" icon={copied ? <Check size={15} /> : <Copy size={15} />} onClick={() => void copy()} /> : null;
+  return <li><article className="border-l-2 border-accent bg-surface-low px-4 py-3"><ItemHeader title="Assistant" timestamp={item.occurredAt} status={item.status} action={action} /><ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown content={item.body} /></div> : null}</article></li>;
 }
 
 function WorkItem({ item, icon, canStopWork, onStopWork }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode; canStopWork: boolean; onStopWork: (interactionId: string) => Promise<void> }) {
@@ -97,10 +97,10 @@ function ContentNotice({ contentMode, detailsOmitted = false }: { contentMode: T
 }
 
 function ItemHeader({ title, timestamp, status, action }: { title: string; timestamp: string | null; status: string | null; action?: ReactNode }) {
-  return <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"><div className="flex min-w-0 items-center gap-1"><p className="text-sm font-medium text-foreground">{title}</p>{action}</div><div className="flex items-center gap-2">{status ? <span className="font-mono text-[10px] uppercase text-tertiary">{statusLabel(status)}</span> : null}{timestamp ? <time className="inline-flex items-center gap-1 font-mono text-[10px] text-tertiary"><Clock3 size={11} />{formatTaskDate(timestamp)}</time> : null}</div></div>;
+  return <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"><div className="flex min-w-0 items-center gap-1"><p className="text-sm font-medium text-foreground">{title}</p>{action}</div><div className="flex items-center gap-2">{status ? <span className="font-mono text-[13px] tracking-normal text-tertiary">{statusLabel(status)}</span> : null}{timestamp ? <time className="inline-flex items-center gap-1 font-mono text-[13px] tracking-normal text-tertiary"><Clock3 size={13} />{formatTaskDate(timestamp)}</time> : null}</div></div>;
 }
 
-function statusLabel(status: string): string { return status.replaceAll("_", " "); }
+function statusLabel(status: string): string { const value = status.replaceAll("_", " ").toLowerCase(); return value.charAt(0).toUpperCase() + value.slice(1); }
 function workTitle(item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>): string { return item.kind === "tool" ? item.toolName : item.kind === "background_task" ? item.label : item.kind === "subagent_result" ? item.name : item.title; }
 function workSummary(item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>): string | null { return item.kind === "tool" ? item.command : item.kind === "background_task" ? item.workSummary : item.kind === "subagent_result" ? item.purpose : null; }
 function workDetails(item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>): string | null { if (item.kind === "tool") return [item.command, item.outputTail, item.exitCode === null ? null : `Exit code: ${item.exitCode}`].filter(Boolean).join("\n\n") || null; if (item.kind === "background_task") return [item.workSummary, item.result, item.error].filter(Boolean).join("\n\n") || null; if (item.kind === "task_result" || item.kind === "subagent_result") return [item.result, item.error].filter(Boolean).join("\n\n") || null; return null; }
