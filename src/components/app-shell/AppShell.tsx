@@ -129,7 +129,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
     topNav={<Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} />}
     sideNav={<ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed} />}
     mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></MobileNav>}
-  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell>;
+  ><main ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</main></AstryxAppShell>;
 }
 
 function ShellLoadingFrame() {
