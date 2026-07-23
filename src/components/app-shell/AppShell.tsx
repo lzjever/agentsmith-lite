@@ -4,7 +4,7 @@ import { AppShell as AstryxAppShell, Button, MobileNav, Spinner } from "@astryxd
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
-import { ErrorState } from "../ui/error-state";
+import { DocumentTitle } from "../layout/DocumentTitle";
 import { ShellNavigation } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -92,8 +92,6 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   useEffect(() => {
     const target = contentStart.current;
     if (!target) return;
-    const heading = target.querySelector("h1")?.textContent?.trim();
-    if (heading) document.title = `${heading} | AgentSmith`;
     if (lastPathname.current && lastPathname.current !== pathname) target.focus();
     lastPathname.current = pathname;
   }, [pathname, status, directoryState]);
@@ -110,7 +108,7 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
     const returnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
     return <ShellStatePage title="Sign in to continue" detail="Use your configured identity provider to access projects." action={<Button label="Sign in" variant="primary" onClick={() => window.location.assign(oidcStartUrlForReturnTo(returnTo))} />} />;
   }
-  if (status === "error") return <main className="grid min-h-screen place-items-center bg-background"><ErrorState title="Workspace unavailable" message="The product API could not load your session." onRetry={() => void loadIdentity()} /></main>;
+  if (status === "error") return <ShellStatePage title="Workspace unavailable" detail="The product API could not load your session." action={<Button label="Try again" variant="secondary" onClick={() => void loadIdentity()} />} />;
   if (directoryState === "loading") return <ShellLoadingFrame />;
 
   const workspace = workspaces.find((item) => item.id === workspaceId);
@@ -135,11 +133,11 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
 }
 
 function ShellLoadingFrame() {
-  return <div className="min-h-screen bg-background"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><span className="font-display text-lg text-foreground">AgentSmith</span></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-[var(--sidebar-width)] border-r border-border bg-panel md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><Spinner label="Loading workspace..." /></main></div></div>;
+  return <><DocumentTitle title="Loading" /><div className="min-h-screen bg-background"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><span className="font-display text-lg text-foreground">AgentSmith</span></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-[var(--sidebar-width)] border-r border-border bg-panel md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><h1 className="sr-only">Loading AgentSmith</h1><Spinner label="Loading workspace..." /></main></div></div></>;
 }
 
 function ShellStatePage({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
-  return <main className="grid min-h-screen place-items-center bg-background px-6"><section className="max-w-md text-center"><p className="type-caption text-tertiary">AgentSmith</p><h1 className="type-section-heading mt-3">{title}</h1>{detail ? <p className="type-body-ui mt-3 text-secondary">{detail}</p> : null}{action ? <p className="mt-6">{action}</p> : null}</section></main>;
+  return <><DocumentTitle title={title} /><main className="grid min-h-screen place-items-center bg-background px-6"><section className="max-w-md text-center"><p className="type-caption text-tertiary">AgentSmith</p><h1 className="type-section-heading mt-3">{title}</h1>{detail ? <p className="type-body-ui mt-3 text-secondary">{detail}</p> : null}{action ? <p className="mt-6">{action}</p> : null}</section></main></>;
 }
 
 function DirectoryNotice({ onRetry }: { onRetry: () => Promise<void> }) {
@@ -147,5 +145,5 @@ function DirectoryNotice({ onRetry }: { onRetry: () => Promise<void> }) {
 }
 
 function ShellRecoveryState({ title, detail, projectsHref, projectHref, retry }: { title: string; detail: string; projectsHref?: string; projectHref?: string; retry: () => Promise<void> }) {
-  return <section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><h1 className="type-section-heading">{title}</h1><p className="mt-3 text-sm text-secondary">{detail}</p><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Button label="Open project" variant="primary" href={projectHref} /> : null}{projectsHref ? <Button label="View all projects" variant="secondary" href={projectsHref} /> : null}<Button label="Back to workspaces" variant="secondary" href="/" /><Button label="Check access again" variant="ghost" onClick={() => void retry()} /></div></div></section>;
+  return <><DocumentTitle title={title} /><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><h1 className="type-section-heading">{title}</h1><p className="mt-3 text-sm text-secondary">{detail}</p><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Button label="Open project" variant="primary" href={projectHref} /> : null}{projectsHref ? <Button label="View all projects" variant="secondary" href={projectsHref} /> : null}<Button label="Back to workspaces" variant="secondary" href="/" /><Button label="Check access again" variant="ghost" onClick={() => void retry()} /></div></div></section></>;
 }
