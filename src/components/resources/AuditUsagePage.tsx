@@ -240,7 +240,7 @@ function SandboxUsageView({
                       <span className="truncate">Task {row.taskId}</span><span className="shrink-0">(deleted)</span>
                     </span>
                   )}
-                  <p className="mt-1 truncate font-mono text-[11px] text-tertiary" title={row.runId}>Run {row.runId}</p>
+                  <p className="mt-1 truncate font-mono text-[13px] text-tertiary" title={row.runId}>Run {row.runId}</p>
                 </div>
                 <Badge variant={row.state === "live" ? "success" : "neutral"} label={row.state === "live" ? "Live" : "Settled"} className="w-fit" />
                 <SandboxTimestamp label="Started" value={row.startedAt} />
