@@ -1,5 +1,5 @@
 import type { Endpoint, TaskDetail } from "../../lib/api/client.js";
-import { formatLocalDateTime } from "../../lib/format/date.js";
+import { formatLocalDateTime } from "../../lib/format/date";
 
 export function taskCompatibleEndpoints(endpoints: Endpoint[]): Endpoint[] {
   return endpoints.filter((endpoint) => endpoint.taskEligible);
