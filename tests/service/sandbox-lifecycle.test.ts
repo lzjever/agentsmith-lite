@@ -516,22 +516,60 @@ describe("sandbox lifecycle service", () => {
     assert.notEqual((await store.sandboxRuns.get(run.runId))?.cleanupStatus, "cleaned");
   });
 
-  it("records a failed sandbox without terminalizing its durable Task or messages", async () => {
+  it("cleans and settles a failed sandbox without terminalizing its durable Task or messages", async () => {
     const store = createLocalInMemoryProductStore();
     const run=sandboxRun();
     await store.createProject({ id:run.projectId,workspaceId:run.workspaceId,name:"P",ownerUserId:"user1",rootPath:run.projectSubPath,taskConcurrencyLimit:1,createdAt:run.createdAt,updatedAt:run.updatedAt });
     await store.createProjectResourcePolicy({projectId:run.projectId,activeTasksLimit:1,providerRequestsLimit:null,providerTokensLimit:null,providerCostLimit:null,projectFileBytesLimit:null,createdAt:run.createdAt,updatedAt:run.updatedAt});
     await store.upsertProjectResourceUsage({projectId:run.projectId,activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:0,updatedAt:run.updatedAt});
     await createTaskForRun(store,taskForRun(run,"running"),true);await store.createTaskMessage({id:"queued-after-failure",taskId:run.taskId,content:"continue",deliveryStatus:"pending",createdAt:run.createdAt});await store.sandboxRuns.put(run);
-    const resources=createdResourcesForRun(run);const pod=resources.find((resource)=>resource.kind==="Pod");assert.ok(pod);pod.status={phase:"Failed"};const port=new FakeLifecyclePort(resources);
-    const service=new SandboxLifecycleService(store,{dataRoot:"/workspace",namespace:run.namespace,port,now:()=>new Date("2026-07-04T00:01:00.000Z")});
+    const resources=createdResourcesForRun(run);const pod=resources.find((resource)=>resource.kind==="Pod");assert.ok(pod);pod.status={phase:"Failed"};
+    const updateWithFencing=store.sandboxRuns.updateWithFencing.bind(store.sandboxRuns);
+    const fencedUpdates:SandboxRunState[]=[];
+    store.sandboxRuns.updateWithFencing=async(runId,expectedFencingToken,nextRun)=>{
+      fencedUpdates.push(structuredClone(nextRun));
+      return updateWithFencing(runId,expectedFencingToken,nextRun);
+    };
+    const pendingPort=new FakeLifecyclePort(resources,{keepResourcesAfterDelete:true});
+    const service=new SandboxLifecycleService(store,{dataRoot:"/workspace",namespace:run.namespace,port:pendingPort,now:()=>new Date("2026-07-04T00:01:00.000Z")});
 
-    const result = await service.reapSandboxRunsOnce({ apply: true });
+    const pendingResult = await service.reapSandboxRunsOnce({ runId:run.runId,apply:true });
 
-    assert.deepEqual(result.errors, []);
+    assert.deepEqual(pendingResult.errors, []);
+    assert.equal(fencedUpdates[0]?.phase,"stopping");assert.equal(fencedUpdates[0]?.cleanupStatus,"cleanup_requested");assert.equal(fencedUpdates[0]?.terminalFailure?.reason,"pod_failed");assert.equal(fencedUpdates[0]?.releaseReason,"failed");
     const task=await store.findTask(run.taskId);assert.equal(task?.status,"running");assert.equal(task?.terminalReason,null);assert.equal(task?.activeReservation,true);
-    const failedRun=await store.sandboxRuns.get(run.runId);assert.equal((await store.findTaskMessage("queued-after-failure"))?.deliveryStatus,"pending");assert.equal(failedRun?.cleanupStatus,"active");assert.equal(failedRun?.terminalFailure?.reason,"pod_failed");
-    assert.deepEqual((await store.listProjectAuditEvents(run.projectId)).map((event)=>event.action),["sandbox.failed"]);assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,1);assert.deepEqual(port.deletedRefs,[]);
+    const failedRun=await store.sandboxRuns.get(run.runId);assert.equal((await store.findTaskMessage("queued-after-failure"))?.deliveryStatus,"pending");assert.notEqual(failedRun?.cleanupStatus,"cleaned");assert.equal(failedRun?.terminalFailure?.reason,"pod_failed");assert.equal(failedRun?.releaseReason,"failed");
+    assert.equal(pendingPort.deletedRefs.length,6);assert.deepEqual(pendingPort.appliedResources,[]);assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,1);assert.deepEqual(await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId),[]);
+
+    const completeService=new SandboxLifecycleService(store,{dataRoot:"/workspace",namespace:run.namespace,port:new FakeLifecyclePort([]),now:()=>new Date("2026-07-04T00:02:00.000Z")});
+    const completeResult=await completeService.reapSandboxRunsOnce({runId:run.runId,apply:true});
+
+    assert.deepEqual(completeResult.errors,[]);
+    const cleanedRun=await store.sandboxRuns.get(run.runId);assert.equal(cleanedRun?.phase,"cleaned");assert.equal(cleanedRun?.cleanupStatus,"cleaned");assert.equal(cleanedRun?.releaseReason,"failed");
+    const durableTask=await store.findTask(run.taskId);assert.equal(durableTask?.status,"running");assert.equal(durableTask?.terminalReason,null);assert.equal(durableTask?.activeReservation,false);
+    assert.equal((await store.findTaskMessage("queued-after-failure"))?.deliveryStatus,"pending");assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,0);
+    const settlements=await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId);assert.equal(settlements.length,1);assert.equal(settlements[0]?.releaseReason,"failed");
+    assert.deepEqual((await store.listProjectAuditEvents(run.projectId)).map((event)=>event.action),["sandbox.failed","sandbox.released"]);
+  });
+
+  it("cleans historical active terminal failures from stopping and expired phases", async () => {
+    for (const phase of ["stopping","expired"] as const) {
+      const store=createLocalInMemoryProductStore();
+      const run=sandboxRun({phase,cleanupStatus:"active",terminalFailure:{reason:"pod_failed"},releaseReason:"failed"});
+      await createReleasableRun(store,run);
+      const resources=createdResourcesForRun(sandboxRun()).filter((resource)=>resource.kind!=="Pod");
+      const port=new FakeLifecyclePort(resources);
+      const service=new SandboxLifecycleService(store,{dataRoot:"/workspace",namespace:run.namespace,port,now:()=>new Date("2026-07-04T00:03:00.000Z")});
+
+      const result=await service.reapSandboxRunsOnce({runId:run.runId,apply:true});
+
+      assert.deepEqual(result.errors,[]);
+      assert.equal(port.deletedRefs.length,5);assert.deepEqual(port.appliedResources,[]);
+      const cleanedRun=await store.sandboxRuns.get(run.runId);assert.equal(cleanedRun?.phase,"cleaned");assert.equal(cleanedRun?.cleanupStatus,"cleaned");assert.equal(cleanedRun?.releaseReason,"failed");
+      assert.equal((await store.findTask(run.taskId))?.activeReservation,false);assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,0);
+      const settlements=await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId);assert.equal(settlements.length,1);assert.equal(settlements[0]?.releaseReason,"failed");
+      assert.deepEqual((await store.listProjectAuditEvents(run.projectId)).map((event)=>event.action),["sandbox.released"]);
+    }
   });
 
   it("retains reservation while cleanup is in progress and releases it only when cleaned", async () => {

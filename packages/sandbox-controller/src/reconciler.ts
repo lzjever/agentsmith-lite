@@ -163,20 +163,21 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
     if (run.cleanupStatus === "cleaned" || run.phase === "cleaned") {
       continue;
     }
-    const terminalFailure = run.terminalFailure ? null : terminalFailureForExpectedRunnerPod(run, observedResources);
+    const terminalFailure = run.terminalFailure ?? terminalFailureForExpectedRunnerPod(run, observedResources);
     if (terminalFailure) {
       actions.push({
         type: "store_run_state",
         run: nextRunState(run, {
-          phase: run.phase,
-          cleanupStatus: "active",
-          terminalFailure
+          phase: "stopping",
+          cleanupStatus: "cleanup_requested",
+          terminalFailure,
+          releaseReason: "failed"
         }),
         reason: "terminal_runner_failure"
       });
       continue;
     }
-    if (run.terminalFailure || run.phase === "stopping" || run.phase === "expired") continue;
+    if (run.phase === "stopping" || run.phase === "expired") continue;
 
     for (const resource of renderSandboxRunCoreResources(run)) {
       const kind = asCoreKind(resource.kind);
@@ -363,13 +364,15 @@ function shouldCleanup(run: SandboxRunState): boolean {
 
 function nextRunState(
   run: SandboxRunState,
-  updates: Pick<SandboxRunState, "phase" | "cleanupStatus" | "terminalFailure">
+  updates: Pick<SandboxRunState, "phase" | "cleanupStatus"> &
+    Partial<Pick<SandboxRunState, "terminalFailure" | "releaseReason">>
 ): SandboxRunState {
   return {
     ...structuredClone(run),
     phase: updates.phase,
     cleanupStatus: updates.cleanupStatus,
-    ...(updates.terminalFailure ? { terminalFailure: updates.terminalFailure } : {})
+    ...(updates.terminalFailure ? { terminalFailure: updates.terminalFailure } : {}),
+    ...(updates.releaseReason !== undefined ? { releaseReason: updates.releaseReason } : {})
   };
 }
 

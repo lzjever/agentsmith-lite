@@ -26,16 +26,43 @@ describe("sandbox reconciler", () => {
 
       const transition = plan.actions.find(isStoreAction);
       assert.equal(transition?.reason, "terminal_runner_failure");
-      assert.equal(transition?.run.phase, "running");
-      assert.equal(transition?.run.cleanupStatus, "active");
+      assert.equal(transition?.run.phase, "stopping");
+      assert.equal(transition?.run.cleanupStatus, "cleanup_requested");
       assert.deepEqual(transition?.run.terminalFailure, expected);
+      assert.equal(transition?.run.releaseReason, "failed");
       assert.equal(plan.actions.some((action) => action.type === "adopt_resource" && action.kind === "Pod"), false);
+      assert.equal(plan.actions.some((action) => action.type === "create_resource"), false);
       assert.equal(plan.actions.some((action) => action.type === "delete_resource"), false);
     }
 
     const runningPod=renderedResource(run,"Pod");runningPod.status={containerStatuses:[{name:"botified-server",state:{terminated:{exitCode:23}}}]};
     const processPlan=reconcileSandboxRuns({namespace:run.namespace,desiredRuns:[run],observedResources:[runningPod],now:new Date("2026-07-04T00:00:00.000Z")});
     assert.equal(processPlan.actions.some((action)=>action.type==="store_run_state"&&action.reason==="terminal_runner_failure"),false);
+  });
+
+  it("advances a persisted active terminal failure to cleanup when its Pod is already gone", () => {
+    const observedResources = createdResourcesForRun(sandboxRun()).filter((resource) => resource.kind !== "Pod");
+    const run = sandboxRun({
+      terminalFailure: { reason: "pod_failed" },
+      releaseReason: "failed"
+    });
+
+    const plan = reconcileSandboxRuns({
+      namespace: run.namespace,
+      desiredRuns: [run],
+      observedResources,
+      now: new Date("2026-07-04T00:00:00.000Z")
+    });
+
+    const transition = plan.actions.find(isStoreAction);
+    assert.equal(transition?.reason, "terminal_runner_failure");
+    assert.equal(transition?.run.phase, "stopping");
+    assert.equal(transition?.run.cleanupStatus, "cleanup_requested");
+    assert.deepEqual(transition?.run.terminalFailure, { reason: "pod_failed" });
+    assert.equal(transition?.run.releaseReason, "failed");
+    assert.equal(plan.actions.some((action) => action.type === "create_resource"), false);
+    assert.equal(plan.actions.some((action) => action.type === "adopt_resource"), false);
+    assert.equal(plan.actions.some((action) => action.type === "delete_resource"), false);
   });
 
   it("ignores terminal Pod status unless namespace, expected name, and full identity all match", () => {

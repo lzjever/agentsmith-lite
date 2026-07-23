@@ -523,17 +523,19 @@ export class SandboxLifecycleService {
     }
     for (let attempt = 0; attempt < TERMINAL_FAILURE_TRANSITION_ATTEMPTS; attempt += 1) {
       const current = await this.store.sandboxRuns.get(actionRun.runId);
-      if (!current || !isTerminalFailureEligibleRun(current)) {
+      if (!current || !isTerminalFailureEligibleRun(current, actionRun)) {
         return "skipped";
       }
       const now = (this.config.now?.() ?? new Date()).toISOString();
-      await this.recordTerminalSandboxFailure({...current,terminalFailure:structuredClone(actionRun.terminalFailure)});
+      if (!current.terminalFailure) {
+        await this.recordTerminalSandboxFailure({...current,terminalFailure:structuredClone(actionRun.terminalFailure)});
+      }
       const stored = await this.store.sandboxRuns.updateWithFencing(actionRun.runId, current.fencingToken, {
         ...current,
-        phase: current.phase,
-        cleanupStatus: "active",
+        phase: actionRun.phase,
+        cleanupStatus: actionRun.cleanupStatus,
         terminalFailure: structuredClone(actionRun.terminalFailure),
-        releaseReason: "failed",
+        releaseReason: actionRun.releaseReason ?? "failed",
         fencingToken: current.fencingToken + 1,
         updatedAt: now
       });
@@ -594,8 +596,8 @@ function isActiveRun(run: PersistedSandboxRunState): boolean {
   return run.cleanupStatus !== "cleaned" && run.phase !== "cleaned";
 }
 
-function isTerminalFailureEligibleRun(run: PersistedSandboxRunState): boolean {
-  return run.cleanupStatus === "active" && (run.phase === "queued" || run.phase === "starting" || run.phase === "running");
+function isTerminalFailureEligibleRun(run: PersistedSandboxRunState, actionRun: SandboxRunState): boolean {
+  return Boolean(actionRun.terminalFailure) && run.cleanupStatus === "active" && run.phase !== "cleaned";
 }
 
 function releaseReason(run:PersistedSandboxRunState):import("../../contracts/src/api.js").SandboxReleaseReason{return run.releaseReason??(run.terminalFailure?"failed":run.phase==="expired"?"legacy_cleaned":"cleanup")}
