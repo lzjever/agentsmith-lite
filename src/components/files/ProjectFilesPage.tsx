@@ -2,16 +2,14 @@
 
 import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Button, Dialog, DialogHeader, IconButton, Skeleton } from "@astryxdesign/core";
-import { type ChangeEvent, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Button, Dialog, DialogHeader, FileInput, IconButton, Skeleton, TextInput } from "@astryxdesign/core";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { ErrorState } from "../ui/error-state";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { toast } from "../ui/toast";
 import { showFileDetails, sortFileEntries } from "./fileBrowserState";
 
@@ -283,9 +281,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     }
   }
 
-  function selectUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
+  function selectUpload(selection: File | File[] | null) {
+    const file = Array.isArray(selection) ? selection[0] : selection;
     if (file) void upload(file);
   }
 
@@ -455,9 +452,9 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
           <p className="sr-only" aria-live="polite">{dropReady ? "Drop a file to upload" : ""}</p>
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-subtle px-3">
             <nav className="min-w-0 overflow-x-auto" aria-label="Library path"><ol className="flex min-w-max items-center gap-1 text-sm text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-tertiary" aria-hidden="true" /> : null}<button type="button" className="max-w-56 truncate rounded-sm px-1.5 py-1 hover:bg-surface-low hover:text-foreground" title={crumb.label} onClick={() => navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav>
-            {canWriteFiles ? <><Button label={uploading ? "Uploading" : "Upload"} variant="secondary" size="md" icon={uploading ? <Loader2 className="animate-spin" size={15} /> : <Upload size={15} />} onClick={() => input.current?.click()} isDisabled={mutationBusy} /><input ref={input} hidden type="file" onChange={selectUpload} /></> : null}
+            {canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}
           </div>
-          <div className="flex gap-2 border-b border-subtle p-3"><Label className="relative flex-1"><span className="sr-only">Filter files</span><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9 pr-8" placeholder="Filter files" />{query ? <IconButton label="Clear file filter" className="absolute right-1 top-0.5" size="lg" variant="ghost" icon={<X size={14} />} onClick={() => setQuery("")} /> : null}</Label></div>
+          <div className="border-b border-subtle p-3"><TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} hasClear placeholder="Filter files" size="lg" width="100%" /></div>
           {filesMessage ? <InlineError message={filesMessage} onDismiss={() => setFilesMessage("")} /> : null}
           {uploadFailure ? <div className="mx-3 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.code === "project_file_bytes_limit_reached" ? <><strong>File storage limit reached.</strong> Delete files or ask a project administrator to change the limit. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/policy`}>Open resource policy</Link>.</> : uploadFailure.message}</span><div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button label="Retry upload" variant="ghost" size="md" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path, uploadFailure.libraryId)} isDisabled={mutationBusy} /> : null}<IconButton label="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={mutationBusy} /></div></div> : null}
           {filesState === "loading" ? <FileBrowserLoading /> : null}
@@ -508,7 +505,7 @@ function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onN
   const title = create ? "Create File Library" : "Rename File Library";
   const subtitle = create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move.";
   const handleOpenChange = (next: boolean) => { if (!pending) onOpenChange(next); };
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />{error ? <div role="alert" className="mx-5 mt-4 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error md:mx-6">{error}</div> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><Label htmlFor={`${mode}-library-name`}>Library name</Label><Input id={`${mode}-library-name`} className="mt-2" value={name} onChange={(event) => onNameChange(event.target.value)} autoFocus maxLength={120} required /></form><footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => onOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" icon={pending ? <Loader2 className="size-4 animate-spin" /> : undefined} isDisabled={pending || !name.trim()} /></footer></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />{error ? <div role="alert" className="mx-5 mt-4 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error md:mx-6">{error}</div> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form><footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => handleOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" icon={pending ? <Loader2 className="size-4 animate-spin" /> : undefined} isDisabled={pending || !name.trim()} /></footer></Dialog>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) {
