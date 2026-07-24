@@ -25,28 +25,48 @@ describe("context API", () => {
   });
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
 
-  it("persists, lists, validates, and deletes context through the public API", async () => {
-    const input = { workspaceId, projectId, scope: "project_shared", contextKey: "project.format", content: "{\"tone\":\"brief\"}", contentType: "json" };
+  it("pages metadata and exposes content only through exact authorized detail", async () => {
+    const largeContent = "x".repeat(30 * 1024);
+    const input = { workspaceId, projectId, scope: "project_shared", contextKey: "project.00", content: largeContent, contentType: "text" };
     const saved = await requestJson("PUT", "/api/v1/context", input);
     assert.equal(saved.contextKey, input.contextKey);
+    for (let index = 1; index < 26; index += 1) {
+      await requestJson("PUT", "/api/v1/context", { ...input, contextKey: `project.${String(index).padStart(2, "0")}`, content: `content ${index}` });
+    }
     const listed = await requestJson("GET", `/api/v1/context?workspaceId=${workspaceId}&projectId=${projectId}&scope=project_shared`);
     assert.equal(listed.canWrite, true);
-    assert.equal(listed.items[0]?.contentType, "json");
-    const renamed = await requestJson("PUT", "/api/v1/context", { ...input, previousContextKey: input.contextKey, expectedVersion: saved.version, contextKey: "project.renamed" });
-    assert.equal(renamed.contextKey, "project.renamed");
-    const stale = await request("PUT", "/api/v1/context", { ...input, previousContextKey: "project.renamed", expectedVersion: saved.version, contextKey: "project.renamed" });
+    assert.equal(listed.items.length, 25);
+    assert.ok(listed.nextCursor);
+    assert.equal(listed.items[0]?.contentType, "text");
+    assert.equal("content" in listed.items[0], false);
+    assert.equal(JSON.stringify(listed).includes(largeContent), false);
+    const detail = await requestJson("GET", `/api/v1/context/${saved.id}?workspaceId=${workspaceId}&projectId=${projectId}&scope=project_shared`);
+    assert.equal(detail.content, largeContent);
+    const second = await requestJson("GET", `/api/v1/context?workspaceId=${workspaceId}&projectId=${projectId}&scope=project_shared&cursor=${encodeURIComponent(listed.nextCursor)}`);
+    assert.deepEqual(second.items.map((entry: { contextKey: string }) => entry.contextKey), ["project.25"]);
+    assert.equal(second.nextCursor, null);
+    const wrongScope = await request("GET", `/api/v1/context/${saved.id}?workspaceId=${workspaceId}&scope=workspace_shared`);
+    assert.equal(wrongScope.response.status, 404);
+  });
+
+  it("preserves context CRUD validation and optimistic conflicts", async () => {
+    const input = { workspaceId, projectId, scope: "project_shared", contextKey: "crud.format", content: "{\"tone\":\"brief\"}", contentType: "json" };
+    const saved = await requestJson("PUT", "/api/v1/context", input);
+    const renamed = await requestJson("PUT", "/api/v1/context", { ...input, previousContextKey: input.contextKey, expectedVersion: saved.version, contextKey: "crud.renamed" });
+    assert.equal(renamed.contextKey, "crud.renamed");
+    const stale = await request("PUT", "/api/v1/context", { ...input, previousContextKey: "crud.renamed", expectedVersion: saved.version, contextKey: "crud.renamed" });
     assert.equal(stale.response.status, 409);
     assert.equal(stale.body.code, "context_version_conflict");
-    const duplicate = await request("PUT", "/api/v1/context", { ...input, contextKey: "project.renamed" });
+    const duplicate = await request("PUT", "/api/v1/context", { ...input, contextKey: "crud.renamed" });
     assert.equal(duplicate.response.status, 409);
     assert.equal(duplicate.body.code, "context_key_conflict");
     const malformed = await request("PUT", "/api/v1/context", { ...input, contextKey: "bad", content: "{" });
     assert.equal(malformed.response.status, 400);
-    const updated = await requestJson("PUT", "/api/v1/context", { ...input, previousContextKey: "project.renamed", expectedVersion: renamed.version, contextKey: "project.renamed", content: "{\"tone\":\"detailed\"}" });
-    const staleDelete = await request("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "project.renamed", expectedVersion: renamed.version });
+    const updated = await requestJson("PUT", "/api/v1/context", { ...input, previousContextKey: "crud.renamed", expectedVersion: renamed.version, contextKey: "crud.renamed", content: "{\"tone\":\"detailed\"}" });
+    const staleDelete = await request("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "crud.renamed", expectedVersion: renamed.version });
     assert.equal(staleDelete.response.status, 409);
     assert.equal(staleDelete.body.code, "context_version_conflict");
-    const deleted = await requestJson("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "project.renamed", expectedVersion: updated.version });
+    const deleted = await requestJson("DELETE", "/api/v1/context", { workspaceId, projectId, scope: "project_shared", contextKey: "crud.renamed", expectedVersion: updated.version });
     assert.deepEqual(deleted, { deleted: true });
   });
 

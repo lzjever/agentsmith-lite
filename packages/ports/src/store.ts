@@ -27,6 +27,7 @@ import type {
   UserProfilePreferences,
   UserNotification, ActiveProjectAlert, ProjectAlertRule, ProjectAlertType, ProjectAlertView, ProjectAlertCursorKey, ProjectCredential, StoredProjectCredential,
   ProjectContextEntry,
+  ProjectContextEntryMetadata,
   Workspace,
   WorkspaceListProjection,
   WorkspaceMembership,
@@ -76,6 +77,15 @@ export interface ProjectAlertStorePage {
   items: ProjectAlert[];
   hasMore: boolean;
   activeCount: number;
+}
+
+export interface ProjectContextMetadataStoreQuery {
+  workspaceId: string;
+  projectId: string | null;
+  scope: ProjectContextEntry["scope"];
+  ownerUserId: string | null;
+  afterContextKey?: string;
+  limit: number;
 }
 
 export interface ProjectAuditStoreQuery {
@@ -550,7 +560,10 @@ export interface ProductStore {
   findTaskBoundToFileLibrary(fileLibraryId: string): Promise<FileLibraryBindingLookup>;
   createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry | null>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
-  listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
+  listProjectContextEntryMetadataPage(query: ProjectContextMetadataStoreQuery): Promise<ProjectContextEntryMetadata[]>;
+  listProjectContextEntryPage(query: ProjectContextMetadataStoreQuery): Promise<ProjectContextEntry[]>;
+  findProjectContextEntryByKey(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null, contextKey: string): Promise<ProjectContextEntry | null>;
+  findProjectContextEntryById(id: string, workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry | null>;
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
   createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule | null>;
   listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;

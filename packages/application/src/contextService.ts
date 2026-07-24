@@ -1,4 +1,4 @@
-import type { ProjectContextContentType, ProjectContextEntry, ProjectContextScope } from "../../contracts/src/api.js";
+import type { ProjectContextContentType, ProjectContextEntry, ProjectContextPage, ProjectContextScope } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -8,11 +8,6 @@ import { runIdempotentMutation } from "./idempotentMutation.js";
 export type ContextContentType = ProjectContextContentType;
 
 export type ContextEntryView = ProjectContextEntry & { contentType: ContextContentType };
-
-export interface ContextListResult {
-  items: ContextEntryView[];
-  canWrite: boolean;
-}
 
 export interface ContextRequestTarget {
   workspaceId: string;
@@ -28,25 +23,58 @@ export interface UpsertContextEntryInput extends ContextRequestTarget {
   contentType: ContextContentType;
 }
 
+export interface ContextPageQuery {
+  cursor?: string;
+  limit?: number;
+}
+
 const MAX_CONTEXT_BYTES = 30 * 1024;
 const MAX_AGENT_CONTEXT_BYTES = 32 * 1024;
 const MAX_CONTEXT_KEY_LENGTH = 160;
+const DEFAULT_CONTEXT_PAGE_LIMIT = 25;
+const MAX_CONTEXT_PAGE_LIMIT = 100;
+const AGENT_CONTEXT_HEADING = "# AgentSmith Context";
+const AGENT_CONTEXT_DESCRIPTION = "These entries are reusable workspace and project guidance. Project entries override workspace defaults with the same key; personal entries override shared entries at the same scope. Direct instructions in the current request take priority.";
+const AGENT_CONTEXT_PREFIX = `${AGENT_CONTEXT_HEADING}\n\n${AGENT_CONTEXT_DESCRIPTION}\n\n`;
 const contextScopes = new Set<ProjectContextScope>(["workspace_shared", "workspace_personal", "project_shared", "project_personal"]);
 const contentTypes = new Set<ContextContentType>(["text", "json", "markdown", "yaml"]);
 
 export class ContextService {
   constructor(private readonly store: ProductStore, private readonly workspaces: WorkspaceService) {}
 
-  async list(userId: string, target: ContextRequestTarget): Promise<ContextListResult> {
+  async listPage(userId: string, target: ContextRequestTarget, query: ContextPageQuery = {}): Promise<ProjectContextPage> {
     const normalized = normalizeTarget(target);
     const access = await this.authorize(userId, normalized, "view");
-    const entries = await this.store.listProjectContextEntries(
+    const ownerUserId = personalOwner(normalized.scope, userId);
+    const limit = requirePageLimit(query.limit);
+    const cursorTarget = { ...normalized, ownerUserId };
+    const afterContextKey = query.cursor ? decodeContextCursor(query.cursor, cursorTarget) : undefined;
+    const rows = await this.store.listProjectContextEntryMetadataPage({
+      ...cursorTarget,
+      ...(afterContextKey ? { afterContextKey } : {}),
+      limit: limit + 1
+    });
+    const items = rows.slice(0, limit);
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: rows.length > limit && last ? encodeContextCursor(cursorTarget, last.contextKey) : null,
+      canWrite: access.canWrite
+    };
+  }
+
+  async get(userId: string, entryId: string, target: ContextRequestTarget): Promise<ContextEntryView> {
+    const normalized = normalizeTarget(target);
+    await this.authorize(userId, normalized, "view");
+    const entry = await this.store.findProjectContextEntryById(
+      requireIdentifier(entryId, "entryId"),
       normalized.workspaceId,
       normalized.projectId,
       normalized.scope,
       personalOwner(normalized.scope, userId)
     );
-    return { items: entries.map((entry) => toView(entry)), canWrite: access.canWrite };
+    if (!entry) throw new NotFoundError("Context entry not found");
+    return toView(entry);
   }
 
   async upsert(userId: string, input: UpsertContextEntryInput, idempotencyKey?: string): Promise<ContextEntryView> {
@@ -60,16 +88,18 @@ export class ContextService {
     const ownerUserId = personalOwner(target.scope, userId);
     const save = async (resourceId: string) => {
       const timestamp = nowIso();
-      const entries = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
-      const existing = entries.find((entry) => entry.contextKey === previousContextKey);
+      const existing = await this.store.findProjectContextEntryByKey(target.workspaceId, target.projectId, target.scope, ownerUserId, previousContextKey);
       const updateRequested = input.previousContextKey !== undefined || input.expectedVersion !== undefined;
       if (!existing && updateRequested) throw contextVersionConflict();
       if (existing && !updateRequested) throw contextKeyConflict();
-      if (existing && entries.some((entry) => entry.contextKey === contextKey && entry.id !== existing.id)) throw contextKeyConflict();
+      if (existing && contextKey !== existing.contextKey) {
+        const conflicting = await this.store.findProjectContextEntryByKey(target.workspaceId, target.projectId, target.scope, ownerUserId, contextKey);
+        if (conflicting && conflicting.id !== existing.id) throw contextKeyConflict();
+      }
       if (existing) {
         if (!Number.isInteger(input.expectedVersion) || input.expectedVersion! < 1) throw new ProductError("expectedVersion is required to update context", 400);
         if (existing.version !== input.expectedVersion) throw contextVersionConflict();
-        if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing, contentType);
+        if (existing.contextKey === contextKey && existing.content === content && existing.contentType === contentType) return toView(existing);
       }
       const entry: ProjectContextEntry = {
         id: existing?.id ?? resourceId, workspaceId: target.workspaceId, projectId: target.projectId, ownerUserId, scope: target.scope,
@@ -79,15 +109,15 @@ export class ContextService {
       if (!existing) {
         const created = await this.store.createProjectContextEntry(entry);
         if (!created) throw contextKeyConflict();
-        return toView(created, contentType);
+        return toView(created);
       }
       const updated = await this.store.updateProjectContextEntry(entry, input.expectedVersion!);
       if (!updated) {
-        const latest = await this.store.listProjectContextEntries(target.workspaceId, target.projectId, target.scope, ownerUserId);
-        if (latest.some((candidate) => candidate.contextKey === contextKey && candidate.id !== existing.id)) throw contextKeyConflict();
+        const conflicting = await this.store.findProjectContextEntryByKey(target.workspaceId, target.projectId, target.scope, ownerUserId, contextKey);
+        if (conflicting && conflicting.id !== existing.id) throw contextKeyConflict();
         throw contextVersionConflict();
       }
-      return toView(updated, contentType);
+      return toView(updated);
     };
     if (!idempotencyKey) return save(newId("ctx"));
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: target.projectId ?? target.workspaceId, operation: target.projectId ? "project.context.save" : "workspace.context.save", key: idempotencyKey, request: { ...target, contextKey, previousContextKey, expectedVersion: input.expectedVersion, content, contentType }, resourceId: newId("ctx"), failureMessage: "Context could not be saved", run: save });
@@ -98,8 +128,7 @@ export class ContextService {
     await this.authorize(userId, normalized, "write");
     const contextKey = requireContextKey(target.contextKey);
     const remove = async () => {
-      const entries = await this.store.listProjectContextEntries(normalized.workspaceId, normalized.projectId, normalized.scope, personalOwner(normalized.scope, userId));
-      const entry = entries.find((candidate) => candidate.contextKey === contextKey);
+      const entry = await this.store.findProjectContextEntryByKey(normalized.workspaceId, normalized.projectId, normalized.scope, personalOwner(normalized.scope, userId), contextKey);
       if (!entry) throw new NotFoundError("Context entry not found");
       if (!Number.isInteger(target.expectedVersion) || target.expectedVersion < 1) throw new ProductError("expectedVersion is required to delete context", 400);
       if (entry.version !== target.expectedVersion || !(await this.store.deleteProjectContextEntry(entry))) throw contextVersionConflict();
@@ -113,21 +142,34 @@ export class ContextService {
     const project = await this.workspaces.requireProjectForUser(userId, projectId, "view");
     const workspaceId = project.workspaceId;
     const effective = new Map<string, ProjectContextEntry>();
+    let fullRenderedBytes = Buffer.byteLength(AGENT_CONTEXT_PREFIX, "utf8");
+    let lastEntry: ProjectContextEntry | undefined;
     for (const [scope, scopedProjectId, ownerUserId] of [
-      ["workspace_shared", null, null],
-      ["workspace_personal", null, userId],
+      ["project_personal", projectId, userId],
       ["project_shared", projectId, null],
-      ["project_personal", projectId, userId]
+      ["workspace_personal", null, userId],
+      ["workspace_shared", null, null]
     ] as const) {
-      for (const entry of await this.store.listProjectContextEntries(workspaceId, scopedProjectId, scope, ownerUserId)) {
+      for await (const entry of this.streamEntries(workspaceId, scopedProjectId, scope, ownerUserId)) {
+        if (effective.has(entry.contextKey)) continue;
+        const candidateFullBytes = fullRenderedBytes + fullAgentContextEntryBytes(entry);
+        const candidateLast = !lastEntry || entry.contextKey.localeCompare(lastEntry.contextKey) >= 0 ? entry : lastEntry;
+        const candidateRenderedBytes = candidateFullBytes
+          - fullAgentContextEntryBytes(candidateLast)
+          + terminalAgentContextEntryBytes(candidateLast);
+        if (candidateRenderedBytes > MAX_AGENT_CONTEXT_BYTES) {
+          throw new ProductError("Effective agent context exceeds the 32 KiB execution limit", 413);
+        }
         effective.set(entry.contextKey, entry);
+        fullRenderedBytes = candidateFullBytes;
+        lastEntry = candidateLast;
       }
     }
     if (effective.size === 0) return "";
     const rendered = [
-      "# AgentSmith Context",
+      AGENT_CONTEXT_HEADING,
       "",
-      "These entries are reusable workspace and project guidance. Project entries override workspace defaults with the same key; personal entries override shared entries at the same scope. Direct instructions in the current request take priority.",
+      AGENT_CONTEXT_DESCRIPTION,
       "",
       ...[...effective.values()].sort((left, right) => left.contextKey.localeCompare(right.contextKey)).flatMap((entry) => [
         `## ${entry.contextKey}`,
@@ -137,10 +179,24 @@ export class ContextService {
         ""
       ])
     ].join("\n").trimEnd() + "\n";
-    if (Buffer.byteLength(rendered, "utf8") > MAX_AGENT_CONTEXT_BYTES) {
-      throw new ProductError("Effective agent context exceeds the 32 KiB execution limit", 413);
-    }
     return rendered;
+  }
+
+  private async *streamEntries(workspaceId: string, projectId: string | null, scope: ProjectContextScope, ownerUserId: string | null): AsyncGenerator<ProjectContextEntry> {
+    let afterContextKey: string | undefined;
+    while (true) {
+      const page = await this.store.listProjectContextEntryPage({
+        workspaceId,
+        projectId,
+        scope,
+        ownerUserId,
+        ...(afterContextKey ? { afterContextKey } : {}),
+        limit: MAX_CONTEXT_PAGE_LIMIT
+      });
+      for (const entry of page) yield entry;
+      if (page.length < MAX_CONTEXT_PAGE_LIMIT) return;
+      afterContextKey = page.at(-1)!.contextKey;
+    }
   }
 
   private async authorize(userId: string, target: Required<ContextRequestTarget>, action: "view" | "write"): Promise<{ canWrite: boolean }> {
@@ -220,17 +276,60 @@ function validateJson(content: string): void {
   }
 }
 
-function toView(entry: ProjectContextEntry, contentType?: ContextContentType): ContextEntryView {
-  return { ...entry, contentType: contentType ?? entry.contentType ?? inferredContentType(entry.content) };
+function toView(entry: ProjectContextEntry): ContextEntryView {
+  return entry;
 }
 
-function inferredContentType(content: string): ContextContentType {
-  try {
-    JSON.parse(content);
-    return "json";
-  } catch {
-    return "text";
+function fullAgentContextEntryBytes(entry: ProjectContextEntry): number {
+  return Buffer.byteLength(`${renderAgentContextEntry(entry)}\n\n`, "utf8");
+}
+
+function terminalAgentContextEntryBytes(entry: ProjectContextEntry): number {
+  return Buffer.byteLength(`${renderAgentContextEntry(entry).trimEnd()}\n`, "utf8");
+}
+
+function renderAgentContextEntry(entry: ProjectContextEntry): string {
+  return `## ${entry.contextKey}\nScope: ${entry.scope}\n\n${entry.content}`;
+}
+
+function requirePageLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_CONTEXT_PAGE_LIMIT;
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CONTEXT_PAGE_LIMIT) {
+    throw new ProductError(`limit must be between 1 and ${MAX_CONTEXT_PAGE_LIMIT}`, 400);
   }
+  return value;
+}
+
+type ContextCursorTarget = Required<ContextRequestTarget> & { ownerUserId: string | null };
+
+function encodeContextCursor(target: ContextCursorTarget, afterContextKey: string): string {
+  return Buffer.from(JSON.stringify({ v: 1, target, afterContextKey }), "utf8").toString("base64url");
+}
+
+function decodeContextCursor(cursor: string, target: ContextCursorTarget): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    throw invalidContextCursor();
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidContextCursor();
+  const decoded = value as { v?: unknown; target?: unknown; afterContextKey?: unknown };
+  if (
+    decoded.v !== 1 ||
+    typeof decoded.afterContextKey !== "string" ||
+    decoded.afterContextKey.length < 1 ||
+    decoded.afterContextKey.length > MAX_CONTEXT_KEY_LENGTH ||
+    JSON.stringify(decoded.target) !== JSON.stringify(target) ||
+    encodeContextCursor(target, decoded.afterContextKey) !== cursor
+  ) {
+    throw invalidContextCursor();
+  }
+  return decoded.afterContextKey;
+}
+
+function invalidContextCursor(): ProductError {
+  return new ProductError("Context cursor is invalid", 400);
 }
 
 function contextKeyConflict(): ProductError {

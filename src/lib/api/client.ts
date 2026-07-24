@@ -4,7 +4,7 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
@@ -100,10 +100,11 @@ export interface ProjectFile { name: string; path: string; type: "file" | "direc
 export type TaskListQuery = ApiTaskListQuery;
 export type TaskListPage = ApiTaskListPage;
 export type TaskListItem = TaskListPage["items"][number];
-export type ContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
-export type ContextContentType = "text" | "json" | "markdown" | "yaml";
-export interface ContextEntry { id: string; workspaceId: string; projectId: string | null; ownerUserId: string | null; scope: ContextScope; contextKey: string; content: string; contentType: ContextContentType; version: number; createdAt: string; updatedAt: string; }
-export interface ContextList { items: ContextEntry[]; canWrite: boolean; }
+export type ContextScope = ProjectContextScope;
+export type ContextContentType = ProjectContextContentType;
+export type ContextEntry = ProjectContextEntry;
+export type ContextEntryMetadata = ProjectContextEntryMetadata;
+export type ContextPage = ProjectContextPage;
 export interface ProjectResourcePolicy {
   projectId: string;
   activeTasksLimit: number;
@@ -261,10 +262,17 @@ export const apiClient = {
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}/health`, "POST", idempotencyKey),
   deleteEndpoint: (projectId: string, endpointId: string, idempotencyKey: string) =>
     jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "DELETE", idempotencyKey),
-  contexts: (input: { workspaceId: string; scope: ContextScope; projectId?: string }) => {
+  contexts: (input: { workspaceId: string; scope: ContextScope; projectId?: string; cursor?: string; limit?: number }) => {
     const query = new URLSearchParams({ workspaceId: input.workspaceId, scope: input.scope });
     if (input.projectId) query.set("projectId", input.projectId);
-    return request<ContextList>(`/context?${query.toString()}`);
+    if (input.cursor) query.set("cursor", input.cursor);
+    if (input.limit) query.set("limit", String(input.limit));
+    return request<ContextPage>(`/context?${query.toString()}`);
+  },
+  context: (entryId: string, input: { workspaceId: string; scope: ContextScope; projectId?: string }) => {
+    const query = new URLSearchParams({ workspaceId: input.workspaceId, scope: input.scope });
+    if (input.projectId) query.set("projectId", input.projectId);
+    return request<ContextEntry>(`/context/${encodeURIComponent(entryId)}?${query.toString()}`);
   },
   saveContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; previousContextKey?: string; expectedVersion?: number; content: string; contentType: ContextContentType }, idempotencyKey: string) => jsonIdempotent<ContextEntry>("/context", "PUT", idempotencyKey, input),
   deleteContext: (input: { workspaceId: string; projectId?: string; scope: ContextScope; contextKey: string; expectedVersion: number }, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>("/context", "DELETE", idempotencyKey, input),

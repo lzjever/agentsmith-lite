@@ -389,9 +389,34 @@ export class PostgresProductStore implements ProductStore {
       return"deleted" as const;
     });
   }
-  async createProjectContextEntry(v: ProjectContextEntry): Promise<ProjectContextEntry | null> { const rows=await this.queryRows<ContextRow>(`insert into project_context_entries (id,workspace_id,project_id,owner_user_id,scope,context_key,content,content_type,name,user_id,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$6,$4,$9,$10,$11) on conflict do nothing returning *`,[v.id,v.workspaceId,v.projectId,v.ownerUserId,v.scope,v.contextKey,v.content,v.contentType??"text",v.version,v.createdAt,v.updatedAt]); return rows[0]?mapContext(rows[0]):null; }
-  async updateProjectContextEntry(v: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null> { try { const rows=await this.queryRows<ContextRow>(`update project_context_entries set context_key=$2,content=$3,content_type=$4,version=$5,updated_at=$6 where id=$1 and version=$7 and workspace_id=$8 and project_id is not distinct from $9 and scope=$10 and owner_user_id is not distinct from $11 returning *`,[v.id,v.contextKey,v.content,v.contentType??"text",v.version,v.updatedAt,expectedVersion,v.workspaceId,v.projectId,v.scope,v.ownerUserId]); return rows[0]?mapContext(rows[0]):null; } catch(error) { if(isUniqueConstraintError(error))return null;throw error; } }
-  async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null): Promise<ProjectContextEntry[]> { const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 order by context_key',[workspaceId,projectId,scope,ownerUserId]);return rows.map(mapContext); }
+  async createProjectContextEntry(v: ProjectContextEntry): Promise<ProjectContextEntry | null> { const rows=await this.queryRows<ContextRow>(`insert into project_context_entries (id,workspace_id,project_id,owner_user_id,scope,context_key,content,content_type,name,user_id,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$6,$4,$9,$10,$11) on conflict do nothing returning *`,[v.id,v.workspaceId,v.projectId,v.ownerUserId,v.scope,v.contextKey,v.content,v.contentType,v.version,v.createdAt,v.updatedAt]); return rows[0]?mapContext(rows[0]):null; }
+  async updateProjectContextEntry(v: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null> { try { const rows=await this.queryRows<ContextRow>(`update project_context_entries set context_key=$2,content=$3,content_type=$4,version=$5,updated_at=$6 where id=$1 and version=$7 and workspace_id=$8 and project_id is not distinct from $9 and scope=$10 and owner_user_id is not distinct from $11 returning *`,[v.id,v.contextKey,v.content,v.contentType,v.version,v.updatedAt,expectedVersion,v.workspaceId,v.projectId,v.scope,v.ownerUserId]); return rows[0]?mapContext(rows[0]):null; } catch(error) { if(isUniqueConstraintError(error))return null;throw error; } }
+  async listProjectContextEntryMetadataPage(query:import("../../ports/src/store.js").ProjectContextMetadataStoreQuery):Promise<import("../../contracts/src/api.js").ProjectContextEntryMetadata[]>{
+    const rows=await this.queryRows<ContextMetadataRow>(
+      `select id,workspace_id,project_id,owner_user_id,scope,context_key,content_type,version,created_at,updated_at
+       from project_context_entries
+       where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4
+         and ($5::text is null or context_key collate "C" > $5 collate "C")
+       order by context_key collate "C"
+       limit $6`,
+      [query.workspaceId,query.projectId,query.scope,query.ownerUserId,query.afterContextKey??null,query.limit]
+    );
+    return rows.map(mapContextMetadata);
+  }
+  async listProjectContextEntryPage(query:import("../../ports/src/store.js").ProjectContextMetadataStoreQuery):Promise<ProjectContextEntry[]>{
+    const rows=await this.queryRows<ContextRow>(
+      `select *
+       from project_context_entries
+       where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4
+         and ($5::text is null or context_key collate "C" > $5 collate "C")
+       order by context_key collate "C"
+       limit $6`,
+      [query.workspaceId,query.projectId,query.scope,query.ownerUserId,query.afterContextKey??null,query.limit]
+    );
+    return rows.map(mapContext);
+  }
+  async findProjectContextEntryByKey(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null,contextKey:string):Promise<ProjectContextEntry|null>{const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 and context_key=$5',[workspaceId,projectId,scope,ownerUserId,contextKey]);return rows[0]?mapContext(rows[0]):null;}
+  async findProjectContextEntryById(id:string,workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null):Promise<ProjectContextEntry|null>{const rows=await this.queryRows<ContextRow>('select * from project_context_entries where id=$1 and workspace_id=$2 and project_id is not distinct from $3 and scope=$4 and owner_user_id is not distinct from $5',[id,workspaceId,projectId,scope,ownerUserId]);return rows[0]?mapContext(rows[0]):null;}
   async deleteProjectContextEntry(v: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean> { return (await this.pool.query('delete from project_context_entries where id=$1 and workspace_id=$2 and project_id is not distinct from $3 and scope=$4 and owner_user_id is not distinct from $5 and version=$6',[v.id,v.workspaceId,v.projectId,v.scope,v.ownerUserId,v.version])).rowCount===1; }
   async createProjectAlertRule(v:ProjectAlertRule):Promise<ProjectAlertRule|null>{return transaction(this.pool,async(client)=>{const project=await client.query("select id from projects where id=$1 for update",[v.projectId]);if(!project.rowCount)throw new Error("Project not found while creating alert rule");const count=await client.query<{count:string}>("select count(*)::text as count from project_alert_rules where project_id=$1",[v.projectId]);if(Number(count.rows[0]?.count??0)>=50)return null;const scope=v.scope??{kind:"project" as const};const row=(await client.query<AlertRuleRow>("insert into project_alert_rules (id,project_id,alert_type,name,metric,condition,threshold,window_seconds,scope_kind,endpoint_id,enabled,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *",[v.id,v.projectId,v.alertType,v.name??v.alertType.replaceAll("_"," "),v.metric??"failure_count",v.condition??"greater_than_or_equal",v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==="endpoint"?scope.endpointId:null,v.enabled,v.createdAt,v.updatedAt])).rows[0];if(!row)throw new Error("Alert rule insert returned no row");return mapAlertRule(row)})}
   async listProjectAlertRules(id:string){const rows=await this.queryRows<AlertRuleRow>('select * from project_alert_rules where project_id=$1 order by created_at,id collate "C" limit 51',[id]);if(rows.length>50)throw new Error("Project alert rule limit exceeded");return rows.map(mapAlertRule)}
@@ -1872,6 +1897,7 @@ interface ProjectRow {
 }
 interface FileLibraryRow { id:string;workspace_id:string;project_id:string;name:string;root_sub_path:string;created_by_user_id:string;created_at:unknown;updated_at:unknown; }
 interface ContextRow { id:string; workspace_id:string; project_id:string|null; owner_user_id:string|null; scope:ProjectContextEntry["scope"]; context_key:string; content:string; content_type:import("../../contracts/src/api.js").ProjectContextContentType; version:number; created_at:unknown; updated_at:unknown; }
+type ContextMetadataRow = Omit<ContextRow,"content">;
 
 interface ModelEndpointRow {
   id: string;
@@ -2033,6 +2059,7 @@ function mapProject(row: ProjectRow): Project {
 }
 function mapFileLibrary(row:FileLibraryRow):FileLibrary{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,name:row.name,rootSubPath:row.root_sub_path,createdByUserId:row.created_by_user_id,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 function mapContext(row: ContextRow): ProjectContextEntry { return { id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,ownerUserId:row.owner_user_id,scope:row.scope,contextKey:row.context_key,content:row.content,contentType:row.content_type,version:row.version,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at) }; }
+function mapContextMetadata(row:ContextMetadataRow):import("../../contracts/src/api.js").ProjectContextEntryMetadata{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,ownerUserId:row.owner_user_id,scope:row.scope,contextKey:row.context_key,contentType:row.content_type,version:row.version,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 
 function mapEndpoint(row: ModelEndpointRow): ModelEndpoint {
   return {

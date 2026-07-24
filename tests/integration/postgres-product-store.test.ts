@@ -28,6 +28,35 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   after(async()=>{await store.close();});
 
+  it("projects bounded Context metadata with keysets and exact target isolation",async()=>{
+    for(const [index,contextKey] of ["alpha","beta","gamma"].entries()){
+      assert.ok(await store.createProjectContextEntry({
+        id:`context_page_${index}`,workspaceId:"workspace_atomic",projectId:"project_atomic",ownerUserId:null,
+        scope:"project_shared",contextKey,content:index===0?"x".repeat(30*1024):`content ${index}`,contentType:"text",
+        version:1,createdAt:at,updatedAt:at
+      }));
+    }
+
+    const first=await store.listProjectContextEntryMetadataPage({
+      workspaceId:"workspace_atomic",projectId:"project_atomic",scope:"project_shared",ownerUserId:null,limit:2
+    });
+    assert.deepEqual(first.map((entry)=>entry.contextKey),["alpha","beta"]);
+    assert.ok(first.every((entry)=>!("content" in entry)));
+    const fullFirst=await store.listProjectContextEntryPage({
+      workspaceId:"workspace_atomic",projectId:"project_atomic",scope:"project_shared",ownerUserId:null,limit:2
+    });
+    assert.deepEqual(fullFirst.map((entry)=>entry.contextKey),["alpha","beta"]);
+    assert.equal(fullFirst[0]?.content.length,30*1024);
+    const second=await store.listProjectContextEntryMetadataPage({
+      workspaceId:"workspace_atomic",projectId:"project_atomic",scope:"project_shared",ownerUserId:null,afterContextKey:"beta",limit:2
+    });
+    assert.deepEqual(second.map((entry)=>entry.contextKey),["gamma"]);
+    assert.equal((await store.findProjectContextEntryByKey("workspace_atomic","project_atomic","project_shared",null,"alpha"))?.content.length,30*1024);
+    assert.equal(await store.findProjectContextEntryByKey("workspace_atomic","project_atomic","project_shared","user_atomic","alpha"),null);
+    assert.equal((await store.findProjectContextEntryById("context_page_0","workspace_atomic","project_atomic","project_shared",null))?.contextKey,"alpha");
+    assert.equal(await store.findProjectContextEntryById("context_page_0","workspace_atomic","project_atomic","project_personal","user_atomic"),null);
+  });
+
   it("uses stable keysets, ordinal title order, and literal Task search patterns",async()=>{
     const records=[
       {id:"task_page_percent",title:"100%",createdAt:"2026-07-23T00:00:01.000Z"},

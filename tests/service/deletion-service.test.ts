@@ -353,7 +353,7 @@ describe("deletion lifecycle", () => {
     await store.upsertWorkspaceMembership({workspaceId:workspace.id,userId:"member",role:"member",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"});
     await store.createProject(project("proj_1", workspace.id));
     await store.createProject(project("proj_2", workspace.id));
-    await store.createProjectContextEntry({ id: "context_1", workspaceId: workspace.id, projectId: null, ownerUserId: null, scope: "workspace_shared", contextKey: "note", content: "x", version:1,createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    await store.createProjectContextEntry({ id: "context_1", workspaceId: workspace.id, projectId: null, ownerUserId: null, scope: "workspace_shared", contextKey: "note", content: "x", contentType:"text",version:1,createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
     const deletion = new DeletionService(store, root);
 
     await deletion.deleteWorkspace("owner", workspace.id);
@@ -361,7 +361,7 @@ describe("deletion lifecycle", () => {
     assert.equal(await store.findWorkspace(workspace.id), null);
     assert.equal(await store.findWorkspaceMembership(workspace.id,"owner"),null);
     assert.equal(await store.findWorkspaceMembership(workspace.id,"member"),null);
-    assert.deepEqual(await store.listProjectContextEntries(workspace.id, null, "workspace_shared", null), []);
+    assert.equal(await store.findProjectContextEntryByKey(workspace.id, null, "workspace_shared", null, "note"), null);
   });
 
   it("keeps a workspace and every project active when one Task still owns a sandbox", async () => {

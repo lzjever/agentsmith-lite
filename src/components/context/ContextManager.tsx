@@ -3,7 +3,7 @@
 import { FilePlus2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner, Button, Heading, IconButton, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
-import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextEntry, type ContextEntryMetadata, type ContextPage, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/Dialog";
@@ -14,7 +14,7 @@ const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
 type ScopeTab = { scope: ContextScope; label: string; description: string };
 type PendingNavigation =
   | { kind: "scope"; scope: ContextScope }
-  | { kind: "entry"; contextKey: string }
+  | { kind: "entry"; entryId: string }
   | { kind: "new" };
 
 export function ContextManager({ workspaceId, projectId }: { workspaceId: string; projectId?: string }) {
@@ -25,6 +25,9 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const mutationKeys = useMutationKeys();
   const showToast = useToast();
   const mounted = useRef(true);
+  const listVersion = useRef(0);
+  const appendVersion = useRef(0);
+  const detailVersion = useRef(0);
   const tabs: ScopeTab[] = projectId ? [
     { scope: "workspace_shared", label: "Workspace shared", description: "Available to members of this workspace." },
     { scope: "workspace_personal", label: "My workspace", description: "Only visible to you in this workspace." },
@@ -36,46 +39,125 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   ];
   const [scope, setScope] = useState<ContextScope>(tabs[0]!.scope);
   const [scopeReady, setScopeReady] = useState(false);
-  const [result, setResult] = useState<ContextList>();
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [error, setError] = useState("");
-  const [conflict, setConflict] = useState(false);
-  const [selectedKey, setSelectedKey] = useState<string>();
+  const [page, setPage] = useState<ContextPage>();
+  const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
+  const [listError, setListError] = useState("");
+  const [listRetry, setListRetry] = useState<"first" | "more">("first");
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [selectedId, setSelectedId] = useState<string>();
+  const [pinnedMetadata, setPinnedMetadata] = useState<ContextEntryMetadata>();
+  const [detail, setDetail] = useState<ContextEntry>();
+  const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [detailError, setDetailError] = useState("");
   const [contextKey, setContextKey] = useState("");
   const [content, setContent] = useState("");
   const [contentType, setContentType] = useState<ContextContentType>("text");
+  const [mutationError, setMutationError] = useState("");
+  const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>();
-  const loadVersion = useRef(0);
   const projectScope = scope === "project_shared" || scope === "project_personal";
+  const target = useMemo(() => ({
+    workspaceId,
+    scope,
+    ...(projectScope && projectId ? { projectId } : {})
+  }), [projectId, projectScope, scope, workspaceId]);
 
-  const load = useCallback(async (preserveDraft = false, preferredEntryId?: string): Promise<ContextList | null> => {
-    const version = ++loadVersion.current;
-    setState("loading");
+  const resetDraft = useCallback(() => {
+    setContextKey("");
+    setContent("");
+    setContentType("text");
+  }, []);
+
+  const loadDetail = useCallback(async (entryId: string, preserveDraft = false): Promise<ContextEntry | null> => {
+    const version = ++detailVersion.current;
+    setDetailState("loading");
+    setDetailError("");
     try {
-      const next = await apiClient.contexts({ workspaceId, scope, ...(projectScope && projectId ? { projectId } : {}) });
-      if (!mounted.current || version !== loadVersion.current) return null;
-      const first = next.items.find((entry) => entry.id === preferredEntryId) ?? next.items[0];
-      setResult(next);
+      const next = await apiClient.context(entryId, target);
+      if (!mounted.current || version !== detailVersion.current) return null;
+      setDetail(next);
+      setSelectedId(next.id);
+      setPinnedMetadata((current) => current?.id === next.id ? toMetadata(next) : current);
       if (!preserveDraft) {
-        setSelectedKey(first?.contextKey);
-        setContextKey(first?.contextKey ?? "");
-        setContent(first?.content ?? "");
-        setContentType(first?.contentType ?? "text");
+        setContextKey(next.contextKey);
+        setContent(next.content);
+        setContentType(next.contentType);
       }
-      setError("");
-      setState("ready");
+      setDetailState("ready");
       return next;
     } catch (reason) {
-      if (!mounted.current || version !== loadVersion.current) return null;
-      setError(message(reason, "Context could not be loaded."));
-      setState("error");
+      if (!mounted.current || version !== detailVersion.current) return null;
+      setDetailError(message(reason, "Context detail could not be loaded."));
+      setDetailState("error");
       return null;
     }
-  }, [projectId, projectScope, scope, workspaceId]);
+  }, [target]);
+
+  const loadFirstPage = useCallback(async (preserveDraft = false, preferredEntryId?: string): Promise<ContextPage | null> => {
+    const version = ++listVersion.current;
+    appendVersion.current += 1;
+    setLoadingMore(false);
+    setListState("loading");
+    setListError("");
+    setListRetry("first");
+    try {
+      const next = await apiClient.contexts(target);
+      if (!mounted.current || version !== listVersion.current) return null;
+      setPage(next);
+      setListState("ready");
+      if (!preserveDraft) {
+        setPinnedMetadata(undefined);
+        const first = next.items.find((entry) => entry.id === preferredEntryId) ?? next.items[0];
+        if (first) {
+          setSelectedId(first.id);
+          setDetail(undefined);
+          resetDraft();
+          void loadDetail(first.id);
+        } else {
+          setSelectedId(undefined);
+          setDetail(undefined);
+          setDetailState("idle");
+          setDetailError("");
+          resetDraft();
+        }
+      }
+      return next;
+    } catch (reason) {
+      if (!mounted.current || version !== listVersion.current) return null;
+      setListError(message(reason, "Context could not be loaded."));
+      setListState("error");
+      return null;
+    }
+  }, [loadDetail, resetDraft, target]);
+
+  const loadMore = useCallback(async () => {
+    if (!page?.nextCursor || loadingMore || listState === "loading") return;
+    const listGeneration = listVersion.current;
+    const appendToken = ++appendVersion.current;
+    setLoadingMore(true);
+    setListError("");
+    setListRetry("more");
+    const cursor = page.nextCursor;
+    try {
+      const next = await apiClient.contexts({ ...target, cursor });
+      if (!mounted.current || listGeneration !== listVersion.current || appendToken !== appendVersion.current) return;
+      setPage((current) => {
+        if (!current || current.nextCursor !== cursor) return current;
+        const known = new Set(current.items.map((entry) => entry.id));
+        return { ...next, items: [...current.items, ...next.items.filter((entry) => !known.has(entry.id))] };
+      });
+      setListState("ready");
+    } catch (reason) {
+      if (!mounted.current || listGeneration !== listVersion.current || appendToken !== appendVersion.current) return;
+      setListError(message(reason, "More context entries could not be loaded."));
+    } finally {
+      if (mounted.current && listGeneration === listVersion.current && appendToken === appendVersion.current) setLoadingMore(false);
+    }
+  }, [listState, loadingMore, page, target]);
 
   useEffect(() => {
     mounted.current = true;
@@ -83,6 +165,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       mounted.current = false;
     };
   }, []);
+
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get("scope");
     const valid = tabs.some((tab) => tab.scope === requested);
@@ -90,46 +173,74 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     if (requested && !valid) replaceContextScope(tabs[0]!.scope, tabs[0]!.scope);
     setScopeReady(true);
   }, []);
-  useEffect(() => { if (scopeReady) { setSelectedKey(undefined); setContextKey(""); setContent(""); setContentType("text"); void load(); } }, [load, scopeReady]);
-  const selected = useMemo(() => result?.items.find((entry) => entry.contextKey === selectedKey), [result, selectedKey]);
+
+  useEffect(() => {
+    if (!scopeReady) return;
+    setPage(undefined);
+    setListState("loading");
+    setListError("");
+    appendVersion.current += 1;
+    setLoadingMore(false);
+    setSelectedId(undefined);
+    setPinnedMetadata(undefined);
+    setDetail(undefined);
+    setDetailState("idle");
+    setDetailError("");
+    resetDraft();
+    void loadFirstPage();
+  }, [loadFirstPage, resetDraft, scopeReady]);
+
+  const selected = detail?.id === selectedId ? detail : undefined;
+  const presentationItems = page
+    ? pinnedMetadata
+      ? [pinnedMetadata, ...page.items.filter((entry) => entry.id !== pinnedMetadata.id)]
+      : page.items
+    : [];
+  const selectedMetadata = presentationItems.find((entry) => entry.id === selectedId);
   const activeTab = tabs.find((tab) => tab.scope === scope) ?? tabs[0]!;
   const normalizedContextKey = contextKey.trim();
-  const dirty = result !== undefined && (selected
+  const detailLoading = detailState === "loading";
+  const dirty = page !== undefined && (selected
     ? normalizedContextKey !== selected.contextKey || content !== selected.content || contentType !== selected.contentType
-    : normalizedContextKey.length > 0 || content.length > 0 || contentType !== "text");
+    : detailState !== "loading" && (normalizedContextKey.length > 0 || content.length > 0 || contentType !== "text"));
+
   function applyNavigation(navigation: PendingNavigation) {
     setConflict(false);
-    setError("");
+    setMutationError("");
     if (navigation.kind === "scope") {
-      setResult(undefined);
-      setSelectedKey(undefined);
-      setContextKey("");
-      setContent("");
-      setContentType("text");
-      setState("loading");
+      listVersion.current += 1;
+      appendVersion.current += 1;
+      detailVersion.current += 1;
+      setLoadingMore(false);
+      setPinnedMetadata(undefined);
       replaceContextScope(navigation.scope, tabs[0]!.scope);
       setScope(navigation.scope);
       return;
     }
     if (navigation.kind === "new") {
-      setSelectedKey(undefined);
-      setContextKey("");
-      setContent("");
-      setContentType("text");
+      detailVersion.current += 1;
+      setSelectedId(undefined);
+      setPinnedMetadata(undefined);
+      setDetail(undefined);
+      setDetailState("idle");
+      setDetailError("");
+      resetDraft();
       return;
     }
-    const entry = result?.items.find((item) => item.contextKey === navigation.contextKey);
-    if (!entry) return;
-    setSelectedKey(entry.contextKey);
-    setContextKey(entry.contextKey);
-    setContent(entry.content);
-    setContentType(entry.contentType);
+    detailVersion.current += 1;
+    setSelectedId(navigation.entryId);
+    setPinnedMetadata((current) => current?.id === navigation.entryId ? current : undefined);
+    setDetail((current) => current?.id === navigation.entryId ? current : undefined);
+    setDetailError("");
+    resetDraft();
+    void loadDetail(navigation.entryId);
   }
+
   function navigate(navigation: PendingNavigation) {
     if (
       (navigation.kind === "scope" && navigation.scope === scope) ||
-      (navigation.kind === "entry" && navigation.contextKey === selected?.contextKey) ||
-      (navigation.kind === "new" && !selected)
+      (navigation.kind === "entry" && navigation.entryId === selectedId) ||
+      (navigation.kind === "new" && !selectedId)
     ) return;
     if (dirty) {
       setPendingNavigation(navigation);
@@ -137,99 +248,163 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     }
     applyNavigation(navigation);
   }
+
   async function revokeWriteAccess(reason: unknown) {
     if (!isReadOnlyMutationError(reason)) return false;
     setDeleteOpen(false);
     setConflict(false);
     mutationKeys.clear("context.save");
     mutationKeys.clear("context.delete");
+    setPage((current) => current ? { ...current, canWrite: false } : current);
     if (reason.status === 403) {
-      setResult(undefined);
-      const readable = await load(true);
-      if (!mounted.current) return true;
+      const refreshVersion = listVersion.current + 1;
+      const readable = await loadFirstPage(true);
+      if (!mounted.current || refreshVersion !== listVersion.current) return true;
       if (!readable) {
-        setSelectedKey(undefined);
-        setContextKey("");
-        setContent("");
-        setContentType("text");
+        appendVersion.current += 1;
+        detailVersion.current += 1;
+        setLoadingMore(false);
+        setPage(undefined);
+        setSelectedId(undefined);
+        setPinnedMetadata(undefined);
+        setDetail(undefined);
+        setDetailState("idle");
+        setDetailError("");
+        setPendingNavigation(undefined);
+        resetDraft();
+        setMutationError("");
         return true;
       }
-    } else {
-      setResult((current) => current ? { ...current, canWrite: false } : current);
+      setPage({ ...readable, canWrite: false });
     }
-    setError("Context write access changed. This scope is now read-only.");
+    if (!mounted.current) return true;
+    setMutationError("Context write access changed. This scope is now read-only.");
     return true;
   }
+
   async function save() {
-    if (!result?.canWrite || !normalizedContextKey || saving || deleting) return;
+    if (!page?.canWrite || !normalizedContextKey || saving || deleting || detailLoading) return;
     setSaving(true);
-    const input = { workspaceId, scope, contextKey: normalizedContextKey, content, contentType, ...(selected ? { previousContextKey: selected.contextKey, expectedVersion: selected.version } : {}), ...(projectScope && projectId ? { projectId } : {}) };
+    const input = {
+      ...target,
+      contextKey: normalizedContextKey,
+      content,
+      contentType,
+      ...(selected ? { previousContextKey: selected.contextKey, expectedVersion: selected.version } : {})
+    };
     const identity = JSON.stringify(input);
     try {
       const saved = await apiClient.saveContext(input, mutationKeys.key("context.save", identity));
       mutationKeys.complete("context.save", identity);
       if (!mounted.current) return;
-      setResult((current) => {
-        if (!current) return current;
-        const index = current.items.findIndex((entry) => entry.id === saved.id || entry.contextKey === selected?.contextKey);
-        const items = [...current.items];
-        if (index >= 0) items[index] = saved;
-        else items.push(saved);
-        return { ...current, items };
-      });
-      setSelectedKey(saved.contextKey); setContextKey(saved.contextKey); setContent(saved.content); setContentType(saved.contentType); setConflict(false); setError(""); showToast({ body: "Context saved" });
-    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = await revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.code === "context_version_conflict"; if (!accessRevoked) { setConflict(nextConflict); setError(nextConflict ? "Context changed elsewhere. Reload the latest version before saving again." : message(reason, "Context could not be saved.")); } } finally { if(mounted.current)setSaving(false); }
+      setDetail(saved);
+      setSelectedId(saved.id);
+      setDetailState("ready");
+      setDetailError("");
+      setContextKey(saved.contextKey);
+      setContent(saved.content);
+      setContentType(saved.contentType);
+      setPinnedMetadata(toMetadata(saved));
+      setConflict(false);
+      setMutationError("");
+      showToast({ body: "Context saved" });
+      await loadFirstPage(true, saved.id);
+    } catch (reason) {
+      if (reason instanceof ApiError) mutationKeys.complete("context.save", identity);
+      if (!mounted.current) return;
+      const accessRevoked = await revokeWriteAccess(reason);
+      const nextConflict = !accessRevoked && reason instanceof ApiError && reason.code === "context_version_conflict";
+      if (!accessRevoked) {
+        setConflict(nextConflict);
+        setMutationError(nextConflict ? "Context changed elsewhere. Reload the latest version before saving again." : message(reason, "Context could not be saved."));
+      }
+    } finally {
+      if (mounted.current) setSaving(false);
+    }
   }
+
+  async function reloadAfterConflict() {
+    if (!selectedId) return;
+    const latest = await loadDetail(selectedId);
+    if (!latest || !mounted.current) return;
+    setConflict(false);
+    setMutationError("");
+  }
+
   async function remove() {
-    if (!result?.canWrite || !selected || deleting || saving) return;
+    if (!page?.canWrite || !selected || deleting || saving) return;
     setDeleting(true);
     setDeleteError("");
-    const input = { workspaceId, scope, contextKey: selected.contextKey, expectedVersion: selected.version, ...(projectScope && projectId ? { projectId } : {}) };
+    const input = { ...target, contextKey: selected.contextKey, expectedVersion: selected.version };
     const identity = JSON.stringify(input);
     try {
       await apiClient.deleteContext(input, mutationKeys.key("context.delete", identity));
       mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
-      const remaining = result.items.filter((entry) => entry.id !== selected.id);
-      const first = remaining[0];
-      setResult({ ...result, items: remaining }); setSelectedKey(first?.contextKey); setContextKey(first?.contextKey ?? ""); setContent(first?.content ?? ""); setContentType(first?.contentType ?? "text"); setDeleteOpen(false); setDeleteError(""); setError(""); showToast({ body: "Context deleted" });
+      setDeleteOpen(false);
+      setDeleteError("");
+      setMutationError("");
+      setSelectedId(undefined);
+      setPinnedMetadata(undefined);
+      setDetail(undefined);
+      setDetailState("idle");
+      resetDraft();
+      showToast({ body: "Context deleted" });
+      await loadFirstPage();
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
       if (await revokeWriteAccess(reason)) return;
       if (reason instanceof ApiError && reason.code === "context_version_conflict") {
-        const latest = await load(false, selected.id);
-        if (!mounted.current) return;
         setDeleteOpen(false);
-        if (!latest?.items.some((entry) => entry.id === selected.id)) {
-          setError("");
-          return;
-        }
-        const detail = "Context changed elsewhere. Latest version loaded; review before deleting.";
-        setError(detail);
+        const latest = await loadDetail(selected.id);
+        if (!mounted.current) return;
+        if (!latest) await loadFirstPage();
+        setMutationError(latest ? "Context changed elsewhere. Latest version loaded; review before deleting." : "");
         return;
       }
       if (reason instanceof ApiError && reason.status === 404 && reason.message === "Context entry not found") {
-        const latest = await load();
-        if (!mounted.current) return;
-        if (latest && !latest.items.some((entry) => entry.id === selected.id || entry.contextKey === selected.contextKey)) {
-          setDeleteOpen(false);
-          setError("");
-          return;
-        }
+        setDeleteOpen(false);
+        setSelectedId(undefined);
+        setPinnedMetadata(undefined);
+        setDetail(undefined);
+        resetDraft();
+        await loadFirstPage();
+        return;
       }
-      const detail = message(reason, "Context could not be deleted.");
-      setError(detail);
-      setDeleteError(detail);
-    } finally { if(mounted.current)setDeleting(false); }
+      const detailMessage = message(reason, "Context could not be deleted.");
+      setMutationError(detailMessage);
+      setDeleteError(detailMessage);
+    } finally {
+      if (mounted.current) setDeleting(false);
+    }
   }
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Context" subtitle={projectId ? "Saved instructions and reference data for this workspace and project." : "Saved instructions and reference data for this workspace."} />}>
     <TabList value={scope} onChange={(value) => { if (!saving && !deleting) navigate({ kind: "scope", scope: value as ContextScope }); }} aria-label="Context scope" className="mb-5 flex h-auto flex-wrap justify-start">{tabs.map((tab) => <Tab key={tab.scope} value={tab.scope} label={tab.label} aria-disabled={saving || deleting} />)}</TabList>
     <Text as="p" color="secondary" display="block" className="mb-5">{activeTab.description}</Text>
-    {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading context..." /></div> : null}
-    {state === "error" ? <Banner status="error" title="Context unavailable" description={error} endContent={<Button label="Try again" size="lg" onClick={() => void load()} />} /> : null}
-    {state === "ready" && result ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]"><section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5"><div className="mb-3 flex items-center justify-between"><Heading level={3}>Entries</Heading>{result.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>{result.items.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="py-4">No context entries yet.</Text> : <div className="space-y-1">{result.items.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", contextKey: entry.contextKey })} className={`w-full px-3 py-2 text-left disabled:cursor-not-allowed ${selected?.id === entry.id ? "bg-muted text-primary" : "text-secondary hover:bg-overlay-hover hover:text-primary"}`}><Text as="span" display="block" maxLines={1} color="inherit">{entry.contextKey}</Text><Text as="span" type="code" color="inherit" display="block" className="mt-1 capitalize">{entry.contentType}</Text></button>)}</div>}</section><section className="min-w-0"><div className="mb-4"><Heading level={3}>{selected ? "Edit entry" : "New entry"}</Heading>{!result.canWrite ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Your access to this context is read-only.</Text> : null}</div><div className="grid gap-4"><TextInput label="Key" value={contextKey} isDisabled={!result.canWrite || saving || deleting} onChange={setContextKey} placeholder="for example, project.conventions" /><Selector label="Content type" options={contentTypes.map((type) => ({ value: type, label: type }))} value={contentType} onChange={(value) => setContentType(value as ContextContentType)} isDisabled={!result.canWrite || saving || deleting} size="lg" /><TextArea label="Content" value={content} isDisabled={!result.canWrite || saving || deleting} onChange={setContent} rows={14} className="min-h-64" width="100%" />{error ? <Banner status="error" title="Context update failed" description={error} endContent={conflict ? <Button label="Reload latest" size="md" variant="secondary" onClick={() => void load(false, selected?.id)} /> : undefined} /> : null}<div className="flex flex-wrap gap-2">{result.canWrite ? <Button label={saving ? "Saving..." : "Save"} size="lg" variant="primary" isDisabled={!dirty || saving || deleting} isLoading={saving} onClick={() => void save()} /> : null}{result.canWrite && selected ? <Button label="Delete" size="lg" variant="destructive" icon={<Trash2 size={16} />} isDisabled={saving || deleting} onClick={() => { setDeleteError(""); setDeleteOpen(true); }} /> : null}</div></div></section></div> : null}
+    {listState === "loading" && !page ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading context..." /></div> : null}
+    {listState === "error" && !page ? <Banner status="error" title="Context unavailable" description={listError} endContent={<Button label="Try again" size="lg" onClick={() => void loadFirstPage()} />} /> : null}
+    {page ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5">
+        <div className="mb-3 flex items-center justify-between"><Heading level={3}>Entries</Heading>{page.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>
+        {listError ? <Banner status="error" title="Entries could not be refreshed" description={listError} endContent={<Button label="Try again" size="md" variant="secondary" onClick={() => void (listRetry === "more" ? loadMore() : loadFirstPage(true))} />} /> : null}
+        {presentationItems.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="py-4">No context entries yet.</Text> : <div className="space-y-1">{presentationItems.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", entryId: entry.id })} className={`w-full px-3 py-2 text-left disabled:cursor-not-allowed ${selectedMetadata?.id === entry.id ? "bg-muted text-primary" : "text-secondary hover:bg-overlay-hover hover:text-primary"}`}><Text as="span" display="block" maxLines={1} color="inherit">{entry.contextKey}</Text><Text as="span" type="code" color="inherit" display="block" className="mt-1 capitalize">{entry.contentType}</Text></button>)}</div>}
+        {page.nextCursor ? <Button label={loadingMore ? "Loading..." : "Load more"} size="md" variant="secondary" isDisabled={loadingMore || listState === "loading"} isLoading={loadingMore} onClick={() => void loadMore()} /> : null}
+      </section>
+      <section className="min-w-0">
+        <div className="mb-4"><Heading level={3}>{selectedId ? "Edit entry" : "New entry"}</Heading>{!page.canWrite ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Your access to this context is read-only.</Text> : null}</div>
+        {detailState === "loading" && !selected ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading context detail..." /></div> : null}
+        {detailError ? <Banner status="error" title="Context detail unavailable" description={detailError} endContent={selectedId ? <Button label="Try again" size="md" variant="secondary" onClick={() => void loadDetail(selectedId)} /> : undefined} /> : null}
+        {selected || (!selectedId && detailState !== "loading") ? <div className="grid gap-4">
+          <TextInput label="Key" value={contextKey} isDisabled={!page.canWrite || saving || deleting || detailLoading} onChange={setContextKey} placeholder="for example, project.conventions" />
+          <Selector label="Content type" options={contentTypes.map((type) => ({ value: type, label: type }))} value={contentType} onChange={(value) => setContentType(value as ContextContentType)} isDisabled={!page.canWrite || saving || deleting || detailLoading} size="lg" />
+          <TextArea label="Content" value={content} isDisabled={!page.canWrite || saving || deleting || detailLoading} onChange={setContent} rows={14} className="min-h-64" width="100%" />
+          {mutationError ? <Banner status="error" title="Context update failed" description={mutationError} endContent={conflict && selectedId ? <Button label="Reload latest" size="md" variant="secondary" onClick={() => void reloadAfterConflict()} /> : undefined} /> : null}
+          <div className="flex flex-wrap gap-2">{page.canWrite ? <Button label={saving ? "Saving..." : "Save"} size="lg" variant="primary" isDisabled={!dirty || saving || deleting || detailLoading} isLoading={saving} onClick={() => void save()} /> : null}{page.canWrite && selected ? <Button label="Delete" size="lg" variant="destructive" icon={<Trash2 size={16} />} isDisabled={saving || deleting || detailLoading} onClick={() => { setDeleteError(""); setDeleteOpen(true); }} /> : null}</div>
+        </div> : null}
+      </section>
+    </div> : null}
     <ConfirmationDialog isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description={<Text as="p" display="block" color="secondary">Your edits have not been saved. Discard them and continue?</Text>} actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} />
     <ConfirmationDialog
       isOpen={deleteOpen}
@@ -239,27 +414,20 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         if (!open) setDeleteError("");
       }}
       title="Delete context entry"
-      description={
-        <Text as="p" display="block" color="secondary">
-          {selected
-            ? `Delete ${selected.contextKey}? This cannot be undone.`
-            : "This entry is no longer available."}
-        </Text>
-      }
+      description={<Text as="p" display="block" color="secondary">{selected ? `Delete ${selected.contextKey}? This cannot be undone.` : "This entry is no longer available."}</Text>}
       actionLabel={deleting ? "Deleting" : "Delete entry"}
       isActionDisabled={!selected}
       busy={deleting}
       onAction={() => void remove()}
     >
-      {deleteError ? (
-        <Banner
-          status="error"
-          title="Context entry could not be deleted"
-          description={deleteError}
-        />
-      ) : null}
+      {deleteError ? <Banner status="error" title="Context entry could not be deleted" description={deleteError} /> : null}
     </ConfirmationDialog>
   </PageLayout>;
+}
+
+function toMetadata(entry: ContextEntry): ContextEntryMetadata {
+  const { content: _content, ...metadata } = entry;
+  return metadata;
 }
 
 function replaceContextScope(scope: ContextScope, defaultScope: ContextScope) {

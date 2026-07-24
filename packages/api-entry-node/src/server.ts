@@ -444,10 +444,20 @@ async function routeApi(
     return sendJson(res, 200, workspaces.flatMap((workspace) => workspace.projects));
   }
 
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "context" && segments[3] && segments.length === 4 && method === "GET") {
+    assertOnlySearchParams(url, ["workspaceId", "projectId", "scope"]);
+    return sendJson(res, 200, await services.contexts.get(user.id, segments[3], contextTargetFromQuery(url)));
+  }
+
   if (url.pathname === "/api/v1/context") {
     if (method === "GET") {
-      assertOnlySearchParams(url, ["workspaceId", "projectId", "scope"]);
-      return sendJson(res, 200, await services.contexts.list(user.id, contextTargetFromQuery(url)));
+      assertOnlySearchParams(url, ["workspaceId", "projectId", "scope", "cursor", "limit"]);
+      const cursor = url.searchParams.get("cursor");
+      const limit = url.searchParams.get("limit");
+      return sendJson(res, 200, await services.contexts.listPage(user.id, contextTargetFromQuery(url), {
+        ...(cursor ? { cursor } : {}),
+        ...(limit ? { limit: asPositiveQueryInteger(limit, "limit") } : {})
+      }));
     }
     if (method === "PUT") {
       assertOnlySearchParams(url, []);
@@ -1032,6 +1042,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     "/api/v1/projects",
     "/api/v1/context"
   ].includes(pathname) ||
+    /^\/api\/v1\/context\/[^/]+$/.test(pathname) ||
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|overview|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/audit\/identities$/.test(pathname) ||
