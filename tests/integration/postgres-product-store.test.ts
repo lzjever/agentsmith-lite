@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
+import { createApplicationServices } from "../../packages/application/src/factory.js";
+import type { ProjectAlertRule } from "../../packages/contracts/src/api.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskArtifact, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 import { readPostgresTestUrl } from "./postgres-test-database.js";
 
@@ -63,6 +66,74 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const newestLast=newest.items.at(-1)!;
     const older=await store.queryTasksForProject("project_atomic",{...scope,sort:"created_at",direction:"desc",limit:2,after:{value:newestLast.createdAt,taskId:newestLast.id}});
     assert.deepEqual(older.items.map((task)=>task.id),["task_page_alpha","task_page_zed"]);
+  });
+
+  it("keeps active and history alert keysets disjoint across tied timestamps",async()=>{
+    const tiedAt="2026-07-23T00:01:00.000Z";
+    const activeAlerts=[
+      ["alert_active_a","sandbox_failure"],
+      ["alert_active_b","provider_failure"],
+      ["alert_active_c","endpoint_failure"],
+    ] as const;
+    const activeIds=activeAlerts.map(([id])=>id);
+    for(const [id,type] of activeAlerts){
+      await store.upsertActiveProjectAlert({id,projectId:"project_atomic",type,status:"active",deliveryStatus:"delivered",createdAt:tiedAt,updatedAt:tiedAt,resolvedAt:null,dismissedAt:null});
+    }
+    for(const [id,type,status] of [
+      ["alert_resolved","active_tasks_limit","resolved"],
+      ["alert_dismissed","project_file_bytes_limit","dismissed"],
+    ] as const){
+      await store.upsertActiveProjectAlert({id,projectId:"project_atomic",type,status:"active",deliveryStatus:"delivered",createdAt:tiedAt,updatedAt:tiedAt,resolvedAt:null,dismissedAt:null});
+      assert.ok(await store.transitionProjectAlert("project_atomic",id,status,tiedAt));
+    }
+
+    const first=await store.queryProjectAlerts("project_atomic",{view:"active",limit:2});
+    assert.equal(first.items.length,2);
+    assert.equal(first.activeCount,activeIds.length);
+    assert.ok(first.items.every((alert)=>alert.status==="active"));
+    assert.equal(first.hasMore,true);
+    const last=first.items.at(-1)!;
+    const second=await store.queryProjectAlerts("project_atomic",{view:"active",limit:2,after:{createdAt:last.createdAt,id:last.id}});
+    const paged=[...first.items,...second.items];
+    assert.equal(new Set(paged.map((alert)=>alert.id)).size,activeIds.length);
+    assert.deepEqual(new Set(paged.map((alert)=>alert.id)),new Set(activeIds));
+    assert.equal(second.hasMore,false);
+
+    const history=await store.queryProjectAlerts("project_atomic",{view:"history",limit:20});
+    assert.deepEqual(new Set(history.items.map((alert)=>alert.status)),new Set(["resolved","dismissed"]));
+    assert.equal(history.activeCount,activeIds.length);
+    assert.equal(history.hasMore,false);
+  });
+
+  it("keeps endpoint quota fallback identity scoped to the subject actor",async()=>{
+    const actorB="user_alert_actor_b";
+    await store.createUser({id:actorB,email:"alert-actor-b@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
+    const input=(id:string,subjectActorId:string)=>({id,projectId:"project_atomic",type:"provider_requests_limit" as const,status:"active" as const,deliveryStatus:"not_configured" as const,endpointId:"endpoint_atomic",subjectActorId,createdAt:at,updatedAt:at,resolvedAt:null,dismissedAt:null});
+
+    const actorAAlert=await store.upsertActiveProjectAlert(input("alert_actor_a","user_atomic"));
+    const actorBAlert=await store.upsertActiveProjectAlert(input("alert_actor_b",actorB));
+    assert.deepEqual([actorAAlert.id,actorBAlert.id],["alert_actor_a","alert_actor_b"]);
+    assert.equal((await store.findActiveProjectAlert("project_atomic","provider_requests_limit",null,"endpoint_atomic","user_atomic"))?.id,actorAAlert.id);
+    assert.equal((await store.findActiveProjectAlert("project_atomic","provider_requests_limit",null,"endpoint_atomic",actorB))?.id,actorBAlert.id);
+
+    assert.ok(await store.transitionProjectAlert("project_atomic",actorBAlert.id,"resolved",at));
+    assert.equal((await store.findActiveProjectAlert("project_atomic","provider_requests_limit",null,"endpoint_atomic","user_atomic"))?.id,actorAAlert.id);
+  });
+
+  it("admits only one PostgreSQL rule creator into the fiftieth slot",async()=>{
+    for(let index=0;index<49;index+=1)await store.createProjectAlertRule(alertRule(`alert_rule_pg_${index}`,"project_atomic"));
+    const services=createApplicationServices({store,dataRoot:"/tmp/asl-postgres-alert-rule-cap",builtinAdminPassword:"admin-password"});
+
+    const results=await Promise.allSettled([
+      services.alertRules.create("user_atomic","project_atomic",{alertType:"sandbox_failure",enabled:false},"pg-rule-race-a"),
+      services.alertRules.create("user_atomic","project_atomic",{alertType:"sandbox_failure",enabled:false},"pg-rule-race-b"),
+    ]);
+
+    assert.equal(results.filter((result)=>result.status==="fulfilled").length,1);
+    const rejected=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");
+    assert.ok(rejected?.reason instanceof ProductError);
+    assert.equal((rejected.reason as ProductError).statusCode,409);
+    assert.equal((await store.listProjectAlertRules("project_atomic")).length,50);
   });
 
   it("pages Artifacts by timestamp and ordinal ID while sharing safe preview kinds",async()=>{
@@ -670,6 +741,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
+  function alertRule(id:string,projectId:string):ProjectAlertRule{return{id,projectId,name:id,alertType:"sandbox_failure",metric:"failure_count",condition:"greater_than_or_equal",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:false,createdAt:at,updatedAt:at};}
   function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:"workspaces/workspace_atomic/projects/project_atomic",fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
   function usageOverviewReadInput(measuredAt:string){const periodStart="2026-06-24T00:00:00.000Z",periodEnd="2026-07-24T00:00:00.000Z";return{projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",selectedEndpointId:null,periodStart,periodEnd,measuredAt}}
 

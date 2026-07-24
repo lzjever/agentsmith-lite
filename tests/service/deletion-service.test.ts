@@ -161,7 +161,7 @@ describe("deletion lifecycle", () => {
     assert.equal(await store.findProject(first.id), null);
     assert.deepEqual(await store.listProjectAuditEvents(first.id), []);
     assert.deepEqual((await store.listUserNotifications("owner")).map((notification) => notification.id), ["notification_second"]);
-    assert.deepEqual(await store.listProjectAlerts(first.id),[]);
+    assert.deepEqual((await store.queryProjectAlerts(first.id,{view:"active",limit:50})).items,[]);
     assert.deepEqual(await store.listSettledProjectProviderSettlements(first.id,"2025-01-01T00:00:00.000Z"),[]);
     await assert.rejects(access(path.join(root, first.rootPath, "only-first.txt")));
     await access(path.join(root, second.rootPath, "only-second.txt"));

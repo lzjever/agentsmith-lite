@@ -1,4 +1,4 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
@@ -11,8 +11,10 @@ type Limit = ProjectAlertType;
 const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, projectFileBytesMeasuredAt: null, updatedAt: nowIso() });
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
 interface SandboxRunCursor { v:1;projectId:string;selectedUserId:string;scopeMeasuredAt:string;key:{releasedAt:string;runId:string}; }
+interface ProjectAlertCursor { v:1;projectId:string;view:ProjectAlertView;key:ProjectAlertCursorKey; }
 
 function encodeSandboxRunCursor(value:SandboxRunCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
+function encodeProjectAlertCursor(value:ProjectAlertCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
 function decodeSandboxRunCursor(cursor:string,projectId:string,selectedUserId:string):SandboxRunCursor{
   const invalid=()=>new ProductError("Sandbox Run history cursor is invalid");
   if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
@@ -21,6 +23,16 @@ function decodeSandboxRunCursor(cursor:string,projectId:string,selectedUserId:st
   if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","selectedUserId","scopeMeasuredAt","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||typeof parsed.selectedUserId!=="string"||typeof parsed.scopeMeasuredAt!=="string"||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["releasedAt","runId"])||typeof parsed.key.releasedAt!=="string"||typeof parsed.key.runId!=="string")throw invalid();
   const value=parsed as unknown as SandboxRunCursor;
   if(value.projectId!==projectId||value.selectedUserId!==selectedUserId||!isCanonicalIso(value.scopeMeasuredAt)||!isCanonicalIso(value.key.releasedAt)||value.key.releasedAt>value.scopeMeasuredAt||!validCursorId(value.key.runId)||encodeSandboxRunCursor(value)!==cursor)throw invalid();
+  return value;
+}
+function decodeProjectAlertCursor(cursor:string,projectId:string,view:ProjectAlertView):ProjectAlertCursor{
+  const invalid=()=>new ProductError("Alert cursor is invalid");
+  if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
+  let parsed:unknown;
+  try{parsed=JSON.parse(Buffer.from(cursor,"base64url").toString("utf8"))}catch{throw invalid()}
+  if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","view","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||(parsed.view!=="active"&&parsed.view!=="history")||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["createdAt","id"])||typeof parsed.key.createdAt!=="string"||typeof parsed.key.id!=="string")throw invalid();
+  const value=parsed as unknown as ProjectAlertCursor;
+  if(value.projectId!==projectId||value.view!==view||!isCanonicalIso(value.key.createdAt)||!validCursorId(value.key.id)||encodeProjectAlertCursor(value)!==cursor)throw invalid();
   return value;
 }
 function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==="object"&&value!==null&&!Array.isArray(value)}
@@ -72,28 +84,19 @@ export class ProjectPolicyService {
     if(selectedUserId!==userId&&!await this.store.findProjectMembership(projectId,selectedUserId))throw new ProductError("Project member not found",404);
     return access.project;
   }
-  async alerts(userId:string,projectId:string):Promise<ProjectAlert[]>;
-  async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery):Promise<import("../../contracts/src/api.js").ProjectAlertPage>;
-  async alerts(userId: string, projectId: string, query?: import("../../contracts/src/api.js").ProjectAlertQuery): Promise<ProjectAlert[] | import("../../contracts/src/api.js").ProjectAlertPage> {
+  async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery={}):Promise<import("../../contracts/src/api.js").ProjectAlertPage>{
     await this.authorization.requireProject(userId, projectId);
-    const activeTypes = new Set((await this.store.listActiveProjectAlerts(projectId)).map((alert) => alert.type));
-    for (const type of activeTypes) await recoverProjectAlerts(this.store, projectId, type, undefined, true);
-    if (!query) return this.store.listProjectAlerts(projectId);
-    const [page, active] = await Promise.all([
-      this.store.queryProjectAlerts(projectId, query),
-      this.store.listActiveProjectAlerts(projectId),
-    ]);
-    return { ...page, activeCount: active.length };
+    const view=query.view??"active",limit=query.limit??20;
+    if(!Number.isSafeInteger(limit)||limit<1||limit>50)throw new ProductError("Alert limit must be between 1 and 50");
+    const decoded=query.cursor?decodeProjectAlertCursor(query.cursor,projectId,view):null;
+    const page=await this.store.queryProjectAlerts(projectId,{view,...(decoded?{after:decoded.key}:{}),limit});
+    const last=page.items.at(-1);
+    return{view,items:page.items,nextCursor:page.hasMore&&last?encodeProjectAlertCursor({v:1,projectId,view,key:{createdAt:last.createdAt,id:last.id}}):null,activeCount:page.activeCount};
   }
   async alert(userId:string,projectId:string,alertId:string):Promise<ProjectAlert>{
     await this.authorization.requireProject(userId,projectId);
-    let alert=await this.store.findProjectAlert(projectId,alertId);
+    const alert=await this.store.findProjectAlert(projectId,alertId);
     if(!alert)throw new ProductError("Project alert not found",404);
-    if(alert.status==="active"){
-      await recoverProjectAlerts(this.store,projectId,alert.type,undefined,true);
-      alert=await this.store.findProjectAlert(projectId,alertId);
-      if(!alert)throw new ProductError("Project alert not found",404);
-    }
     return alert;
   }
   async transitionAlert(userId: string, projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey?: string) {
@@ -104,7 +107,6 @@ export class ProjectPolicyService {
       await this.auditEvent(projectId, userId, action, "rejected", alertId, "alert");
       throw error;
     }
-    if((await this.store.findProjectAlert(projectId,alertId))?.type==="historical_task_failure")throw new ProductError("Historical alerts are read-only",409,"historical_alert_read_only");
     const transition = async () => {
       let alert: ProjectAlert;
       try {
@@ -182,7 +184,7 @@ export class ProjectPolicyService {
   }
   async refreshActiveTaskAlerts(projectId:string):Promise<void>{
     await evaluateProjectAlertRules(this.store,projectId,"active_tasks_limit");
-    await recoverProjectAlerts(this.store,projectId,"active_tasks_limit");
+    await recoverProjectAlerts(this.store,projectId,"active_tasks_limit",{unconfiguredFallback:true});
   }
   async refreshSandboxFailureAlerts(projectId:string,endpointId?:string):Promise<void>{
     await emitProjectAlert(this.store,projectId,"sandbox_failure",endpointId?{endpointId}:{});
@@ -203,6 +205,10 @@ export class ProjectPolicyService {
     const policy = await this.requirePolicy(projectId);
     const reserved = await this.store.reserveProjectProviderSettlement({ id: newId("providersettle"), projectId, taskId, endpointId,actorId,reservedTokens:reservation.tokens,reservedCost:reservation.cost, reservedAt, expiresAt: new Date(Date.parse(reservedAt) + 5 * 60_000).toISOString() });
     if (reserved) {
+      for(const type of ["provider_requests_limit","provider_tokens_limit","provider_cost_limit"] as const){
+        await recoverProjectAlerts(this.store,projectId,type,{unconfiguredFallback:true});
+        if(endpointId)await recoverProjectAlerts(this.store,projectId,type,{endpointId,subjectActorId:actorId,unconfiguredFallback:true});
+      }
       await this.auditEvent(projectId, actorId, "provider.request", "accepted", endpointId);
       return reserved.id;
     }
@@ -211,11 +217,11 @@ export class ProjectPolicyService {
     const endpointLimits = await this.endpointReservationLimits(policy, projectId, actorId, endpointId, reservation, reservedAt);
     const limits = [...projectLimits, ...endpointLimits].filter((limit, index, values) => values.indexOf(limit) === index);
     const alertScopes = [
-      ...projectLimits.map((limit) => ({ limit, endpointId: null })),
-      ...endpointLimits.map((limit) => ({ limit, endpointId })),
-      ...(!limits.length ? [{ limit: "provider_requests_limit" as const, endpointId }] : []),
-    ].filter((value, index, values) => values.findIndex((candidate) => candidate.limit === value.limit && candidate.endpointId === value.endpointId) === index);
-    await Promise.all(alertScopes.map(({ limit, endpointId: scopeEndpointId }) => this.openAlert(projectId, limit, scopeEndpointId)));
+      ...projectLimits.map((limit) => ({ limit, endpointId: null, subjectActorId: null })),
+      ...endpointLimits.map((limit) => ({ limit, endpointId, subjectActorId: actorId })),
+      ...(!limits.length ? [{ limit: "provider_requests_limit" as const, endpointId, subjectActorId: endpointId ? actorId : null }] : []),
+    ].filter((value, index, values) => values.findIndex((candidate) => candidate.limit === value.limit && candidate.endpointId === value.endpointId && candidate.subjectActorId === value.subjectActorId) === index);
+    await Promise.all(alertScopes.map(({ limit, endpointId: scopeEndpointId, subjectActorId }) => this.openAlert(projectId, limit, scopeEndpointId, subjectActorId)));
     await this.auditEvent(projectId, actorId, "provider.request", "rejected", endpointId);
     const reason = projectLimits[0] ?? endpointLimits[0] ?? "provider_requests_limit";
     const scope = projectLimits.length ? "Project" : endpointLimits.length ? "Endpoint rolling" : "Project";
@@ -229,10 +235,14 @@ export class ProjectPolicyService {
     const types = ["provider_requests_limit", "provider_tokens_limit", "provider_cost_limit"] as const;
     for (const type of types) {
       await evaluateProjectAlertRules(this.store, settled.usage.projectId, type, settled.endpointId ? { endpointId: settled.endpointId } : {});
-      if (type === "provider_requests_limit") continue;
       if (settled.exceededLimits.includes(type)) await this.openAlert(settled.usage.projectId, type, null);
-      else await recoverProjectAlerts(this.store, settled.usage.projectId, type, null);
+      else {
+        await recoverProjectAlerts(this.store, settled.usage.projectId, type, { unconfiguredFallback: true });
+        if (settled.endpointId) await recoverProjectAlerts(this.store, settled.usage.projectId, type, { endpointId: settled.endpointId, subjectActorId:settled.actorId, unconfiguredFallback: true });
+      }
     }
+    await evaluateProjectAlertRules(this.store, settled.usage.projectId, "provider_failure", settled.endpointId ? { endpointId: settled.endpointId } : {});
+    await recoverProjectAlerts(this.store, settled.usage.projectId, "provider_failure", { endpointId: settled.endpointId, unconfiguredFallback: true });
   }
   async markProviderUnknown(id: string): Promise<void> { await this.store.markProjectProviderSettlementUnknown(id, nowIso()); }
   async failProvider(id: string): Promise<void> { await this.store.failProjectProviderSettlement(id, nowIso()); }
@@ -276,7 +286,7 @@ export class ProjectPolicyService {
   }
   private async projectFileAlertProjection(projectId:string,bytes:number,limit:number|null):Promise<void>{
     if(limit!==null&&bytes>limit)await this.openAlert(projectId,"project_file_bytes_limit");
-    else{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")}
+    else{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit",{unconfiguredFallback:true})}
   }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
   private async bestEffortFileProjection(label:string,action:()=>Promise<void>):Promise<void>{try{await action()}catch(error){console.error(`${label} failed`,error)}}
@@ -292,12 +302,12 @@ export class ProjectPolicyService {
     ];
     for (const limit of limits) {
       if (limit.before === limit.after || (limit.after !== null && limit.current + limit.next > limit.after)) continue;
-      await recoverProjectAlerts(this.store, updated.projectId, limit.type, null);
+      await recoverProjectAlerts(this.store, updated.projectId, limit.type, {unconfiguredFallback:true});
     }
     for (const window of previous.endpointWindows ?? []) {
       const current = (updated.endpointWindows ?? []).find((candidate) => candidate.endpointId === window.endpointId && candidate.metric === window.metric);
       if (current?.limit === window.limit && current.windowSeconds === window.windowSeconds) continue;
-      await recoverProjectAlerts(this.store, updated.projectId, providerMetricLimit(window.metric), window.endpointId);
+      await this.recoverEndpointQuotaFallbacks(updated.projectId,providerMetricLimit(window.metric),window.endpointId);
     }
   }
   private async endpointReservationLimits(policy: ProjectResourcePolicy, projectId: string, actorId: string | null, endpointId: string | null, reservation: Readonly<{ tokens: number; cost: number }>, measuredAt: string): Promise<Limit[]> {
@@ -336,7 +346,13 @@ export class ProjectPolicyService {
     }
     await this.auditEvent(projectId, actorId, action, "accepted", resourceId);
   }
-  private async openAlert(projectId: string, type: Limit, endpointId?: string | null) { await emitProjectAlert(this.store, projectId, type, endpointId ? { endpointId } : {}); }
+  private async recoverEndpointQuotaFallbacks(projectId:string,type:Limit,endpointId:string):Promise<void>{
+    await recoverProjectAlerts(this.store,projectId,type,{endpointId,subjectActorId:null,unconfiguredFallback:true});
+    for(const member of await this.store.listProjectMemberships(projectId)){
+      await recoverProjectAlerts(this.store,projectId,type,{endpointId,subjectActorId:member.userId,unconfiguredFallback:true});
+    }
+  }
+  private async openAlert(projectId: string, type: Limit, endpointId?: string | null, subjectActorId: string | null = null) { await emitProjectAlert(this.store, projectId, type, endpointId ? { endpointId, subjectActorId } : {}); }
   private async auditEvent(projectId: string, actorId: string | null, action: ProjectAuditAction, status: "accepted" | "rejected", resourceId: string | null, resourceKind = auditResourceKind(action), detail?: import("../../contracts/src/api.js").ProjectAuditSafeDetail) { await this.store.appendProjectAuditEvent({ id: newId("audit"), projectId, actorId, action, status, resourceKind, resourceId, ...(detail ? { detail: safeAuditDetail(detail) } : {}), createdAt: nowIso() }); }
 }
 

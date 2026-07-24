@@ -8,7 +8,6 @@ import type {
   Project,
   ProjectMembership, ProjectMembershipView,
   ActiveProjectAlert,
-  ActiveProjectAlertRuleView,
   ProjectAlert,
   ProjectAuditEvent,
   ProjectResourcePolicy,
@@ -20,9 +19,9 @@ import type {
   User,
   Workspace,
   ManagedWorkspaceMembershipRole,
-  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertRuleView, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
+  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
-import { classifyPreviewMediaType, isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { classifyPreviewMediaType, isActiveProjectAlert, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
@@ -139,7 +138,7 @@ export class InMemoryProductStore implements ProductStore {
   private readonly artifacts: PersistedTaskArtifact[] = [];
   private readonly taskIdempotency = new Map<string, InMemoryTaskIdempotencyRecord>();
   private taskMutationTail: Promise<void> = Promise.resolve();
-  private readonly profiles = new Map<string, UserProfilePreferences>(); private readonly notifications = new Map<string, UserNotification>(); private readonly notificationDedupe = new Map<string, string>(); private readonly credentials = new Map<string, StoredProjectCredential>(); private readonly contexts = new Map<string, ProjectContextEntry>(); private readonly alertRules = new Map<string, ProjectAlertRuleView>(); private readonly messages: PersistedTaskMessage[] = [];
+  private readonly profiles = new Map<string, UserProfilePreferences>(); private readonly notifications = new Map<string, UserNotification>(); private readonly notificationDedupe = new Map<string, string>(); private readonly credentials = new Map<string, StoredProjectCredential>(); private readonly contexts = new Map<string, ProjectContextEntry>(); private readonly alertRules = new Map<string, ProjectAlertRule>(); private readonly messages: PersistedTaskMessage[] = [];
 
   async countUsers(): Promise<number> {
     return this.users.size;
@@ -616,20 +615,26 @@ export class InMemoryProductStore implements ProductStore {
     return this.auditEvents.filter(event=>event.projectId===input.projectId&&(cutoff===null||Date.parse(event.createdAt)>=cutoff)&&(input.endpointId===null||event.detail?.endpointId===input.endpointId)&&failureEventMatches(input.alertType,event)).length;
   }
   private transitionSettlement(id: string, allowed: ProjectProviderSettlement["status"][], status: ProjectProviderSettlement["status"], updatedAt: string, timestamp?: "dispatchedAt" | "deliveredAt"): ProjectProviderSettlement | null { const current = this.providerSettlements.get(id); if (!current) return null; if (current.status === status) return clone(current); if (!allowed.includes(current.status)) return null; const updated = { ...current, status, ...(timestamp ? { [timestamp]: updatedAt } : {}), updatedAt } as ProjectProviderSettlement; this.providerSettlements.set(id, clone(updated)); return clone(updated); }
-  private settlementResult(settlement: ProjectProviderSettlement): ProjectProviderUsageSettlement | null { const policy = this.policies.get(settlement.projectId); const usage = this.usage.get(settlement.projectId); if (!policy || !usage) return null; return { usage: clone(usage), endpointId: settlement.endpointId, exceededLimits: [...(policy.providerTokensLimit !== null && usage.providerTokens > policy.providerTokensLimit ? ["provider_tokens_limit" as const] : []), ...(policy.providerCostLimit !== null && usage.providerCost > policy.providerCostLimit ? ["provider_cost_limit" as const] : [])] }; }
+  private settlementResult(settlement: ProjectProviderSettlement): ProjectProviderUsageSettlement | null { const policy = this.policies.get(settlement.projectId); const usage = this.usage.get(settlement.projectId); if (!policy || !usage) return null; return { usage: clone(usage), endpointId: settlement.endpointId, actorId:settlement.actorId??null, exceededLimits: [...(policy.providerRequestsLimit !== null && usage.providerRequests > policy.providerRequestsLimit ? ["provider_requests_limit" as const] : []), ...(policy.providerTokensLimit !== null && usage.providerTokens > policy.providerTokensLimit ? ["provider_tokens_limit" as const] : []), ...(policy.providerCostLimit !== null && usage.providerCost > policy.providerCostLimit ? ["provider_cost_limit" as const] : [])] }; }
   async upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert> {
-    const normalized: ActiveProjectAlert = { ...alert, metric: alert.metric ?? null, metricValue: alert.metricValue ?? null, threshold: alert.threshold ?? null };
-    const existing = [...this.alerts.values()].find((value) => isActiveProjectAlert(value) && value.projectId === normalized.projectId && value.type === normalized.type && (value.ruleId??null)===(normalized.ruleId??null) && (value.endpointId??null)===(normalized.endpointId??null));
+    const normalized: ActiveProjectAlert = { ...alert, metric: alert.metric ?? null, metricValue: alert.metricValue ?? null, threshold: alert.threshold ?? null, subjectActorId:alert.subjectActorId??null };
+    if(normalized.subjectActorId!==null&&((normalized.ruleId??null)!==null||(normalized.endpointId??null)===null||!isProviderLimitAlert(normalized.type)))throw new Error("Alert subject actor is valid only for an unconfigured endpoint provider quota");
+    const existing = [...this.alerts.values()].find((value) => isActiveProjectAlert(value) && value.projectId === normalized.projectId && value.type === normalized.type && (value.ruleId??null)===(normalized.ruleId??null) && (value.endpointId??null)===(normalized.endpointId??null) && (value.subjectActorId??null)===(normalized.subjectActorId??null));
     const stored: ActiveProjectAlert = existing ? { ...existing, type: normalized.type, status: "active", metric: normalized.metric ?? null, metricValue: normalized.metricValue ?? null, threshold: normalized.threshold ?? null, updatedAt: normalized.updatedAt } : normalized;
     this.alerts.set(stored.id, clone(stored)); return clone(stored);
   }
-  async listActiveProjectAlerts(projectId: string): Promise<ActiveProjectAlert[]> { return [...this.alerts.values()].filter(isActiveProjectAlert).filter((alert)=>alert.projectId===projectId).map(clone); }
-  async listProjectAlerts(projectId: string): Promise<ProjectAlert[]> { return [...this.alerts.values()].filter((alert) => alert.projectId === projectId).sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).map(clone); }
-  async queryProjectAlerts(projectId: string, query: import("../../contracts/src/api.js").ProjectAlertQuery) { const limit=Math.min(100,Math.max(1,query.limit??20));const filtered=[...this.alerts.values()].filter((alert)=>alert.projectId===projectId&&(!query.status||alert.status===query.status)&&(!query.cursor||`${alert.createdAt}|${alert.id}`<query.cursor)).sort((left,right)=>right.createdAt.localeCompare(left.createdAt)||right.id.localeCompare(left.id));const items=filtered.slice(0,limit);return{items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
+  async queryProjectAlerts(projectId:string,query:import("../../ports/src/store.js").ProjectAlertStoreQuery):Promise<import("../../ports/src/store.js").ProjectAlertStorePage>{
+    const snapshot=[...this.alerts.values()].filter((alert)=>alert.projectId===projectId).map(clone);
+    const activeCount=snapshot.filter((alert)=>alert.status==="active").length;
+    const filtered=snapshot.filter((alert)=>(query.view==="active"?alert.status==="active":alert.status!=="active")&&(!query.after||alert.createdAt<query.after.createdAt||alert.createdAt===query.after.createdAt&&compareC(alert.id,query.after.id)<0)).sort((left,right)=>compareOrdinal(right.createdAt,left.createdAt)||compareC(right.id,left.id));
+    const page=filtered.slice(0,query.limit);
+    return{items:page,hasMore:filtered.length>query.limit,activeCount};
+  }
+  async findActiveProjectAlert(projectId:string,type:ProjectAlertType,ruleId:string|null,endpointId:string|null,subjectActorId:string|null):Promise<ActiveProjectAlert|null>{const active=[...this.alerts.values()].filter((value):value is ActiveProjectAlert=>value.status==="active");const alert=active.find((value)=>value.projectId===projectId&&value.type===type&&(value.ruleId??null)===ruleId&&(value.endpointId??null)===endpointId&&(value.subjectActorId??null)===subjectActorId);return alert?clone(alert):null}
   async findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null> { const alert=this.alerts.get(id);return alert?.projectId===projectId?clone(alert):null; }
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.status !== "active") return null; const next = { ...alert, status, updatedAt, ...(status === "resolved" ? { resolvedAt: updatedAt } : { dismissedAt: updatedAt }) }; this.alerts.set(id, clone(next)); return clone(next); }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const alert=this.alerts.get(id);if(!alert||alert.projectId!==projectId||alert.status!=="active")return null;const next={...alert,...input,updatedAt};this.alerts.set(id,clone(next));return clone(next)}
-  async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.type === "historical_task_failure") return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
+  async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId) return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
   async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(event.action==="task.historical_terminal")throw new Error("Historical audit events are read-only");if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
   async listProjectAuditEvents(projectId:string){return this.auditEvents.filter(event=>event.projectId===projectId).map(clone)}
   async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
@@ -672,10 +677,13 @@ export class InMemoryProductStore implements ProductStore {
   async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v));for(const [id,endpoint] of this.endpoints){if(endpoint.credentialId===v.id)this.endpoints.set(id,clone({...endpoint,health:{status:"unknown",checkedAt:null,errorCategory:null},updatedAt:v.updatedAt}))}return publicCredential(v); }
   async deleteProjectCredential(id:string,projectId:string,expectedVersion:number): Promise<DeleteProjectCredentialResult> { const current=this.credentials.get(id);if(!current||current.projectId!==projectId)return "not_found";if(current.version!==expectedVersion)return "version_conflict";if([...this.endpoints.values()].some(endpoint=>endpoint.credentialId===id))return "referenced_by_endpoints";this.credentials.delete(id);return "deleted"; }
   async createProjectContextEntry(v:ProjectContextEntry){if(this.contextKeyExists(v))return null;this.contexts.set(v.id,clone(v));return clone(v)} async updateProjectContextEntry(v:ProjectContextEntry,expectedVersion:number){const current=this.contexts.get(v.id);if(!current||current.version!==expectedVersion||this.contextKeyExists(v,v.id))return null;this.contexts.set(v.id,clone(v));return clone(v)} async listProjectContextEntries(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null){return [...this.contexts.values()].filter(v=>v.workspaceId===workspaceId&&v.projectId===projectId&&v.scope===scope&&v.ownerUserId===ownerUserId).map(clone)} async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId"|"version">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId||current.version!==v.version)return false;return this.contexts.delete(v.id)}
-  async createProjectAlertRule(v:ProjectAlertRule){const stored:ActiveProjectAlertRuleView={...v,retiredWasEnabled:null};this.alertRules.set(v.id,clone(stored));return clone(stored)} async listProjectAlertRules(id:string){return [...this.alertRules.values()].filter(v=>v.projectId===id).map(clone)} async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId||!isActiveProjectAlertRuleView(current)||(expectedUpdatedAt!==undefined&&current.updatedAt!==expectedUpdatedAt))return null;const stored:ActiveProjectAlertRuleView={...v,retiredWasEnabled:null};this.alertRules.set(v.id,clone(stored));return clone(stored)}
+  async createProjectAlertRule(v:ProjectAlertRule){if([...this.alertRules.values()].filter((rule)=>rule.projectId===v.projectId).length>=50)return null;this.alertRules.set(v.id,clone(v));return clone(v)}
+  async listProjectAlertRules(id:string){const rules=[...this.alertRules.values()].filter((rule)=>rule.projectId===id).sort((left,right)=>compareOrdinal(left.createdAt,right.createdAt)||compareC(left.id,right.id));if(rules.length>50)throw new Error("Project alert rule limit exceeded");return rules.map(clone)}
+  async findProjectAlertRule(projectId:string,id:string){const rule=this.alertRules.get(id);return rule?.projectId===projectId?clone(rule):null}
+  async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId||(expectedUpdatedAt!==undefined&&current.updatedAt!==expectedUpdatedAt))return null;this.alertRules.set(v.id,clone(v));return clone(v)}
   async deleteProjectAlertRule(projectId:string,id:string){
     const current=this.alertRules.get(id);
-    if(!current||current.projectId!==projectId||!isActiveProjectAlertRuleView(current))return false;
+    if(!current||current.projectId!==projectId)return false;
     this.alertRules.delete(id);
     for(const [alertId,alert] of this.alerts){
       if(alert.ruleId===id)this.alerts.set(alertId,clone({...alert,ruleId:null}));
@@ -1791,6 +1799,7 @@ function taskArtifactKind(artifact: PersistedTaskArtifact): import("../../contra
 function compareOrdinal(left:string,right:string):number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
+function compareC(left:string,right:string):number{return Buffer.compare(Buffer.from(left,"utf8"),Buffer.from(right,"utf8"))}
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {
   if(type==="provider_failure")return event.action==="provider.request"&&event.status==="rejected"&&event.resourceKind==="provider"&&event.detail?.errorCategory!==undefined;
@@ -1798,6 +1807,7 @@ function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):bool
   if(type==="sandbox_failure")return event.action==="sandbox.failed"&&event.status==="accepted";
   return false;
 }
+function isProviderLimitAlert(type:ProjectAlertType):boolean{return type==="provider_requests_limit"||type==="provider_tokens_limit"||type==="provider_cost_limit"}
 
 function membershipKey(projectId: string, userId: string): string {
   return `${projectId}\0${userId}`;

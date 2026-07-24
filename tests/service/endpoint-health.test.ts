@@ -158,6 +158,34 @@ test("endpoint model discovery and recheck persist only safe health transitions"
   assert.equal(settlements.filter((settlement) => settlement.endpointId === endpoint.id).length, 3);
 });
 
+test("healthy endpoint updates and model discovery recover the targeted endpoint failure fallback", async () => {
+  const store = createInMemoryProductStore();
+  const services = createApplicationServices({
+    store,
+    dataRoot: "/tmp/agentsmith-endpoint-health-recovery",
+    builtinAdminPassword: "admin-password",
+    providerClient: {
+      completeChat: async () => { throw new Error("not used"); },
+      validateEndpoint: async () => ({ status: "healthy" }),
+      discoverModels: async () => ({ models: ["model"], health: { status: "healthy", checkedAt: null, errorCategory: null } }),
+    },
+  });
+  const { user } = await services.auth.loginAfterBootstrap("admin-password");
+  const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+  const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+  const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "secret" });
+  const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Before", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
+  const failedAt = "2026-07-24T00:00:00.000Z";
+
+  await store.upsertActiveProjectAlert({ id: "alert_endpoint_update_recovery", projectId: project.id, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: endpoint.id, createdAt: failedAt, updatedAt: failedAt, resolvedAt: null, dismissedAt: null });
+  const updated = await services.endpoints.updateEndpoint(user.id, project.id, endpoint.id, { name: "After", protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, model: endpoint.model, credentialId: credential.id, capabilities: endpoint.capabilities, requestTimeoutSecs: endpoint.requestTimeoutSecs, expectedUpdatedAt: endpoint.updatedAt });
+  assert.equal((await store.findProjectAlert(project.id, "alert_endpoint_update_recovery"))?.status, "resolved");
+
+  await store.upsertActiveProjectAlert({ id: "alert_endpoint_discovery_recovery", projectId: project.id, type: "endpoint_failure", status: "active", deliveryStatus: "not_configured", endpointId: endpoint.id, createdAt: failedAt, updatedAt: failedAt, resolvedAt: null, dismissedAt: null });
+  await services.endpoints.discoverModels(user.id, project.id, { endpointId: endpoint.id, baseUrl: updated.baseUrl, credentialId: updated.credentialId, requestTimeoutSecs: updated.requestTimeoutSecs });
+  assert.equal((await store.findProjectAlert(project.id, "alert_endpoint_discovery_recovery"))?.status, "resolved");
+});
+
 test("endpoint recheck does not overwrite configuration changed while the provider responds", async () => {
   let validationCalls = 0;
   let recheckStarted!: () => void;

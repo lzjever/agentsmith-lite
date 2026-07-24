@@ -88,7 +88,7 @@ describe("project resource policy", () => {
     assert.match(over.measuredAt??"",/Z$/);
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,8);
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytesMeasuredAt,over.measuredAt);
-    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),true);
+    assert.equal((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.some((alert)=>alert.type==="project_file_bytes_limit"),true);
     await store.adjustProjectResourceUsage({
       projectId:project.id,
       delta:{activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:-1},
@@ -98,7 +98,7 @@ describe("project resource policy", () => {
     const recovered=await services.policies.reconcileFileLibraryBytes(project.id, 3);
     assert.deepEqual({...recovered,measuredAt:"measured"},{recordedBytes:3,measuredAt:"measured",limitBytes:5,remainingBytes:2});
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,3);
-    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),false);
+    assert.equal((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.some((alert)=>alert.type==="project_file_bytes_limit"),false);
   });
 
   it("expires stale provider reservations with conservative request accounting", async () => {
@@ -238,7 +238,26 @@ describe("project resource policy", () => {
 
     await services.policies.reserveProvider(project.id,user.id,endpoint.id);
     await assert.rejects(()=>services.policies.reserveProvider(project.id,user.id,endpoint.id),/provider requests limit reached/i);
+    assert.deepEqual(
+      (await services.policies.alerts(user.id,project.id)).items.map((alert)=>[alert.type,alert.endpointId,alert.subjectActorId]),
+      [["provider_requests_limit",endpoint.id,user.id]],
+    );
     await services.policies.reserveProvider(project.id,teammate.user.id,endpoint.id);
+    assert.deepEqual(
+      (await services.policies.alerts(user.id,project.id)).items.map((alert)=>[alert.type,alert.endpointId,alert.subjectActorId]),
+      [["provider_requests_limit",endpoint.id,user.id]],
+    );
+    await assert.rejects(()=>services.policies.reserveProvider(project.id,teammate.user.id,endpoint.id),/provider requests limit reached/i);
+    assert.deepEqual(
+      new Set((await services.policies.alerts(user.id,project.id)).items.map((alert)=>alert.subjectActorId)),
+      new Set([user.id,teammate.user.id]),
+    );
+
+    await services.policies.updatePolicy(user.id,project.id,{providerRequestsLimit:2});
+    const third=await services.auth.loginExternalPrincipal({issuer:"https://idp.test",subject:"window-third",email:"window-third@example.test",emailVerified:true});
+    await assert.rejects(()=>services.policies.reserveProvider(project.id,third.user.id,endpoint.id),/project provider requests limit reached/i);
+    const projectAlert=(await services.policies.alerts(user.id,project.id)).items.find((alert)=>alert.type==="provider_requests_limit"&&alert.endpointId===null);
+    assert.equal(projectAlert?.subjectActorId,null);
   });
 
   it("requires integer endpoint request and token limits", async () => {
@@ -288,7 +307,7 @@ describe("project resource policy", () => {
         && error.code === "provider_tokens_limit_reached"
     );
     assert.deepEqual(
-      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.status === "active").map((alert) => [alert.type, alert.endpointId]),
+      (await services.policies.alerts(user.id, project.id)).items.map((alert) => [alert.type, alert.endpointId]),
       [["provider_tokens_limit", endpoint.id]]
     );
   });
@@ -309,9 +328,52 @@ describe("project resource policy", () => {
     await services.policies.updatePolicy(user.id, project.id, { endpointWindows: [] });
 
     assert.deepEqual(
-      (await services.policies.alerts(user.id, project.id)).filter((alert) => alert.type === "provider_tokens_limit").map((alert) => [alert.type, alert.status]),
+      (await services.policies.alerts(user.id, project.id, { view: "history" })).items.filter((alert) => alert.type === "provider_tokens_limit").map((alert) => [alert.type, alert.status]),
       [["provider_tokens_limit", "resolved"]]
     );
+  });
+
+  it("lists and deeplinks persisted alerts without evaluation or recovery side effects", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-alert-pure-read", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const rule = await services.alertRules.create(user.id, project.id, {
+      alertType: "project_file_bytes_limit",
+      threshold: 10,
+    });
+    const timestamp = "2026-07-12T00:00:00.000Z";
+    const alert = await store.upsertActiveProjectAlert({
+      id: "alert_pure_read",
+      projectId: project.id,
+      type: "project_file_bytes_limit",
+      status: "active",
+      deliveryStatus: "delivered",
+      ruleId: rule.id,
+      metric: "project_file_bytes",
+      metricValue: 10,
+      threshold: 10,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      resolvedAt: null,
+      dismissedAt: null,
+    });
+    const measure = store.measureProjectAlertRule.bind(store);
+    const transition = store.transitionProjectAlert.bind(store);
+    const appendAudit = store.appendProjectAuditEvent.bind(store);
+    let measurements = 0;
+    let transitions = 0;
+    let auditWrites = 0;
+    store.measureProjectAlertRule = async (input) => { measurements += 1; return measure(input); };
+    store.transitionProjectAlert = async (...input) => { transitions += 1; return transition(...input); };
+    store.appendProjectAuditEvent = async (event) => { auditWrites += 1; return appendAudit(event); };
+
+    const page = await services.policies.alerts(user.id, project.id, { view: "active" });
+    assert.deepEqual(page.items.map((item) => [item.id, item.status]), [[alert.id, "active"]]);
+    assert.equal(page.activeCount, 1);
+    assert.equal((await services.policies.alert(user.id, project.id, alert.id)).status, "active");
+    assert.deepEqual({ measurements, transitions, auditWrites }, { measurements: 0, transitions: 0, auditWrites: 0 });
   });
 
   it("patches nullable limits without replacing unrelated policy fields", async () => {
@@ -359,7 +421,7 @@ describe("project resource policy", () => {
     await store.appendProjectAuditEvent({ id: "policy_replay_sandbox_failure", projectId: project.id, actorId: user.id, action: "sandbox.failed", status: "accepted", resourceKind: "sandbox", resourceId: "task_replay", createdAt: new Date().toISOString() });
     await services.alertRules.create(user.id, project.id, { alertType: "sandbox_failure" });
     await services.policies.raiseAlert(project.id, "sandbox_failure");
-    const active = (await services.policies.alerts(user.id, project.id)).find((alert) => alert.status === "active");
+    const active = (await services.policies.alerts(user.id, project.id)).items[0];
     assert.ok(active);
     const resolved = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");
     const replayed = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");

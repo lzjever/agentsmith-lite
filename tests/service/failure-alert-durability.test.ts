@@ -29,7 +29,7 @@ describe("durable failure alerts", () => {
     const checked = await setup.services.endpoints.recheckEndpoint(setup.userId, setup.projectId, endpoint.id);
 
     assert.equal(checked.health?.status, "unavailable");
-    const alert = (await setup.store.listProjectAlerts(setup.projectId)).find((item) => item.ruleId === rule.id);
+    const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus, alert?.endpointId], [1, 1, "delivered", endpoint.id]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
     const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "endpoint.health_check");
@@ -52,7 +52,7 @@ describe("durable failure alerts", () => {
     await assert.rejects(() => setup.services.endpoints.recheckEndpoint(setup.userId, setup.projectId, endpoint.id), /audit append unavailable/);
 
     assert.equal(measurements(), 0);
-    assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "endpoint_failure").length, 0);
+    assert.equal((await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.filter((item) => item.type === "endpoint_failure").length, 0);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 0);
   });
 
@@ -72,7 +72,7 @@ describe("durable failure alerts", () => {
 
     await assert.rejects(() => setup.services.providerBroker.completeChat({ endpoint, settlementEndpointId: endpoint.id, apiKey: secret, actorId: setup.userId }, [{ role: "user", content: "hello" }]), /OpenAI-compatible provider request failed/);
 
-    const alert = (await setup.store.listProjectAlerts(setup.projectId)).find((item) => item.ruleId === rule.id);
+    const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus, alert?.endpointId], [1, 1, "delivered", endpoint.id]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
     const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "provider.request" && item.status === "rejected");
@@ -93,7 +93,7 @@ describe("durable failure alerts", () => {
     await assert.rejects(() => setup.services.providerBroker.completeChat({ endpoint, settlementEndpointId: endpoint.id, apiKey: "provider-write-failure-secret", actorId: setup.userId }, [{ role: "user", content: "hello" }]), /audit append unavailable/);
 
     assert.equal(measurements(), 0);
-    assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "provider_failure").length, 0);
+    assert.equal((await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.filter((item) => item.type === "provider_failure").length, 0);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 0);
   });
 
@@ -103,7 +103,7 @@ describe("durable failure alerts", () => {
 
     await setup.lifecycle.reapSandboxRunsOnce({ runId: setup.run.runId, apply: true });
 
-    const alert = (await setup.store.listProjectAlerts(setup.projectId)).find((item) => item.ruleId === rule.id);
+    const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus], [1, 1, "delivered"]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
     const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "sandbox.failed");
@@ -122,7 +122,7 @@ describe("durable failure alerts", () => {
     assert.match(failed.errors.join("\n"), /audit append unavailable/);
     assert.equal((await setup.store.sandboxRuns.get(setup.run.runId))?.state, "active");
     assert.equal(measurements(), 0);
-    assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "sandbox_failure").length, 0);
+    assert.equal((await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.filter((item) => item.type === "sandbox_failure").length, 0);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 0);
 
     await setup.lifecycle.reapSandboxRunsOnce({ runId: setup.run.runId, apply: true });
@@ -131,7 +131,7 @@ describe("durable failure alerts", () => {
     assert.deepEqual([releasedRun?.state, releasedRun?.releaseReason, releasedRun?.failureCode], ["released", "failed", "runner_failed"]);
     assert.equal(measurements(), 1);
     assert.equal((await setup.store.listProjectAuditEvents(setup.projectId)).filter((item) => item.action === "sandbox.failed").length, 1);
-    assert.equal((await setup.store.listProjectAlerts(setup.projectId)).filter((item) => item.type === "sandbox_failure" && item.metricValue === 1).length, 1);
+    assert.equal((await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.filter((item) => item.type === "sandbox_failure" && item.metricValue === 1).length, 1);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
   });
 });

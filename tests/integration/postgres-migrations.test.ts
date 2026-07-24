@@ -194,9 +194,187 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
       assert.match(cutover.sql,/provider_requests\s*=\s*\([\s\S]*status <> 'failed'/i);
       assert.match(cutover.sql,/tg_op = 'DELETE'[\s\S]*lifecycle_status = 'deleting'/i);
       assert.match(cutover.sql,/drop constraint if exists agent_tasks_file_library_tombstone_check/i);
+      const alertCompatibilityColumns=await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema='public' and table_name='project_alert_rules' and column_name='retired_was_enabled'");
+      assert.deepEqual(alertCompatibilityColumns.rows,[]);
+      const alertSubjectColumns=await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema='public' and table_name='project_alerts' and column_name='subject_actor_id'");
+      assert.deepEqual(alertSubjectColumns.rows,[{column_name:"subject_actor_id"}]);
+      const alertConstraints=await client.query<{definition:string}>(`select pg_get_constraintdef(oid) as definition from pg_constraint where conrelid in ('project_alerts'::regclass,'project_alert_rules'::regclass)`);
+      assert.equal(alertConstraints.rows.some((row)=>/historical_task_failure/i.test(row.definition)),false);
+      assert.equal(alertConstraints.rows.some((row)=>/subject_actor_id.*rule_id.*endpoint_id.*provider_requests_limit/is.test(row.definition)),true);
+      const alertIndexes=await client.query<{indexname:string;indexdef:string}>("select indexname,indexdef from pg_indexes where schemaname='public' and indexname in ('project_alert_rules_project_page_idx','project_alerts_active_page_idx','project_alerts_history_page_idx','project_alerts_one_active_per_rule_scope_unique') order by indexname");
+      assert.deepEqual(alertIndexes.rows.map((row)=>row.indexname),["project_alert_rules_project_page_idx","project_alerts_active_page_idx","project_alerts_history_page_idx","project_alerts_one_active_per_rule_scope_unique"]);
+      assert.match(alertIndexes.rows.find((row)=>row.indexname==="project_alerts_one_active_per_rule_scope_unique")?.indexdef??"",/subject_actor_id/i);
     } finally {
       await client.end();
     }
+  });
+
+  it("canonicalizes Alert rows, windows, constraints, and indexes in migration 069",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"069_canonical_project_alerts",async(client,migrationSql)=>{
+      const ids=await insertProjectFixture(client,"alerts_069");
+      const timestamp=new Date().toISOString();
+      await client.query(
+        `insert into project_alert_rules (id,project_id,alert_type,name,metric,condition,threshold,window_seconds,scope_kind,endpoint_id,enabled,retired_was_enabled,created_at,updated_at)
+         values
+           ($1,$4,'provider_requests_limit','Provider requests','provider_requests','greater_than_or_equal',1,null,'project',null,true,null,$5,$5),
+           ($2,$4,'active_tasks_limit','Active tasks','active_tasks','greater_than_or_equal',1,60,'project',null,true,null,$5,$5),
+           ($3,$4,'historical_task_failure','Historical','failure_count','greater_than_or_equal',1,3600,'project',null,false,true,$5,$5)`,
+        [`rule_provider_${ids.suffix}`,`rule_gauge_${ids.suffix}`,`rule_historical_${ids.suffix}`,ids.projectId,timestamp]
+      );
+      await client.query(
+        "insert into project_alerts (id,project_id,type,status,delivery_status,created_at,updated_at,resolved_at) values ($1,$2,'historical_task_failure','resolved','delivered',$3,$3,$3)",
+        [`alert_historical_${ids.suffix}`,ids.projectId,timestamp]
+      );
+      await client.query(
+        `insert into project_alerts (id,project_id,type,status,delivery_status,created_at,updated_at)
+         values ($1,$2,'sandbox_failure','active','delivered',$3,$3)`,
+        [`alert_canonical_${ids.suffix}`,ids.projectId,timestamp]
+      );
+      await client.query(
+        `insert into user_notifications (
+           id,user_id,type,title,body,project_id,resource_kind,resource_id,link_path,created_at
+         ) values ($1,$2,'project_alert','Historical','Historical',$3,'alert',$4,'/obsolete',$5)`,
+        [
+          `notification_historical_${ids.suffix}`,
+          ids.userId,
+          ids.projectId,
+          `alert_historical_${ids.suffix}`,
+          timestamp,
+        ]
+      );
+
+      await client.query(migrationSql);
+
+      assert.deepEqual(
+        (await client.query<{id:string;window_seconds:number|null}>("select id,window_seconds from project_alert_rules where project_id=$1 order by id",[ids.projectId])).rows,
+        [{id:`rule_gauge_${ids.suffix}`,window_seconds:null},{id:`rule_provider_${ids.suffix}`,window_seconds:3600}]
+      );
+      assert.deepEqual((await client.query<{id:string}>("select id from project_alerts where project_id=$1 order by id",[ids.projectId])).rows,[{id:`alert_canonical_${ids.suffix}`}]);
+      assert.deepEqual(
+        (await client.query<{id:string}>("select id from user_notifications where project_id=$1",[ids.projectId])).rows,
+        [{id:`notification_historical_${ids.suffix}`}],
+      );
+      assert.equal((await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema=current_schema() and table_name='project_alert_rules' and column_name='retired_was_enabled'")).rowCount,0);
+      assert.equal((await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema=current_schema() and table_name='project_alerts' and column_name='subject_actor_id'")).rowCount,0);
+      const uniqueIndex=await client.query<{indexdef:string}>("select indexdef from pg_indexes where schemaname=current_schema() and indexname='project_alerts_one_active_per_rule_scope_unique'");
+      assert.equal(uniqueIndex.rowCount,1);
+      assert.doesNotMatch(uniqueIndex.rows[0]!.indexdef,/subject_actor_id/i);
+      await assert.rejects(
+        client.query("update project_alert_rules set window_seconds=60 where id=$1",[`rule_gauge_${ids.suffix}`]),
+        isCheckViolation
+      );
+    });
+  });
+
+  it("fails migration 069 before changing a Project with more than 50 rules",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"069_canonical_project_alerts",async(client,migrationSql)=>{
+      const ids=await insertProjectFixture(client,"alerts_069_limit");
+      const timestamp=new Date().toISOString();
+      await client.query(
+        `insert into project_alert_rules (id,project_id,alert_type,name,metric,condition,threshold,window_seconds,scope_kind,endpoint_id,enabled,retired_was_enabled,created_at,updated_at)
+         select 'rule_'||value||'_'||$1,$2,'sandbox_failure','Rule '||value,'failure_count','greater_than_or_equal',1,3600,'project',null,false,null,$3,$3
+         from generate_series(1,51) as series(value)`,
+        [ids.suffix,ids.projectId,timestamp]
+      );
+
+      await assert.rejects(client.query(migrationSql),isCheckViolation);
+      assert.equal((await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema=current_schema() and table_name='project_alert_rules' and column_name='retired_was_enabled'")).rowCount,1);
+    });
+  });
+
+  it("upgrades an applied migration 069 with actor-scoped Alerts and orphan cleanup in migration 070",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"070_actor_scoped_alerts_and_orphan_cleanup",async(client,migrationSql)=>{
+      const ids=await insertProjectFixture(client,"alerts_070");
+      const timestamp=new Date().toISOString();
+      const credentialId=`credential_${ids.suffix}`;
+      const endpointId=`endpoint_${ids.suffix}`;
+      const canonicalAlertId=`alert_canonical_${ids.suffix}`;
+      const endpointQuotaAlertId=`alert_endpoint_quota_${ids.suffix}`;
+      const projectQuotaAlertId=`alert_project_quota_${ids.suffix}`;
+      const orphanAlertId=`alert_historical_${ids.suffix}`;
+      await client.query(
+        `insert into project_credentials (
+           id,project_id,name,type,base_url,key_id,nonce,ciphertext,auth_tag,fingerprint,
+           version,created_at,last_rotated_at,updated_at
+         ) values ($1,$2,'Provider','api_key','https://api.example.test','test',$3,$4,$5,'migration',1,$6,null,$6)`,
+        [credentialId,ids.projectId,Buffer.alloc(12),Buffer.from("ciphertext"),Buffer.alloc(16),timestamp]
+      );
+      await client.query(
+        `insert into model_endpoints (
+           id,project_id,name,protocol,base_url,model,credential_id,capabilities,
+           request_timeout_secs,health_status,created_at,updated_at
+         ) values ($1,$2,'Provider endpoint','openai_chat_completions','https://api.example.test','model',$3,'[]'::jsonb,30,'healthy',$4,$4)`,
+        [endpointId,ids.projectId,credentialId,timestamp]
+      );
+      await client.query(
+        `insert into project_alerts (
+           id,project_id,type,status,delivery_status,endpoint_id,created_at,updated_at
+         ) values
+           ($1,$4,'sandbox_failure','active','delivered',null,$6,$6),
+           ($2,$4,'provider_requests_limit','active','delivered',$5,$6,$6),
+           ($3,$4,'provider_requests_limit','active','delivered',null,$6,$6)`,
+        [canonicalAlertId,endpointQuotaAlertId,projectQuotaAlertId,ids.projectId,endpointId,timestamp]
+      );
+      await client.query(
+        `insert into user_notifications (
+           id,user_id,type,title,body,project_id,resource_kind,resource_id,link_path,created_at
+         ) values
+           ($1,$4,'project_alert','Obsolete','Obsolete',$5,'alert',$6,'/obsolete',$7),
+           ($2,$4,'project_alert','Canonical','Canonical',$5,'alert',$8,'/canonical',$7),
+           ($3,$4,'project_alert','Other','Other',$5,'endpoint',$6,'/other',$7)`,
+        [
+          `notification_historical_${ids.suffix}`,
+          `notification_canonical_${ids.suffix}`,
+          `notification_other_${ids.suffix}`,
+          ids.userId,
+          ids.projectId,
+          orphanAlertId,
+          timestamp,
+          canonicalAlertId,
+        ]
+      );
+
+      await client.query(migrationSql);
+
+      assert.equal((await client.query<{column_name:string}>("select column_name from information_schema.columns where table_schema=current_schema() and table_name='project_alerts' and column_name='subject_actor_id'")).rowCount,1);
+      assert.deepEqual(
+        (await client.query<{id:string;status:string;resolved_at:Date|null}>("select id,status,resolved_at from project_alerts where id=any($1) order by id",[[endpointQuotaAlertId,projectQuotaAlertId]])).rows.map((row)=>({id:row.id,status:row.status,resolved:row.resolved_at!==null})),
+        [
+          {id:endpointQuotaAlertId,status:"resolved",resolved:true},
+          {id:projectQuotaAlertId,status:"active",resolved:false},
+        ]
+      );
+      assert.deepEqual(
+        (await client.query<{id:string}>("select id from user_notifications where project_id=$1 order by id",[ids.projectId])).rows,
+        [{id:`notification_canonical_${ids.suffix}`},{id:`notification_other_${ids.suffix}`}],
+      );
+      const uniqueIndex=await client.query<{indexdef:string}>("select indexdef from pg_indexes where schemaname=current_schema() and indexname='project_alerts_one_active_per_rule_scope_unique'");
+      assert.equal(uniqueIndex.rowCount,1);
+      assert.match(uniqueIndex.rows[0]!.indexdef,/subject_actor_id/i);
+      await client.query(
+        `insert into project_alerts (
+           id,project_id,type,status,delivery_status,endpoint_id,subject_actor_id,created_at,updated_at
+         ) values
+           ($1,$3,'provider_requests_limit','active','delivered',$4,$5,$7,$7),
+           ($2,$3,'provider_requests_limit','active','delivered',$4,$6,$7,$7)`,
+        [
+          `alert_actor_a_${ids.suffix}`,
+          `alert_actor_b_${ids.suffix}`,
+          ids.projectId,
+          endpointId,
+          ids.userId,
+          `user_other_${ids.suffix}`,
+          timestamp,
+        ]
+      );
+      await assert.rejects(
+        client.query("update project_alerts set subject_actor_id=$2 where id=$1",[canonicalAlertId,ids.userId]),
+        isCheckViolation
+      );
+    });
   });
 
   it("preserves non-Task receipts, bound endpoints, and read-only historical rows through migration 066", async () => {
@@ -742,11 +920,19 @@ async function withMigration066Database(
   sourceUrl: string,
   run: (client: pg.Client, cutoverSql: string) => Promise<void>
 ): Promise<void> {
+  return withPendingMigrationDatabase(sourceUrl,"066_converge_task_turn_run_state",run);
+}
+
+async function withPendingMigrationDatabase(
+  sourceUrl:string,
+  migrationId:string,
+  run:(client:pg.Client,migrationSql:string)=>Promise<void>
+):Promise<void>{
   const migrations = await readPostgresMigrations();
-  const cutoverIndex = migrations.findIndex((migration) => migration.id === "066_converge_task_turn_run_state");
+  const cutoverIndex = migrations.findIndex((migration) => migration.id === migrationId);
   assert.ok(cutoverIndex > 0);
 
-  const databaseName = `migration_066_${process.pid}_${Date.now()}_${randomUUID().slice(0, 8)}_test`;
+  const databaseName = `migration_${migrationId.slice(0,3)}_${process.pid}_${Date.now()}_${randomUUID().slice(0, 8)}_test`;
   const maintenanceUrl = new URL(sourceUrl);
   maintenanceUrl.pathname = "/postgres";
   const maintenanceClient = new pg.Client({ connectionString: maintenanceUrl.toString() });
@@ -760,7 +946,7 @@ async function withMigration066Database(
     } catch (error) {
       if (error instanceof Error && (error as { code?: string }).code === "42501") {
         throw new Error(
-          "POSTGRES_TEST_URL must authenticate as a PostgreSQL role with CREATEDB for migration 066 isolation",
+          `POSTGRES_TEST_URL must authenticate as a PostgreSQL role with CREATEDB for migration ${migrationId.slice(0,3)} isolation`,
           { cause: error }
         );
       }

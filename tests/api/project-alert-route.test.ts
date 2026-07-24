@@ -34,6 +34,9 @@ describe("project alert history API", () => {
       const removedRuleField = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ alertType: "sandbox_failure", channels: ["email"] }) });
       assert.equal(removedRuleField.status, 400);
       const rule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "sandbox_failure" }, ownerCookie, ownerCsrf);
+      const linkedRule = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}`, { headers: { cookie: ownerCookie } });
+      assert.equal(linkedRule.status, 200);
+      assert.equal((await linkedRule.json() as { id: string }).id, rule.id);
       const testedRule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules/${rule.id}/test`, {}, ownerCookie, ownerCsrf);
       assert.equal(testedRule.metric, rule.metric);
       const removedTestBody = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}/test`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf }, body: JSON.stringify({ notify: true }) });
@@ -75,13 +78,94 @@ describe("project alert history API", () => {
       const audit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/audit`, { headers: { cookie: ownerCookie } });
       assert.equal(audit.status, 200);
       const auditPage=await audit.json() as {items:Array<{action:string;status:string;resourceKind:string;resourceId:string}>;nextCursor:string|null};assert.deepEqual(auditPage.items.filter(event=>event.status==="accepted"&&["alert.dismiss","alert.resolve"].includes(event.action)).map(event=>[event.action,event.resourceId]).sort((left,right)=>left[0]!.localeCompare(right[0]!)),[["alert.dismiss",dismissable.id],["alert.resolve",alert.id]]);assert.equal(auditPage.nextCursor,null);
-      const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts`, { headers: { cookie: ownerCookie } });
-      assert.equal((await history.json() as { items: Array<{ status: string }> }).items[0]?.status, "resolved");
+      const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts?view=history`, { headers: { cookie: ownerCookie } });
+      assert.deepEqual(new Set((await history.json() as { items: Array<{ status: string }> }).items.map((item) => item.status)), new Set(["resolved", "dismissed"]));
       assert.deepEqual(await json(api.baseUrl, "DELETE", `/api/v1/projects/${project.id}/alert-rules/${rule.id}`, {}, ownerCookie, ownerCsrf), { deleted: true });
+    } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
+  });
+
+  it("partitions active and history views with fixed limits and project-bound keyset cursors", async () => {
+    const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-project-alert-pages-"));
+    const store = createLocalInMemoryProductStore();
+    const api = await createApiServer({ port: 0, dataRoot, builtinAdminPassword: "admin-password", store });
+    try {
+      await post(api.baseUrl, "/api/v1/auth/bootstrap", { password: "admin-password" });
+      const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
+      const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+      const csrf = (await login.json() as { csrfToken: string }).csrfToken;
+      const workspace = await json(api.baseUrl, "POST", "/api/v1/workspaces", { name: "Alert pages" }, cookie, csrf);
+      const project = await json(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Primary" }, cookie, csrf);
+      const otherProject = await json(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Other" }, cookie, csrf);
+      const tiedAt = "2026-07-20T12:00:00.000Z";
+      const activeIds = Array.from({ length: 23 }, (_, index) => `alert_active_${String(index).padStart(2, "0")}`);
+      for (const id of activeIds) {
+        const ruleId = `rule_${id}`;
+        const rule = await store.createProjectAlertRule({
+          id: ruleId,
+          projectId: project.id,
+          name: id,
+          alertType: "sandbox_failure",
+          metric: "failure_count",
+          condition: "greater_than_or_equal",
+          threshold: 1,
+          windowSeconds: 3600,
+          scope: { kind: "project" },
+          enabled: false,
+          createdAt: tiedAt,
+          updatedAt: tiedAt,
+        });
+        if (!rule) throw new Error("Canonical alert pagination fixture exceeded the rule cap");
+        await store.upsertActiveProjectAlert({ id, projectId: project.id, type: "sandbox_failure", status: "active", deliveryStatus: "delivered", ruleId: rule.id, createdAt: tiedAt, updatedAt: tiedAt, resolvedAt: null, dismissedAt: null });
+      }
+      for (const [id, status] of [["alert_resolved", "resolved"], ["alert_dismissed", "dismissed"]] as const) {
+        const alert = await store.upsertActiveProjectAlert({ id, projectId: project.id, type: "sandbox_failure", status: "active", deliveryStatus: "delivered", createdAt: tiedAt, updatedAt: tiedAt, resolvedAt: null, dismissedAt: null });
+        if (!await store.transitionProjectAlert(project.id, alert.id, status, tiedAt)) throw new Error("Canonical alert pagination fixture could not transition its active alert");
+      }
+
+      const defaultPage = await alertPage(api.baseUrl, project.id, "", cookie);
+      assert.equal(defaultPage.view, "active");
+      assert.equal(defaultPage.items.length, 20);
+      assert.equal(defaultPage.activeCount, activeIds.length);
+      assert.ok(defaultPage.items.every((item) => item.status === "active"));
+      assert.ok(defaultPage.nextCursor);
+
+      const explicitActive = await alertPage(api.baseUrl, project.id, "?view=active&limit=50", cookie);
+      assert.equal(explicitActive.items.length, activeIds.length);
+      assert.equal(explicitActive.activeCount, activeIds.length);
+      assert.equal(explicitActive.nextCursor, null);
+
+      const history = await alertPage(api.baseUrl, project.id, "?view=history", cookie);
+      assert.equal(history.view, "history");
+      assert.deepEqual(new Set(history.items.map((item) => item.status)), new Set(["resolved", "dismissed"]));
+      assert.equal(history.activeCount, activeIds.length);
+
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await alertPage(api.baseUrl, project.id, `?view=active&limit=7${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, cookie);
+        seen.push(...page.items.map((item) => item.id));
+        cursor = page.nextCursor;
+      } while (cursor);
+      assert.equal(new Set(seen).size, activeIds.length);
+      assert.deepEqual(new Set(seen), new Set(activeIds));
+
+      const activeCursor = defaultPage.nextCursor!;
+      for (const pathname of [
+        `/api/v1/projects/${project.id}/alerts?status=active`,
+        `/api/v1/projects/${project.id}/alerts?view=all`,
+        `/api/v1/projects/${project.id}/alerts?view=invalid`,
+        `/api/v1/projects/${project.id}/alerts?limit=51`,
+        `/api/v1/projects/${project.id}/alerts?view=active&cursor=${encodeURIComponent(`${tiedAt}|alert_active_00`)}`,
+        `/api/v1/projects/${project.id}/alerts?view=history&cursor=${encodeURIComponent(activeCursor)}`,
+        `/api/v1/projects/${otherProject.id}/alerts?view=active&cursor=${encodeURIComponent(activeCursor)}`,
+      ]) {
+        assert.equal((await fetch(api.baseUrl + pathname, { headers: { cookie } })).status, 400, pathname);
+      }
     } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
   });
 });
 
 async function post(baseUrl: string, pathname: string, body: unknown) { return fetch(baseUrl + pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
 async function json(baseUrl: string, method: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<any> { const response = await fetch(baseUrl + pathname, { method, headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, ...(needsIdempotencyKey(method,pathname) ? { "idempotency-key": crypto.randomUUID() } : {}) }, body: JSON.stringify(body) }); if (response.status !== 200) assert.fail(await response.text()); return response.json(); }
+async function alertPage(baseUrl:string,projectId:string,query:string,cookie:string):Promise<{view:"active"|"history";items:Array<{id:string;status:string}>;nextCursor:string|null;activeCount:number}>{const response=await fetch(`${baseUrl}/api/v1/projects/${projectId}/alerts${query}`,{headers:{cookie}});if(response.status!==200)assert.fail(await response.text());return response.json()}
 function needsIdempotencyKey(method:string,pathname:string):boolean{return method==="POST"&&(pathname==="/api/v1/workspaces"||/^\/api\/v1\/workspaces\/[^/]+\/(projects|members)$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/(credentials|endpoints|members|alert-rules)$/.test(pathname)||/^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+\/(acknowledge|silence)$/.test(pathname))||(method==="PATCH"&&(/^\/api\/v1\/projects\/[^/]+\/(policy|alerts\/[^/]+|alert-rules\/[^/]+)$/.test(pathname)))||(method==="DELETE"&&/^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+$/.test(pathname));}

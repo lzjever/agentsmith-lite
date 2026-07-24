@@ -1,8 +1,8 @@
-import { isActiveProjectAlertRuleView, projectAlertTypeLabel, sanitizeProjectAuditDetail, type ActiveProjectAlert, type AlertRuleMetric, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
+import { projectAlertTypeLabel, sanitizeProjectAuditDetail, type ActiveProjectAlert, type AlertRuleMetric, type ProjectAlert, type ProjectAlertRule, type ProjectAlertType, type ProjectAuditEvent } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 
-export type AlertEvaluationContext = { endpointId?: string };
+export type AlertEvaluationContext = { endpointId?: string; subjectActorId?: string | null };
 type FailureAlertType = Extract<ProjectAlertType, "endpoint_failure" | "provider_failure" | "sandbox_failure">;
 
 export async function evaluateProjectAlertRules(
@@ -13,20 +13,20 @@ export async function evaluateProjectAlertRules(
 ): Promise<number> {
   const timestamp = nowIso();
   const rules = await store.listProjectAlertRules(projectId);
-  const configured = rules.filter(isActiveProjectAlertRuleView).filter((rule) =>
+  const configured = rules.filter((rule) =>
     rule.enabled &&
     rule.alertType === type &&
     (rule.scope?.kind !== "endpoint" || rule.scope.endpointId === context.endpointId)
   );
+  if(configured.length>50)throw new Error("Project alert rule evaluation exceeds 50 rules");
   if (!configured.length) return 0;
-  const [active, members, project] = await Promise.all([
-    store.listActiveProjectAlerts(projectId),
+  const [members, project] = await Promise.all([
     store.listProjectMemberships(projectId),
     store.findProject(projectId),
   ]);
   for (const rule of configured) {
     const endpointId = rule.scope?.kind === "endpoint" ? rule.scope.endpointId : null;
-    const current = active.find((alert) => alert.ruleId === rule.id && (alert.endpointId ?? null) === endpointId);
+    const current = await store.findActiveProjectAlert(projectId,type,rule.id,endpointId,null);
     const value = await measureAlertRule(store, rule, timestamp);
     if (!matchesAlertRule(rule, value)) {
       if (current) await resolveAlert(store, current, timestamp);
@@ -43,6 +43,7 @@ export async function evaluateProjectAlertRules(
       metricValue: value,
       threshold: rule.threshold ?? null,
       endpointId,
+      subjectActorId: null,
       acknowledgedAt: null,
       acknowledgedBy: null,
       silencedUntil: null,
@@ -101,6 +102,7 @@ export async function emitProjectAlert(
   await store.upsertActiveProjectAlert({
     id: newId("alert"), projectId, type, status: "active", deliveryStatus: "not_configured",
     ruleId: null, metric: null, metricValue: null, threshold: null, endpointId: context.endpointId ?? null,
+    subjectActorId: context.subjectActorId ?? null,
     acknowledgedAt: null, acknowledgedBy: null, silencedUntil: null,
     createdAt: timestamp, updatedAt: timestamp, resolvedAt: null, dismissedAt: null,
   });
@@ -110,17 +112,20 @@ export async function recoverProjectAlerts(
   store: ProductStore,
   projectId: string,
   type: ProjectAlertType,
-  endpointId?: string | null,
-  configuredOnly = false,
+  target: Readonly<{ ruleId?: string; endpointId?: string | null; subjectActorId?: string | null; unconfiguredFallback?: boolean }> = {},
 ): Promise<void> {
   const timestamp = nowIso();
-  const rules = new Map((await store.listProjectAlertRules(projectId)).filter(isActiveProjectAlertRuleView).map((rule) => [rule.id, rule]));
-  for (const alert of await store.listActiveProjectAlerts(projectId)) {
-    if (alert.type !== type || (endpointId !== undefined && (alert.endpointId ?? null) !== endpointId)) continue;
-    const rule = alert.ruleId ? rules.get(alert.ruleId) : undefined;
-    if (configuredOnly && !alert.ruleId) continue;
-    if (rule && ruleStillOwnsAlert(rule, alert) && matchesAlertRule(rule, await measureAlertRule(store, rule, timestamp))) continue;
-    await resolveAlert(store, alert, timestamp);
+  const endpointId=target.endpointId??null;
+  if(target.ruleId){
+    const alert=await store.findActiveProjectAlert(projectId,type,target.ruleId,endpointId,null);
+    if(alert){
+      const rule=await store.findProjectAlertRule(projectId,target.ruleId);
+      if(!rule||!ruleStillOwnsAlert(rule,alert)||!matchesAlertRule(rule,await measureAlertRule(store,rule,timestamp)))await resolveAlert(store,alert,timestamp);
+    }
+  }
+  if(target.unconfiguredFallback){
+    const fallback=await store.findActiveProjectAlert(projectId,type,null,endpointId,target.subjectActorId??null);
+    if(fallback)await resolveAlert(store,fallback,timestamp);
   }
 }
 

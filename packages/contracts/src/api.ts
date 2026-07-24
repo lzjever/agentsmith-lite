@@ -26,10 +26,7 @@ export type AlertRuleMetric = "active_tasks" | "provider_requests" | "provider_t
 export type AlertRuleCondition = "greater_than_or_equal";
 export type AlertRuleScope = { kind: "project" } | { kind: "endpoint"; endpointId: string };
 export interface ProjectAlertRule { id: string; projectId: string; name?: string; alertType: ProjectAlertType; metric?: AlertRuleMetric; condition?: AlertRuleCondition; threshold?: number; windowSeconds?: number | null; scope?: AlertRuleScope; enabled: boolean; createdAt: ISODateString; updatedAt: ISODateString; }
-export interface ActiveProjectAlertRuleView extends ProjectAlertRule { retiredWasEnabled: null; }
-export interface HistoricalProjectAlertRuleView extends Omit<ProjectAlertRule, "alertType" | "enabled"> { alertType: "historical_task_failure"; enabled: false; retiredWasEnabled: boolean; }
-export type ProjectAlertRuleView = ActiveProjectAlertRuleView | HistoricalProjectAlertRuleView;
-export function isActiveProjectAlertRuleView(rule: ProjectAlertRuleView): rule is ActiveProjectAlertRuleView { return rule.alertType !== "historical_task_failure"; }
+export type ProjectAlertRuleView = ProjectAlertRule;
 
 export type ProjectMembershipRole = "owner" | "admin" | "member" | "viewer";
 export type ManagedProjectMembershipRole = Exclude<ProjectMembershipRole, "owner">;
@@ -275,8 +272,7 @@ export interface ProjectFileStorageRefreshResponse {
 }
 
 export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "sandbox_failure";
-export type ProjectAlertReadType = ProjectAlertType | "historical_task_failure";
-export function projectAlertTypeLabel(type: ProjectAlertReadType, endpointScoped = false): string {
+export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = false): string {
   if (type === "provider_requests_limit" && endpointScoped) return "Endpoint request limit reached";
   return {
     active_tasks_limit: "Task capacity reached",
@@ -287,7 +283,6 @@ export function projectAlertTypeLabel(type: ProjectAlertReadType, endpointScoped
     endpoint_failure: "Endpoint failure",
     provider_failure: "Provider failure",
     sandbox_failure: "Sandbox failure",
-    historical_task_failure: "Historical task failure",
   }[type];
 }
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
@@ -307,6 +302,7 @@ interface ProjectAlertFields {
   metricValue?: number | null;
   threshold?: number | null;
   endpointId?: string | null;
+  subjectActorId?: string | null;
   acknowledgedAt?: ISODateString | null;
   acknowledgedBy?: string | null;
   silencedUntil?: ISODateString | null;
@@ -317,17 +313,19 @@ interface ProjectAlertFields {
 }
 export interface ActiveProjectAlert extends ProjectAlertFields { type: ProjectAlertType; status: "active"; }
 export interface InactiveProjectAlert extends ProjectAlertFields { type: ProjectAlertType; status: "resolved" | "dismissed"; }
-export interface HistoricalProjectAlert extends ProjectAlertFields { type: "historical_task_failure"; status: "resolved" | "dismissed"; }
-export type ProjectAlert = ActiveProjectAlert | InactiveProjectAlert | HistoricalProjectAlert;
+export type ProjectAlert = ActiveProjectAlert | InactiveProjectAlert;
 export function isActiveProjectAlert(alert: ProjectAlert): alert is ActiveProjectAlert { return alert.status === "active"; }
 
+export type ProjectAlertView = "active" | "history";
+export interface ProjectAlertCursorKey { createdAt: ISODateString; id: string; }
 export interface ProjectAlertQuery {
-  status?: ProjectAlertStatus;
+  view?: ProjectAlertView;
   cursor?: string;
   limit?: number;
 }
 
 export interface ProjectAlertPage {
+  view: ProjectAlertView;
   items: ProjectAlert[];
   nextCursor: string | null;
   activeCount: number;

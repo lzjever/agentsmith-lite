@@ -49,15 +49,34 @@ Tasks retain a null title and `taskAvailable: false`. Members may select only
 themselves; Project owners and administrators may select another current
 member.
 
-Alert, rule, and Audit reads retain legacy Task-terminal records only as
-history. Legacy `task_failure` alerts and rules are returned as
-`historical_task_failure`; historical alerts are never `active`, and historical
-rules are disabled with their prior enabled state available only for display.
-Legacy Task-terminal Audit rows use `task.historical_terminal`, with the prior
-action available only for display. Historical alerts and rules are read-only:
-they cannot be acknowledged, silenced, edited, tested, enabled, or deleted, and
-they are excluded from runtime evaluation and mutation. None of these historical
-records represents a current Sandbox failure.
+## Project Alerts
+
+`GET /api/v1/projects/{projectId}/alerts` accepts only `view`, `cursor`, and
+`limit`. `view` is `active` or `history` and defaults to `active`; history
+contains both resolved and dismissed alerts without a status subfilter. The
+default limit is 20 and the maximum is 50. Legacy `status`, `view=all`, unknown
+views, unknown query parameters, raw key cursors, and cursors from another
+Project or view are rejected.
+
+The response is `{ view, items, nextCursor, activeCount }`. Items are ordered by
+`createdAt` and ID descending, with IDs compared using PostgreSQL `C` collation.
+The opaque base64url JSON v1 cursor binds the Project, view, and final
+`{ createdAt, id }` key. `activeCount` always counts the Project's active alerts
+independently of the selected view. PostgreSQL obtains the page and count from
+one repeatable-read snapshot.
+
+Alert collection and deeplink GETs are pure reads: they do not evaluate rules,
+recover alerts, write Audit events, or send notifications. Evaluation and
+recovery run only from the business event that changed usage, health, failure,
+policy, or rule state. Recovery targets affected rule IDs or an unconfigured
+fallback alert; it does not scan and repair alerts during a read.
+
+Each Project has at most 50 alert rules. Rule creation locks the Project and
+checks the cap in the same transaction, so concurrent creation cannot exceed
+it; the 51st rule returns a conflict and idempotent replay returns the original
+result. Gauge rules (`active_tasks`, `project_file_bytes`) have a null window.
+Provider and failure rules default to 3600 seconds and accept only 60 through
+2592000 seconds. Alert and rule resources are looked up by Project and ID.
 
 ## Task Conversation
 

@@ -64,7 +64,7 @@ test("usage overview returns project limits and authenticated-user provider aggr
     assert.equal(refreshed.projectId,project.id);
     assert.deepEqual({...refreshed.fileStorage,measuredAt:"measured"},{recordedBytes:7,measuredAt:"measured",limitBytes:1,remainingBytes:0});
     assert.match(refreshed.fileStorage.measuredAt??"",/Z$/);
-    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),true);
+    assert.equal((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.some((alert)=>alert.type==="project_file_bytes_limit"),true);
     assert.deepEqual((await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie)).fileStorage,refreshed.fileStorage);
 
     await rm(directFile);
@@ -72,7 +72,7 @@ test("usage overview returns project limits and authenticated-user provider aggr
     assert.equal(recoveredResponse.status,200,await recoveredResponse.clone().text());
     const recovered=await recoveredResponse.json() as {fileStorage:{recordedBytes:number;measuredAt:string|null;limitBytes:number|null;remainingBytes:number|null}};
     assert.deepEqual({...recovered.fileStorage,measuredAt:"measured"},{recordedBytes:0,measuredAt:"measured",limitBytes:1,remainingBytes:1});
-    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),false);
+    assert.equal((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.some((alert)=>alert.type==="project_file_bytes_limit"),false);
 
     const filtered = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage?endpointId=${second.id}`, cookie);
     assert.equal(filtered.provider.selectedEndpointId, second.id);

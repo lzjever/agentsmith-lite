@@ -22,7 +22,7 @@ import type {
   UpdateProjectResourcePolicyInput,
   User,
   UserProfilePreferences,
-  UserNotification, ActiveProjectAlert, ActiveProjectAlertRuleView, ProjectAlertRule, ProjectAlertRuleView, ProjectAlertType, ProjectCredential, StoredProjectCredential,
+  UserNotification, ActiveProjectAlert, ProjectAlertRule, ProjectAlertType, ProjectAlertView, ProjectAlertCursorKey, ProjectCredential, StoredProjectCredential,
   ProjectContextEntry,
   Workspace,
   WorkspaceListProjection,
@@ -61,6 +61,18 @@ export interface PersistedAgentTask extends Omit<AgentTask, "fileLibraryId"> {
 
 export interface PersistedTaskArtifact extends AgentTaskArtifact {
   fileId: string;
+}
+
+export interface ProjectAlertStoreQuery {
+  view: ProjectAlertView;
+  after?: ProjectAlertCursorKey;
+  limit: number;
+}
+
+export interface ProjectAlertStorePage {
+  items: ProjectAlert[];
+  hasMore: boolean;
+  activeCount: number;
 }
 
 export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "accepted" | "failed";
@@ -508,9 +520,10 @@ export interface ProductStore {
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
   listProjectContextEntries(workspaceId: string, projectId: string | null, scope: ProjectContextEntry["scope"], ownerUserId: string | null): Promise<ProjectContextEntry[]>;
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
-  createProjectAlertRule(value: ProjectAlertRule): Promise<ActiveProjectAlertRuleView>;
-  listProjectAlertRules(projectId: string): Promise<ProjectAlertRuleView[]>;
-  updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ActiveProjectAlertRuleView | null>;
+  createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule | null>;
+  listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;
+  findProjectAlertRule(projectId: string, id: string): Promise<ProjectAlertRule | null>;
+  updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
   listProjectsForUser(userId: string): Promise<Project[]>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
@@ -542,9 +555,8 @@ export interface ProductStore {
   measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>;
   measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
   upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert>;
-  listActiveProjectAlerts(projectId: string): Promise<ActiveProjectAlert[]>;
-  listProjectAlerts(projectId: string): Promise<ProjectAlert[]>;
-  queryProjectAlerts(projectId: string, query: import("../../contracts/src/api.js").ProjectAlertQuery): Promise<{ items: ProjectAlert[]; nextCursor: string | null }>;
+  queryProjectAlerts(projectId: string, query: ProjectAlertStoreQuery): Promise<ProjectAlertStorePage>;
+  findActiveProjectAlert(projectId: string, type: ProjectAlertType, ruleId: string | null, endpointId: string | null, subjectActorId: string | null): Promise<ActiveProjectAlert | null>;
   findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null>;
   transitionProjectAlert(projectId: string, id: string, status: Extract<ProjectAlert["status"], "resolved" | "dismissed">, updatedAt: string): Promise<ProjectAlert | null>;
   updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string):Promise<ProjectAlert|null>;
@@ -858,7 +870,8 @@ export interface ProjectResourceUsageAdjustment {
 export interface ProjectProviderUsageSettlement {
   usage: ProjectResourceUsage;
   endpointId: string | null;
-  exceededLimits: Array<Extract<ProjectAlertType, "provider_tokens_limit" | "provider_cost_limit">>;
+  actorId: string | null;
+  exceededLimits: Array<Extract<ProjectAlertType, "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit">>;
 }
 
 export interface LegacyExternalIdentityBinding {

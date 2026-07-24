@@ -11,6 +11,7 @@ import {
   useToast,
 } from "@astryxdesign/core";
 import { KeyRound, Plus, RefreshCw, Server } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -24,6 +25,12 @@ import { EndpointsContent } from "./endpoints-page/EndpointsContent";
 type LoadState = "loading" | "ready" | "error";
 
 export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
+  const routeSearchParams = useSearchParams();
+  const focusedEndpointId =
+    routeSearchParams?.get("endpointId") ??
+    (typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("endpointId"));
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [credentials, setCredentials] = useState<ProjectCredential[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
@@ -468,6 +475,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
           <EndpointsContent
             endpoints={endpoints}
             credentials={credentials}
+            focusedEndpointId={focusedEndpointId}
             canManage={canManage}
             canEdit={canConfigure}
             busy={mutationBusy}

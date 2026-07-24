@@ -398,7 +398,7 @@ describe("product services", () => {
     }
     assert.equal((await store.listProjectAuditEvents(project.id)).some((event) => event.action === "endpoint.create" && event.status === "accepted"), true);
     assert.equal((await store.listProjectAuditEvents(project.id)).some((event) => event.action === "endpoint.create" && event.status === "rejected"), true);
-    assert.deepEqual((await store.listActiveProjectAlerts(project.id)).map((alert) => alert.type), []);
+    assert.deepEqual((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.map((alert) => alert.type), []);
   });
 
   it("lets a project owner manage credential-bound endpoints", async () => {

@@ -15,7 +15,7 @@ import {
   TextInput,
 } from "@astryxdesign/core";
 import { KeyRound, Pencil, RefreshCw, Search, Trash2 } from "lucide-react";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type {
   Endpoint,
   EndpointCapability,
@@ -26,6 +26,7 @@ import { EndpointStatusBadge } from "../EndpointStatusBadge";
 export function EndpointsContent({
   endpoints,
   credentials,
+  focusedEndpointId,
   canManage,
   canEdit,
   busy,
@@ -36,6 +37,7 @@ export function EndpointsContent({
 }: {
   endpoints: Endpoint[];
   credentials: ProjectCredential[];
+  focusedEndpointId: string | null;
   canManage: boolean;
   canEdit: boolean;
   busy: boolean;
@@ -45,6 +47,9 @@ export function EndpointsContent({
   onDelete: (endpoint: Endpoint) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [highlightedEndpointId, setHighlightedEndpointId] = useState<
+    string | null
+  >(null);
   const credentialsById = useMemo(
     () => new Map(credentials.map((credential) => [credential.id, credential])),
     [credentials],
@@ -56,6 +61,45 @@ export function EndpointsContent({
         .includes(query.trim().toLowerCase())),
     [endpoints, query],
   );
+
+  useEffect(() => {
+    if (
+      focusedEndpointId &&
+      endpoints.some((endpoint) => endpoint.id === focusedEndpointId) &&
+      !filtered.some((endpoint) => endpoint.id === focusedEndpointId)
+    ) {
+      setQuery("");
+      return;
+    }
+    if (
+      !focusedEndpointId ||
+      !filtered.some((endpoint) => endpoint.id === focusedEndpointId)
+    ) {
+      setHighlightedEndpointId(null);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const targets = [
+        document.getElementById(endpointElementId(focusedEndpointId, "table")),
+        document.getElementById(endpointElementId(focusedEndpointId, "mobile")),
+      ];
+      const target =
+        targets.find((item) => item && item.getClientRects().length > 0) ??
+        targets.find((item) => item !== null);
+      target?.scrollIntoView({ block: "center" });
+      target?.focus({ preventScroll: true });
+      setHighlightedEndpointId(focusedEndpointId);
+    });
+    const timeout = window.setTimeout(() => {
+      setHighlightedEndpointId((current) =>
+        current === focusedEndpointId ? null : current
+      );
+    }, 2500);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [endpoints, filtered, focusedEndpointId]);
 
   return (
     <section aria-label="Project endpoints" className="space-y-4">
@@ -98,8 +142,20 @@ export function EndpointsContent({
               </TableHeader>
               <TableBody>
                 {filtered.map((endpoint) => (
-                  <TableRow key={endpoint.id}>
-                    <TableCell><EndpointName endpoint={endpoint} /></TableCell>
+                  <TableRow
+                    id={endpointElementId(endpoint.id, "table")}
+                    tabIndex={endpoint.id === focusedEndpointId ? -1 : undefined}
+                    aria-current={
+                      endpoint.id === highlightedEndpointId ? "true" : undefined
+                    }
+                    key={endpoint.id}
+                  >
+                    <TableCell>
+                      <EndpointName
+                        endpoint={endpoint}
+                        highlighted={endpoint.id === highlightedEndpointId}
+                      />
+                    </TableCell>
                     <TableCell>
                       <Text type="code" size="2xs" color="secondary">
                         {endpoint.model}
@@ -148,6 +204,8 @@ export function EndpointsContent({
                 <EndpointCard
                   endpoint={endpoint}
                   credential={credentialsById.get(endpoint.credentialId)}
+                  focused={endpoint.id === focusedEndpointId}
+                  highlighted={endpoint.id === highlightedEndpointId}
                   canManage={canManage}
                   canEdit={canEdit}
                   busy={busy}
@@ -168,6 +226,8 @@ export function EndpointsContent({
 function EndpointCard({
   endpoint,
   credential,
+  focused,
+  highlighted,
   canManage,
   canEdit,
   busy,
@@ -178,6 +238,8 @@ function EndpointCard({
 }: {
   endpoint: Endpoint;
   credential: ProjectCredential | undefined;
+  focused: boolean;
+  highlighted: boolean;
   canManage: boolean;
   canEdit: boolean;
   busy: boolean;
@@ -187,7 +249,14 @@ function EndpointCard({
   onDelete: (endpoint: Endpoint) => void;
 }) {
   return (
-    <article className="space-y-4 py-4">
+    <article
+      id={endpointElementId(endpoint.id, "mobile")}
+      tabIndex={focused ? -1 : undefined}
+      aria-current={highlighted ? "true" : undefined}
+      className={`space-y-4 py-4 outline-none ${
+        highlighted ? "bg-muted outline outline-2 outline-accent" : ""
+      }`}
+    >
       <EndpointName endpoint={endpoint} />
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
         <div>
@@ -237,9 +306,26 @@ function EndpointCard({
   );
 }
 
-function EndpointName({ endpoint }: { endpoint: Endpoint }) {
+function endpointElementId(
+  endpointId: string,
+  surface: "table" | "mobile"
+) {
+  return `endpoint-${surface}-${endpointId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+function EndpointName({
+  endpoint,
+  highlighted = false
+}: {
+  endpoint: Endpoint;
+  highlighted?: boolean;
+}) {
   return (
-    <div className="grid gap-1">
+    <div
+      className={`grid gap-1 rounded-sm px-2 py-1 ${
+        highlighted ? "bg-muted outline outline-2 outline-accent" : ""
+      }`}
+    >
       <Text display="block" weight="medium">{endpoint.name}</Text>
       <Text
         type="code"

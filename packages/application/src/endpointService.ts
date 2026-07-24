@@ -5,7 +5,7 @@ import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src
 import { normalizeOpenAICompatibleBaseUrl, normalizeOpenAICompatibleModelIds, validateOpenAICompatibleEndpoint } from "../../openai-compatible-client/src/index.js";
 import { CredentialVersionConflictError, EndpointNameConflictError, type ProductStore } from "../../ports/src/store.js";
 import { WorkspaceService } from "./workspaceService.js";
-import { recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
+import { evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 import { CredentialService } from "./credentialService.js";
 import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
@@ -82,6 +82,7 @@ export class EndpointService {
         throw failure;
       }
       await this.audit(projectId, userId, "endpoint.update", endpointId, "accepted", healthAuditDetail(updated.health));
+      await this.recoverEndpointFailure(projectId,endpointId);
       return updated;
     };
     if (!idempotencyKey) return update();
@@ -126,7 +127,10 @@ export class EndpointService {
       }
       const detail={modelCount:checked.models.length,...(healthAuditDetail(checked.health)??{})};
       if(checked.health.status==="unavailable")await this.endpointFailure(projectId,userId,"endpoint.model_discover",settlementEndpointId,detail);
-      else await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"accepted",detail);
+      else {
+        await this.audit(projectId,userId,"endpoint.model_discover",settlementEndpointId,"accepted",detail);
+        if(settlementEndpointId)await this.recoverEndpointFailure(projectId,settlementEndpointId);
+      }
       return checked;
     };
     if (!idempotencyKey) return discover();
@@ -149,7 +153,7 @@ export class EndpointService {
       if (checked.health.status === "unavailable") await this.endpointFailure(projectId,userId,"endpoint.health_check",endpointId,healthAuditDetail(checked.health));
       else {
         await this.audit(projectId,userId,"endpoint.health_check",endpointId,"accepted",healthAuditDetail(checked.health));
-        await recoverProjectAlerts(this.store, projectId, "endpoint_failure", endpointId);
+        await this.recoverEndpointFailure(projectId,endpointId);
       }
       return updated;
     };
@@ -168,6 +172,11 @@ export class EndpointService {
       id:newId("audit"),projectId,actorId,action,status:"rejected",resourceKind:"endpoint",resourceId,
       detail:sanitizeProjectAuditDetail({...detail,...(resourceId?{endpointId:resourceId}:{})}),createdAt:timestamp
     },evaluationEndpointId?{endpointId:evaluationEndpointId}:{});
+  }
+
+  private async recoverEndpointFailure(projectId:string,endpointId:string):Promise<void>{
+    await evaluateProjectAlertRules(this.store,projectId,"endpoint_failure",{endpointId});
+    await recoverProjectAlerts(this.store,projectId,"endpoint_failure",{endpointId,subjectActorId:null,unconfiguredFallback:true});
   }
 
   async requireEndpointForProject(projectId: string, endpointId: string): Promise<ModelEndpoint> {
