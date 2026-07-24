@@ -3,9 +3,9 @@
 import { Library, Plus } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Banner, Button, DialogHeader, Layout, LayoutContent, LayoutFooter, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, Layout, LayoutContent, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 
 export type TaskCreateValue = {
   title: string;
@@ -109,7 +109,7 @@ export function TaskCreateDialog({
           </>}
         </div>
       </form>
-    </LayoutContent>} footer={<LayoutFooter><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></div></LayoutFooter>} />
+    </LayoutContent>} footer={<DialogFooter secondaryAction={<Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} />} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />} />} />
   </Dialog>;
 
   function clearError() { setError(""); setErrorCode(""); }

@@ -4,12 +4,11 @@ import {
   DialogHeader,
   Layout,
   LayoutContent,
-  LayoutFooter,
   Text,
 } from "@astryxdesign/core";
 import { useEffect, useId, useState } from "react";
 import type { Endpoint } from "../../lib/api/client";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 
 export function DeleteEndpointDialog({
   endpoint,
@@ -80,8 +79,8 @@ export function DeleteEndpointDialog({
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -90,6 +89,8 @@ export function DeleteEndpointDialog({
                 isDisabled={deleting}
                 onClick={() => handleOpenChange(false)}
               />
+            }
+            primaryAction={
               <Button
                 label={deleting ? "Deleting" : "Delete endpoint"}
                 type="button"
@@ -99,8 +100,8 @@ export function DeleteEndpointDialog({
                 isLoading={deleting}
                 onClick={() => void confirm()}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

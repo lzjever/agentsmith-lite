@@ -9,14 +9,13 @@ import {
   DialogHeader,
   Layout,
   LayoutContent,
-  LayoutFooter,
   NumberInput,
   Selector,
   TextInput,
 } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "active_tasks_limit", label: "Task capacity", metric: "active_tasks", defaultWindowSeconds: null },
@@ -162,8 +161,8 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -172,6 +171,8 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
                 isDisabled={saving}
                 onClick={() => handleOpenChange(false)}
               />
+            }
+            primaryAction={
               <Button
                 label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"}
                 type="submit"
@@ -182,8 +183,8 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
                 isDisabled={saving || !canSave}
                 isLoading={saving}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

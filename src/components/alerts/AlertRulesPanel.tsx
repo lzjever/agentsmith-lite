@@ -1,11 +1,11 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { Banner, Button, DialogHeader, EmptyState, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Text, useToast } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, EmptyState, Heading, IconButton, Layout, LayoutContent, Text, useToast } from "@astryxdesign/core";
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
@@ -259,8 +259,8 @@ function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: {
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -269,6 +269,8 @@ function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: {
                 isDisabled={busy}
                 onClick={() => handleOpenChange(false)}
               />
+            }
+            primaryAction={
               <Button
                 label="Delete"
                 type="button"
@@ -278,8 +280,8 @@ function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: {
                 isLoading={busy}
                 onClick={() => void onConfirm()}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

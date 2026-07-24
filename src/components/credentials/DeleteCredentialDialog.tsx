@@ -4,12 +4,11 @@ import {
   DialogHeader,
   Layout,
   LayoutContent,
-  LayoutFooter,
   Text,
 } from "@astryxdesign/core";
 import { useEffect, useId, useState } from "react";
 import type { ProjectCredential } from "../../lib/api/client";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 
 export function DeleteCredentialDialog({
   credential,
@@ -80,8 +79,8 @@ export function DeleteCredentialDialog({
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -90,6 +89,8 @@ export function DeleteCredentialDialog({
                 isDisabled={deleting}
                 onClick={() => handleOpenChange(false)}
               />
+            }
+            primaryAction={
               <Button
                 label={deleting ? "Deleting" : "Delete credential"}
                 type="button"
@@ -99,8 +100,8 @@ export function DeleteCredentialDialog({
                 isLoading={deleting}
                 onClick={() => void confirm()}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

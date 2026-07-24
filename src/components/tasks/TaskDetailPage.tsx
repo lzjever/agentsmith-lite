@@ -1,7 +1,7 @@
 "use client";
 
 import { Archive, ArrowLeft, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
-import { Banner, Button as AstryxButton, Collapsible, DialogHeader, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Tab, TabList, Text } from "@astryxdesign/core";
+import { Banner, Button as AstryxButton, Collapsible, DialogHeader, Heading, IconButton, Layout, LayoutContent, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection, TaskInteractionSnapshot } from "../../lib/api/client";
@@ -10,7 +10,7 @@ import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { RouteLoadingPage } from "../layout/RouteStatePage";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
 import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskLifecycleActions } from "./TaskLifecycleActions";
@@ -337,7 +337,7 @@ function TaskActionDialog({ idPrefix, open, onOpenChange, title, description, ac
   const titleId = `${idPrefix}-title`;
   const descriptionId = `${idPrefix}-description`;
   const formId = `${idPrefix}-form`;
-  return <Dialog isOpen={open} onOpenChange={changeOpen} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={titleId} aria-describedby={descriptionId}><Layout defaultHasDividers header={<DialogHeader id={titleId} title={title} />} content={<LayoutContent><form id={formId} onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="grid gap-4"><Text id={descriptionId} as="p" display="block" color="secondary">{description}</Text>{failure ? <Banner status="error" title={errorTitle} description={failure} /> : null}</div></form></LayoutContent>} footer={<LayoutFooter><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={loading} onClick={() => changeOpen(false)} /><AstryxButton label={loading ? "Working" : actionLabel} type="submit" form={formId} variant="destructive" size="lg" isLoading={loading} isDisabled={loading} /></div></LayoutFooter>} /></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={changeOpen} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={titleId} aria-describedby={descriptionId}><Layout defaultHasDividers header={<DialogHeader id={titleId} title={title} />} content={<LayoutContent><form id={formId} onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="grid gap-4"><Text id={descriptionId} as="p" display="block" color="secondary">{description}</Text>{failure ? <Banner status="error" title={errorTitle} description={failure} /> : null}</div></form></LayoutContent>} footer={<DialogFooter secondaryAction={<AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={loading} onClick={() => changeOpen(false)} />} primaryAction={<AstryxButton label={loading ? "Working" : actionLabel} type="submit" form={formId} variant="destructive" size="lg" isLoading={loading} isDisabled={loading} />} />} /></Dialog>;
 }
 
 function message(reason: unknown): string {

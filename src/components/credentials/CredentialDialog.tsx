@@ -4,11 +4,10 @@ import {
   DialogHeader,
   Layout,
   LayoutContent,
-  LayoutFooter,
   TextInput,
 } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useId, useState } from "react";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { CredentialSecretField } from "./CredentialSecretField";
 
 export function CredentialDialog({ open, onOpenChange, title, busy, error, onSubmit, submit, includeName = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; busy: boolean; error: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; submit: string; includeName?: boolean }) {
@@ -101,8 +100,8 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -111,6 +110,8 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
                 onClick={() => handleOpenChange(false)}
                 isDisabled={busy}
               />
+            }
+            primaryAction={
               <Button
                 label={busy ? "Working..." : submit}
                 type="submit"
@@ -120,8 +121,8 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
                 isDisabled={busy || !canSubmit}
                 isLoading={busy}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

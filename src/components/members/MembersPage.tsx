@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Banner, Button, DialogHeader, EmptyState, IconButton, Layout, LayoutContent, LayoutFooter, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, EmptyState, IconButton, Layout, LayoutContent, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
@@ -9,7 +9,7 @@ import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { memberIdentityLabel, memberMatchesQuery, removeMemberById } from "./members-page-utils";
 import { MembersTable } from "./MembersTable";
 
@@ -270,14 +270,14 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       <Layout
         header={<DialogHeader title="Add member" subtitle="Choose someone who already belongs to this workspace." onOpenChange={handleInviteOpenChange} hasDivider />}
         content={<LayoutContent>{inviteError ? <Banner className="mb-4" status="error" title="Member could not be added" description={inviteError} endContent={<IconButton label="Dismiss member error" tooltip="Dismiss member error" variant="ghost" size="lg" icon={<X size={15} />} onClick={() => setInviteError("")} />} /> : null}<form id={inviteFormId} className="grid gap-4" onSubmit={addMember}><Selector label="Workspace member" options={eligible.map((member) => ({ value: member.userId, label: workspaceMemberLabel(member) }))} value={candidateUserId} onChange={setCandidateUserId} placeholder="Select a workspace member" isDisabled={busyUserId === "new"} size="lg" /><Selector label="Role" options={[{ value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }, { value: "admin", label: "Admin" }]} value={role} onChange={(value) => setRole(value as Exclude<MemberRole, "owner">)} isDisabled={busyUserId === "new"} size="lg" /></form></LayoutContent>}
-        footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={() => handleInviteOpenChange(false)} isDisabled={busyUserId === "new"} /><Button type="submit" form={inviteFormId} label={busyUserId === "new" ? "Adding..." : "Add member"} variant="primary" size="lg" isDisabled={!canAdd || !candidateUserId || busyUserId === "new"} isLoading={busyUserId === "new"} /></div></LayoutFooter>}
+        footer={<DialogFooter hasDivider secondaryAction={<Button type="button" label="Cancel" variant="ghost" size="lg" onClick={() => handleInviteOpenChange(false)} isDisabled={busyUserId === "new"} />} primaryAction={<Button type="submit" form={inviteFormId} label={busyUserId === "new" ? "Adding..." : "Add member"} variant="primary" size="lg" isDisabled={!canAdd || !candidateUserId || busyUserId === "new"} isLoading={busyUserId === "new"} />} />}
       />
     </Dialog>
     <Dialog isOpen={Boolean(removing)} onOpenChange={(open) => { if (busyUserId !== undefined) return; if (!open) { setRemoving(undefined); setRemoveError(""); } }} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={removeTitleId} aria-describedby={removeDescriptionId}>
       <Layout
         header={<DialogHeader id={removeTitleId} title="Remove member" hasDivider />}
         content={<LayoutContent><Text as="p" id={removeDescriptionId} color="secondary">{removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : "This member is no longer available."}</Text>{removeError ? <Banner className="mt-4" status="error" title="Member could not be removed" description={removeError} /> : null}</LayoutContent>}
-        footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button label="Cancel" variant="ghost" size="lg" isDisabled={busyUserId !== undefined} onClick={() => setRemoving(undefined)} /><Button label={busyUserId === removing?.userId ? "Removing" : "Remove member"} variant="destructive" size="lg" isDisabled={!canManage || busyUserId !== undefined} isLoading={busyUserId === removing?.userId} onClick={() => void removeMember()} /></div></LayoutFooter>}
+        footer={<DialogFooter hasDivider secondaryAction={<Button label="Cancel" variant="ghost" size="lg" isDisabled={busyUserId !== undefined} onClick={() => setRemoving(undefined)} />} primaryAction={<Button label={busyUserId === removing?.userId ? "Removing" : "Remove member"} variant="destructive" size="lg" isDisabled={!canManage || busyUserId !== undefined} isLoading={busyUserId === removing?.userId} onClick={() => void removeMember()} />} />}
       />
     </Dialog>
     <Dialog isOpen={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)} purpose="info" width="min(34rem, calc(100vw - 2rem))" aria-label="Member details">{selected ? <Layout header={<DialogHeader title="Member details" subtitle="Project membership identity." onOpenChange={(open) => !open && setSelected(undefined)} hasDivider />} content={<LayoutContent><dl className="grid gap-4 sm:grid-cols-[8rem_1fr]"><dt><Text color="secondary">Name</Text></dt><dd><Text wordBreak="break-all">{memberIdentityLabel(selected)}</Text></dd><dt><Text color="secondary">Email</Text></dt><dd><Text wordBreak="break-all">{selected.email}</Text></dd><dt><Text color="secondary">Role</Text></dt><dd><Text>{selected.role}</Text></dd><dt><Text color="secondary">Joined</Text></dt><dd><Text>{formatLocalDateTime(selected.createdAt)}</Text></dd><dt><Text color="secondary">Updated</Text></dt><dd><Text>{formatLocalDateTime(selected.updatedAt)}</Text></dd></dl></LayoutContent>} /> : null}</Dialog>

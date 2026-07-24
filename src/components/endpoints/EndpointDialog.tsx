@@ -10,7 +10,6 @@ import {
   IconButton,
   Layout,
   LayoutContent,
-  LayoutFooter,
   NumberInput,
   Selector,
   Text,
@@ -21,7 +20,7 @@ import type {
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -252,8 +251,8 @@ export function EndpointDialog({
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 type="button"
                 variant="ghost"
@@ -262,6 +261,8 @@ export function EndpointDialog({
                 onClick={() => handleOpenChange(false)}
                 isDisabled={saving || discovering}
               />
+            }
+            primaryAction={
               <Button
                 type="submit"
                 form={formId}
@@ -278,8 +279,8 @@ export function EndpointDialog({
                   input.capabilities.length === 0
                 }
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

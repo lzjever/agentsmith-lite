@@ -2,11 +2,11 @@
 
 import { FilePlus2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Banner, Button, DialogHeader, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, Heading, IconButton, Layout, LayoutContent, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { AlertDialog, Dialog } from "../ui/Dialog";
+import { AlertDialog, Dialog, DialogFooter } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
@@ -268,8 +268,8 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
           </LayoutContent>
         }
         footer={
-          <LayoutFooter>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <DialogFooter
+            secondaryAction={
               <Button
                 label="Cancel"
                 type="button"
@@ -278,6 +278,8 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
                 isDisabled={deleting}
                 onClick={() => setDeleteOpen(false)}
               />
+            }
+            primaryAction={
               <Button
                 label={deleting ? "Deleting" : "Delete entry"}
                 type="button"
@@ -287,8 +289,8 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
                 isLoading={deleting}
                 onClick={() => void remove()}
               />
-            </div>
-          </LayoutFooter>
+            }
+          />
         }
       />
     </Dialog>

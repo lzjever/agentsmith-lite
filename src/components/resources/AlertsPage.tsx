@@ -10,7 +10,6 @@ import {
   IconButton,
   Layout,
   LayoutContent,
-  LayoutFooter,
   MoreMenu,
   Spinner,
   Tab,
@@ -62,7 +61,7 @@ import {
 import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog } from "../ui/Dialog";
+import { Dialog, DialogFooter } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -563,8 +562,8 @@ function ProjectAlertsPage({
             </LayoutContent>
           }
           footer={
-            <LayoutFooter>
-              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <DialogFooter
+              secondaryAction={
                 <Button
                   label="Cancel"
                   type="button"
@@ -578,6 +577,8 @@ function ProjectAlertsPage({
                     })
                   }
                 />
+              }
+              primaryAction={
                 <Button
                   label={dismissBusy ? "Dismissing" : "Dismiss"}
                   type="button"
@@ -589,8 +590,8 @@ function ProjectAlertsPage({
                     if (dismiss) void mutate(dismiss, "dismiss");
                   }}
                 />
-              </div>
-            </LayoutFooter>
+              }
+            />
           }
         />
       </Dialog>
