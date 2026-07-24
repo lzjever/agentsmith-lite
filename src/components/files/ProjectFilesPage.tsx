@@ -1,17 +1,14 @@
 "use client";
 
-import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Button, Dialog, DialogHeader, FileInput, IconButton, Skeleton, TextInput } from "@astryxdesign/core";
+import { Banner, Button, Collapsible, Dialog, DialogHeader, EmptyState, FileInput, Heading, IconButton, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { ErrorState } from "../ui/error-state";
-import { toast } from "../ui/toast";
 import { showFileDetails, sortFileEntries } from "./fileBrowserState";
 
 type LoadState = "loading" | "ready" | "error";
@@ -31,6 +28,7 @@ export function ProjectFilesPage({ workspaceId, projectId }: { workspaceId?: str
 function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
   const projectBasePath = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}` : "..";
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   const mounted = useRef(true);
   const librariesRef = useRef<FileLibrary[]>([]);
   const selectedLibraryRef = useRef<string | null>(null);
@@ -49,6 +47,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [entries, setEntries] = useState<ProjectFile[]>([]);
   const [filesState, setFilesState] = useState<LoadState>("ready");
   const [filesMessage, setFilesMessage] = useState("");
+  const [filesNotice, setFilesNotice] = useState("");
   const [selected, setSelected] = useState<ProjectFile>();
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -65,6 +64,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [deleteLibraryTarget, setDeleteLibraryTarget] = useState<FileLibrary>();
   const [libraryName, setLibraryName] = useState("");
   const [libraryDialogError, setLibraryDialogError] = useState("");
+  const [libraryDeleteError, setLibraryDeleteError] = useState("");
+  const [replaceError, setReplaceError] = useState("");
   const [libraryMutationPending, setLibraryMutationPending] = useState(false);
 
   const resetFileSelection = useCallback(() => {
@@ -263,17 +264,19 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
         previewVersion.current += 1;
         setPreview((current) => invalidateFilePreview(current, written.path));
         setReplaceTarget(undefined);
+        setReplaceError("");
       }
-      toast.success(overwrite ? "File replaced" : "File uploaded");
+      showToast({ body: overwrite ? "File replaced" : "File uploaded", type: "info" });
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("library-file.upload", requestIdentity);
       if (await revokeWriteAccess(error, libraryId)) return;
       if (selectedLibraryRef.current !== libraryId) return;
       if (!overwrite && error instanceof ApiError && error.status === 409 && error.message === "Project file already exists") {
+        setReplaceError("");
         setReplaceTarget({ libraryId, file, path: uploadPath });
       } else if (overwrite) {
-        throw new Error(errorMessage(error, "File could not be replaced."));
+        setReplaceError(errorMessage(error, "File could not be replaced."));
       } else {
         setUploadFailure({ libraryId, file, path: uploadPath, message: errorMessage(error, "File could not be uploaded."), ...(error instanceof ApiError && error.code ? { code: error.code } : {}) });
       }
@@ -319,7 +322,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       if (!mounted.current || version !== previewVersion.current) return;
       if (isMissingFile(error)) {
         forgetFile(entry.path);
-        toast.error("File no longer exists.");
+        setFilesNotice("File no longer exists. It was removed from this File Library view.");
         return;
       }
       setPreviewError(errorMessage(error, "File preview could not be loaded."));
@@ -341,7 +344,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       mutationKeys.complete("library-file.delete", requestIdentity);
       if (!mounted.current || selectedLibraryRef.current !== libraryId) return;
       forgetFile(target.path);
-      toast.success(alreadyMissing ? "File no longer exists" : "File deleted");
+      if (alreadyMissing) setFilesNotice("File no longer exists. The File Library view has been updated.");
+      else showToast({ body: "File deleted", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("library-file.delete", requestIdentity);
       if (await revokeWriteAccess(error, libraryId)) return;
@@ -378,7 +382,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       setLibraries(next);
       setCreateOpen(false);
       selectLibrary(created.id);
-      toast.success("File Library created");
+      showToast({ body: "File Library created", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("file-library.create", requestIdentity);
       setLibraryDialogError(errorMessage(error, "File Library could not be created."));
@@ -403,7 +407,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       librariesRef.current = next;
       setLibraries(next);
       setRenameTarget(undefined);
-      toast.success("File Library renamed");
+      showToast({ body: "File Library renamed", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("file-library.rename", requestIdentity);
       setLibraryDialogError(errorMessage(error, "File Library could not be renamed."));
@@ -417,6 +421,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     const target = deleteLibraryTarget;
     const requestIdentity = target.id;
     setLibraryMutationPending(true);
+    setLibraryDeleteError("");
     try {
       await apiClient.deleteFileLibrary(projectId, target.id, mutationKeys.key("file-library.delete", requestIdentity));
       mutationKeys.complete("file-library.delete", requestIdentity);
@@ -430,10 +435,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       applyLocation(fallback, "");
       setEntries([]);
       writeFileBrowserLocation(fallback, "", true);
-      toast.success("File Library deleted");
+      showToast({ body: "File Library deleted", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("file-library.delete", requestIdentity);
-      throw new Error(errorMessage(error, "File Library could not be deleted."));
+      setLibraryDeleteError(errorMessage(error, "File Library could not be deleted."));
     } finally {
       if (mounted.current) setLibraryMutationPending(false);
     }
@@ -448,16 +453,17 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Browse and manage the File Libraries available in this project." actions={<div className="flex items-center gap-2"><IconButton label="Refresh File Libraries" tooltip="Refresh File Libraries" variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void loadLibraries()} isDisabled={librariesState === "loading" || mutationBusy} />{canCreateLibrary ? <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={openCreateLibrary} /> : null}</div>} />}>
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
       <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
-      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface transition-colors ${dropReady ? "border-accent ring-2 ring-accent/25" : "border-subtle"}`} aria-label="Library files" aria-busy={filesState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
+      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={filesState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
         {!selectedLibrary ? <NoLibrarySelected canCreate={canCreateLibrary} onCreate={openCreateLibrary} /> : <>
           <p className="sr-only" aria-live="polite">{dropReady ? "Drop a file to upload" : ""}</p>
-          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-subtle px-3">
-            <nav className="min-w-0 overflow-x-auto" aria-label="Library path"><ol className="flex min-w-max items-center gap-1 text-sm text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-tertiary" aria-hidden="true" /> : null}<button type="button" className="max-w-56 truncate rounded-sm px-1.5 py-1 hover:bg-surface-low hover:text-foreground" title={crumb.label} onClick={() => navigate(crumb.path)}>{crumb.label}</button></li>)}</ol></nav>
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border px-3">
+            <nav className="min-w-0 overflow-x-auto" aria-label="Library path"><ol className="flex min-w-max items-center gap-1 text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-icon-secondary" aria-hidden="true" /> : null}<button type="button" className="max-w-56 truncate rounded-sm px-1.5 py-1 hover:bg-overlay-hover hover:text-primary" title={crumb.label} onClick={() => navigate(crumb.path)}><Text type="supporting" color="secondary">{crumb.label}</Text></button></li>)}</ol></nav>
             {canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}
           </div>
-          <div className="border-b border-subtle p-3"><TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} hasClear placeholder="Filter files" size="lg" width="100%" /></div>
+          <div className="border-b border-border p-3"><TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} hasClear placeholder="Filter files" size="lg" width="100%" /></div>
+          {filesNotice ? <Banner className="mx-3 mt-3" status="info" title="File Library updated" description={filesNotice} isDismissable onDismiss={() => setFilesNotice("")} /> : null}
           {filesMessage ? <InlineError message={filesMessage} onDismiss={() => setFilesMessage("")} /> : null}
-          {uploadFailure ? <div className="mx-3 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{uploadFailure.code === "project_file_bytes_limit_reached" ? <><strong>File storage limit reached.</strong> Delete files or ask a project administrator to change the limit. <Link className="font-medium text-foreground hover:underline" href={`${projectBasePath}/policy`}>Open resource policy</Link>.</> : uploadFailure.message}</span><div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button label="Retry upload" variant="ghost" size="md" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path, uploadFailure.libraryId)} isDisabled={mutationBusy} /> : null}<IconButton label="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={mutationBusy} /></div></div> : null}
+          {uploadFailure ? <Banner className="mx-3 mt-3" status="error" title={uploadFailure.code === "project_file_bytes_limit_reached" ? "File storage limit reached" : "File upload failed"} description={uploadFailure.code === "project_file_bytes_limit_reached" ? <>Delete files or ask a project administrator to change the limit. <Link className="underline" href={`${projectBasePath}/policy`}><Text weight="medium">Open resource policy</Text></Link>.</> : uploadFailure.message} endContent={<div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button label="Retry upload" variant="ghost" size="md" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path, uploadFailure.libraryId)} isDisabled={mutationBusy} /> : null}<IconButton label="Refresh files" tooltip="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={mutationBusy} /></div>} /> : null}
           {filesState === "loading" ? <FileBrowserLoading /> : null}
           {filesState === "error" ? <FileBrowserError onRetry={loadFiles} /> : null}
           {filesState === "ready" && entries.length === 0 ? <FileBrowserEmpty nested={path !== ""} canUpload={canWriteFiles} onUpload={() => input.current?.click()} /> : null}
@@ -465,31 +471,31 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
           {filesState === "ready" && entries.length > 0 && !noMatches ? <FileBrowserList entries={visibleEntries} parent={parent} selectedPath={selected?.path} onNavigate={navigate} onSelect={selectFile} /> : null}
         </>}
       </section>
-      <aside className="hidden rounded-md border border-subtle bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /></aside>
+      <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /></aside>
     </div>
-    <div className="lg:hidden">{selected ? <Button label="File details" variant="ghost" size="lg" className="w-full justify-between" aria-expanded={mobileDetailsOpen} endContent={<ChevronRight className={mobileDetailsOpen ? "rotate-90 transition-transform" : "transition-transform"} size={16} />} onClick={() => setMobileDetailsOpen((open) => !open)} /> : null}{showFileDetails(selected, true, mobileDetailsOpen) ? <div className="mt-2 rounded-md border border-subtle bg-surface p-4"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /></div> : null}</div>
-    {previewError && selected ? <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-error/30 bg-error/10 px-4 py-3" role="alert"><p className="text-sm text-error">{previewError}</p><div className="flex items-center gap-2"><Button label="Try preview again" variant="ghost" size="md" icon={<RefreshCw size={14} />} onClick={() => void openPreview(selected)} /><IconButton label="Dismiss preview error" variant="ghost" icon={<X size={15} />} onClick={() => setPreviewError("")} /></div></div> : null}
-    {preview ? <div className="mt-4 rounded-md border border-subtle bg-surface p-4"><div className="mb-3 flex min-w-0 justify-between gap-3"><strong className="truncate" title={preview.name}>{preview.name}</strong><IconButton label="Close preview" variant="ghost" icon={<X size={15} />} onClick={() => { previewVersion.current += 1; if (preview.kind === "image") URL.revokeObjectURL(preview.value); setPreview(null); }} /></div>{preview.kind === "image" ? <img className="max-h-96 max-w-full" src={preview.value} alt={preview.name} /> : <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{preview.value}</pre>}</div> : null}
+    <div className="lg:hidden">{selected ? <Collapsible trigger="File details" isOpen={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}><div className="mt-2 rounded-md border border-border bg-surface p-4">{showFileDetails(selected, true, mobileDetailsOpen) ? <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /> : null}</div></Collapsible> : null}</div>
+    {previewError && selected ? <Banner className="mt-4" status="error" title="File preview unavailable" description={previewError} endContent={<div className="flex items-center gap-2"><Button label="Try preview again" variant="ghost" size="md" icon={<RefreshCw size={14} />} onClick={() => void openPreview(selected)} /><IconButton label="Dismiss preview error" tooltip="Dismiss preview error" variant="ghost" icon={<X size={15} />} onClick={() => setPreviewError("")} /></div>} /> : null}
+    {preview ? <div className="mt-4 rounded-md border border-border bg-surface p-4"><div className="mb-3 flex min-w-0 justify-between gap-3"><Text weight="semibold" maxLines={1}>{preview.name}</Text><IconButton label="Close preview" tooltip="Close preview" variant="ghost" icon={<X size={15} />} onClick={() => { previewVersion.current += 1; if (preview.kind === "image") URL.revokeObjectURL(preview.value); setPreview(null); }} /></div>{preview.kind === "image" ? <img className="max-h-96 max-w-full" src={preview.value} alt={preview.name} /> : <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words"><Text type="code">{preview.value}</Text></pre>}</div> : null}
     <LibraryNameDialog mode="create" open={createOpen} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!libraryMutationPending) { setCreateOpen(open); if (!open) setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={createLibrary} />
     <LibraryNameDialog mode="rename" open={Boolean(renameTarget)} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setRenameTarget(undefined); setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={renameLibrary} />
-    <ConfirmationDialog open={Boolean(deleteLibraryTarget)} onOpenChange={(open) => !open && !libraryMutationPending && setDeleteLibraryTarget(undefined)} title="Delete File Library?" description={deleteLibraryTarget ? <>Delete <strong className="text-foreground">{deleteLibraryTarget.name}</strong>? The server will only delete an unbound, empty library.</> : ""} confirmText="Delete library" confirmDisabled={libraryMutationPending} onConfirm={deleteLibrary} errorContext="File Library could not be deleted" />
+    <DeleteLibraryDialog library={deleteLibraryTarget} pending={libraryMutationPending} error={libraryDeleteError} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setDeleteLibraryTarget(undefined); setLibraryDeleteError(""); } }} onConfirm={deleteLibrary} />
     <DeleteFileDialog entry={deleteFileTarget} deleting={deletingFile} onCancel={() => !deletingFile && setDeleteFileTarget(undefined)} onConfirm={removeFile} />
-    <ConfirmationDialog open={Boolean(replaceTarget)} onOpenChange={(open) => !open && !uploading && setReplaceTarget(undefined)} title={`Replace ${replaceTarget?.file.name ?? "file"}?`} description="A file with this name already exists in this folder. This will permanently replace its contents." confirmText="Replace file" variant="default" confirmDisabled={uploading} onConfirm={() => replaceTarget ? upload(replaceTarget.file, true, replaceTarget.path, replaceTarget.libraryId) : undefined} errorContext="File could not be replaced" />
+    <ReplaceFileDialog target={replaceTarget} pending={uploading} error={replaceError} onOpenChange={(open) => { if (!open && !uploading) { setReplaceTarget(undefined); setReplaceError(""); } }} onConfirm={() => replaceTarget ? upload(replaceTarget.file, true, replaceTarget.path, replaceTarget.libraryId) : undefined} />
   </PageLayout>;
 }
 
 function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBasePath, canCreate, mutationBusy, onRetry, onSelect, onCreate, onRename, onDelete }: { state: LoadState; message: string; libraries: FileLibrary[]; selectedLibraryId: string | null; projectBasePath: string; canCreate: boolean; mutationBusy: boolean; onRetry: () => Promise<void>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void }) {
-  return <section className="flex min-h-0 max-h-72 flex-col overflow-hidden rounded-md border border-subtle bg-surface lg:max-h-none" aria-label="File Libraries">
-    <div className="flex min-h-12 items-center justify-between border-b border-subtle px-3"><div className="min-w-0"><h2 className="type-caption text-tertiary">File Libraries</h2><p className="mt-0.5 text-xs text-secondary">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</p></div>{canCreate ? <IconButton label="Create library" tooltip="Create library" variant="ghost" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}</div>
+  return <section className="flex min-h-0 max-h-72 flex-col overflow-hidden rounded-md border border-border bg-surface lg:max-h-none" aria-label="File Libraries">
+    <div className="flex min-h-12 items-center justify-between border-b border-border px-3"><div className="min-w-0"><Heading level={3}>File Libraries</Heading><Text type="supporting" color="secondary" display="block" className="mt-0.5">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</Text></div>{canCreate ? <IconButton label="Create library" tooltip="Create library" variant="ghost" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}</div>
     <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
       {state === "loading" ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton height={48} /><Skeleton height={48} /></div> : null}
-      {state === "error" ? <ErrorState title="Libraries unavailable" message={message} onRetry={() => void onRetry()} /> : null}
-      {state === "ready" && libraries.length === 0 ? <p className="p-3 text-sm text-secondary">No File Libraries are available in this project.</p> : null}
+      {state === "error" ? <Banner status="error" title="Libraries unavailable" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
+      {state === "ready" && libraries.length === 0 ? <EmptyState isCompact title="No File Libraries available" /> : null}
       {state === "ready" ? libraries.map((library) => {
         const active = library.id === selectedLibraryId;
         const boundLabel = library.boundTask ? `Bound to ${library.boundTask.title || "Task"}` : null;
-        return <div key={library.id} className={`group flex items-center gap-1 rounded-sm ${active ? "bg-accent/10 ring-1 ring-inset ring-accent/20" : "hover:bg-surface-low"}`}>
-          <div className="min-w-0 flex-1 py-2"><button type="button" className="flex w-full min-w-0 items-center gap-2 px-2 text-left" aria-current={active ? "true" : undefined} aria-label={`Select library ${library.name}`} onClick={() => onSelect(library.id)} title={library.name}><FolderOpen className={`size-4 shrink-0 ${active ? "text-accent" : "text-tertiary"}`} /><span className="truncate text-sm text-foreground">{library.name}</span></button>{library.boundTask && boundLabel ? <Link className="mt-1 block truncate pl-8 pr-2 text-xs text-warning hover:underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`} title={boundLabel}>{boundLabel}</Link> : <span className="mt-1 block pl-8 text-xs text-tertiary">Available</span>}</div>
+        return <div key={library.id} className={`group flex items-center gap-1 rounded-sm ${active ? "bg-accent-muted ring-1 ring-inset ring-accent" : "hover:bg-overlay-hover"}`}>
+          <div className="min-w-0 flex-1 py-2"><button type="button" className="flex w-full min-w-0 items-center gap-2 px-2 text-left" aria-current={active ? "true" : undefined} aria-label={`Select library ${library.name}`} onClick={() => onSelect(library.id)} title={library.name}><FolderOpen className={`size-4 shrink-0 ${active ? "text-accent-text" : "text-icon-secondary"}`} /><Text maxLines={1}>{library.name}</Text></button>{library.boundTask && boundLabel ? <Link className="mt-1 block truncate pl-8 pr-2 text-warning hover:underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`} title={boundLabel}><Text type="supporting" color="inherit">{boundLabel}</Text></Link> : <Text type="supporting" color="secondary" display="block" className="mt-1 pl-8">Available</Text>}</div>
           {active ? <div className="flex shrink-0 items-center pr-1"><IconButton label={`Rename ${library.name}`} tooltip={library.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" className="h-7 w-7" icon={<Pencil size={14} />} isDisabled={!library.capabilities.canRename || mutationBusy} onClick={() => onRename(library)} /><IconButton label={`Delete ${library.name}`} tooltip={library.boundTask ? "This library is bound to a Task and cannot be deleted" : library.capabilities.canDelete ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" className="h-7 w-7 text-error" icon={<Trash2 size={14} />} isDisabled={!library.capabilities.canDelete || mutationBusy} onClick={() => onDelete(library)} /></div> : null}
         </div>;
       }) : null}
@@ -498,7 +504,7 @@ function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBa
 }
 
 function NoLibrarySelected({ canCreate, onCreate }: { canCreate: boolean; onCreate: () => void }) {
-  return <div className="grid min-h-[28rem] place-items-center px-6 text-center"><div><FolderOpen className="mx-auto size-8 text-tertiary" /><h2 className="mt-3 type-title">No File Libraries</h2><p className="mt-2 max-w-sm text-sm text-secondary">Create a File Library to store and browse files for this project.</p>{canCreate ? <Button label="Create library" variant="primary" size="lg" className="mt-4" icon={<Plus size={16} />} onClick={onCreate} /> : null}</div></div>;
+  return <EmptyState className="min-h-[28rem]" icon={<FolderOpen />} title="No File Libraries" description="Create a File Library to store and browse files for this project." {...(canCreate ? { actions: <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={onCreate} /> } : {})} />;
 }
 
 function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onNameChange, onSubmit }: { mode: "create" | "rename"; open: boolean; name: string; error: string; pending: boolean; onOpenChange: (open: boolean) => void; onNameChange: (name: string) => void; onSubmit: (event: FormEvent) => void }) {
@@ -506,11 +512,11 @@ function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onN
   const title = create ? "Create File Library" : "Rename File Library";
   const subtitle = create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move.";
   const handleOpenChange = (next: boolean) => { if (!pending) onOpenChange(next); };
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />{error ? <div role="alert" className="mx-5 mt-4 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error md:mx-6">{error}</div> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form><footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => handleOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" icon={pending ? <Loader2 className="size-4 animate-spin" /> : undefined} isDisabled={pending || !name.trim()} /></footer></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form><footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => handleOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" isLoading={pending} isDisabled={pending || !name.trim()} /></footer></Dialog>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) {
-  return <div className="mx-3 mt-3 flex items-start justify-between gap-3 rounded-sm border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><span>{message}</span><IconButton label="Dismiss error" variant="ghost" icon={<X size={15} />} onClick={onDismiss} /></div>;
+  return <Banner className="mx-3 mt-3" status="error" title="File operation unavailable" description={message} isDismissable onDismiss={onDismiss} />;
 }
 
 function FileBrowserLoading() {
@@ -518,34 +524,60 @@ function FileBrowserLoading() {
 }
 
 function FileBrowserError({ onRetry }: { onRetry: () => Promise<unknown> }) {
-  return <ErrorState title="Files unavailable" message="This library directory could not be loaded." onRetry={() => void onRetry()} />;
+  return <Banner className="m-3" status="error" title="Files unavailable" description="This library directory could not be loaded." endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} />;
 }
 
 function FileBrowserEmpty({ nested, canUpload, onUpload }: { nested: boolean; canUpload: boolean; onUpload: () => void }) {
-  return <div className="grid min-h-64 place-items-center px-6 text-center"><div><FolderUp className="mx-auto size-7 text-tertiary" /><h2 className="mt-3 type-title">{nested ? "This folder is empty" : "No files yet"}</h2><p className="mt-2 text-sm text-secondary">{nested ? "Use the path trail to return to another folder." : "Upload a file to this library."}</p>{canUpload ? <Button label="Upload file" className="mt-4" variant="secondary" size="lg" icon={<Upload size={16} />} onClick={onUpload} /> : null}</div></div>;
+  return <EmptyState className="min-h-64" icon={<FolderUp />} title={nested ? "This folder is empty" : "No files yet"} description={nested ? "Use the path trail to return to another folder." : "Upload a file to this library."} {...(canUpload ? { actions: <Button label="Upload file" variant="secondary" size="lg" icon={<Upload size={16} />} onClick={onUpload} /> } : {})} />;
 }
 
 function FileBrowserNoMatches({ query, onClear }: { query: string; onClear: () => void }) {
-  return <div className="grid min-h-64 place-items-center px-6 text-center"><div><Search className="mx-auto size-7 text-tertiary" /><h2 className="mt-3 type-title">No matching files</h2><p className="mt-2 max-w-md break-words text-sm text-secondary">No files in this folder match "{query}".</p><Button label="Clear filter" className="mt-3" variant="ghost" size="lg" onClick={onClear} /></div></div>;
+  return <EmptyState className="min-h-64" icon={<Search />} title="No matching files" description={`No files in this folder match "${query}".`} actions={<Button label="Clear filter" variant="ghost" size="lg" onClick={onClear} />} />;
 }
 
 function FileBrowserList({ entries, parent, selectedPath, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | undefined; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
-  return <div className="divide-y divide-subtle">{parent !== null ? <button type="button" className="grid w-full grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 text-left text-secondary hover:bg-surface-low hover:text-foreground" onClick={() => onNavigate(parent)}><FolderUp className="size-5" /><span>Up one folder</span><span className="text-xs text-tertiary">..</span></button> : null}{entries.map((entry) => <FileRow key={entry.path} entry={entry} selected={entry.path === selectedPath} onNavigate={onNavigate} onSelect={onSelect} />)}</div>;
+  return <div className="divide-y divide-border">{parent !== null ? <button type="button" className="grid w-full grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 text-left text-secondary hover:bg-overlay-hover hover:text-primary" onClick={() => onNavigate(parent)}><FolderUp className="size-5" /><span>Up one folder</span><Text type="supporting" color="secondary">..</Text></button> : null}{entries.map((entry) => <FileRow key={entry.path} entry={entry} selected={entry.path === selectedPath} onNavigate={onNavigate} onSelect={onSelect} />)}</div>;
 }
 
 function FileRow({ entry, selected, onNavigate, onSelect }: { entry: ProjectFile; selected: boolean; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
   const directory = entry.type === "directory";
-  return <div className={`grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 ${selected ? "bg-surface-low" : "hover:bg-surface-low"}`}><span className="text-icon-default">{directory ? <Folder className="size-5" /> : <FileText className="size-5" />}</span><button type="button" className="min-w-0 truncate text-left text-sm text-foreground" title={entry.name} onClick={() => directory ? onNavigate(entry.path) : onSelect(entry)}>{entry.name}</button><button type="button" className="rounded-sm px-2 py-1 text-xs text-tertiary hover:bg-surface hover:text-foreground" aria-label={`Show details for ${entry.name}`} onClick={() => onSelect(entry)}>{directory ? "Folder" : formatBytes(entry.size ?? 0)}</button></div>;
+  return <div className={`grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 ${selected ? "bg-muted" : "hover:bg-overlay-hover"}`}><span className="text-icon-secondary">{directory ? <Folder className="size-5" /> : <FileText className="size-5" />}</span><button type="button" className="min-w-0 truncate text-left text-primary" title={entry.name} onClick={() => directory ? onNavigate(entry.path) : onSelect(entry)}><Text type="supporting">{entry.name}</Text></button><button type="button" className="rounded-sm px-2 py-1 text-secondary hover:bg-overlay-hover hover:text-primary" aria-label={`Show details for ${entry.name}`} onClick={() => onSelect(entry)}><Text type="supporting" color="secondary">{directory ? "Folder" : formatBytes(entry.size ?? 0)}</Text></button></div>;
 }
 
 function FileDetails({ entry, projectId, library, mutationBusy, onDelete, onPreview }: { entry: ProjectFile | undefined; projectId: string; library: FileLibrary | undefined; mutationBusy: boolean; onDelete: (entry: ProjectFile) => void; onPreview: (entry: ProjectFile) => void }) {
-  if (!entry || !library) return <div className="grid min-h-48 place-items-center text-center text-sm text-secondary"><span>Select a file to view its details.</span></div>;
+  if (!entry || !library) return <EmptyState className="min-h-48" isCompact title="No file selected" description="Select a file to view its details." />;
   const file = entry.type === "file";
-  return <div className="space-y-4"><div><p className="type-caption text-tertiary">{file ? "File" : "Folder"}</p><h2 className="mt-2 break-words type-title">{entry.name}</h2><p className="mt-1 break-all text-sm text-secondary">{entry.path}</p></div><dl className="space-y-3 border-y border-subtle py-3 text-sm"><div className="flex justify-between gap-3"><dt className="text-secondary">Size</dt><dd className="text-foreground">{file ? formatBytes(entry.size ?? 0) : "-"}</dd></div>{file ? <div className="flex justify-between gap-3"><dt className="text-secondary">Type</dt><dd className="break-all text-right text-foreground">{entry.mediaType ?? "application/octet-stream"}</dd></div> : null}<div className="flex justify-between gap-3"><dt className="text-secondary">Updated</dt><dd className="text-right text-foreground">{formatDate(entry.updatedAt)}</dd></div></dl>{file ? <div className="flex flex-wrap gap-2"><a className="inline-flex min-h-9 items-center justify-center gap-2 rounded-sm border border-border-input bg-surface px-3 text-sm text-primary hover:bg-hover hover:text-foreground" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)}><Download size={16} />Download</a>{isPreviewableProjectFile(entry) && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}</div>;
+  return <div className="space-y-4"><div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div><dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>{file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{isPreviewableProjectFile(entry) && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}</div>;
 }
 
 export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { entry: ProjectFile | undefined; deleting: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
-  return <ConfirmationDialog open={entry !== undefined} onOpenChange={(open) => !open && onCancel()} title="Delete file?" description={entry ? <>This permanently removes <strong className="text-foreground">{entry.name}</strong> from this File Library.</> : ""} confirmText={deleting ? "Deleting" : "Delete"} confirmDisabled={deleting} onConfirm={onConfirm} errorContext="File could not be deleted" />;
+  const [error, setError] = useState("");
+  useEffect(() => setError(""), [entry?.path]);
+  async function confirm() {
+    setError("");
+    try {
+      await onConfirm();
+    } catch (cause) {
+      setError(errorMessage(cause, "File could not be deleted."));
+    }
+  }
+  const handleOpenChange = (open: boolean) => {
+    if (!open && !deleting) {
+      setError("");
+      onCancel();
+    }
+  };
+  return <Dialog isOpen={entry !== undefined} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete file"><DialogHeader title="Delete file?" subtitle="This permanently removes the file from this File Library." onOpenChange={handleOpenChange} hasDivider />{entry ? <Text as="p" display="block" color="secondary" className="px-5 pt-4 md:px-6">File: <Text weight="semibold">{entry.name}</Text></Text> : null}{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={deleting} onClick={() => handleOpenChange(false)} /><Button label="Delete" variant="destructive" size="lg" isDisabled={deleting} isLoading={deleting} onClick={() => void confirm()} /></footer></Dialog>;
+}
+
+function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm }: { library: FileLibrary | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
+  const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
+  return <Dialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete File Library"><DialogHeader title="Delete File Library?" subtitle="The server will only delete an unbound, empty library." onOpenChange={handleOpenChange} hasDivider />{library ? <Text as="p" display="block" color="secondary" className="px-5 pt-4 md:px-6">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File Library could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Delete library" variant="destructive" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></footer></Dialog>;
+}
+
+function ReplaceFileDialog({ target, pending, error, onOpenChange, onConfirm }: { target: { file: File } | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> | undefined }) {
+  const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
+  return <Dialog isOpen={Boolean(target)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Replace file"><DialogHeader title={`Replace ${target?.file.name ?? "file"}?`} subtitle="A file with this name already exists in this folder. This permanently replaces its contents." onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File could not be replaced" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Replace file" variant="primary" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></footer></Dialog>;
 }
 
 function normalizeLibraryPath(input: string | null | undefined): string {

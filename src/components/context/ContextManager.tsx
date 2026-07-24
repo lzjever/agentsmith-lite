@@ -2,13 +2,10 @@
 
 import { FilePlus2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, IconButton, Selector, Tab, TabList, TextArea, TextInput } from "@astryxdesign/core";
+import { AlertDialog, Banner, Button, Dialog, DialogHeader, Heading, IconButton, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
@@ -25,6 +22,7 @@ export function ContextManager({ workspaceId, projectId }: { workspaceId: string
 
 function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; projectId?: string }) {
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   const mounted = useRef(true);
   const tabs: ScopeTab[] = projectId ? [
     { scope: "workspace_shared", label: "Workspace shared", description: "Available to members of this workspace." },
@@ -48,6 +46,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>();
   const loadVersion = useRef(0);
   const projectScope = scope === "project_shared" || scope === "project_personal";
@@ -177,12 +176,13 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         else items.push(saved);
         return { ...current, items };
       });
-      setSelectedKey(saved.contextKey); setContextKey(saved.contextKey); setContent(saved.content); setContentType(saved.contentType); setConflict(false); setError(""); toast.success("Context saved");
-    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = await revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.code === "context_version_conflict"; if (!accessRevoked) { setConflict(nextConflict); setError(message(reason, "Context could not be saved.")); } toast.error(nextConflict ? "Context changed elsewhere" : message(reason, "Context could not be saved")); } finally { if(mounted.current)setSaving(false); }
+      setSelectedKey(saved.contextKey); setContextKey(saved.contextKey); setContent(saved.content); setContentType(saved.contentType); setConflict(false); setError(""); showToast({ body: "Context saved" });
+    } catch (reason) { if(reason instanceof ApiError)mutationKeys.complete("context.save",identity);if(!mounted.current)return;const accessRevoked = await revokeWriteAccess(reason); const nextConflict = !accessRevoked && reason instanceof ApiError && reason.code === "context_version_conflict"; if (!accessRevoked) { setConflict(nextConflict); setError(nextConflict ? "Context changed elsewhere. Reload the latest version before saving again." : message(reason, "Context could not be saved.")); } } finally { if(mounted.current)setSaving(false); }
   }
   async function remove() {
     if (!result?.canWrite || !selected || deleting || saving) return;
     setDeleting(true);
+    setDeleteError("");
     const input = { workspaceId, scope, contextKey: selected.contextKey, expectedVersion: selected.version, ...(projectScope && projectId ? { projectId } : {}) };
     const identity = JSON.stringify(input);
     try {
@@ -191,11 +191,11 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       if (!mounted.current) return;
       const remaining = result.items.filter((entry) => entry.id !== selected.id);
       const first = remaining[0];
-      setResult({ ...result, items: remaining }); setSelectedKey(first?.contextKey); setContextKey(first?.contextKey ?? ""); setContent(first?.content ?? ""); setContentType(first?.contentType ?? "text"); setDeleteOpen(false); setError(""); toast.success("Context deleted");
+      setResult({ ...result, items: remaining }); setSelectedKey(first?.contextKey); setContextKey(first?.contextKey ?? ""); setContent(first?.content ?? ""); setContentType(first?.contentType ?? "text"); setDeleteOpen(false); setDeleteError(""); setError(""); showToast({ body: "Context deleted" });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
-      if (await revokeWriteAccess(reason)) { toast.error("Context could not be deleted"); return; }
+      if (await revokeWriteAccess(reason)) return;
       if (reason instanceof ApiError && reason.code === "context_version_conflict") {
         const latest = await load(false, selected.id);
         if (!mounted.current) return;
@@ -206,7 +206,6 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         }
         const detail = "Context changed elsewhere. Latest version loaded; review before deleting.";
         setError(detail);
-        toast.error(detail);
         return;
       }
       if (reason instanceof ApiError && reason.status === 404 && reason.message === "Context entry not found") {
@@ -220,18 +219,18 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       }
       const detail = message(reason, "Context could not be deleted.");
       setError(detail);
-      throw new Error(detail);
+      setDeleteError(detail);
     } finally { if(mounted.current)setDeleting(false); }
   }
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Context" subtitle={projectId ? "Saved instructions and reference data for this workspace and project." : "Saved instructions and reference data for this workspace."} />}>
     <TabList value={scope} onChange={(value) => { if (!saving && !deleting) navigate({ kind: "scope", scope: value as ContextScope }); }} aria-label="Context scope" className="mb-5 flex h-auto flex-wrap justify-start">{tabs.map((tab) => <Tab key={tab.scope} value={tab.scope} label={tab.label} aria-disabled={saving || deleting} />)}</TabList>
-    <p className="mb-5 text-sm text-secondary">{activeTab.description}</p>
-    {state === "loading" ? <PageState>Loading context...</PageState> : null}
-    {state === "error" ? <PageState><div className="space-y-3"><p role="alert" className="text-error">{error}</p><Button label="Try again" size="lg" onClick={() => void load()} /></div></PageState> : null}
-    {state === "ready" && result ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]"><section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5"><div className="mb-3 flex items-center justify-between"><h2 className="type-title">Entries</h2>{result.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>{result.items.length === 0 ? <p className="py-4 text-sm text-secondary">No context entries yet.</p> : <div className="space-y-1">{result.items.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", contextKey: entry.contextKey })} className={`w-full px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-60 ${selected?.id === entry.id ? "bg-surface text-foreground" : "text-secondary hover:bg-hover hover:text-foreground"}`}><span className="block truncate">{entry.contextKey}</span><span className="mt-1 block font-mono text-[13px] capitalize text-tertiary">{entry.contentType}</span></button>)}</div>}</section><section className="min-w-0"><div className="mb-4"><h2 className="type-title">{selected ? "Edit entry" : "New entry"}</h2>{!result.canWrite ? <p className="mt-1 text-sm text-secondary">Your access to this context is read-only.</p> : null}</div><div className="grid gap-4"><TextInput label="Key" value={contextKey} isDisabled={!result.canWrite || saving || deleting} onChange={setContextKey} placeholder="for example, project.conventions" /><Selector label="Content type" options={contentTypes.map((type) => ({ value: type, label: type }))} value={contentType} onChange={(value) => setContentType(value as ContextContentType)} isDisabled={!result.canWrite || saving || deleting} size="lg" /><TextArea label="Content" value={content} isDisabled={!result.canWrite || saving || deleting} onChange={setContent} rows={14} className="min-h-64 [&_textarea]:font-mono" width="100%" />{error ? <div className="flex flex-wrap items-center gap-3 text-sm text-error" role="alert"><span>{error}</span>{conflict ? <Button label="Reload latest" size="md" variant="secondary" onClick={() => void load(false, selected?.id)} /> : null}</div> : null}<div className="flex flex-wrap gap-2">{result.canWrite ? <Button label={saving ? "Saving..." : "Save"} size="lg" variant="primary" isDisabled={!dirty || saving || deleting} onClick={() => void save()} /> : null}{result.canWrite && selected ? <Button label="Delete" size="lg" variant="destructive" icon={<Trash2 size={16} />} isDisabled={saving || deleting} onClick={() => setDeleteOpen(true)} /> : null}</div></div></section></div> : null}
-    <ConfirmationDialog open={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description="Your edits have not been saved. Discard them and continue?" confirmText="Discard changes" onConfirm={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} errorContext="Context navigation failed" />
-    <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete context entry" description={selected ? `Delete ${selected.contextKey}? This cannot be undone.` : ""} confirmText={deleting ? "Deleting" : "Delete entry"} confirmDisabled={!selected || deleting} onConfirm={remove} errorContext="Context entry could not be deleted" />
+    <Text as="p" color="secondary" display="block" className="mb-5">{activeTab.description}</Text>
+    {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading context..." /></div> : null}
+    {state === "error" ? <Banner status="error" title="Context unavailable" description={error} endContent={<Button label="Try again" size="lg" onClick={() => void load()} />} /> : null}
+    {state === "ready" && result ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]"><section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5"><div className="mb-3 flex items-center justify-between"><Heading level={3}>Entries</Heading>{result.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>{result.items.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="py-4">No context entries yet.</Text> : <div className="space-y-1">{result.items.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", contextKey: entry.contextKey })} className={`w-full px-3 py-2 text-left disabled:cursor-not-allowed ${selected?.id === entry.id ? "bg-muted text-primary" : "text-secondary hover:bg-overlay-hover hover:text-primary"}`}><Text as="span" display="block" maxLines={1} color="inherit">{entry.contextKey}</Text><Text as="span" type="code" color="inherit" display="block" className="mt-1 capitalize">{entry.contentType}</Text></button>)}</div>}</section><section className="min-w-0"><div className="mb-4"><Heading level={3}>{selected ? "Edit entry" : "New entry"}</Heading>{!result.canWrite ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Your access to this context is read-only.</Text> : null}</div><div className="grid gap-4"><TextInput label="Key" value={contextKey} isDisabled={!result.canWrite || saving || deleting} onChange={setContextKey} placeholder="for example, project.conventions" /><Selector label="Content type" options={contentTypes.map((type) => ({ value: type, label: type }))} value={contentType} onChange={(value) => setContentType(value as ContextContentType)} isDisabled={!result.canWrite || saving || deleting} size="lg" /><TextArea label="Content" value={content} isDisabled={!result.canWrite || saving || deleting} onChange={setContent} rows={14} className="min-h-64" width="100%" />{error ? <Banner status="error" title="Context update failed" description={error} endContent={conflict ? <Button label="Reload latest" size="md" variant="secondary" onClick={() => void load(false, selected?.id)} /> : undefined} /> : null}<div className="flex flex-wrap gap-2">{result.canWrite ? <Button label={saving ? "Saving..." : "Save"} size="lg" variant="primary" isDisabled={!dirty || saving || deleting} isLoading={saving} onClick={() => void save()} /> : null}{result.canWrite && selected ? <Button label="Delete" size="lg" variant="destructive" icon={<Trash2 size={16} />} isDisabled={saving || deleting} onClick={() => { setDeleteError(""); setDeleteOpen(true); }} /> : null}</div></div></section></div> : null}
+    <AlertDialog isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description="Your edits have not been saved. Discard them and continue?" actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} />
+    <Dialog isOpen={deleteOpen} onOpenChange={(open) => { if (deleting) return; setDeleteOpen(open); if (!open) setDeleteError(""); }} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete context entry"><DialogHeader title="Delete context entry" subtitle={selected ? `Delete ${selected.contextKey}? This cannot be undone.` : "This entry is no longer available."} onOpenChange={(open) => { if (!open && !deleting) setDeleteOpen(false); }} hasDivider />{deleteError ? <Banner className="mx-5 mt-4" status="error" title="Context entry could not be deleted" description={deleteError} /> : null}<footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={deleting} onClick={() => setDeleteOpen(false)} /><Button label={deleting ? "Deleting" : "Delete entry"} variant="destructive" size="lg" isDisabled={!selected || deleting} isLoading={deleting} onClick={() => void remove()} /></footer></Dialog>
   </PageLayout>;
 }
 

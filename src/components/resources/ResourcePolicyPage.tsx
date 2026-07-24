@@ -12,10 +12,7 @@ import {
 } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
-import { ErrorState } from "../ui/error-state";
-import { Banner, Button, NumberInput, Selector, Spinner } from "@astryxdesign/core";
-import { toast } from "../ui/toast";
+import { Banner, Button, EmptyState, Heading, IconButton, NumberInput, Selector, Spinner, Text, useToast } from "@astryxdesign/core";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
@@ -45,6 +42,7 @@ export function ResourcePolicyPage({ projectId }: { projectId: string }) {
 
 function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   const active = useRef(true);
   const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
@@ -121,13 +119,13 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       if (!active.current) return;
       setPolicy(saved);
       setDraft(policyDraft(saved));
-      toast.success("Resource policy updated.");
+      showToast({ body: "Resource policy updated.", type: "info" });
     } catch (cause) {
       if (!active.current) return;
       if (cause instanceof ApiError) mutationKeys.complete("project.policy.update", projectId);
       if (cause instanceof ApiError && cause.status === 409 && cause.message === "Project policy changed elsewhere. Reload and try again.") {
         await load();
-        if (active.current) toast.error("Resource policy changed elsewhere. Latest values loaded.");
+        if (active.current) setError("Resource policy changed elsewhere. Latest values loaded; review your changes before saving again.");
         return;
       }
       if (cause instanceof ApiError && cause.status === 403) {
@@ -159,11 +157,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
           title="Resource policy"
           subtitle="Project-wide gauges and lifetime provider budgets, with per-user endpoint rolling windows."
           actions={
-            <Button
+            <IconButton
               label="Refresh policy"
+              tooltip="Refresh policy"
               variant="ghost"
               size="lg"
-              isIconOnly
               icon={<RefreshCw size={16} />}
               isDisabled={saving}
               onClick={() => void load()}
@@ -173,18 +171,17 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       }
     >
       {state === "loading" ? (
-        <PageState state="loading">
+        <div className="grid min-h-64 place-items-center" role="status">
           <Spinner label="Loading policy..." />
-        </PageState>
+        </div>
       ) : null}
       {state === "error" ? (
-        <PageState state="error">
-          <ErrorState
-            title="Resource policy unavailable"
-            message={error}
-            onRetry={() => void load()}
-          />
-        </PageState>
+        <Banner
+          status="error"
+          title="Resource policy unavailable"
+          description={error}
+          endContent={<Button label="Try again" variant="ghost" onClick={() => void load()} />}
+        />
       ) : null}
       {state === "ready" && policy && draft ? (
         <form onSubmit={save} className="space-y-6">
@@ -196,10 +193,10 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             />
           ) : null}
           {!canManage ? (
-            <p className="flex items-center gap-2 text-sm text-secondary">
+            <div className="flex items-center gap-2">
               <SlidersHorizontal size={16} />
-              Read-only policy
-            </p>
+              <Text type="supporting" color="secondary">Read-only policy</Text>
+            </div>
           ) : null}
           {error ? (
             <Banner
@@ -209,7 +206,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             />
           ) : null}
           <section>
-            <h2 className="type-title">Project limits</h2>
+            <Heading level={2}>Project limits</Heading>
             <div className="mt-3 divide-y divide-border border-y border-border">
               {limits.map((limit) => (
                 <div
@@ -270,7 +267,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                     )
                   ) : (
                     <>
-                      <span className="text-sm text-foreground">{limit.label}</span>
+                      <Text>{limit.label}</Text>
                       <strong>{policyLimitValue(limit.key, policy[limit.key], limit.required)}</strong>
                     </>
                   )}
@@ -279,10 +276,10 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             </div>
           </section>
           <section>
-            <h2 className="type-title">Endpoint windows</h2>
-            <p className="mt-1 text-sm text-secondary">
+            <Heading level={2}>Endpoint windows</Heading>
+            <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
               Each limit applies independently to every user over the selected rolling window.
-            </p>
+            </Text>
             {endpointState === "error" ? (
               <Banner
                 className="mt-3"
@@ -306,7 +303,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                 className="mt-4 border-t border-border pt-3"
                 key={endpoint.id}
               >
-                <legend className="text-sm font-medium">{endpoint.name}</legend>
+                <legend><Text type="label" weight="medium">{endpoint.name}</Text></legend>
                 {endpointMetrics.map((metric) => {
                   const current = draft.endpointWindows.find(
                     (item) =>
@@ -375,14 +372,14 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                         </>
                       ) : (
                         <>
-                          <span className="text-sm text-secondary">
+                          <Text type="supporting" color="secondary">
                             {metric.label}
-                          </span>
-                          <strong className="text-sm">
+                          </Text>
+                          <Text weight="semibold">
                             {current
                               ? `${current.limit} / ${windowLabel(current.windowSeconds)}`
                               : "Unlimited"}
-                          </strong>
+                          </Text>
                         </>
                       )}
                     </div>
@@ -391,13 +388,11 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
               </fieldset>
             ))}
             {endpointState === "ready" && !endpoints.length ? (
-              <p className="mt-3 text-sm text-secondary">
-                No endpoints configured.
-              </p>
+              <EmptyState className="mt-3" isCompact title="No endpoints configured" />
             ) : null}
           </section>
           {canManage ? (
-            <div className="flex justify-end border-t border-subtle pt-4">
+            <div className="flex justify-end border-t border-border pt-4">
               <Button
                 type="submit"
                 label={saving ? "Saving..." : "Save policy"}

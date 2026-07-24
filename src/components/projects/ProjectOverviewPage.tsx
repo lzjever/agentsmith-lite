@@ -1,13 +1,12 @@
 "use client";
 
 import { ArrowLeft, ArrowRight, Server, Users, Wrench, type LucideIcon } from "lucide-react";
-import { Button } from "@astryxdesign/core";
+import { Banner, Button, Heading, Spinner, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, type Project, type ProjectMember, type ProjectOverview, type ProjectOverviewAction } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
 
 type NextStep = { href: string; label: string; icon: LucideIcon; description: string };
 
@@ -60,38 +59,38 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
   const header = <PageHeader title={overview?.project.name ?? "Project overview"} subtitle={headerSubtitle} />;
 
   return <PageLayout header={header}>
-    {state === "loading" ? <PageState><span className="text-secondary">Loading project overview...</span></PageState> : null}
-    {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Project overview unavailable</h2><p className="text-sm text-secondary">{error}</p><Button label="Try again" variant="secondary" onClick={() => void load()} /></div></PageState> : null}
+    {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading project overview..." /></div> : null}
+    {state === "error" ? <Banner status="error" title="Project overview unavailable" description={error} endContent={<Button label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
     {state === "ready" && overview ? <div className="space-y-7">
-      <Link href={`/workspaces/${workspaceId}`} className="inline-flex items-center gap-2 text-sm text-secondary no-underline hover:text-foreground"><ArrowLeft size={16} />Back to workspace</Link>
-      {lifecycleStatus !== "active" || workspaceLifecycleStatus !== "active" ? <p role="status" className="border-l-2 border-warning bg-warning-soft px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)}</p> : null}
-      <section className="grid divide-y divide-subtle border-y border-subtle sm:grid-cols-2 sm:divide-x sm:divide-y-0" aria-label="Project availability">
+      <Link href={`/workspaces/${workspaceId}`} className="inline-flex items-center gap-2 no-underline hover:text-primary"><ArrowLeft size={16} /><Text type="supporting" color="secondary">Back to workspace</Text></Link>
+      {lifecycleStatus !== "active" || workspaceLifecycleStatus !== "active" ? <Banner status="warning" title="Project is read-only" description={projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)} /> : null}
+      <section className="grid divide-y divide-border border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-y-0" aria-label="Project availability">
         <Availability label="Task endpoints" value={overview.taskReadyEndpointCount} detail={overview.taskReadyEndpointCount === 1 ? "tool-capable connection" : "tool-capable connections"} />
         <Availability label="Task capacity" value={overview.project.taskConcurrencyLimit} detail="concurrent sandboxes" />
       </section>
       <section className="grid gap-10 pt-1 xl:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.8fr)]">
         <div>
-          <p className="type-caption text-tertiary">{primaryStep ? "Recommended next" : readOnly ? "Read-only access" : "Ready"}</p>
-          <h2 className="type-section-heading mt-2 max-w-2xl">{primaryStep ? primaryStep.label : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Workspace archived" : "Workspace deletion in progress" : readOnly ? "Explore this project" : noUsableEndpoint ? "Connect a model to begin" : "Continue your work"}</h2>
-          <p className="type-body-ui mt-2 max-w-2xl text-secondary">{primaryStep ? primaryStep.description : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Restore the workspace before changing this project or starting new work." : "Workspace deletion must finish before this project is no longer available." : readOnly ? "You can inspect the project areas available to your role." : noUsableEndpoint ? "A project administrator needs to configure a healthy OpenAI-compatible endpoint." : "Create or continue an agent task from the project navigation."}</p>
-          {primaryStep ? <Link href={`${base}/${primaryStep.href}`} className="mt-5 inline-flex min-h-9 items-center gap-2 rounded-sm bg-accent px-3 text-sm text-white no-underline hover:bg-accent/90"><primaryStep.icon size={16} />{primaryStep.label}<ArrowRight size={15} /></Link> : null}
+          <Text as="p" type="supporting" color="secondary" display="block">{primaryStep ? "Recommended next" : readOnly ? "Read-only access" : "Ready"}</Text>
+          <Heading level={2} className="mt-2 max-w-2xl">{primaryStep ? primaryStep.label : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Workspace archived" : "Workspace deletion in progress" : readOnly ? "Explore this project" : noUsableEndpoint ? "Connect a model to begin" : "Continue your work"}</Heading>
+          <Text as="p" color="secondary" display="block" className="mt-2 max-w-2xl">{primaryStep ? primaryStep.description : workspaceReadOnly ? workspaceLifecycleStatus === "archived" ? "Restore the workspace before changing this project or starting new work." : "Workspace deletion must finish before this project is no longer available." : readOnly ? "You can inspect the project areas available to your role." : noUsableEndpoint ? "A project administrator needs to configure a healthy OpenAI-compatible endpoint." : "Create or continue an agent task from the project navigation."}</Text>
+          {primaryStep ? <Button className="mt-5" href={`${base}/${primaryStep.href}`} label={primaryStep.label} variant="primary" icon={<primaryStep.icon size={16} />} endContent={<ArrowRight size={15} />} /> : null}
         </div>
-        <aside className="border-t border-subtle pt-5 xl:border-l xl:border-t-0 xl:pl-8 xl:pt-0">
-          <p className="type-caption text-tertiary">Project access</p>
-          <dl className="mt-3 divide-y divide-subtle text-sm">
+        <aside className="border-t border-border pt-5 xl:border-l xl:border-t-0 xl:pl-8 xl:pt-0">
+          <Text as="p" type="supporting" color="secondary" display="block">Project access</Text>
+          <dl className="mt-3 divide-y divide-border">
             <ProjectDetail label="Role" value={roleLabel(overview.memberRole)} />
             <ProjectDetail label="Owner" value={overview.owner ? memberLabel(overview.owner) : "Unavailable"} />
             <ProjectDetail label="Status" value={lifecycleLabel(lifecycleStatus)} />
           </dl>
         </aside>
       </section>
-      {secondarySteps.length ? <section className="border-t border-subtle pt-6"><p className="type-caption text-tertiary">Also available</p><div className={`mt-3 grid gap-px overflow-hidden rounded-md border border-subtle bg-subtle ${secondarySteps.length > 1 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>{secondarySteps.map((step) => <Link key={step.href} href={`${base}/${step.href}`} className="group flex min-h-28 items-start justify-between gap-4 bg-surface p-4 text-foreground no-underline hover:bg-hover"><span><step.icon size={17} className="mb-3 text-accent" /><strong className="block text-sm font-medium">{step.label}</strong><span className="mt-1 block text-sm text-secondary">{step.description}</span></span><ArrowRight size={16} className="mt-1 shrink-0 text-icon-default transition-transform group-hover:translate-x-0.5" /></Link>)}</div></section> : null}
+      {secondarySteps.length ? <section className="border-t border-border pt-6"><Text as="p" type="supporting" color="secondary" display="block">Also available</Text><div className={`mt-3 grid gap-px overflow-hidden rounded-md border border-border bg-border ${secondarySteps.length > 1 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>{secondarySteps.map((step) => <Link key={step.href} href={`${base}/${step.href}`} className="group flex min-h-28 items-start justify-between gap-4 bg-surface p-4 text-primary no-underline hover:bg-overlay-hover"><span><step.icon size={17} className="mb-3 text-accent-text" /><Text weight="medium">{step.label}</Text><Text as="span" type="supporting" color="secondary" display="block" className="mt-1">{step.description}</Text></span><ArrowRight size={16} className="mt-1 shrink-0 text-icon-secondary group-hover:translate-x-0.5" /></Link>)}</div></section> : null}
     </div> : null}
   </PageLayout>;
 }
 
-function Availability({ label, value, detail }: { label: string; value: number; detail: string }) { return <div className="px-4 py-4 sm:px-5"><p className="type-caption text-tertiary">{label}</p><p className="mt-2 flex items-baseline gap-2"><strong className="text-2xl font-medium tabular-nums text-foreground">{value}</strong><span className="text-sm text-secondary">{detail}</span></p></div>; }
-function ProjectDetail({ label, value }: { label: string; value: string }) { return <div className="flex items-start justify-between gap-4 py-3"><dt className="text-secondary">{label}</dt><dd className="max-w-[70%] break-words text-right text-foreground">{value}</dd></div>; }
+function Availability({ label, value, detail }: { label: string; value: number; detail: string }) { return <div className="px-4 py-4 sm:px-5"><Text as="p" type="supporting" color="secondary" display="block">{label}</Text><div className="mt-2 flex items-baseline gap-2"><Text size="2xl" weight="medium" hasTabularNumbers>{value}</Text><Text type="supporting" color="secondary">{detail}</Text></div></div>; }
+function ProjectDetail({ label, value }: { label: string; value: string }) { return <div className="flex items-start justify-between gap-4 py-3"><dt><Text color="secondary">{label}</Text></dt><dd className="max-w-[70%]"><Text wordBreak="break-word" justify="end">{value}</Text></dd></div>; }
 
 function memberLabel(member: { displayName: string | null; email: string }): string { return member.displayName || member.email || "Project owner"; }
 function roleLabel(role: ProjectMember["role"]): string { return role[0]!.toUpperCase() + role.slice(1); }

@@ -11,6 +11,7 @@ import {
   TableHeader,
   TableHeaderCell,
   TableRow,
+  Text,
   TextInput,
 } from "@astryxdesign/core";
 import Link from "next/link";
@@ -95,12 +96,12 @@ export function ProjectsTable({
                 <TableCell>
                   <Link
                     href={projectHref(workspaceId, project.id)}
-                    className="flex items-center gap-3 text-foreground no-underline"
+                    className="flex items-center gap-3 text-primary no-underline"
                   >
-                    <span className="grid size-8 place-items-center rounded-sm bg-surface-high text-icon-default">
+                    <span className="grid size-8 place-items-center rounded-sm bg-muted text-icon-secondary">
                       <FolderKanban size={16} />
                     </span>
-                    <span className="font-medium">{project.name}</span>
+                    <Text weight="medium">{project.name}</Text>
                   </Link>
                 </TableCell>
                 <TableCell>{project.taskConcurrencyLimit}</TableCell>
@@ -121,9 +122,9 @@ export function ProjectsTable({
                 <TableCell>
                   <Link
                     href={projectHref(workspaceId, project.id)}
-                    className="inline-flex items-center gap-1 text-sm text-secondary no-underline hover:text-foreground"
+                    className="inline-flex items-center gap-1 no-underline hover:text-primary"
                   >
-                    Open
+                    <Text type="supporting" color="secondary">Open</Text>
                     <ArrowRight size={15} />
                   </Link>
                 </TableCell>
@@ -132,7 +133,7 @@ export function ProjectsTable({
           </TableBody>
         </Table>
       </div>
-      <div className="divide-y divide-subtle border-y border-subtle md:hidden">
+      <div className="divide-y divide-border border-y border-border md:hidden">
         {visible.map((project) => (
           <ProjectCard
             workspaceId={workspaceId}
@@ -145,9 +146,7 @@ export function ProjectsTable({
         ))}
       </div>
       {filtered.length === 0 ? (
-        <p className="py-6 text-center text-sm text-secondary">
-          No projects match this search.
-        </p>
+        <Text as="p" type="supporting" color="secondary" justify="center" display="block" className="py-6">No projects match this search.</Text>
       ) : null}
       {pageCount > 1 ? (
         <Pagination
@@ -177,25 +176,21 @@ export function ProjectCard({
     <div className="group flex items-center justify-between gap-3 px-2 py-4">
       <Link
         href={projectHref(workspaceId, project.id)}
-        className="flex min-w-0 flex-1 items-center justify-between gap-4 text-foreground no-underline transition-colors hover:bg-surface-low"
+        className="flex min-w-0 flex-1 items-center justify-between gap-4 text-primary no-underline hover:bg-overlay-hover"
       >
         <span className="flex min-w-0 items-center gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-sm bg-surface-high text-icon-default">
+          <span className="grid size-9 shrink-0 place-items-center rounded-sm bg-muted text-icon-secondary">
             <FolderKanban size={17} />
           </span>
           <span className="min-w-0">
-            <strong className="block truncate font-medium">
-              {project.name}
-            </strong>
-            <small className="mt-1 block text-secondary">
-              Task concurrency: {project.taskConcurrencyLimit}
-            </small>
+            <Text weight="medium" display="block" maxLines={1}>{project.name}</Text>
+            <Text type="supporting" color="secondary" display="block" className="mt-1">Task concurrency: {project.taskConcurrencyLimit}</Text>
             <span className="mt-2 block"><ProjectLifecycleStatus project={project} /></span>
           </span>
         </span>
         <ArrowRight
           size={16}
-          className="shrink-0 text-icon-default transition-transform group-hover:translate-x-0.5"
+          className="shrink-0 text-icon-secondary group-hover:translate-x-0.5"
         />
       </Link>
       {onTogglePin ? (
@@ -228,9 +223,10 @@ function ButtonPin({
   return (
     <IconButton
       label={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
+      tooltip={`${pinned ? "Unpin" : "Pin"} ${project.name}`}
       variant="ghost"
       size="md"
-      className="shrink-0 text-secondary hover:text-foreground"
+      className="shrink-0 text-secondary hover:text-primary"
       isDisabled={busy}
       icon={pinned ? <PinOff size={16} /> : <Pin size={16} />}
       onClick={() => onTogglePin(project.id)}
@@ -255,9 +251,7 @@ function Pagination({
         isDisabled={page === 1}
         onClick={() => onPageChange(page - 1)}
       />
-      <span className="text-xs text-tertiary">
-        Page {page} of {pageCount}
-      </span>
+      <Text type="supporting" color="secondary">Page {page} of {pageCount}</Text>
       <Button
         label="Next"
         variant="secondary"

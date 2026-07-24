@@ -7,5 +7,6 @@ out/
 .dev/
 .env
 *.log
+src/theme/generated/
 third_party/botified/target/
 packages/bash-executor/target/

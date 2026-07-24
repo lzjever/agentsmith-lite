@@ -14,6 +14,7 @@ import {
   LayoutFooter,
   NumberInput,
   Selector,
+  Text,
   TextInput,
 } from "@astryxdesign/core";
 import type {
@@ -30,6 +31,7 @@ export function EndpointDialog({
   saving,
   discovering,
   models,
+  discoveryGuidance,
   canSubmit,
   canSave,
   nameConflict,
@@ -47,6 +49,7 @@ export function EndpointDialog({
   saving: boolean;
   discovering: boolean;
   models: string[];
+  discoveryGuidance: string;
   canSubmit: boolean;
   canSave: boolean;
   nameConflict: boolean;
@@ -107,6 +110,7 @@ export function EndpointDialog({
                       variant="ghost"
                       size="lg"
                       label="Dismiss endpoint error"
+                      tooltip="Dismiss endpoint error"
                       icon={<X size={15} />}
                       onClick={onDismissError}
                     />
@@ -123,14 +127,28 @@ export function EndpointDialog({
                   {...(nameConflict && { status: { type: "error", message: "An endpoint already uses this name." } as const })}
                   width="100%"
                 />
-                <TextInput
-                  label="Model"
-                  value={input.model}
-                  onChange={(value) => set("model", value)}
-                  isRequired
-                  isDisabled={saving}
-                  width="100%"
-                />
+                <div>
+                  <TextInput
+                    label="Model"
+                    value={input.model}
+                    onChange={(value) => set("model", value)}
+                    isRequired
+                    isDisabled={saving}
+                    width="100%"
+                  />
+                  {discoveryGuidance ? (
+                    <Text
+                      as="p"
+                      type="supporting"
+                      color="secondary"
+                      display="block"
+                      className="mt-1"
+                      role="status"
+                    >
+                      {discoveryGuidance}
+                    </Text>
+                  ) : null}
+                </div>
                 <div className="sm:col-span-2">
                   <TextInput
                     label="Base URL"
@@ -182,11 +200,9 @@ export function EndpointDialog({
                     size="lg"
                     label={discovering ? "Checking" : "Discover models"}
                     icon={
-                      <RefreshCw
-                        className={discovering ? "animate-spin" : ""}
-                        size={15}
-                      />
+                      <RefreshCw size={15} />
                     }
+                    isLoading={discovering}
                     onClick={onDiscoverModels}
                     isDisabled={
                       !canSubmit ||
@@ -210,7 +226,7 @@ export function EndpointDialog({
                   ) : null}
                 </div>
                 <fieldset className="grid gap-2 sm:col-span-2">
-                  <legend className="text-sm text-primary">Capabilities</legend>
+                  <legend><Text type="label">Capabilities</Text></legend>
                   <div className="flex flex-wrap gap-x-5 gap-y-2">
                     {endpointCapabilities.map((capability) => (
                       <CheckboxInput

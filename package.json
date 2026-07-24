@@ -19,19 +19,21 @@
   ],
   "scripts": {
     "clean": "rm -rf dist .next",
-    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json",
+    "typecheck": "npm run build:theme && tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json",
     "build": "npm run clean && tsc -p tsconfig.node.json && npm run build:web",
-    "build:web": "APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL:?APP_PUBLIC_BASE_URL is required to build the Next application} next build && node scripts/web/prepare-standalone.mjs",
+    "build:theme": "astryx theme build src/theme/agentSmithTheme.ts -o src/theme/generated/agent-smith.css",
+    "build:web": "npm run build:theme && APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL:?APP_PUBLIC_BASE_URL is required to build the Next application} next build && node scripts/web/prepare-standalone.mjs",
     "test": "rm -rf dist && npm run build:api && env -u POSTGRES_APP_URL -u POSTGRES_TEST_URL node --test \"dist/tests/**/*.test.js\"",
     "db:migrate": "node scripts/db/apply-migrations.mjs",
     "test:postgres": "test -n \"${POSTGRES_TEST_URL:-}\" || { echo 'POSTGRES_TEST_URL is required' >&2; exit 1; }; rm -rf dist && npm run db:migrate && npm run build:api && node --test --test-concurrency=1 \"dist/tests/integration/postgres*.test.js\"",
     "build:api": "tsc -p tsconfig.node.json",
     "dev:api": "npm run build:api && node dist/packages/api-entry-node/src/main.js",
-    "dev:web": "next dev",
+    "dev:web": "npm run build:theme && next dev",
     "start:web": "node .next/standalone/server.js",
     "dev": "bash scripts/dev/start.sh"
   },
   "devDependencies": {
+    "@astryxdesign/cli": "0.1.7",
     "@playwright/test": "^1.56.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.2",
@@ -44,19 +46,14 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@astryxdesign/core": "^0.1.7",
-    "@astryxdesign/theme-neutral": "^0.1.7",
+    "@astryxdesign/core": "0.1.7",
+    "@astryxdesign/theme-neutral": "0.1.7",
     "@stylexjs/stylex": "^0.19.0",
-    "@tanstack/react-table": "^8.21.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "clsx": "^2.1.1",
     "lucide-react": "^1.25.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^3.3.0",
     "ws": "^8.21.0"
   }
 }

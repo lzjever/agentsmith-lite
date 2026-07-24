@@ -3,12 +3,22 @@
 import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
   Badge,
+  Banner,
   Button,
   DateTimeInput,
   Dialog,
   DialogHeader,
+  EmptyState,
+  Heading,
   IconButton,
   Selector,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+  Text,
   type ISODateTimeString,
 } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,9 +35,7 @@ import {
 } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
-import { ErrorState } from "../ui/error-state";
 import { UsageView } from "./UsageView";
 import { auditResourceIdentity } from "./audit-resource-identity";
 import {
@@ -143,6 +151,7 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
           actions={
             <IconButton
               label="Refresh usage"
+              tooltip="Refresh usage"
               variant="ghost"
               icon={<RefreshCw size={16} />}
               onClick={() => void load()}
@@ -153,8 +162,8 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
     >
       {canSelectUser && currentUserId ? (
         <div className="flex justify-end border-y border-border py-3">
-          <div className="grid gap-1 text-xs text-secondary">
-            Sandbox member
+          <div className="grid gap-1 text-secondary">
+            <Text type="label" color="secondary">Sandbox member</Text>
             <Selector
               label="Sandbox usage member"
               isLabelHidden
@@ -168,19 +177,13 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
         </div>
       ) : null}
       {state === "loading" && !visibleUsage ? (
-        <PageState state="loading">Loading usage...</PageState>
+        <div className="grid min-h-64 place-items-center" role="status"><Text color="secondary">Loading usage...</Text></div>
       ) : null}
       {state === "loading" && visibleUsage ? (
-        <div className="border-y border-border px-3 py-2 text-sm text-secondary" role="status">Refreshing usage...</div>
+        <div className="border-y border-border px-3 py-2 text-secondary" role="status"><Text type="supporting" color="secondary">Refreshing usage...</Text></div>
       ) : null}
       {state === "error" && !visibleUsage ? (
-        <PageState state="error">
-          <ErrorState
-            title={usageError(error).title}
-            message={usageError(error).message}
-            onRetry={() => void load()}
-          />
-        </PageState>
+        <Banner status="error" title={usageError(error).title} description={usageError(error).message} endContent={<Button label="Try again" variant="ghost" onClick={() => void load()} />} />
       ) : null}
       {visibleUsage ? (
         <div className="space-y-7">
@@ -212,10 +215,10 @@ function SandboxUsageView({
     <section className="space-y-4 border-y border-border py-5" aria-labelledby="sandbox-usage">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 id="sandbox-usage" className="type-title text-foreground">Sandbox usage</h2>
-          <p className="mt-1 text-sm text-secondary">
+          <Heading level={2} id="sandbox-usage">Sandbox usage</Heading>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
             Task sandbox runtime and requested resources for {selectedMember ? memberLabel(selectedMember) : "you"}.
-          </p>
+          </Text>
         </div>
       </div>
       <dl className="grid overflow-hidden border border-border sm:grid-cols-2 xl:grid-cols-5">
@@ -226,51 +229,22 @@ function SandboxUsageView({
         <SandboxTotal label="Memory request-time" value={`${formatDecimal(sandbox.memoryRequestByteSeconds, 1_073_741_824n)} GiB-s`} />
       </dl>
       {sandbox.rows.length ? (
-        <div className="overflow-x-auto border-y border-border">
-          <div className="min-w-[52rem] divide-y divide-border">
-            {sandbox.rows.map((row) => (
-              <div className="grid grid-cols-[minmax(11rem,1fr)_7rem_10rem_10rem_8rem_minmax(14rem,1fr)] items-center gap-3 px-2 py-3 text-xs" key={row.runId}>
-                <div className="min-w-0">
-                  {row.taskAvailable ? (
-                    <a className="inline-flex max-w-full items-center gap-1 font-medium text-foreground hover:underline" href={taskHref(projectId, row.taskId)}>
-                      <span className="truncate">Task {row.taskId}</span><ExternalLink className="size-3 shrink-0" />
-                    </a>
-                  ) : (
-                    <span className="inline-flex max-w-full items-center gap-1 text-secondary" title="This task was deleted">
-                      <span className="truncate">Task {row.taskId}</span><span className="shrink-0">(deleted)</span>
-                    </span>
-                  )}
-                  <p className="mt-1 truncate font-mono text-[13px] text-tertiary" title={row.runId}>Run {row.runId}</p>
-                </div>
-                <Badge variant={row.state === "live" ? "success" : "neutral"} label={row.state === "live" ? "Live" : "Settled"} className="w-fit" />
-                <SandboxTimestamp label="Started" value={row.startedAt} />
-                <SandboxTimestamp label="Released" value={row.releasedAt} />
-                <div><span className="text-tertiary">Duration</span><p className="mt-1 text-foreground">{formatDuration(row.durationSeconds)}</p></div>
-                <div>
-                  <span className="text-tertiary">Resources</span>
-                  <p className="mt-1 text-foreground">{formatInteger(row.resources.cpuRequestMillis)} mCPU · {formatBytes(row.resources.memoryRequestBytes)} requested</p>
-                  <p className="mt-1 text-tertiary">Limits {formatInteger(row.resources.cpuLimitMillis)} mCPU · {formatBytes(row.resources.memoryLimitBytes)}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : <p className="border border-dashed border-border px-4 py-8 text-center text-sm text-secondary">No sandbox runs for this member.</p>}
+        <Table aria-label="Sandbox runs" density="balanced" dividers="rows" verticalAlign="top">
+          <TableHeader><TableRow isHeaderRow><TableHeaderCell>Task and run</TableHeaderCell><TableHeaderCell>State</TableHeaderCell><TableHeaderCell>Started</TableHeaderCell><TableHeaderCell>Released</TableHeaderCell><TableHeaderCell>Duration</TableHeaderCell><TableHeaderCell>Resources</TableHeaderCell></TableRow></TableHeader>
+          <TableBody>{sandbox.rows.map((row) => <TableRow key={row.runId}><TableCell><div className="min-w-0">{row.taskAvailable ? <a className="inline-flex max-w-full items-center gap-1 hover:underline" href={taskHref(projectId, row.taskId)}><Text weight="medium" maxLines={1}>Task {row.taskId}</Text><ExternalLink className="size-3 shrink-0" /></a> : <span title="This task was deleted"><Text type="supporting" color="secondary">Task {row.taskId} (deleted)</Text></span>}<span className="mt-1 block" title={row.runId}><Text type="code" color="secondary" display="block" maxLines={1}>Run {row.runId}</Text></span></div></TableCell><TableCell><Badge variant={row.state === "live" ? "success" : "neutral"} label={row.state === "live" ? "Live" : "Settled"} /></TableCell><TableCell>{row.startedAt ? formatDate(row.startedAt) : "-"}</TableCell><TableCell>{row.releasedAt ? formatDate(row.releasedAt) : "-"}</TableCell><TableCell>{formatDuration(row.durationSeconds)}</TableCell><TableCell><Text display="block">{formatInteger(row.resources.cpuRequestMillis)} mCPU · {formatBytes(row.resources.memoryRequestBytes)} requested</Text><Text type="supporting" color="secondary" display="block" className="mt-1">Limits {formatInteger(row.resources.cpuLimitMillis)} mCPU · {formatBytes(row.resources.memoryLimitBytes)}</Text></TableCell></TableRow>)}</TableBody>
+        </Table>
+      ) : <EmptyState className="border border-dashed border-border" isCompact title="No sandbox runs" description="No sandbox runs for this member." />}
     </section>
   );
 }
 
 function SandboxTotal({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 border-b border-border p-4 sm:border-r xl:border-b-0"><dt className="type-caption text-tertiary">{label}</dt><dd className="mt-2 break-words text-lg text-foreground">{value}</dd></div>;
-}
-
-function SandboxTimestamp({ label, value }: { label: string; value: string | null }) {
-  return <div><span className="text-tertiary">{label}</span><p className="mt-1 text-foreground">{value ? formatDate(value) : "-"}</p></div>;
+  return <div className="min-w-0 border-b border-border p-4 sm:border-r xl:border-b-0"><dt><Text type="supporting" color="secondary">{label}</Text></dt><dd className="mt-2 break-words"><Text type="large">{value}</Text></dd></div>;
 }
 
 function InlineUsageError({ error, onRetry }: { error: unknown; onRetry: () => Promise<void> }) {
   const copy = usageError(error);
-  return <div className="flex flex-wrap items-center justify-between gap-3 border-y border-error/40 bg-error/5 px-3 py-2 text-sm" role="alert"><span><strong>{copy.title}.</strong> {copy.message}</span><Button label="Retry" variant="ghost" size="md" onClick={() => void onRetry()} /></div>;
+  return <Banner status="error" title={copy.title} description={copy.message} endContent={<Button label="Retry" variant="ghost" size="md" onClick={() => void onRetry()} />} />;
 }
 
 function usageError(error: unknown): { title: string; message: string } {
@@ -483,6 +457,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
           actions={
             <IconButton
               label="Refresh audit"
+              tooltip="Refresh audit"
               variant="ghost"
               size="lg"
               icon={<RefreshCw size={16} />}
@@ -493,20 +468,14 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
       }
     >
       {state === "error" ? (
-        <PageState state="error">
-          <ErrorState
-            title="Audit unavailable"
-            message="Audit events could not be loaded."
-            onRetry={() => void load()}
-          />
-        </PageState>
+        <Banner status="error" title="Audit unavailable" description="Audit events could not be loaded." endContent={<Button label="Try again" variant="ghost" onClick={() => void load()} />} />
       ) : null}
       <section className="space-y-4">
         {resourceId ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-2">
-            <p className="text-sm text-secondary">
+            <Text as="p" type="supporting" color="secondary" display="block">
               Showing events for {linkedResourceLabel(kind, resourceId)} <strong>{resourceId}</strong>.
-            </p>
+            </Text>
             <Button
               label="Clear resource filter"
               variant="ghost"
@@ -517,9 +486,9 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
           </div>
         ) : null}
         <Button label={`Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}`} className="w-fit sm:hidden" variant="secondary" size="lg" icon={<SlidersHorizontal size={16} />} aria-expanded={filtersOpen} aria-controls="audit-filters" onClick={() => setFiltersOpen((open) => !open)} />
-        <div id="audit-filters" className={`${filtersOpen ? "grid" : "hidden"} gap-3 border-b border-subtle pb-4 sm:grid md:grid-cols-2 xl:grid-cols-5`}>
+        <div id="audit-filters" className={`${filtersOpen ? "grid" : "hidden"} gap-3 border-b border-border pb-4 sm:grid md:grid-cols-2 xl:grid-cols-5`}>
           <div className="grid gap-1">
-            <span className="text-xs text-secondary">Actor</span>
+            <Text type="label" color="secondary">Actor</Text>
             <Selector
               label="Actor"
               isLabelHidden
@@ -537,7 +506,7 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
             />
           </div>
           <div className="grid gap-1">
-            <span className="text-xs text-secondary">Resource user</span>
+            <Text type="label" color="secondary">Resource user</Text>
             <Selector
               label="Resource user"
               isLabelHidden
@@ -622,54 +591,64 @@ function AuditProjectPage({ projectId }: { projectId: string }) {
           />
         </div>
         {state === "loading" ? (
-          <PageState state="loading">Loading audit events...</PageState>
+          <div className="grid min-h-64 place-items-center" role="status"><Text color="secondary">Loading audit events...</Text></div>
         ) : null}
         {state === "ready" && !items.length ? (
-          <PageState state="empty">
-            <div>
-              <ClipboardList className="mx-auto size-7 text-tertiary" />
-              <p className="mt-2">No audit events match this query.</p>
-            </div>
-          </PageState>
+          <EmptyState icon={<ClipboardList />} title="No audit events" description="No audit events match this query." />
         ) : null}
         {state === "ready" && items.length ? (
-          <div className="divide-y divide-border border-y border-border">
-            <div className="hidden gap-2 bg-surface-low px-2 py-2 sm:grid sm:grid-cols-[9rem_9rem_9rem_minmax(10rem,1fr)_6rem_minmax(10rem,1fr)]" aria-hidden="true">
-              <span className="type-caption text-tertiary">Time</span>
-              <span className="type-caption text-tertiary">Actor</span>
-              <span className="type-caption text-tertiary">Resource user</span>
-              <span className="type-caption text-tertiary">Action</span>
-              <span className="type-caption text-tertiary">Result</span>
-              <span className="type-caption text-tertiary">Resource</span>
+          <>
+            <div className="hidden overflow-x-auto md:block">
+              <Table aria-label="Project audit events" density="balanced" dividers="rows" verticalAlign="top">
+                <TableHeader>
+                  <TableRow isHeaderRow>
+                    <TableHeaderCell>Time</TableHeaderCell>
+                    <TableHeaderCell>Actor</TableHeaderCell>
+                    <TableHeaderCell>Resource user</TableHeaderCell>
+                    <TableHeaderCell>Action</TableHeaderCell>
+                    <TableHeaderCell>Result</TableHeaderCell>
+                    <TableHeaderCell>Resource</TableHeaderCell>
+                    <TableHeaderCell />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {items.map((event) => (
+                    <TableRow key={event.id}>
+                      <TableCell><Text type="supporting" color="secondary">{formatDate(event.createdAt)}</Text></TableCell>
+                      <TableCell><Text type="supporting" color="secondary" maxLines={1}>{actorName(event)}</Text></TableCell>
+                      <TableCell><Text type="supporting" color="secondary" maxLines={1}>{subjectName(event, members)}</Text></TableCell>
+                      <TableCell><span title={event.action}><Text weight="semibold">{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></Text></span></TableCell>
+                      <TableCell><Badge variant={event.status === "rejected" ? "error" : "neutral"} label={auditResultLabel(event.status)} /></TableCell>
+                      <TableCell><Text type="supporting" color="secondary" wordBreak="break-all">{auditResourceDisplay(event)}</Text></TableCell>
+                      <TableCell><Button label="View details" variant="ghost" size="sm" onClick={() => setSelected(event)} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </div>
-            {items.map((event) => (
-              <button
-                className="grid w-full gap-2 px-2 py-3 text-left transition-colors hover:bg-hover sm:grid-cols-[9rem_9rem_9rem_minmax(10rem,1fr)_6rem_minmax(10rem,1fr)]"
-                onClick={() => setSelected(event)}
-                key={event.id}
-              >
-                <span className="hidden text-xs text-secondary sm:block">
-                  {formatDate(event.createdAt)}
-                </span>
-                <span className="hidden truncate text-xs text-secondary sm:block" title={actorName(event)}>{actorName(event)}</span>
-                <span className="hidden truncate text-xs text-secondary sm:block" title={subjectName(event, members)}>{subjectName(event, members)}</span>
-                <span className="flex items-start justify-between gap-3 sm:block"><strong className="text-sm font-medium" title={event.action}>{auditActionLabel(event.action)}<span className="sr-only"> ({event.action})</span></strong><Badge className="shrink-0 sm:hidden" variant={event.status === "rejected" ? "error" : "neutral"} label={auditResultLabel(event.status)} /></span>
-                <Badge
-                  className="hidden justify-self-start sm:inline-flex"
-                  variant={event.status === "rejected" ? "error" : "neutral"}
-                  label={auditResultLabel(event.status)}
-                />
-                <span className="hidden break-all text-xs text-secondary sm:block">
-                  {event.resourceId
-                    ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}`
-                    : auditResourceIdentity(event.resourceKind, event.resourceId)}
-                </span>
-                <span className="text-xs text-secondary sm:hidden">{formatDate(event.createdAt)} · {actorName(event)}</span>
-                {subjectName(event, members) !== "-" ? <span className="truncate text-xs text-secondary sm:hidden">Resource user: {subjectName(event, members)}</span> : null}
-                <span className="break-all text-xs text-secondary sm:hidden">{event.resourceId ? `${auditResourceLabel(event.resourceKind)}: ${event.resourceId}` : auditResourceIdentity(event.resourceKind, event.resourceId)}</span>
-              </button>
-            ))}
-          </div>
+            <ul className="divide-y divide-border border-y border-border md:hidden" aria-label="Project audit events">
+              {items.map((event) => (
+                <li key={event.id} className="grid gap-3 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <Text display="block" weight="semibold" wordBreak="break-word">{auditActionLabel(event.action)}</Text>
+                      <Text display="block" type="supporting" color="secondary" className="mt-1">{formatDate(event.createdAt)}</Text>
+                    </div>
+                    <Badge className="shrink-0" variant={event.status === "rejected" ? "error" : "neutral"} label={auditResultLabel(event.status)} />
+                  </div>
+                  <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2">
+                    <dt><Text type="supporting" color="secondary">Actor</Text></dt>
+                    <dd><Text type="supporting" wordBreak="break-all">{actorName(event)}</Text></dd>
+                    <dt><Text type="supporting" color="secondary">Resource user</Text></dt>
+                    <dd><Text type="supporting" wordBreak="break-all">{subjectName(event, members)}</Text></dd>
+                    <dt><Text type="supporting" color="secondary">Resource</Text></dt>
+                    <dd><Text type="supporting" wordBreak="break-all">{auditResourceDisplay(event)}</Text></dd>
+                  </dl>
+                  <Button className="justify-self-start" label="View details" variant="secondary" size="sm" onClick={() => setSelected(event)} />
+                </li>
+              ))}
+            </ul>
+          </>
         ) : null}
         <div className="flex justify-end gap-2">
           <Button
@@ -699,6 +678,7 @@ function actorName(event:ProjectAuditEvent):string{return event.actorId===null?"
 function auditActors(members:ProjectMember[],events:ProjectAuditEvent[],selected:string):Array<{id:string;label:string}>{const actors=new Map<string,string>();actors.set("system","System");for(const member of members)actors.set(member.userId,member.displayName?`${member.displayName} (${member.email})`:member.email);for(const event of events)if(event.actorId)actors.set(event.actorId,event.actorDisplayName?`${event.actorDisplayName} (${event.actorEmail??event.actorId})`:event.actorEmail??event.actorId);if(selected!=="all"&&!actors.has(selected))actors.set(selected,selected);return [...actors].map(([id,label])=>({id,label}))}
 function auditSubjects(members:ProjectMember[],events:ProjectAuditEvent[],selected:string):Array<{id:string;label:string}>{const subjects=new Map(members.map((member)=>[member.userId,memberLabel(member)]));for(const event of events)if(event.subjectUserId)subjects.set(event.subjectUserId,subjects.get(event.subjectUserId)??event.subjectUserId);if(selected!=="all"&&!subjects.has(selected))subjects.set(selected,selected);return [...subjects].map(([id,label])=>({id,label}))}
 function subjectName(event:ProjectAuditEvent,members:ProjectMember[]):string{if(!event.subjectUserId)return "-";const member=members.find((candidate)=>candidate.userId===event.subjectUserId);return member?memberLabel(member):event.subjectUserId}
+function auditResourceDisplay(event:ProjectAuditEvent):string{return event.resourceId?`${auditResourceLabel(event.resourceKind)}: ${event.resourceId}`:auditResourceIdentity(event.resourceKind,event.resourceId)}
 function linkedResourceLabel(kind:string,resourceId:string):string{if(kind==="alert")return resourceId.startsWith("alert_rule_")?"alert rule":"alert instance";return `${kind==="all"?"linked":kind.replaceAll("_"," ")} resource`}
 function auditActionLabel(value:string):string{return value in auditActionLabels?auditActionLabels[value as keyof typeof auditActionLabels]:humanizeAuditToken(value)}
 function auditResourceLabel(value:string):string{return value in auditResourceLabels?auditResourceLabels[value as keyof typeof auditResourceLabels]:humanizeAuditToken(value)}
@@ -720,7 +700,7 @@ function Filter({
 }) {
   return (
     <div className="grid gap-1">
-      <span className="text-xs text-secondary">{label}</span>
+      <Text type="label" color="secondary">{label}</Text>
       <Selector
         label={label}
         isLabelHidden
@@ -753,7 +733,7 @@ function DetailDialog({
             onOpenChange={(open) => !open && onClose()}
             hasDivider
           />
-          <dl className="grid gap-3 px-5 py-5 text-sm sm:grid-cols-[8rem_1fr]">
+          <dl className="grid gap-3 px-5 py-5 sm:grid-cols-[8rem_1fr]">
             <DT label="Timestamp" value={event.createdAt} />
             <DT label="Action" value={auditActionLabel(event.action)} />
             <DT label="Action ID" value={event.action} />
@@ -787,8 +767,8 @@ function DetailDialog({
 function DT({ label, value }: { label: string; value: string }) {
   return (
     <>
-      <dt className="text-secondary">{label}</dt>
-      <dd className="break-all text-foreground">{value}</dd>
+      <dt><Text type="supporting" color="secondary">{label}</Text></dt>
+      <dd className="break-all"><Text type="code">{value}</Text></dd>
     </>
   );
 }

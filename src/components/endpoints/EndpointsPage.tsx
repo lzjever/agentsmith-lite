@@ -1,15 +1,21 @@
 "use client";
 
+import {
+  Banner,
+  Button,
+  Divider,
+  EmptyState,
+  IconButton,
+  Spinner,
+  Text,
+  useToast,
+} from "@astryxdesign/core";
 import { KeyRound, Plus, RefreshCw, Server } from "lucide-react";
-import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Banner, Button as AstryxButton } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
-import { toast } from "../ui/toast";
 import { DeleteEndpointDialog } from "./DeleteEndpointDialog";
 import { EndpointDialog } from "./EndpointDialog";
 import { applyEndpointSave, emptyEndpointInput, endpointInputForEdit, endpointSummary, removeEndpoint } from "./endpoints-page-utils";
@@ -37,6 +43,8 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   const [dialogOpen, setDialogOpen] = useState(false);
   const [actionProjectId, setActionProjectId] = useState<string>();
   const [formError, setFormError] = useState("");
+  const [discoveryGuidance, setDiscoveryGuidance] = useState("");
+  const [actionError, setActionError] = useState("");
   const discoveryRevision = useRef(0);
   const endpointsLoadRevision = useRef(0);
   const credentialsLoadRevision = useRef(0);
@@ -44,6 +52,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   const projectRevision = useRef(0);
   const currentProjectId = useRef(projectId);
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   if (currentProjectId.current !== projectId) {
     currentProjectId.current = projectId;
     projectRevision.current += 1;
@@ -114,6 +123,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     setActionProjectId(undefined);
     setInput(emptyEndpointInput());
     setFormError("");
+    setActionError("");
     setSaving(false);
     void load();
     loadDependencies();
@@ -128,6 +138,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     discoveryRevision.current += 1;
     setDiscovering(false);
     setModels([]);
+    setDiscoveryGuidance("");
   }
 
   function changeInput(value: EndpointInput) {
@@ -137,6 +148,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
 
   function create() {
     if (!canConfigure || mutationBusy) return;
+    setActionError("");
     invalidateDiscovery();
     setEditing(undefined);
     setInput(emptyEndpointInput());
@@ -147,6 +159,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   }
   function edit(endpoint: Endpoint) {
     if (!canConfigure || mutationBusy) return;
+    setActionError("");
     invalidateDiscovery();
     setEditing(endpoint);
     setInput(endpointInputForEdit(endpoint));
@@ -200,7 +213,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
         setDialogOpen(false);
         setActionProjectId(undefined);
         setEditing(undefined);
-        toast.error("Endpoint was removed elsewhere.");
+        setActionError("Endpoint was removed elsewhere. The endpoint list has been refreshed.");
         return true;
       }
       invalidateDiscovery();
@@ -229,12 +242,12 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));
       setDialogOpen(false);
       setActionProjectId(undefined);
-      toast.success(editing ? "Endpoint updated" : "Endpoint created");
+      showToast({ body: editing ? "Endpoint updated" : "Endpoint created" });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
       if (revision !== projectRevision.current) return;
       if (editing && forgetMissingEndpoint(reason, editing.id)) {
-        toast.error("Endpoint was removed elsewhere.");
+        setActionError("Endpoint was removed elsewhere. Review the refreshed endpoint list.");
         return;
       }
       if (editing && await refreshStaleEndpoint(reason, editing.id)) return;
@@ -250,6 +263,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     const revision = ++discoveryRevision.current;
     setDiscovering(true);
     setFormError("");
+    setDiscoveryGuidance("");
     try {
       const request = { baseUrl: input.baseUrl, credentialId: input.credentialId, requestTimeoutSecs: input.requestTimeoutSecs, ...(editing ? { endpointId: editing.id } : {}) };
       const requestSlot = editing?.id ?? projectId;
@@ -262,8 +276,11 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
         return;
       }
       setModels(result.models);
-      if (result.models.length === 0) toast.success("Connection checked. Enter a model name manually.");
-      else if (!input.model) setInput((current) => ({ ...current, model: result.models[0]! }));
+      if (result.models.length === 0) {
+        setDiscoveryGuidance("Connection succeeded, but no models were returned. Enter a model name manually.");
+      } else if (!input.model) {
+        setInput((current) => ({ ...current, model: result.models[0]! }));
+      }
     } catch (reason) {
       if (projectEpoch !== projectRevision.current || revision !== discoveryRevision.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("endpoint.models", editing?.id ?? projectId);
@@ -277,22 +294,26 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   async function recheck(endpoint: Endpoint) {
     if (!canManage || mutationBusy) return;
     const revision = projectRevision.current;
+    setActionError("");
     setCheckingId(endpoint.id);
     try {
       const checked = await apiClient.recheckEndpoint(projectId, endpoint.id, mutationKeys.key("endpoint.recheck", endpoint.id));
       mutationKeys.complete("endpoint.recheck", endpoint.id);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => applyEndpointSave(items, checked, true));
-      if (checked.health?.status === "healthy") toast.success("Endpoint is healthy");
-      else toast.error(`Endpoint unavailable: ${checked.health?.errorCategory ?? "unknown"}`);
+      if (checked.health?.status === "healthy") {
+        showToast({ body: "Endpoint is healthy" });
+      } else {
+        setActionError(`${endpoint.name} is unavailable: ${checked.health?.errorCategory ?? "unknown"}. Update its configuration or check it again.`);
+      }
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("endpoint.recheck", endpoint.id);
       if (revision !== projectRevision.current) return;
       if (forgetMissingEndpoint(reason, endpoint.id)) {
-        toast.error("Endpoint was removed elsewhere.");
+        setActionError(`${endpoint.name} was removed elsewhere. The endpoint list has been updated.`);
         return;
       }
-      toast.error(denied(reason));
+      setActionError(`${endpoint.name} could not be checked: ${denied(reason)}`);
     } finally {
       if (revision === projectRevision.current) setCheckingId(undefined);
     }
@@ -300,6 +321,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   async function remove() {
     if (!deleting || !canManage || mutationBusy) return;
     const revision = projectRevision.current;
+    setActionError("");
     setSaving(true);
     try {
       await apiClient.deleteEndpoint(projectId, deleting.id, mutationKeys.key("endpoint.delete", deleting.id));
@@ -307,7 +329,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => removeEndpoint(items, deleting.id));
       setDeleting(undefined);
-      toast.success("Endpoint deleted");
+      showToast({ body: "Endpoint deleted" });
     } catch (reason) {
       if (reason instanceof ApiError && deleting) mutationKeys.complete("endpoint.delete", deleting.id);
       if (revision !== projectRevision.current) return;
@@ -320,26 +342,192 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
 
   function refresh() {
     if (mutationBusy) return;
+    setActionError("");
     void load();
     loadDependencies();
   }
 
   const needsCredential = credentialsState === "ready" && credentials.length === 0;
-  return <PageLayout header={<PageHeader title="Endpoints" subtitle="Manage OpenAI-compatible model connections for this project." actions={<><AstryxButton label="Refresh endpoints" variant="ghost" isIconOnly icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} isDisabled={mutationBusy} onClick={create} /> : null}</>} />}>
-    {credentialsState === "error" ? <Banner status="warning" title="Credentials unavailable" description={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`} /> : null}
-    {capabilitiesError ? <Banner status="warning" title="Endpoint permissions unavailable" description={capabilitiesError} /> : null}
-    {state === "loading" ? <PageState><span className="text-secondary">Loading endpoints...</span></PageState> : null}
-    {state === "error" ? <PageState><div className="space-y-3"><h2 className="type-title">Endpoints unavailable</h2><p className="text-sm text-secondary">{error}</p><AstryxButton label="Try again" onClick={() => void load()} /></div></PageState> : null}
-    {state === "ready" && endpoints.length === 0 ? <PageState><div className="max-w-sm space-y-3"><span className="mx-auto grid size-10 place-items-center rounded-md bg-surface-high text-icon-default">{needsCredential ? <KeyRound size={20} /> : <Server size={20} />}</span><h2 className="type-title">{needsCredential ? "Create a credential first" : "No endpoints configured"}</h2><p className="text-sm text-secondary">{needsCredential ? canManage ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection." : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured." : canManage ? "Create an OpenAI-compatible endpoint before creating a task." : "An administrator can add an endpoint before task work begins."}</p>{needsCredential ? <CredentialsLink workspaceId={workspaceId} projectId={projectId} /> : canConfigure ? <AstryxButton label="Create endpoint" icon={<Plus size={16} />} onClick={create} /> : null}</div></PageState> : null}
-    {state === "ready" && endpoints.length > 0 ? <section className="space-y-4">{needsCredential ? <Banner status="warning" title="Project credentials required" description={canManage ? "Create a project credential before adding or editing endpoints." : "No project credentials are available."} endContent={<CredentialsLink workspaceId={workspaceId} projectId={projectId} />} /> : null}<div className="flex flex-wrap items-center justify-between gap-3 border-y border-subtle py-3"><p className="type-caption text-tertiary">{endpointSummary(endpoints)}</p><p className="text-sm text-secondary">{canManage ? "Management enabled." : "Read-only access."}</p></div><EndpointsContent endpoints={endpoints} credentials={credentials} canManage={canManage} canEdit={canConfigure} busy={mutationBusy} checkingId={checkingId} onEdit={edit} onRecheck={recheck} onDelete={setDeleting} /></section> : null}
-    <EndpointDialog open={dialogOpen && actionProjectId === projectId} input={input} editing={Boolean(editing)} saving={saving} discovering={discovering} models={models} canSubmit={canConfigure} canSave={(editing === undefined || endpointInputChanged(input, editing)) && !nameConflict} nameConflict={nameConflict} error={formError} credentials={credentials} onDiscoverModels={() => void discoverModels()} onDismissError={() => setFormError("")} onOpenChange={(open) => { setDialogOpen(open); if (!open) { mutationKeys.clear("endpoint.create"); setActionProjectId(undefined); invalidateDiscovery(); setFormError(""); } }} onChange={changeInput} onSubmit={save} />
-    <DeleteEndpointDialog endpoint={deleting?.projectId === projectId ? deleting : undefined} deleting={saving} canConfirm={canManage} onOpenChange={(open) => { if (!open) setDeleting(undefined); }} onConfirm={remove} />
-  </PageLayout>;
+  const emptyDescription = needsCredential
+    ? canManage
+      ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection."
+      : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured."
+    : canManage
+      ? "Create an OpenAI-compatible endpoint before creating a task."
+      : "An administrator can add an endpoint before task work begins.";
+
+  return (
+    <PageLayout
+      header={
+        <PageHeader
+          title="Endpoints"
+          subtitle="Manage OpenAI-compatible model connections for this project."
+          actions={
+            <>
+              <IconButton
+                label="Refresh endpoints"
+                tooltip="Refresh endpoints"
+                variant="ghost"
+                icon={<RefreshCw size={17} />}
+                isDisabled={mutationBusy}
+                onClick={refresh}
+              />
+              {canConfigure ? (
+                <Button
+                  label="Create endpoint"
+                  icon={<Plus size={16} />}
+                  isDisabled={mutationBusy}
+                  onClick={create}
+                />
+              ) : null}
+            </>
+          }
+        />
+      }
+    >
+      {credentialsState === "error" ? (
+        <Banner
+          status="warning"
+          title="Credentials unavailable"
+          description={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`}
+        />
+      ) : null}
+      {capabilitiesError ? (
+        <Banner
+          status="warning"
+          title="Endpoint permissions unavailable"
+          description={capabilitiesError}
+        />
+      ) : null}
+      {actionError ? (
+        <Banner
+          className="mb-4"
+          status="error"
+          title="Endpoint action could not be completed"
+          description={actionError}
+        />
+      ) : null}
+      {state === "loading" ? (
+        <div
+          className="flex min-h-48 items-center justify-center"
+          data-testid="page-state__loading"
+          data-page-state="loading"
+        >
+          <Spinner size="lg" label="Loading endpoints..." />
+        </div>
+      ) : null}
+      {state === "error" ? (
+        <EmptyState
+          data-testid="page-state__error"
+          data-page-state="error"
+          title="Endpoints unavailable"
+          description={error}
+          actions={<Button label="Try again" onClick={() => void load()} />}
+        />
+      ) : null}
+      {state === "ready" && endpoints.length === 0 ? (
+        <EmptyState
+          data-testid="page-state__empty"
+          data-page-state="empty"
+          icon={needsCredential ? <KeyRound size={20} /> : <Server size={20} />}
+          title={needsCredential ? "Create a credential first" : "No endpoints configured"}
+          description={emptyDescription}
+          actions={needsCredential ? (
+            <CredentialsLink workspaceId={workspaceId} projectId={projectId} />
+          ) : canConfigure ? (
+            <Button
+              label="Create endpoint"
+              icon={<Plus size={16} />}
+              onClick={create}
+            />
+          ) : undefined}
+        />
+      ) : null}
+      {state === "ready" && endpoints.length > 0 ? (
+        <section className="space-y-4">
+          {needsCredential ? (
+            <Banner
+              status="warning"
+              title="Project credentials required"
+              description={canManage
+                ? "Create a project credential before adding or editing endpoints."
+                : "No project credentials are available."}
+              endContent={<CredentialsLink workspaceId={workspaceId} projectId={projectId} />}
+            />
+          ) : null}
+          <div>
+            <Divider />
+            <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+              <Text type="supporting">{endpointSummary(endpoints)}</Text>
+              <Text color="secondary">
+                {canManage ? "Management enabled." : "Read-only access."}
+              </Text>
+            </div>
+            <Divider />
+          </div>
+          <EndpointsContent
+            endpoints={endpoints}
+            credentials={credentials}
+            canManage={canManage}
+            canEdit={canConfigure}
+            busy={mutationBusy}
+            checkingId={checkingId}
+            onEdit={edit}
+            onRecheck={recheck}
+            onDelete={setDeleting}
+          />
+        </section>
+      ) : null}
+      <EndpointDialog
+        open={dialogOpen && actionProjectId === projectId}
+        input={input}
+        editing={Boolean(editing)}
+        saving={saving}
+        discovering={discovering}
+        models={models}
+        discoveryGuidance={discoveryGuidance}
+        canSubmit={canConfigure}
+        canSave={(editing === undefined || endpointInputChanged(input, editing)) && !nameConflict}
+        nameConflict={nameConflict}
+        error={formError}
+        credentials={credentials}
+        onDiscoverModels={() => void discoverModels()}
+        onDismissError={() => setFormError("")}
+        onOpenChange={(open) => {
+          setDialogOpen(open);
+          if (!open) {
+            mutationKeys.clear("endpoint.create");
+            setActionProjectId(undefined);
+            invalidateDiscovery();
+            setFormError("");
+          }
+        }}
+        onChange={changeInput}
+        onSubmit={save}
+      />
+      <DeleteEndpointDialog
+        endpoint={deleting?.projectId === projectId ? deleting : undefined}
+        deleting={saving}
+        canConfirm={canManage}
+        onOpenChange={(open) => {
+          if (!open) setDeleting(undefined);
+        }}
+        onConfirm={remove}
+      />
+    </PageLayout>
+  );
 }
 
 function CredentialsLink({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
   const href = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}/credentials` : "../credentials";
-  return <Link href={href} className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border-input bg-surface px-3.5 text-[13px] text-primary hover:bg-hover hover:text-foreground"><KeyRound size={15} />Project credentials</Link>;
+  return (
+    <Button
+      label="Project credentials"
+      href={href}
+      variant="secondary"
+      icon={<KeyRound size={15} />}
+    />
+  );
 }
 
 function message(error: unknown) {

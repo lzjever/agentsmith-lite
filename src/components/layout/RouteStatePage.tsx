@@ -1,15 +1,13 @@
 "use client";
 
-import { Spinner } from "@astryxdesign/core";
+import { Banner, Button, Spinner } from "@astryxdesign/core";
 import { PageLayout } from "./PageLayout";
 import { PageHeader } from "./PageHeader";
-import { PageState } from "./PageState";
-import { ErrorState } from "../ui/error-state";
 
 export function RouteLoadingPage({ title, label = `Loading ${title.toLowerCase()}...` }: { title: string; label?: string }) {
-  return <PageLayout header={<PageHeader title={title} />}><PageState state="loading"><Spinner label={label} /></PageState></PageLayout>;
+  return <PageLayout header={<PageHeader title={title} />}><div className="grid min-h-48 place-items-center px-4 py-6"><Spinner label={label} /></div></PageLayout>;
 }
 
 export function RouteErrorPage({ title, message, onRetry }: { title: string; message: string; onRetry: () => void }) {
-  return <PageLayout header={<PageHeader title={title} />}><PageState state="error"><ErrorState title={`${title} unavailable`} message={message} onRetry={onRetry} /></PageState></PageLayout>;
+  return <PageLayout header={<PageHeader title={title} />}><Banner status="error" container="section" title={`${title} unavailable`} description={message} endContent={<Button label="Try again" variant="secondary" onClick={onRetry} />} /></PageLayout>;
 }

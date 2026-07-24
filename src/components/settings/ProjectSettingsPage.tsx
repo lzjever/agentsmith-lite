@@ -4,15 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Archive, RefreshCw, Save, Trash2, Users } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Banner, Button, Selector, TextInput } from "@astryxdesign/core";
+import { Banner, Button, Dialog, DialogHeader, Heading, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type CurrentUser, type ProjectMember, type ProjectSettings } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
 import { SettingsLoadError } from "./SettingsRouteState";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { toast } from "../ui/toast";
 
 export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
   return <ProjectSettings key={`${workspaceId}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
@@ -21,6 +18,7 @@ export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: s
 function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
   const router = useRouter();
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const memberRequest = useRef(0);
@@ -33,7 +31,11 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
   const [deleteName, setDeleteName] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [ownerError, setOwnerError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [members,setMembers]=useState<ProjectMember[]>([]);const [memberState,setMemberState]=useState<"loading"|"ready"|"error">("loading");const [ownerTarget,setOwnerTarget]=useState("");const [ownerOpen,setOwnerOpen]=useState(false);const [ownerBusy,setOwnerBusy]=useState(false);const [lifecycleBusy,setLifecycleBusy]=useState(false);
   const loadMembers = useCallback(async () => {
     const request = ++memberRequest.current;
@@ -79,6 +81,7 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!settingsDirty || !projectName.trim() || mutationBusy) return;
+    setActionError("");
     setSaving(true);
     const input = { name: projectName, expectedName: data!.project.name };
     try {
@@ -88,12 +91,12 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       setData(saved);
       setProjectName(saved.project.name);
       notifyDirectoryChanged();
-      toast.success("Project settings saved.");
+      showToast({ body: "Project settings saved." });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("project-settings", projectId);
       if (!mounted.current) return;
       const changed = reason instanceof ApiError && reason.status === 409 && reason.message === "Project changed elsewhere. Reload and try again.";
-      toast.error(changed ? "Project changed elsewhere. Latest settings loaded." : settingsErrorMessage(reason, "Project settings could not be saved."));
+      setActionError(changed ? "Project changed elsewhere. Latest settings loaded; review your changes before saving again." : settingsErrorMessage(reason, "Project settings could not be saved."));
       if (changed || isReadOnlyMutationError(reason)) await load();
     } finally {
       if (mounted.current) setSaving(false);
@@ -121,10 +124,43 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     setOwnerTarget("");
     mutationKeys.clear("project-owner-transfer");
   }, [memberState, ownerTarget, ownerTargetEligible]);
-  async function setArchive(){if(!data||mutationBusy)return;const operation=archived?"project-unarchive":"project-archive";setLifecycleBusy(true);try{if(archived)await apiClient.unarchiveProject(projectId,mutationKeys.key(operation,projectId));else await apiClient.archiveProject(projectId,mutationKeys.key(operation,projectId));mutationKeys.complete(operation,projectId);if(!mounted.current)return;notifyDirectoryChanged();await load();if(mounted.current)toast.success(archived?"Project restored.":"Project archived.");}catch(reason){if(reason instanceof ApiError)mutationKeys.complete(operation,projectId);if(!mounted.current)return;toast.error(settingsErrorMessage(reason,"Project lifecycle could not be updated."));if(isReadOnlyMutationError(reason))await load();}finally{if(mounted.current)setLifecycleBusy(false)}}
+  function setArchiveDialogOpen(open: boolean) {
+    if (lifecycleBusy && !open) return;
+    setArchiveOpen(open);
+    if (!open) {
+      setArchiveError("");
+      mutationKeys.clear("project-archive");
+    }
+  }
+  async function setArchive(){
+    if(!data||mutationBusy)return;
+    const operation=archived?"project-unarchive":"project-archive";
+    setActionError("");
+    setArchiveError("");
+    setLifecycleBusy(true);
+    try{
+      if(archived)await apiClient.unarchiveProject(projectId,mutationKeys.key(operation,projectId));
+      else await apiClient.archiveProject(projectId,mutationKeys.key(operation,projectId));
+      mutationKeys.complete(operation,projectId);
+      if(!mounted.current)return;
+      notifyDirectoryChanged();
+      setArchiveOpen(false);
+      await load();
+      if(mounted.current)showToast({ body: archived?"Project restored.":"Project archived." });
+    }catch(reason){
+      if(reason instanceof ApiError)mutationKeys.complete(operation,projectId);
+      if(!mounted.current)return;
+      const message=settingsErrorMessage(reason,"Project lifecycle could not be updated.");
+      if(archived)setActionError(message);
+      else setArchiveError(message);
+    }finally{
+      if(mounted.current)setLifecycleBusy(false);
+    }
+  }
   async function transferOwner(){
     if(!data||!canTransferOwnership||mutationBusy)return;
     setOwnerBusy(true);
+    setOwnerError("");
     try {
       await apiClient.transferProjectOwner(projectId,ownerTarget,mutationKeys.key("project-owner-transfer",ownerTarget));
       mutationKeys.complete("project-owner-transfer",ownerTarget);
@@ -133,33 +169,33 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       notifyDirectoryChanged();
       setOwnerOpen(false);
       setOwnerTarget("");
-      toast.success("Project ownership transferred.");
+      setOwnerError("");
+      showToast({ body: "Project ownership transferred." });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("project-owner-transfer",ownerTarget);
-      if (mounted.current) await load();
-      throw reason;
+      if (mounted.current) setOwnerError(settingsErrorMessage(reason, "Project ownership could not be transferred."));
     } finally { if(mounted.current)setOwnerBusy(false); }
   }
   async function deleteProject() {
     if (mutationBusy) return;
     setDeleteBusy(true);
+    setDeleteError("");
     try {
       await apiClient.deleteProject(projectId,mutationKeys.key("project-delete",projectId));
       mutationKeys.complete("project-delete",projectId);
       if (!mounted.current) return;
-      toast.success("Project deleted.");
+      showToast({ body: "Project deleted." });
       router.push(`/workspaces/${workspaceId}`);
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("project-delete",projectId);
       if (!mounted.current) return;
       if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
         setDialogOpen(false);
-        if (error.status === 403) toast.error(deletionMessage(error));
         notifyDirectoryChanged();
         router.push(`/workspaces/${workspaceId}`);
         return;
       }
-      throw new Error(deletionMessage(error));
+      setDeleteError(deletionMessage(error));
     } finally {
       if (mounted.current) setDeleteBusy(false);
     }
@@ -169,25 +205,27 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
     setDeleteOpen(open);
     if (!open) {
       setDeleteName("");
+      setDeleteError("");
       mutationKeys.clear("project-delete");
     }
   }
 
-  return <PageLayout contentWidth="narrow" header={<PageHeader title="Project settings" subtitle="Project metadata and access administration." actions={<Link className="inline-flex items-center gap-2 text-sm text-secondary hover:text-foreground" href={`/workspaces/${workspaceId}/projects/${projectId}/members`}><Users size={16} />Manage members</Link>} />}>
-    {state === "loading" ? <PageState state="loading">Loading project settings...</PageState> : null}
+  return <PageLayout contentWidth="narrow" header={<PageHeader title="Project settings" subtitle="Project metadata and access administration." actions={<Link className="inline-flex items-center gap-2 text-secondary hover:text-primary" href={`/workspaces/${workspaceId}/projects/${projectId}/members`}><Users size={16} /><Text type="supporting" color="inherit">Manage members</Text></Link>} />}>
+    {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading project settings..." /></div> : null}
     {state === "error" ? <SettingsLoadError message={loadError} onRetry={() => void load()} backHref={`/workspaces/${workspaceId}/projects/${projectId}/overview`} backLabel="Back to project" /> : null}
+    {state === "ready" && actionError ? <Banner className="mb-5" status="error" title="Project could not be updated" description={actionError} /> : null}
     {state === "ready" && data ? <>
-      <p role="status" className="border-y border-subtle bg-surface-low px-4 py-3 text-sm text-secondary">{projectLifecycleMessage(lifecycleStatus,workspaceLifecycleStatus)}</p>
-      <form onSubmit={submit} className="grid gap-5 border-y border-subtle py-5">
+      <Banner status="info" title="Project status" description={projectLifecycleMessage(lifecycleStatus,workspaceLifecycleStatus)} />
+      <form onSubmit={submit} className="mt-5 grid gap-5 border-y border-border py-5">
         <TextInput label="Project name" htmlName="name" value={projectName} onChange={(value) => setProjectName(value.slice(0, 160))} isRequired isDisabled={mutationBusy||!data.capabilities.canManageSettings||!isActive} width="100%" />
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4"><p className="text-sm text-secondary">Members and resource limits are managed in their dedicated sections.</p>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" label={saving ? "Saving..." : "Save project"} variant="primary" icon={<Save size={16} />} isDisabled={mutationBusy || !settingsDirty || !projectName.trim()} /> : <span className="text-sm text-secondary">Read-only access.</span>}</div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"><Text type="supporting" color="secondary">Members and resource limits are managed in their dedicated sections.</Text>{data.capabilities.canManageSettings&&isActive ? <Button type="submit" label={saving ? "Saving..." : "Save project"} variant="primary" icon={<Save size={16} />} isDisabled={mutationBusy || !settingsDirty || !projectName.trim()} isLoading={saving} /> : <Text type="supporting" color="secondary">Read-only access.</Text>}</div>
       </form>
-      {showLifecycle?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Lifecycle</h2><p className="mt-1 text-sm text-secondary">Archived projects remain available for viewing. Only the project owner can restore one.</p>{archived&&!workspaceActive?<p className="mt-4 text-sm text-secondary">Restore the workspace before unarchiving this project.</p>:<Button className="mt-4" label={archived ? "Unarchive project" : "Archive project"} variant="secondary" icon={<Archive size={16}/>} isDisabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveOpen(true)} />}</section>:null}
-      {canArchive?<ConfirmationDialog open={archiveOpen} onOpenChange={(open)=>{setArchiveOpen(open);if(!open)mutationKeys.clear("project-archive");}} title="Archive project" description="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." confirmText="Archive project" confirmDisabled={mutationBusy} onConfirm={setArchive}/>:null}
-      {isOwner?<section className="mt-8 border-t border-subtle pt-6"><h2 className="type-title">Transfer ownership</h2><p className="mt-1 text-sm text-secondary">Choose an existing project member as the new owner.</p>{memberState==="loading"?<p className="mt-4 text-sm text-secondary" role="status">Loading eligible project members...</p>:null}{memberState==="error"?<Banner className="mt-4" status="error" title="Project members unavailable" description="Project members could not be loaded." endContent={<Button label="Retry" variant="ghost" size="sm" aria-label="Retry member loading" icon={<RefreshCw size={14}/>} isDisabled={mutationBusy} onClick={()=>void loadMembers()} />}/>:null}{memberState==="ready"&&ownerCandidates.length === 0 ? <p className="mt-4 text-sm text-secondary" role="status">There are no other project members eligible to become owner.</p> : null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><Selector id="project-owner-target" label="New project owner" options={ownerCandidates.map((member) => ({ value: member.userId, label: memberLabel(member) }))} value={ownerTargetEligible?ownerTarget:""} onChange={setOwnerTarget} placeholder="Select a member" isDisabled={!canTransferOwnership||mutationBusy} size="lg" width={256} /><Button label="Transfer ownership" variant="secondary" isDisabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} onClick={()=>setOwnerOpen(true)} /></div>:null}</section>:null}
-      {isOwner?<ConfirmationDialog open={ownerOpen&&ownerTargetEligible} onOpenChange={(open)=>{setOwnerOpen(open);if(!open)mutationKeys.clear("project-owner-transfer");}} title="Transfer project ownership" description="The current owner becomes an administrator." confirmText="Transfer ownership" variant="default" confirmDisabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} onConfirm={transferOwner}/>:null}
-      {canDelete ? <section className="mt-8 border-t border-danger/40 pt-6" aria-label="Danger zone"><h2 className="type-title">{lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"}</h2><p className="mt-1 text-sm text-secondary">{lifecycleStatus==="deleting"?"Previous cleanup did not finish. Continue deleting the remaining project-owned data.":"This permanently removes this project and its project-owned data."}</p><Button className="mt-4" label={lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} variant="destructive" aria-label={lifecycleStatus==="deleting"?"Continue project deletion":"Open project deletion confirmation"} icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDialogOpen(true)} /></section> : null}
-      {canDelete ? <ConfirmationDialog open={deleteOpen} onOpenChange={setDialogOpen} title={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"} description={<><span>Type <strong className="text-foreground">{data.project.name}</strong> to permanently delete this project.</span><div className="mt-4"><TextInput label="Project name" value={deleteName} onChange={setDeleteName} isDisabled={mutationBusy} width="100%" /></div></>} confirmText={deleteBusy ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} confirmDisabled={mutationBusy || deleteName !== data.project.name} onConfirm={deleteProject} errorContext="Project could not be deleted" /> : null}
+      {showLifecycle?<section className="mt-8 border-t border-border pt-6"><Heading level={3}>Lifecycle</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Archived projects remain available for viewing. Only the project owner can restore one.</Text>{archived&&!workspaceActive?<Text as="p" type="supporting" color="secondary" display="block" className="mt-4">Restore the workspace before unarchiving this project.</Text>:<Button className="mt-4" label={archived ? "Unarchive project" : "Archive project"} variant="secondary" icon={<Archive size={16}/>} isDisabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveDialogOpen(true)} />}</section>:null}
+      {canArchive?<Dialog isOpen={archiveOpen} onOpenChange={setArchiveDialogOpen} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Archive project"><form onSubmit={(event)=>{event.preventDefault();void setArchive();}}><DialogHeader title="Archive project" subtitle="Project data remains available for viewing, but changes and new task runs are disabled until the owner restores this project." onOpenChange={setArchiveDialogOpen} hasDivider />{archiveError?<Banner className="mx-5 mt-4" status="error" title="Project could not be archived" description={archiveError}/>:null}<footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={lifecycleBusy} onClick={()=>setArchiveDialogOpen(false)}/><Button label={lifecycleBusy?"Archiving":"Archive project"} type="submit" variant="destructive" size="lg" isDisabled={lifecycleBusy} isLoading={lifecycleBusy}/></footer></form></Dialog>:null}
+      {isOwner?<section className="mt-8 border-t border-border pt-6"><Heading level={3}>Transfer ownership</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Choose an existing project member as the new owner.</Text>{memberState==="loading"?<Text as="p" type="supporting" color="secondary" display="block" className="mt-4" role="status">Loading eligible project members...</Text>:null}{memberState==="error"?<Banner className="mt-4" status="error" title="Project members unavailable" description="Project members could not be loaded." endContent={<Button label="Retry" variant="ghost" size="sm" aria-label="Retry member loading" icon={<RefreshCw size={14}/>} isDisabled={mutationBusy} onClick={()=>void loadMembers()} />}/>:null}{memberState==="ready"&&ownerCandidates.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-4" role="status">There are no other project members eligible to become owner.</Text> : null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><Selector id="project-owner-target" label="New project owner" options={ownerCandidates.map((member) => ({ value: member.userId, label: memberLabel(member) }))} value={ownerTargetEligible?ownerTarget:""} onChange={setOwnerTarget} placeholder="Select a member" isDisabled={!canTransferOwnership||mutationBusy} size="lg" width={256} /><Button label="Transfer ownership" variant="secondary" isDisabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} onClick={()=>{setOwnerError("");setOwnerOpen(true);}} /></div>:null}</section>:null}
+      {isOwner?<Dialog isOpen={ownerOpen&&ownerTargetEligible} onOpenChange={(open)=>{if(ownerBusy&&!open)return;setOwnerOpen(open);if(!open){setOwnerError("");mutationKeys.clear("project-owner-transfer");}}} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Transfer project ownership"><DialogHeader title="Transfer project ownership" subtitle="The current owner becomes an administrator." onOpenChange={(open)=>{if(!open&&!ownerBusy)setOwnerOpen(false);}} hasDivider />{ownerError?<Banner className="mx-5 mt-4" status="error" title="Ownership could not be transferred" description={ownerError}/>:null}<footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={ownerBusy} onClick={()=>setOwnerOpen(false)}/><Button label="Transfer ownership" variant="primary" size="lg" isDisabled={!ownerTarget||!ownerTargetEligible||!canTransferOwnership||mutationBusy} isLoading={ownerBusy} onClick={()=>void transferOwner()}/></footer></Dialog>:null}
+      {canDelete ? <section className="mt-8 border-t border-error pt-6" aria-label="Danger zone"><Heading level={3}>{lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"}</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">{lifecycleStatus==="deleting"?"Previous cleanup did not finish. Continue deleting the remaining project-owned data.":"This permanently removes this project and its project-owned data."}</Text><Button className="mt-4" label={lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} variant="destructive" aria-label={lifecycleStatus==="deleting"?"Continue project deletion":"Open project deletion confirmation"} icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDialogOpen(true)} /></section> : null}
+      {canDelete ? <Dialog isOpen={deleteOpen} onOpenChange={(open)=>{if(deleteBusy&&!open)return;setDialogOpen(open);}} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"}><form onSubmit={(event)=>{event.preventDefault();void deleteProject();}}><DialogHeader title={lifecycleStatus==="deleting"?"Continue project deletion":"Delete project"} subtitle="This action permanently removes project-owned data." onOpenChange={(open)=>{if(!open&&!deleteBusy)setDialogOpen(false);}} hasDivider /><div className="grid gap-4 px-5 py-5"><Text color="secondary">Type <Text weight="semibold">{data.project.name}</Text> to permanently delete this project.</Text><TextInput label="Project name" value={deleteName} onChange={setDeleteName} isDisabled={mutationBusy} width="100%" />{deleteError?<Banner status="error" title="Project could not be deleted" description={deleteError}/>:null}</div><footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleteBusy} onClick={()=>setDialogOpen(false)}/><Button label={deleteBusy ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete project"} type="submit" variant="destructive" size="lg" isDisabled={mutationBusy || deleteName !== data.project.name} isLoading={deleteBusy}/></footer></form></Dialog> : null}
     </> : null}
   </PageLayout>;
 }

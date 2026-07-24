@@ -9,16 +9,16 @@ import {
   Text,
 } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
-import type { Endpoint } from "../../lib/api/client";
+import type { ProjectCredential } from "../../lib/api/client";
 
-export function DeleteEndpointDialog({
-  endpoint,
+export function DeleteCredentialDialog({
+  credential,
   deleting,
   canConfirm,
   onOpenChange,
   onConfirm,
 }: {
-  endpoint: Endpoint | undefined;
+  credential: ProjectCredential | undefined;
   deleting: boolean;
   canConfirm: boolean;
   onOpenChange: (open: boolean) => void;
@@ -28,7 +28,7 @@ export function DeleteEndpointDialog({
 
   useEffect(() => {
     setFailure("");
-  }, [endpoint?.id]);
+  }, [credential?.id]);
 
   const handleOpenChange = (open: boolean) => {
     if (deleting) return;
@@ -37,40 +37,40 @@ export function DeleteEndpointDialog({
   };
 
   const confirm = async () => {
-    if (!endpoint || !canConfirm || deleting) return;
+    if (!credential || !canConfirm || deleting) return;
     setFailure("");
     try {
       await onConfirm();
     } catch (reason) {
-      setFailure(reason instanceof Error ? reason.message : "Endpoint could not be deleted.");
+      setFailure(reason instanceof Error ? reason.message : "Credential could not be deleted.");
     }
   };
 
   return (
     <Dialog
-      isOpen={Boolean(endpoint)}
+      isOpen={Boolean(credential)}
       onOpenChange={handleOpenChange}
       purpose="form"
       role="alertdialog"
-      width="min(34rem, calc(100vw - 2rem))"
+      width="min(32rem, calc(100vw - 2rem))"
       padding={0}
-      aria-label="Delete endpoint"
+      aria-label="Delete credential"
     >
       <Layout
         defaultHasDividers
-        header={<DialogHeader title="Delete endpoint" onOpenChange={handleOpenChange} />}
+        header={<DialogHeader title="Delete credential" onOpenChange={handleOpenChange} />}
         content={
           <LayoutContent>
             <div className="grid gap-4">
               <Text as="p" display="block" color="secondary">
-                {endpoint
-                  ? `Remove ${endpoint.name}? This also removes its rolling limits and endpoint alert rules, and resolves active endpoint alerts. Tasks that reference it must be deleted first.`
+                {credential
+                  ? `Delete ${credential.name}? This cannot be undone. Endpoints using this credential must be updated first.`
                   : ""}
               </Text>
               {failure ? (
                 <Banner
                   status="error"
-                  title="Endpoint could not be deleted"
+                  title="Credential could not be deleted"
                   description={failure}
                 />
               ) : null}
@@ -89,7 +89,7 @@ export function DeleteEndpointDialog({
                 onClick={() => handleOpenChange(false)}
               />
               <Button
-                label={deleting ? "Deleting" : "Delete endpoint"}
+                label={deleting ? "Deleting" : "Delete credential"}
                 type="button"
                 variant="destructive"
                 size="lg"

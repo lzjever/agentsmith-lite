@@ -1,10 +1,11 @@
 "use client";
 
-import { AppShell as AstryxAppShell, Button, MobileNav, Spinner } from "@astryxdesign/core";
+import { AppShell as AstryxAppShell, Button, Heading, MobileNav, Spinner, Text } from "@astryxdesign/core";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Project, type Workspace } from "../../lib/api/client";
+import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type Workspace } from "../../lib/api/client";
 import { DocumentTitle } from "../layout/DocumentTitle";
+import { ThemeToggle } from "../theme/ThemeToggle";
 import { ShellNavigation } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -128,22 +129,22 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
     height="auto"
     topNav={<Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} />}
     sideNav={<ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed} />}
-    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></MobileNav>}
-  ><main ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</main></AstryxAppShell>;
+    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full flex-col"><div className="min-h-0 flex-1"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></div><ThemeToggle mobile /></div></MobileNav>}
+  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell>;
 }
 
 function ShellLoadingFrame() {
-  return <><DocumentTitle title="Loading" /><div className="min-h-screen bg-background"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><span className="font-display text-lg text-foreground">AgentSmith</span></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-[var(--sidebar-width)] border-r border-border bg-panel md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><h1 className="sr-only">Loading AgentSmith</h1><Spinner label="Loading workspace..." /></main></div></div></>;
+  return <><DocumentTitle title="Loading" /><div className="min-h-screen bg-body"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><Text type="large" weight="semibold">AgentSmith</Text></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-60 border-r border-border bg-muted md:block" aria-hidden="true" /><main className="grid min-w-0 flex-1 place-items-center"><Heading level={1} className="sr-only">Loading AgentSmith</Heading><Spinner label="Loading workspace..." /></main></div></div></>;
 }
 
 function ShellStatePage({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
-  return <><DocumentTitle title={title} /><main className="grid min-h-screen place-items-center bg-background px-6"><section className="max-w-md text-center"><p className="type-caption text-tertiary">AgentSmith</p><h1 className="type-section-heading mt-3">{title}</h1>{detail ? <p className="type-body-ui mt-3 text-secondary">{detail}</p> : null}{action ? <p className="mt-6">{action}</p> : null}</section></main></>;
+  return <><DocumentTitle title={title} /><main className="grid min-h-screen place-items-center bg-body px-6"><section className="max-w-md text-center"><Text type="supporting" color="secondary">AgentSmith</Text><Heading level={1} className="mt-3">{title}</Heading>{detail ? <Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text> : null}{action ? <div className="mt-6">{action}</div> : null}</section></main></>;
 }
 
 function DirectoryNotice({ onRetry }: { onRetry: () => Promise<void> }) {
-  return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-surface-low px-4 py-2 text-sm text-secondary" role="status"><span>Workspace navigation is unavailable. This page may still be used.</span><Button label="Retry navigation" size="sm" variant="ghost" onClick={() => void onRetry()} /></div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted px-4 py-2" role="status"><Text color="secondary">Workspace navigation is unavailable. This page may still be used.</Text><Button label="Retry navigation" size="sm" variant="ghost" onClick={() => void onRetry()} /></div>;
 }
 
 function ShellRecoveryState({ title, detail, projectsHref, projectHref, retry }: { title: string; detail: string; projectsHref?: string; projectHref?: string; retry: () => Promise<void> }) {
-  return <><DocumentTitle title={title} /><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><h1 className="type-section-heading">{title}</h1><p className="mt-3 text-sm text-secondary">{detail}</p><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Button label="Open project" variant="primary" href={projectHref} /> : null}{projectsHref ? <Button label="View all projects" variant="secondary" href={projectsHref} /> : null}<Button label="Back to workspaces" variant="secondary" href="/" /><Button label="Check access again" variant="ghost" onClick={() => void retry()} /></div></div></section></>;
+  return <><DocumentTitle title={title} /><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><Heading level={1}>{title}</Heading><Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref ? <Button label="Open project" variant="primary" href={projectHref} /> : null}{projectsHref ? <Button label="View all projects" variant="secondary" href={projectsHref} /> : null}<Button label="Back to workspaces" variant="secondary" href="/" /><Button label="Check access again" variant="ghost" onClick={() => void retry()} /></div></div></section></>;
 }

@@ -1,12 +1,10 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { Button } from "@astryxdesign/core/Button";
+import { Banner, Button, Dialog, DialogHeader, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule, type ProjectAlertType } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { toast } from "../ui/toast";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
@@ -14,6 +12,7 @@ const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: ini
 
 export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccessDenied, onInstancesChanged }: { projectId: string; endpoints?: Endpoint[]; canManage: boolean; onAccessDenied?: (reason: unknown) => void; onInstancesChanged?: () => Promise<void> }) {
   const mutationKeys = useMutationKeys();
+  const showToast = useToast();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
@@ -25,9 +24,13 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
   const [formError, setFormError] = useState("");
   const [busyRuleId, setBusyRuleId] = useState<string | null>(null);
   const [removing, setRemoving] = useState<ActiveAlertRule | null>(null);
+  const [panelError, setPanelError] = useState("");
+  const [panelNotice, setPanelNotice] = useState("");
+  const [removeError, setRemoveError] = useState("");
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
     setState("loading");
+    setPanelError("");
     try {
       const listed = await apiClient.alertRules(projectId);
       if (!mounted.current || request !== loadRequest.current) return;
@@ -53,6 +56,8 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       mutationKeys.clear("alert-rule.delete");
       setDialogOpen(false);
       setRemoving(null);
+      setPanelError("");
+      setRemoveError("");
     }
   }, [canManage]);
 
@@ -61,8 +66,9 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       setDialogOpen(false);
       setRemoving(null);
       onAccessDenied?.(reason);
+      return;
     }
-    toast.error(message);
+    setPanelError(message);
   }
 
   function forgetMissingRule(reason: unknown, ruleId: string) {
@@ -74,7 +80,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     }
     if (removing?.id === ruleId) setRemoving(null);
     void onInstancesChanged?.();
-    toast.error("Alert rule no longer exists.");
+    setPanelNotice("Alert rule no longer exists. The rule list has been updated.");
     return true;
   }
 
@@ -83,6 +89,8 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     setEditing(null);
     setValue(initialValue);
     setFormError("");
+    setPanelError("");
+    setPanelNotice("");
     setDialogOpen(true);
   }
 
@@ -91,6 +99,8 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
     setEditing(rule);
     setValue(alertRuleFormValue(rule));
     setFormError("");
+    setPanelError("");
+    setPanelNotice("");
     setDialogOpen(true);
   }
 
@@ -111,20 +121,20 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       await onInstancesChanged?.();
       if (!mounted.current) return;
       setDialogOpen(false);
-      toast.success(editing ? "Alert rule updated." : "Alert rule created.");
+      showToast({ body: editing ? "Alert rule updated." : "Alert rule created.", type: "info" });
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "alert-rule.update" : "alert-rule.create", editing ? `${editing.id}:form` : projectId);
       if (editing && isRuleConflict(reason)) {
         setDialogOpen(false);
         await load();
-        if (mounted.current) toast.error("Alert rule changed elsewhere. Latest rules loaded.");
+        if (mounted.current) setPanelNotice("Alert rule changed elsewhere. Latest rules loaded; review before editing again.");
         return;
       }
       if (editing && forgetMissingRule(reason, editing.id)) return;
       const message = editing ? "Alert rule could not be updated." : "Alert rule could not be created.";
-      if (!isReadOnlyMutationError(reason)) setFormError(message);
-      mutationFailed(reason, message);
+      if (isReadOnlyMutationError(reason)) mutationFailed(reason, message);
+      else setFormError(message);
     } finally {
       if (mounted.current) setSaving(false);
     }
@@ -132,6 +142,7 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
 
   async function toggle(rule: ProjectAlertRule) {
     if (!canManage || busyRuleId !== null || !isActiveRule(rule)) return;
+    setPanelError("");
     setBusyRuleId(rule.id);
     try {
       const identity = `${rule.id}:toggle:${!rule.enabled}`;
@@ -141,13 +152,13 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       setRules((current) => current.map((item) => item.id === rule.id ? saved : item));
       await onInstancesChanged?.();
       if (!mounted.current) return;
-      toast.success(saved.enabled ? "Alert rule enabled." : "Alert rule disabled.");
+      showToast({ body: saved.enabled ? "Alert rule enabled." : "Alert rule disabled.", type: "info" });
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) mutationKeys.complete("alert-rule.update", `${rule.id}:toggle:${!rule.enabled}`);
       if (isRuleConflict(reason)) {
         await load();
-        if (mounted.current) toast.error("Alert rule changed elsewhere. Latest rules loaded.");
+        if (mounted.current) setPanelNotice("Alert rule changed elsewhere. Latest rules loaded; review before trying again.");
         return;
       }
       if (forgetMissingRule(reason, rule.id)) return;
@@ -156,11 +167,12 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       if (mounted.current) setBusyRuleId(null);
     }
   }
-  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null||!isActiveRule(rule))return;setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); toast.success(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
+  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null||!isActiveRule(rule))return;setPanelError("");setPanelNotice("");setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); setPanelNotice(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
 
   async function remove() {
     if (!removing || !canManage || busyRuleId !== null) return;
     setBusyRuleId(removing.id);
+    setRemoveError("");
     try {
       let alreadyMissing = false;
       await apiClient.deleteAlertRule(projectId, removing.id, mutationKeys.key("alert-rule.delete", removing.id)).catch((error) => {
@@ -173,39 +185,49 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
       await onInstancesChanged?.();
       if (!mounted.current) return;
       setRemoving(null);
-      toast.success(alreadyMissing ? "Alert rule no longer exists." : "Alert rule deleted.");
+      if (alreadyMissing) setPanelNotice("Alert rule no longer exists. The rule list has been updated.");
+      else showToast({ body: "Alert rule deleted.", type: "info" });
     } catch (error) {
       if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("alert-rule.delete", removing.id);
-      mutationFailed(error, "Alert rule could not be deleted.");
-      throw error;
+      if (isReadOnlyMutationError(error)) {
+        mutationFailed(error, "Alert rule could not be deleted.");
+      } else {
+        setRemoveError(error instanceof Error ? error.message : "Alert rule could not be deleted.");
+      }
     } finally {
       if (mounted.current) setBusyRuleId(null);
     }
   }
 
-  return <section className="mt-8 border-t border-subtle pt-6" aria-label="Alert rules">
+  return <section className="mt-8 border-t border-border pt-6" aria-label="Alert rules">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <div><h2 className="type-title">Alert rules</h2><p className="mt-1 text-sm text-secondary">Choose when project administrators should be notified.</p></div>
-      {canManage ? <Button label="Add rule" variant="secondary" icon={<Plus size={16} />} isDisabled={busyRuleId !== null} onClick={openCreate} /> : <span className="text-sm text-secondary">Read-only</span>}
+      <div><Heading level={2}>Alert rules</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Choose when project administrators should be notified.</Text></div>
+      {canManage ? <Button label="Add rule" variant="secondary" icon={<Plus size={16} />} isDisabled={busyRuleId !== null} onClick={openCreate} /> : <Text type="supporting" color="secondary">Read-only</Text>}
     </div>
-    {state === "loading" ? <p className="mt-4 text-sm text-secondary">Loading alert rules...</p> : null}
-    {state === "error" ? <div className="mt-4 flex items-center justify-between gap-3 border-y border-subtle py-3" role="alert"><span className="text-sm text-error">Alert rules could not be loaded.</span><Button label="Retry" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void load()} /></div> : null}
-    {state === "ready" && rules.length === 0 ? <p className="mt-4 text-sm text-secondary">No alert rules configured.</p> : null}
-    {state === "ready" && rules.length > 0 ? <ul className="mt-4 divide-y divide-subtle border-y border-subtle">
+    {panelError ? <Banner className="mt-4" status="error" title="Alert rule update failed" description={panelError} isDismissable onDismiss={() => setPanelError("")} /> : null}
+    {panelNotice ? <Banner className="mt-4" status="info" title="Alert rule status" description={panelNotice} isDismissable onDismiss={() => setPanelNotice("")} /> : null}
+    {state === "loading" ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-4">Loading alert rules...</Text> : null}
+    {state === "error" ? <Banner className="mt-4" status="error" title="Alert rules unavailable" description="Alert rules could not be loaded." endContent={<Button label="Retry" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void load()} />} /> : null}
+    {state === "ready" && rules.length === 0 ? <EmptyState className="mt-4" isCompact title="No alert rules configured" /> : null}
+    {state === "ready" && rules.length > 0 ? <ul className="mt-4 divide-y divide-border border-y border-border">
       {rules.map((rule) => <li className="flex items-center justify-between gap-3 py-3" key={rule.id}>
-        <span className="min-w-0 text-sm text-foreground"><strong className="block truncate font-medium">{!isActiveRule(rule) ? "Historical task failure" : rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</strong><small className="mt-1 block text-secondary">{!isActiveRule(rule) ? `Read-only retained rule · previously ${rule.retiredWasEnabled ? "enabled" : "disabled"}` : `Threshold ${rule.threshold ?? 1} · ${rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · ${scopeLabel(rule, endpoints)}`}</small></span>
+        <span className="min-w-0"><Text weight="semibold" display="block" maxLines={1}>{!isActiveRule(rule) ? "Historical task failure" : rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</Text><Text type="supporting" color="secondary" display="block" className="mt-1">{!isActiveRule(rule) ? `Read-only retained rule · previously ${rule.retiredWasEnabled ? "enabled" : "disabled"}` : `Threshold ${rule.threshold ?? 1} · ${rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · ${scopeLabel(rule, endpoints)}`}</Text></span>
         <div className="flex items-center gap-2">
-          {!isActiveRule(rule) ? <span className="text-sm text-secondary">Read-only</span> : canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <span className="text-sm text-secondary">{rule.enabled ? "Enabled" : "Disabled"}</span>}
-          {canManage && isActiveRule(rule) ? <Button label="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
-          {canManage && isActiveRule(rule) ? <Button label="Edit alert rule" variant="ghost" icon={<Pencil size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => openEdit(rule)} /> : null}
-          {canManage && isActiveRule(rule) ? <Button label="Delete alert rule" variant="ghost" icon={<Trash2 size={16} />} isIconOnly isDisabled={busyRuleId !== null} onClick={() => setRemoving(rule)} /> : null}
+          {!isActiveRule(rule) ? <Text type="supporting" color="secondary">Read-only</Text> : canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <Text type="supporting" color="secondary">{rule.enabled ? "Enabled" : "Disabled"}</Text>}
+          {canManage && isActiveRule(rule) ? <IconButton label="Test alert rule" tooltip="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
+          {canManage && isActiveRule(rule) ? <IconButton label="Edit alert rule" tooltip="Edit alert rule" variant="ghost" icon={<Pencil size={16} />} isDisabled={busyRuleId !== null} onClick={() => openEdit(rule)} /> : null}
+          {canManage && isActiveRule(rule) ? <IconButton label="Delete alert rule" tooltip="Delete alert rule" variant="ghost" icon={<Trash2 size={16} />} isDisabled={busyRuleId !== null} onClick={() => { setRemoveError(""); setRemoving(rule); }} /> : null}
         </div>
       </li>)}
     </ul> : null}
     <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} endpoints={endpoints} saving={saving} canSave={busyRuleId === null && (editing === null || alertRuleChanged(value, editing))} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) { mutationKeys.clear("alert-rule.create"); setFormError(""); } }} onChange={setValue} onSubmit={save} />
-    <ConfirmationDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)} title="Delete alert rule" description="This permanently removes the rule from this project." confirmText="Delete" confirmDisabled={busyRuleId !== null} onConfirm={remove} errorContext="Alert rule could not be deleted" />
+    <DeleteAlertRuleDialog open={removing !== null} busy={busyRuleId !== null} error={removeError} onOpenChange={(open) => { if (!open && busyRuleId === null) { setRemoving(null); setRemoveError(""); } }} onConfirm={remove} />
   </section>;
+}
+function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: { open: boolean; busy: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
+  const handleOpenChange = (next: boolean) => !busy && onOpenChange(next);
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete alert rule"><DialogHeader title="Delete alert rule" subtitle="This permanently removes the rule from this project." onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="Alert rule could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={busy} onClick={() => handleOpenChange(false)} /><Button label="Delete" variant="destructive" size="lg" isDisabled={busy} isLoading={busy} onClick={() => void onConfirm()} /></footer></Dialog>;
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
 function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpoints.find(endpoint=>endpoint.id===scope.endpointId)?.name??"Endpoint";}

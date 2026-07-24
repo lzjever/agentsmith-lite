@@ -1,9 +1,9 @@
 "use client";
 
-import { AlertCircle, Library, Plus, X } from "lucide-react";
+import { Library, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Button, Dialog, DialogHeader, RadioList, RadioListItem, Selector, TextArea, TextInput } from "@astryxdesign/core";
+import { Banner, Button, Dialog, DialogHeader, IconButton, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
 
 export type TaskCreateValue = {
@@ -89,26 +89,26 @@ export function TaskCreateDialog({
   return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" padding={0} aria-label="Create task">
     <div className="overflow-y-auto">
       <form onSubmit={(event) => void submit(event)} aria-label="Create task">
-        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider endContent={<Button label="Close create task" variant="ghost" size="lg" isIconOnly icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
-        {error ? <div className="mx-5 mt-4 flex items-start gap-2 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert"><AlertCircle className="mt-0.5 size-4 shrink-0" /><div>{errorCode === "active_tasks_limit_reached" ? <><p className="font-medium">Active task limit reached.</p><p className="mt-1 text-secondary">Wait for or cancel an active task. Project administrators can change the limit. <Link className="font-medium text-foreground hover:underline" href={policyHref}>Open resource policy</Link>.</p></> : error}</div></div> : null}
+        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider endContent={<IconButton label="Close create task" tooltip="Close create task" variant="ghost" size="lg" icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
+        {error ? <Banner className="mx-5 mt-4" status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
         <div className="grid gap-5 px-5 py-5">
-          {endpoints.length === 0 ? <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">No task-ready endpoint is available. Add or repair an endpoint before creating a task.</p> : <>
+          {endpoints.length === 0 ? <Banner status="warning" title="No task-ready endpoint" description="Add or repair an endpoint before creating a task." /> : <>
             <div className="grid gap-4 sm:grid-cols-2">
               <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
-              <label className="grid gap-1.5 text-sm text-secondary">Endpoint<Selector label="Endpoint" isLabelHidden options={endpoints.map((endpoint) => ({ value: endpoint.id, label: `${endpoint.name} (${endpoint.model})` }))} value={endpointId} onChange={setEndpointId} isDisabled={busy} size="lg" /></label>
+              <Selector label="Endpoint" options={endpoints.map((endpoint) => ({ value: endpoint.id, label: `${endpoint.name} (${endpoint.model})` }))} value={endpointId} onChange={setEndpointId} isDisabled={busy} size="lg" />
             </div>
             <div className="grid gap-3">
               <RadioList label="File Library" htmlName="file-library-mode" value={libraryMode} onChange={(value) => setLibraryMode(value as typeof libraryMode)} isDisabled={busy}>
-                <RadioListItem value="create_new" label="Create new library" description="Start this task with its own File Library." startContent={<Plus className="size-4 text-icon-default" />} />
-                <RadioListItem value="use_existing" label="Use existing library" description="Choose an available File Library you can bind to this task." startContent={<Library className="size-4 text-icon-default" />} isDisabled={availableLibraries.length === 0} />
+                <RadioListItem value="create_new" label="Create new library" description="Start this task with its own File Library." startContent={<Plus className="size-4 text-icon-secondary" />} />
+                <RadioListItem value="use_existing" label="Use existing library" description="Choose an available File Library you can bind to this task." startContent={<Library className="size-4 text-icon-secondary" />} isDisabled={availableLibraries.length === 0} />
               </RadioList>
               {libraryMode === "create_new" ? <div className="ml-7"><TextInput label="Library name" value={libraryName} onChange={(value) => { setLibraryName(value.slice(0, 160)); setLibraryNameEdited(true); }} isDisabled={busy} width="100%" /></div> : null}
-              {libraryMode === "use_existing" ? librariesLoading ? <p className="ml-7 text-sm text-tertiary">Loading File Libraries...</p> : availableLibraries.length > 0 ? <label className="ml-7 grid gap-1.5 text-sm text-secondary">Library<Selector label="Existing File Library" isLabelHidden options={availableLibraries.map((library) => ({ value: library.id, label: library.name }))} value={libraryId} onChange={setLibraryId} isDisabled={busy} size="lg" /></label> : <p className="ml-7 text-sm text-tertiary">No unbound File Library is available.</p> : null}
+              {libraryMode === "use_existing" ? librariesLoading ? <Text className="ml-7" type="supporting" color="secondary">Loading File Libraries...</Text> : availableLibraries.length > 0 ? <div className="ml-7"><Selector label="Existing File Library" options={availableLibraries.map((library) => ({ value: library.id, label: library.name }))} value={libraryId} onChange={setLibraryId} isDisabled={busy} size="lg" /></div> : <Text className="ml-7" type="supporting" color="secondary">No unbound File Library is available.</Text> : null}
             </div>
             <TextArea label="Task prompt" value={prompt} onChange={setPrompt} rows={7} placeholder="Describe the result you need" isDisabled={busy} width="100%" />
           </>}
         </div>
-        <footer className="flex flex-col-reverse gap-2 border-t border-subtle px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></footer>
+        <footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></footer>
       </form>
     </div>
   </Dialog>;

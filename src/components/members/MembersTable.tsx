@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge, Button, IconButton, Selector, Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow } from "@astryxdesign/core";
+import { Badge, Banner, Button, IconButton, Selector, Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow, Text } from "@astryxdesign/core";
 import { Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { MemberRole, ProjectMember } from "../../lib/api/client";
@@ -32,28 +32,28 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
           {visible.map((member) => <TableRow key={member.userId}>
             <TableCell><MemberIdentity member={member} /></TableCell>
             <TableCell><MemberRoleCell member={member} canManage={canManage} busy={mutationBusy} roleError={roleError} onDismissRoleError={onDismissRoleError} onChangeRole={onChangeRole} /></TableCell>
-            <TableCell><span className="text-sm text-secondary">{formatLocalDate(member.createdAt)}</span></TableCell>
+            <TableCell><Text type="supporting" color="secondary">{formatLocalDate(member.createdAt)}</Text></TableCell>
             <TableCell><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></TableCell>
           </TableRow>)}
         </TableBody>
       </Table>
     </div>
-    <div className="divide-y divide-subtle rounded-md border border-subtle md:hidden">
+    <div className="divide-y divide-border rounded-md border border-border md:hidden">
       {visible.map((member) => <article className="space-y-4 p-4" key={member.userId}>
         <MemberIdentity member={member} />
         <div className="grid grid-cols-2 gap-4">
-          <div><p className="type-caption text-tertiary">Access</p><div className="mt-1"><MemberRoleControl member={member} canManage={canManage} busy={mutationBusy} onChangeRole={onChangeRole} /></div></div>
-          <div><p className="type-caption text-tertiary">Joined</p><p className="mt-1 text-sm text-secondary">{formatLocalDate(member.createdAt)}</p></div>
+          <div><Text as="p" type="supporting" color="secondary" display="block">Access</Text><div className="mt-1"><MemberRoleControl member={member} canManage={canManage} busy={mutationBusy} onChangeRole={onChangeRole} /></div></div>
+          <div><Text as="p" type="supporting" color="secondary" display="block">Joined</Text><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">{formatLocalDate(member.createdAt)}</Text></div>
         </div>
         {roleError?.userId === member.userId ? <InlineError message={roleError.message} onDismiss={onDismissRoleError} /> : null}
-        <div className="flex flex-wrap justify-end gap-2 border-t border-subtle pt-3"><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></div>
+        <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></div>
       </article>)}
     </div>
-    {pageCount > 1 ? <div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="md" isDisabled={currentPage === 1} onClick={() => setPage(currentPage - 1)} /><span className="text-xs text-tertiary">Page {currentPage} of {pageCount}</span><Button label="Next" variant="secondary" size="md" isDisabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)} /></div> : null}
+    {pageCount > 1 ? <div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="md" isDisabled={currentPage === 1} onClick={() => setPage(currentPage - 1)} /><Text type="supporting" color="secondary">Page {currentPage} of {pageCount}</Text><Button label="Next" variant="secondary" size="md" isDisabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)} /></div> : null}
   </section>;
 }
 
-function MemberIdentity({ member }: { member: ProjectMember }) { return <div className="grid gap-1"><strong className="break-all font-medium text-foreground">{memberIdentityLabel(member)}</strong>{member.displayName ? <span className="text-xs text-secondary">{member.email}</span> : null}</div>; }
+function MemberIdentity({ member }: { member: ProjectMember }) { return <div className="grid gap-1"><Text weight="medium" wordBreak="break-all">{memberIdentityLabel(member)}</Text>{member.displayName ? <Text type="supporting" color="secondary">{member.email}</Text> : null}</div>; }
 
 function MemberRoleCell({ member, canManage, busy, roleError, onDismissRoleError, onChangeRole }: { member: ProjectMember; canManage: boolean; busy: boolean; roleError: { userId: string; message: string } | undefined; onDismissRoleError: () => void; onChangeRole: (member: ProjectMember, role: Exclude<MemberRole, "owner">) => void }) {
   return <><MemberRoleControl member={member} canManage={canManage} busy={busy} onChangeRole={onChangeRole} />{roleError?.userId === member.userId ? <InlineError message={roleError.message} onDismiss={onDismissRoleError} /> : null}</>;
@@ -67,4 +67,4 @@ function MemberActions({ member, canManage, busy, onRemove, onView }: { member: 
   return <div className="flex flex-wrap items-center justify-end gap-2"><Button label="View details" variant="ghost" size="md" onClick={() => onView(member)} />{canManage && member.role !== "owner" ? <IconButton label={`Remove ${memberIdentityLabel(member)}`} variant="ghost" size="lg" className="text-error" isDisabled={busy} onClick={() => onRemove(member)} icon={<Trash2 size={15} />} /> : null}</div>;
 }
 
-function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) { return <div className="mt-2 flex items-center justify-between gap-2 text-sm text-error" role="alert"><span>{message}</span><IconButton label="Dismiss role error" variant="ghost" size="lg" onClick={onDismiss} icon={<X size={15} />} /></div>; }
+function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) { return <Banner className="mt-2" status="error" title="Role update failed" description={message} endContent={<IconButton label="Dismiss role error" variant="ghost" size="lg" onClick={onDismiss} icon={<X size={15} />} />} />; }

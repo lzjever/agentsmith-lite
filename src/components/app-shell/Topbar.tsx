@@ -29,17 +29,18 @@ export function Topbar({
   return (
     <AstryxTopNav
       label="Application controls"
-      className="min-h-[3.25rem] border-b border-border bg-surface/95 px-2 shadow-ambient backdrop-blur-sm sm:px-4 md:px-5"
+      className="min-h-[3.25rem] border-b border-border bg-surface px-2 shadow-sm sm:px-4 md:px-5"
       heading={
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2 [&_a>span:last-child]:hidden sm:[&_a>span:last-child]:inline">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <IconButton
           label="Open navigation"
+          tooltip="Open navigation"
           icon={<Menu size={18} />}
           variant="ghost"
           className="md:hidden"
           onClick={onOpenNavigation}
         />
-        <Logo />
+        <Logo compactOnMobile />
       </div>
       }
       startContent={<div className="flex min-w-0 items-center gap-1 overflow-hidden before:mx-1 before:h-5 before:w-px before:bg-border md:gap-2">
@@ -128,7 +129,7 @@ export function ProjectSwitcher({
           width="100%"
         />
       </div>
-      {onViewAll ? <IconButton label="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={onViewAll} /> : null}
+      {onViewAll ? <IconButton label="View all projects" tooltip="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={onViewAll} /> : null}
     </div>
   );
 }

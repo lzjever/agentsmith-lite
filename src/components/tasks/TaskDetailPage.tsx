@@ -1,7 +1,7 @@
 "use client";
 
 import { Archive, ArrowLeft, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
-import { Button as AstryxButton, IconButton, Tab, TabList } from "@astryxdesign/core";
+import { Banner, Button as AstryxButton, Collapsible, Dialog, DialogHeader, Heading, IconButton, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection } from "../../lib/api/client";
@@ -10,8 +10,6 @@ import { appPath } from "../../lib/navigation/app-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { RouteLoadingPage } from "../layout/RouteStatePage";
-import { PageState } from "../layout/PageState";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
 import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
 import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskLifecycleActions } from "./TaskLifecycleActions";
@@ -192,21 +190,21 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const { task, capabilities, lifecycle, sandboxState } = detail;
   const mutationBusy = deleting || releasing || lifecycleBusy;
   const releaseLabel=sandboxState.state==="failed"||sandboxState.state==="release_requested"?"Retry release":"Release sandbox";
-  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(detail)} · ${task.id}`} actions={<><IconButton label="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label={releaseLabel} variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
+  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(detail)} · ${task.id}`} actions={<><IconButton label="Refresh task" tooltip="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={refresh} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadTask(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label={releaseLabel} variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" tooltip="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifacts} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} onRetry={loadArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadTask(true)} /> : null;
-  const archivedNotice = lifecycle.state === "archived" ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3"><Archive className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">This task is archived. Its conversation, files, and artifacts remain available.</p></div> : null;
+  const archivedNotice = lifecycle.state === "archived" ? <Banner status="info" icon={<Archive size={16} />} title="Task archived" description="Its conversation, files, and artifacts remain available." /> : null;
   const sandboxNotice = sandboxState.state === "released"
-    ? <div className="flex items-start gap-3 border border-border bg-surface-low px-4 py-3" role="status"><CircleCheck className="mt-0.5 size-4 shrink-0 text-icon-default" /><p className="text-sm text-secondary">Sandbox resources were released. Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available.</p></div>
+    ? <Banner status="success" icon={<CircleCheck size={16} />} title="Sandbox released" description="Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available." />
     : sandboxState.state === "failed"
-      ? <div className="border border-error/30 bg-error/10 px-4 py-3 text-sm" role="alert"><p className="font-medium text-foreground">Sandbox failed</p><p className="mt-1 text-secondary">{sandboxState.cause?.message??"The sandbox could not continue."}</p></div>
+      ? <Banner status="error" title="Sandbox failed" description={sandboxState.cause?.message??"The sandbox could not continue."} />
     : sandboxState.state === "release_requested" && sandboxState.cause
-      ? <div className="border border-warning/30 bg-warning/10 px-4 py-3 text-sm" role="status"><p className="font-medium text-foreground">Sandbox cleanup pending</p><p className="mt-1 text-secondary">{sandboxState.cause.message}</p></div>
+      ? <Banner status="warning" title="Sandbox cleanup pending" description={sandboxState.cause.message} />
     : null;
 
-  const releaseDialog = <ConfirmationDialog open={releaseOpen} onOpenChange={setReleaseOpen} title={`${releaseLabel}?`} description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." confirmText={releaseLabel} onConfirm={releaseSandbox} errorContext="Sandbox could not be released" />;
+  const releaseDialog = <TaskActionDialog open={releaseOpen} onOpenChange={setReleaseOpen} title={`${releaseLabel}?`} description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." actionLabel={releaseLabel} loading={releasing} onAction={releaseSandbox} errorTitle="Sandbox could not be released" />;
 
-  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={`${basePath}/${taskId}`}><ArrowLeft size={16} />Task conversation</Link>{taskRefreshError}{archivedNotice}{sandboxNotice}<section className="border border-border bg-background p-4"><h2 className="type-title text-foreground">Published artifacts</h2><div className="mt-4">{artifactsPanel}</div></section>{releaseDialog}</PageLayout>;
+  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={`${basePath}/${taskId}`}><ArrowLeft size={16} /><Text type="supporting" color="secondary">Task conversation</Text></Link>{taskRefreshError}{archivedNotice}{sandboxNotice}<section className="border border-border bg-surface p-4"><Heading level={4} accessibilityLevel={2}>Published artifacts</Heading><div className="mt-4">{artifactsPanel}</div></section>{releaseDialog}</PageLayout>;
 
   const showArtifacts = artifactsState !== "ready" || artifacts.length > 0;
   const terminalAvailable = capabilities.openTerminal;
@@ -219,7 +217,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     setMode(next as WorkspaceMode);
   };
   return <PageLayout header={header} contentWidth="full">
-    <Link className="inline-flex w-fit items-center gap-2 text-sm text-secondary hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>
+    <Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={basePath}><ArrowLeft size={16} /><Text type="supporting" color="secondary">All tasks</Text></Link>
     {taskRefreshError}
     {archivedNotice}
     {sandboxNotice}
@@ -231,34 +229,57 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     <div className="grid h-[clamp(24rem,calc(100dvh-20rem),48rem)] min-h-0 min-w-0 gap-4 overflow-hidden md:h-[clamp(24rem,calc(100dvh-12rem),48rem)] xl:grid-cols-[minmax(0,1fr)_18rem]" data-testid="task-workspace">
       <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace key={conversationKey} taskId={taskId} presentation={detail} onPresentationChange={handlePresentationChange} onProjectionChange={handleProjectionChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
       {terminalStarted && sandboxState.state !== "release_requested" ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
-      {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-background xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><h2 className="type-title text-foreground">Artifacts</h2><Link href={`${basePath}/${taskId}/artifacts`} className="text-sm text-secondary hover:text-foreground">View all</Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
+      {showArtifacts ? <aside className={`${mode === "artifacts" ? "block" : "hidden"} min-h-0 min-w-0 overflow-y-auto border border-border bg-surface xl:block`}><div className="flex items-center justify-between gap-3 border-b border-border px-3 py-3"><Heading level={4} accessibilityLevel={2}>Artifacts</Heading><Link href={`${basePath}/${taskId}/artifacts`} className="hover:text-primary"><Text type="supporting" color="secondary">View all</Text></Link></div><div className="p-3">{artifactsPanel}</div></aside> : null}
     </div>
-    <details className="border-y border-border py-3"><summary className="cursor-pointer text-sm font-medium text-foreground">Task details</summary><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.8fr)_minmax(0,1fr)]"><TaskWorkspaceSummary task={task} filesHref={`/workspaces/${workspaceId}/projects/${projectId}/files?libraryId=${encodeURIComponent(task.fileLibraryId)}`} /><div><h3 className="type-caption text-tertiary">Original prompt</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm text-secondary">{task.prompt}</p></div></div></details>
+    <div className="border-y border-border py-3"><Collapsible trigger="Task details" defaultIsOpen={false}><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.8fr)_minmax(0,1fr)]"><TaskWorkspaceSummary task={task} filesHref={`/workspaces/${workspaceId}/projects/${projectId}/files?libraryId=${encodeURIComponent(task.fileLibraryId)}`} /><div><Heading level={6} accessibilityLevel={3}>Original prompt</Heading><Text display="block" type="supporting" color="secondary" className="mt-2 whitespace-pre-wrap break-words">{task.prompt}</Text></div></div></Collapsible></div>
     {releaseDialog}
-    <ConfirmationDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This permanently removes this task from the product." confirmText="Delete task" onConfirm={deleteTask} errorContext="Task could not be deleted" />
+    <TaskActionDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This permanently removes this task from the product." actionLabel="Delete task" loading={deleting} onAction={deleteTask} errorTitle="Task could not be deleted" />
   </PageLayout>;
 }
 
 function TaskLoadFailure({ title, detail, basePath, onRetry }: { title: string; detail: string; basePath: string; onRetry?: () => void }) {
-  return <PageLayout header={<PageHeader title={title} />}><PageState state={onRetry ? "error" : "empty"}><div className="text-center"><p className={`mt-2 text-sm ${onRetry ? "text-error" : "text-secondary"}`} {...(onRetry ? { role: "alert" as const } : {})}>{detail}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 text-sm text-secondary no-underline hover:text-foreground" href={basePath}><ArrowLeft size={16} />All tasks</Link>{onRetry ? <AstryxButton label="Try again" variant="secondary" onClick={onRetry} /> : null}</div></div></PageState></PageLayout>;
+  const actions = <div className="mt-5 flex flex-wrap justify-center gap-2"><Link className="inline-flex min-h-9 items-center gap-2 rounded-sm border border-border px-3 no-underline hover:text-primary" href={basePath}><ArrowLeft size={16} /><Text type="supporting" color="secondary">All tasks</Text></Link>{onRetry ? <AstryxButton label="Try again" variant="secondary" onClick={onRetry} /> : null}</div>;
+  return <PageLayout header={<PageHeader title={title} />}>{onRetry ? <><Banner status="error" container="section" title={`${title} unavailable`} description={detail} />{actions}</> : <div className="flex min-h-48 flex-col items-center justify-center px-4 py-6 text-center"><Text display="block" type="supporting" color="secondary">{detail}</Text>{actions}</div>}</PageLayout>;
 }
 
 function ArtifactsSection({ taskId, artifacts, state, error, refreshing, emptyMessage, onRetry }: { taskId: string; artifacts: TaskArtifact[]; state: LoadState; error: string; refreshing: boolean; emptyMessage?: string; onRetry: () => Promise<void> }) {
-  if (state === "loading" && artifacts.length === 0) return <p className="py-6 text-center text-sm text-secondary">Loading artifacts...</p>;
+  if (state === "loading" && artifacts.length === 0) return <Text display="block" type="supporting" color="secondary" className="py-6 text-center">Loading artifacts...</Text>;
   if (state === "error" && artifacts.length === 0) return <SectionError title="Artifacts unavailable" message={error} onRetry={onRetry} />;
-  return <>{error ? <div className="mb-3 border border-error/30 bg-error/10 px-3 py-2 text-sm text-error" role="alert">{error}</div> : null}<TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRetry} refreshing={refreshing} {...(emptyMessage ? { emptyMessage } : {})} /></>;
+  return <>{error ? <Banner className="mb-3" status="error" title="Artifacts could not be refreshed" description={error} /> : null}<TaskArtifactsPanel taskId={taskId} artifacts={artifacts} onRefresh={onRetry} refreshing={refreshing} {...(emptyMessage ? { emptyMessage } : {})} /></>;
 }
 
 function TaskWorkspaceSummary({ task, filesHref }: { task: Task; filesHref: string }) {
-  return <div><h3 className="type-caption text-tertiary">Workspace</h3><dl className="mt-2 grid gap-2 text-sm"><TaskDetailValue label="File Library"><Link className="break-all font-mono text-xs text-foreground hover:underline" href={filesHref}>{task.fileLibraryId}</Link></TaskDetailValue><TaskDetailValue label="Endpoint"><span className="break-all font-mono text-xs">{task.endpointId}</span></TaskDetailValue></dl></div>;
+  return <div><Heading level={6} accessibilityLevel={3}>Workspace</Heading><dl className="mt-2 grid gap-2"><TaskDetailValue label="File Library"><Link className="break-all text-primary hover:underline" href={filesHref}><Text type="code">{task.fileLibraryId}</Text></Link></TaskDetailValue><TaskDetailValue label="Endpoint"><Text type="code">{task.endpointId}</Text></TaskDetailValue></dl></div>;
 }
 
 function TaskDetailValue({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2"><dt className="text-tertiary">{label}</dt><dd className="min-w-0 text-secondary">{children}</dd></div>;
+  return <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2"><dt><Text type="supporting" color="secondary">{label}</Text></dt><dd className="min-w-0"><Text as="div" type="supporting" color="secondary">{children}</Text></dd></div>;
 }
 
 function SectionError({ title, message: detail, onRetry }: { title: string; message: string; onRetry: () => Promise<void> }) {
-  return <div className="border border-error/30 bg-error/10 px-3 py-3 text-sm" role="alert"><p className="font-medium text-foreground">{title}</p><p className="mt-1 break-words text-secondary">{detail}</p><AstryxButton label="Try again" className="mt-3" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={() => void onRetry()} /></div>;
+  return <div><Banner status="error" title={title} description={detail} /><AstryxButton label="Try again" className="mt-3" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={() => void onRetry()} /></div>;
+}
+
+function TaskActionDialog({ open, onOpenChange, title, description, actionLabel, loading, onAction, errorTitle }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; actionLabel: string; loading: boolean; onAction: () => Promise<void>; errorTitle: string }) {
+  const [failure, setFailure] = useState("");
+  useEffect(() => {
+    if (!open) setFailure("");
+  }, [open]);
+  function changeOpen(nextOpen: boolean) {
+    if (loading) return;
+    if (!nextOpen) setFailure("");
+    onOpenChange(nextOpen);
+  }
+  async function submit() {
+    setFailure("");
+    try {
+      await onAction();
+      onOpenChange(false);
+    } catch (reason) {
+      setFailure(message(reason));
+    }
+  }
+  return <Dialog isOpen={open} onOpenChange={changeOpen} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label={title}><form onSubmit={(event) => { event.preventDefault(); void submit(); }}><DialogHeader title={title} subtitle={description} hasDivider />{failure ? <Banner className="mx-5 mt-4" status="error" title={errorTitle} description={failure} /> : null}<footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={loading} onClick={() => changeOpen(false)} /><AstryxButton label={loading ? "Working" : actionLabel} type="submit" variant="destructive" size="lg" isLoading={loading} isDisabled={loading} /></footer></form></Dialog>;
 }
 
 function message(reason: unknown): string {

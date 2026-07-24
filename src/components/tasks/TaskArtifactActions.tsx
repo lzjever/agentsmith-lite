@@ -1,7 +1,7 @@
 "use client";
 
-import { Download, Image as ImageIcon, Loader2 } from "lucide-react";
-import { Button, Dialog, DialogHeader, IconButton } from "@astryxdesign/core";
+import { Download, Image as ImageIcon } from "lucide-react";
+import { Banner, Button, Dialog, DialogHeader, IconButton, Spinner, Text } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
 import { ApiError, apiClient } from "../../lib/api/client";
 import { formatArtifactBytes } from "./task-ui";
@@ -59,9 +59,9 @@ function ArtifactTextPreview({ taskId, artifact }: { taskId: string; artifact: P
     return () => { cancelled = true; controller.abort(); };
   }, [artifact.id, artifact.previewText, reloadKey, taskId]);
 
-  if (error) return <div className="mt-3"><p role="alert" className="text-sm text-error">{error}</p><Button className="mt-3" label="Try again" onClick={() => { setError(null); setText(null); setReloadKey((key) => key + 1); }} /></div>;
-  if (text === null) return <div className="mt-3 grid min-h-24 place-items-center text-sm text-secondary"><Loader2 className="size-4 animate-spin" />Loading preview...</div>;
-  return <pre className="mt-3 max-h-64 overflow-auto border border-border bg-surface-low p-3 text-xs text-foreground">{text}</pre>;
+  if (error) return <div className="mt-3"><Banner status="error" title="Preview unavailable" description={error} /><Button className="mt-3" label="Try again" onClick={() => { setError(null); setText(null); setReloadKey((key) => key + 1); }} /></div>;
+  if (text === null) return <div className="mt-3 grid min-h-24 place-items-center text-secondary"><Spinner size="sm" label="Loading preview..." /></div>;
+  return <pre className="mt-3 max-h-64 overflow-auto border border-border bg-muted p-3 text-primary"><Text type="code">{text}</Text></pre>;
 }
 
 function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId: string; artifact: PreviewableTaskArtifact; open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -93,7 +93,7 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     onOpenChange(nextOpen);
   }
 
-  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100vh - 2rem))" padding={0} aria-label={artifact.name}><div className="overflow-auto"><DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} hasDivider />{loading ? <div className="grid min-h-64 place-items-center text-sm text-secondary"><Loader2 className="size-5 animate-spin" />Loading image...</div> : null}{error ? <div className="p-5"><p role="alert" className="text-sm text-error">{error}</p><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70vh] max-w-full object-contain p-5" /> : null}<div className="flex justify-end border-t border-subtle px-5 py-4"><Button label="Close" variant="ghost" onClick={() => close(false)} /></div></div></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100vh - 2rem))" padding={0} aria-label={artifact.name}><div className="overflow-auto"><DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} hasDivider />{loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}{error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70vh] max-w-full object-contain p-5" /> : null}<div className="flex justify-end border-t border-border px-5 py-4"><Button label="Close" variant="ghost" onClick={() => close(false)} /></div></div></Dialog>;
 }
 
 export function isPreviewableText(mediaType: string | null | undefined): boolean { return mediaType === "application/json" || mediaType?.startsWith("text/") === true && mediaType !== "text/html"; }

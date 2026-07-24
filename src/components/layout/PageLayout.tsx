@@ -16,17 +16,17 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
     ? {}
     : { contentWidth: contentWidth === "narrow" ? "64rem" : "1480px" };
   const gutters = immersive
-    ? "px-[var(--layout-padding-immersive)]"
-    : "px-[var(--layout-padding)] md:px-8";
+    ? "px-2"
+    : "px-5 md:px-8";
   const topPadding = immersive
-    ? "pt-[var(--layout-padding-immersive)]"
+    ? "pt-2"
     : "pt-5 md:pt-7";
   const bottomPadding = immersive
-    ? "pb-[var(--layout-padding-immersive)]"
+    ? "pb-2"
     : "pb-5 md:pb-7";
-  const gap = immersive ? "gap-[var(--layout-gap-immersive)]" : "gap-[var(--layout-gap)]";
+  const gap = immersive ? "gap-2" : "gap-5";
   const bodyTopPadding = header || toolbar
-    ? immersive ? "pt-[var(--layout-gap-immersive)]" : "pt-[var(--layout-gap)]"
+    ? immersive ? "pt-2" : "pt-5"
     : topPadding;
 
   return (

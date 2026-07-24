@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim AS build
 WORKDIR /app
 ARG APP_PUBLIC_BASE_URL
 ARG NODE_BUILD_HEAP_MB=2048
@@ -17,6 +17,22 @@ COPY . .
 ENV APP_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
 ENV APP_BUILD_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
 RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build
+RUN npm prune --omit=dev
+
+FROM node:24-bookworm-slim AS runtime
+WORKDIR /app
+ARG APP_PUBLIC_BASE_URL
+ENV NODE_ENV=production
+ENV APP_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
+ENV APP_BUILD_PUBLIC_BASE_URL=$APP_PUBLIC_BASE_URL
 ENV PORT=3000
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/.next/standalone ./.next/standalone
+COPY --from=build /app/scripts/web/start.mjs ./scripts/web/start.mjs
+COPY --from=build /app/scripts/public-base-url.mjs ./scripts/public-base-url.mjs
+COPY --from=build /app/scripts/db/apply-migrations.mjs ./scripts/db/apply-migrations.mjs
+COPY --from=build /app/infra/db/migrations ./infra/db/migrations
 EXPOSE 3000
 CMD ["node", "dist/packages/api-entry-node/src/main.js"]

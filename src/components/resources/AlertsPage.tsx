@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Banner, Button, Selector, Spinner, Tab, TabList } from "@astryxdesign/core";
+import { AlertDialog, Badge, Banner, Button, EmptyState, IconButton, Selector, Spinner, Tab, TabList, Text, useToast } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -26,10 +26,6 @@ import {
 import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { PageState } from "../layout/PageState";
-import { ConfirmationDialog } from "../ui/confirmation-dialog";
-import { ErrorState } from "../ui/error-state";
-import { toast } from "../ui/toast";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -49,6 +45,7 @@ function alertItems(page: { items?: ProjectAlert[] }) {
 }
 
 function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
+  const showToast = useToast();
   const routeSearchParams = useSearchParams();
   const requestedAlertId =
     routeSearchParams?.get("alertId") ??
@@ -68,6 +65,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const [view, setView] = useState<"instances" | "rules">("instances");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -87,6 +85,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     const request = ++loadRequest.current;
     setState("loading");
     setError("");
+    setNotice("");
     setCapabilities(undefined);
     setCapabilitiesError("");
     const [alertsResult, capabilitiesResult, endpointsResult, linkedResult] =
@@ -206,9 +205,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       if (!mounted.current) return;
       replace(saved);
       setDismiss(null);
-      toast.success(
-        status === "resolved" ? "Alert resolved." : "Alert dismissed.",
-      );
+      showToast({ body: status === "resolved" ? "Alert resolved." : "Alert dismissed.", type: "info" });
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError) mutationKeys.complete("project.alert.transition", `${alert.id}:${status}`);
@@ -240,13 +237,14 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       mutationKeys.complete(action === "ack" ? "project.alert.acknowledge" : "project.alert.silence", identity);
       if (!mounted.current) return;
       replace(saved);
-      toast.success(
-        action === "ack"
+      showToast({
+        body: action === "ack"
           ? "Alert acknowledged."
           : saved.silencedUntil
             ? "Alert silenced for one hour."
             : "Alert silence cleared.",
-      );
+        type: "info",
+      });
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError) mutationKeys.complete(action === "ack" ? "project.alert.acknowledge" : "project.alert.silence", identity);
@@ -274,7 +272,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     setDismiss(null);
     setError("");
     const refreshed = await refreshInstances();
-    if (mounted.current && refreshed) toast.error("Alert changed elsewhere. Latest state loaded.");
+    if (mounted.current && refreshed) setNotice("Alert changed elsewhere. Latest state loaded; review it before trying another action.");
     return true;
   }
   function revokeAccess(cause?: unknown) {
@@ -308,7 +306,6 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
         cause instanceof Error ? cause.message : "Alert could not be updated.",
       );
     }
-    toast.error("Alert could not be updated.");
     return accessDenied;
   }
   return (
@@ -318,11 +315,11 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           title="Alerts"
           subtitle="Monitor project activity and resource limits with in-app notifications."
           actions={
-            <Button
+            <IconButton
               label="Refresh alerts"
+              tooltip="Refresh alerts"
               variant="ghost"
               size="lg"
-              isIconOnly
               icon={<RefreshCw size={16} />}
               isDisabled={busyId !== null}
               onClick={() => void load()}
@@ -332,18 +329,17 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
       }
     >
       {state === "loading" ? (
-        <PageState state="loading">
+        <div className="grid min-h-64 place-items-center" role="status">
           <Spinner label="Loading alerts..." />
-        </PageState>
+        </div>
       ) : null}
       {state === "error" ? (
-        <PageState state="error">
-          <ErrorState
-            title="Alerts unavailable"
-            message={error}
-            onRetry={() => void load()}
-          />
-        </PageState>
+        <Banner
+          status="error"
+          title="Alerts unavailable"
+          description={error}
+          endContent={<Button label="Try again" variant="ghost" onClick={() => void load()} />}
+        />
       ) : null}
       {state === "ready" && capabilitiesError ? (
         <Banner
@@ -359,6 +355,16 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           status="error"
           title="Alert update failed"
           description={error}
+        />
+      ) : null}
+      {state === "ready" && notice ? (
+        <Banner
+          className="mb-3"
+          status="info"
+          title="Alert state updated"
+          description={notice}
+          isDismissable
+          onDismiss={() => setNotice("")}
         />
       ) : null}
       {state === "ready" ? (
@@ -386,7 +392,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
               onResolve={(alert) =>
                 void transition(alert, "resolved").catch(() => undefined)
               }
-              onDismiss={setDismiss}
+              onDismiss={(alert) => { setError(""); setDismiss(alert); }}
             />
           ) : null}
           {view === "rules" ? (
@@ -396,19 +402,18 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           ) : null}
         </>
       ) : null}
-      <ConfirmationDialog
-        open={dismiss !== null}
-        onOpenChange={(open) => !open && setDismiss(null)}
+      <AlertDialog
+        isOpen={dismiss !== null}
+        onOpenChange={(open) => !open && busyId === null && setDismiss(null)}
         title="Dismiss project alert"
         description={
           dismiss
-            ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
+            ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.${error ? ` Last attempt failed: ${error}` : ""}`
             : ""
         }
-        confirmText="Dismiss"
-        onConfirm={() =>
-          dismiss ? transition(dismiss, "dismissed") : undefined
-        }
+        actionLabel="Dismiss"
+        isActionLoading={Boolean(dismiss && busyId === dismiss.id)}
+        onAction={() => dismiss ? transition(dismiss, "dismissed").catch(() => undefined) : undefined}
       />
     </PageLayout>
   );
@@ -477,16 +482,11 @@ function AlertInstances({
         className="w-48"
       />
       {alerts.length === 0 ? (
-        <PageState state="empty">
-          {status === "all" ? (
-            <div>
-              <Bell className="mx-auto size-8 text-tertiary" />
-              <h2 className="mt-3 type-title">No alert instances</h2>
-            </div>
-          ) : (
-            "No instances match this filter."
-          )}
-        </PageState>
+        <EmptyState
+          icon={<Bell />}
+          title={status === "all" ? "No alert instances" : "No matching alert instances"}
+          {...(status === "all" ? {} : { description: "No instances match this filter." })}
+        />
       ) : (
         <>
           <ul className="divide-y divide-border border-y border-border">
@@ -503,21 +503,19 @@ function AlertInstances({
                 id={alertElementId(alert.id)}
                 tabIndex={-1}
                 aria-current={selectedAlertId === alert.id ? "true" : undefined}
-                className={`grid gap-3 px-3 py-4 outline-none sm:grid-cols-[1.25rem_minmax(0,1fr)_auto] ${selectedAlertId === alert.id ? "border-l-2 border-accent bg-surface-low" : ""}`}
+                className={`grid gap-3 px-3 py-4 outline-none sm:grid-cols-[1.25rem_minmax(0,1fr)_auto] ${selectedAlertId === alert.id ? "border-l-2 border-accent bg-muted" : ""}`}
                 key={alert.id}
               >
                 <AlertTriangle
                   className={
                     alert.status === "active"
                       ? "text-error"
-                      : "text-icon-default"
+                      : "text-icon-secondary"
                   }
                 />
                 <div>
                   <div className="flex flex-wrap gap-2">
-                    <strong className="text-sm text-foreground">
-                      {alertLabel(alert)}
-                    </strong>
+                    <Text weight="semibold">{alertLabel(alert)}</Text>
                     <Badge variant={alert.status === "active" ? "error" : "neutral"} label={alert.status} />
                     {alert.acknowledgedAt ? (
                       <Badge variant="neutral" label="Acknowledged" />
@@ -529,14 +527,14 @@ function AlertInstances({
                       <Badge variant="neutral" label="Linked instance" />
                     ) : null}
                   </div>
-                  <p className="mt-1 text-sm text-secondary">
+                  <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
                     {alert.metricValue !== null &&
                     alert.metricValue !== undefined
                       ? `${alert.metric?.replaceAll("_", " ")}: ${alert.metricValue}${alert.threshold !== null && alert.threshold !== undefined ? ` of ${alert.threshold}` : ""}`
                       : "No metric context recorded"}
-                    {alert.endpointId ? <> · <Link className="hover:text-foreground hover:underline" href={`${projectBasePath}/endpoints`}>{endpoint?.name ?? `Endpoint ${alert.endpointId}`}</Link></> : null}
-                  </p>
-                  <p className="mt-1 text-xs text-tertiary">
+                    {alert.endpointId ? <> · <Link className="hover:text-primary hover:underline" href={`${projectBasePath}/endpoints`}>{endpoint?.name ?? `Endpoint ${alert.endpointId}`}</Link></> : null}
+                  </Text>
+                  <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
                     Opened {formatDate(alert.createdAt)}
                     {alert.acknowledgedAt
                       ? ` · acknowledged ${formatDate(alert.acknowledgedAt)}`
@@ -547,29 +545,29 @@ function AlertInstances({
                     {alert.resolvedAt
                       ? ` · recovered ${formatDate(alert.resolvedAt)}`
                       : ""}
-                  </p>
+                  </Text>
                   <div className="mt-2 flex flex-wrap items-center gap-3">
                     <Link
                       href={investigation.href}
-                      className="inline-flex items-center gap-1.5 text-xs text-secondary hover:text-foreground"
+                      className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
                     >
                       <Gauge size={14} />
-                      {investigation.label}
+                      <Text type="supporting" color="secondary">{investigation.label}</Text>
                     </Link>
                     <Link
                       href={`${projectBasePath}/audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
-                      className="inline-flex items-center gap-1.5 text-xs text-secondary hover:text-foreground"
+                      className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
                     >
                       <ClipboardList size={14} />
-                      View alert history
+                      <Text type="supporting" color="secondary">View alert history</Text>
                     </Link>
                   </div>
                   {retry?.alert.id === alert.id ? (
                     <div
-                      className="mt-2 flex items-center gap-2 text-sm text-error"
+                      className="mt-2 flex items-center gap-2 text-error"
                       role="alert"
                     >
-                      <span>Update failed.</span>
+                      <Text type="supporting" color="inherit">Update failed.</Text>
                       <Button
                         label="Retry"
                         variant="ghost"
@@ -586,43 +584,43 @@ function AlertInstances({
                 {canManage && alert.status === "active" ? (
                   <div className="flex gap-1">
                     {!alert.acknowledgedAt ? (
-                      <Button
+                      <IconButton
                         label="Acknowledge alert"
+                        tooltip="Acknowledge alert"
                         variant="ghost"
                         size="lg"
-                        isIconOnly
                         icon={<Check size={15} />}
                         isDisabled={busyId === alert.id}
                         onClick={() => onAck(alert)}
                       />
                     ) : null}
-                    <Button
+                    <IconButton
                       label={
                         silenced
                           ? "Clear alert silence"
                           : "Silence alert for one hour"
                       }
+                      tooltip={silenced ? "Clear alert silence" : "Silence alert for one hour"}
                       variant="ghost"
                       size="lg"
-                      isIconOnly
                       icon={<Clock size={15} />}
                       isDisabled={busyId === alert.id}
                       onClick={() => onSilence(alert)}
                     />
-                    <Button
+                    <IconButton
                       label="Resolve alert"
+                      tooltip="Resolve alert"
                       variant="ghost"
                       size="lg"
-                      isIconOnly
                       icon={<CheckCircle2 size={15} />}
                       isDisabled={busyId === alert.id}
                       onClick={() => onResolve(alert)}
                     />
-                    <Button
+                    <IconButton
                       label="Dismiss alert"
+                      tooltip="Dismiss alert"
                       variant="ghost"
                       size="lg"
-                      isIconOnly
                       icon={<X size={15} />}
                       isDisabled={busyId === alert.id}
                       onClick={() => onDismiss(alert)}
