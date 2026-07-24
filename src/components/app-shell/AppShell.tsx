@@ -12,6 +12,7 @@ import { Topbar } from "./Topbar";
 type ShellProps={children:ReactNode;workspaceId?:string;projectId?:string};
 type ShellState="loading"|"ready"|"login"|"error";
 type DirectoryState="loading"|"ready"|"error";
+type ExactReadIssue="unavailable"|"outage";
 
 export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const mounted=useRef(true);
@@ -35,8 +36,8 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const [project,setProject]=useState<ProjectDetail>();
   const [quickWorkspaces,setQuickWorkspaces]=useState<WorkspaceDirectoryItem[]>([]);
   const [quickProjects,setQuickProjects]=useState<ProjectDirectoryItem[]>([]);
-  const [workspaceUnavailable,setWorkspaceUnavailable]=useState(false);
-  const [projectUnavailable,setProjectUnavailable]=useState(false);
+  const [workspaceIssue,setWorkspaceIssue]=useState<ExactReadIssue>();
+  const [projectIssue,setProjectIssue]=useState<ExactReadIssue>();
 
   async function loadIdentity(preservePage=false) {
     const request=++identityRequest.current;
@@ -66,14 +67,16 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     if(!mounted.current||request!==navigationRequest.current)return;
     if(workspacePage.status==="fulfilled")setQuickWorkspaces(workspacePage.value.items);
     else if(!preservePage)setQuickWorkspaces([]);
-    if(workspaceResult.status==="fulfilled"){setWorkspace(workspaceResult.value);setWorkspaceUnavailable(false);}
-    else {setWorkspace(undefined);setWorkspaceUnavailable(Boolean(scope.workspaceId));}
-    if(projectResult.status==="fulfilled"){setProject(projectResult.value);setProjectUnavailable(false);}
-    else {setProject(undefined);setProjectUnavailable(Boolean(scope.projectId));}
+    const nextWorkspaceIssue=workspaceResult.status==="rejected"?exactReadIssue(workspaceResult.reason):undefined;
+    const nextProjectIssue=projectResult.status==="rejected"?exactReadIssue(projectResult.reason):undefined;
+    if(workspaceResult.status==="fulfilled"){setWorkspace(workspaceResult.value);setWorkspaceIssue(undefined);}
+    else {setWorkspace(undefined);setWorkspaceIssue(nextWorkspaceIssue);}
+    if(projectResult.status==="fulfilled"){setProject(projectResult.value);setProjectIssue(undefined);}
+    else {setProject(undefined);setProjectIssue(nextProjectIssue);}
     if(projectPage.status==="fulfilled")setQuickProjects(projectPage.value.items);
     else if(!preservePage)setQuickProjects([]);
     hasNavigation.current=true;
-    setDirectoryState(workspacePage.status==="rejected"||projectPage.status==="rejected"?"error":"ready");
+    setDirectoryState(workspacePage.status==="rejected"||projectPage.status==="rejected"||nextWorkspaceIssue==="outage"||nextProjectIssue==="outage"?"error":"ready");
   }
 
   useEffect(()=>{
@@ -102,10 +105,14 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const workspaceRecord=workspace?.workspace;
   const projectRecord=project?.project;
   const mismatch=Boolean(workspaceRecord&&projectRecord&&projectRecord.workspaceId!==workspaceRecord.id);
-  const contextError=workspaceId&&workspaceUnavailable
+  const contextError=workspaceId&&workspaceIssue==="unavailable"
     ?<ShellRecoveryState title="Workspace unavailable" detail="This workspace does not exist or you no longer have permission to access it." retry={loadNavigation}/>
-    :requestedProjectId&&projectUnavailable
+    :workspaceId&&workspaceIssue==="outage"
+      ?<ShellRecoveryState title="Workspace could not be loaded" detail="The product API could not load this workspace. Try again." retryLabel="Try again" retry={loadNavigation}/>
+    :requestedProjectId&&projectIssue==="unavailable"
       ?<ShellRecoveryState title="Project unavailable" detail="This project does not exist or you no longer have permission to access it." {...(workspaceRecord?{projectsHref:`/workspaces/${workspaceRecord.id}/projects`}:{})} retry={loadNavigation}/>
+      :requestedProjectId&&projectIssue==="outage"
+        ?<ShellRecoveryState title="Project could not be loaded" detail="The product API could not load this project. Try again." retryLabel="Try again" {...(workspaceRecord?{projectsHref:`/workspaces/${workspaceRecord.id}/projects`}:{})} retry={loadNavigation}/>
       :mismatch&&workspaceRecord&&project
         ?<ShellRecoveryState title="Project and workspace do not match" detail={`This project belongs to ${project.workspace.name}, not ${workspaceRecord.name}.`} projectHref={`/workspaces/${project.workspace.id}/projects/${projectRecord!.id}/overview`} retry={loadNavigation}/>
         :null;
@@ -123,4 +130,8 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
 function ShellLoadingFrame(){return <><DocumentTitle title="Loading"/><div className="min-h-screen bg-body"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><Text type="large" weight="semibold">AgentSmith</Text></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-60 border-r border-border bg-muted md:block" aria-hidden="true"/><main className="grid min-w-0 flex-1 place-items-center"><Heading level={1} className="sr-only">Loading AgentSmith</Heading><Spinner label="Loading workspace..."/></main></div></div></>}
 function ShellStatePage({title,detail,action}:{title:string;detail?:string;action?:ReactNode}){return <><DocumentTitle title={title}/><main className="grid min-h-screen place-items-center bg-body px-6"><section className="max-w-md text-center"><Text type="supporting" color="secondary">AgentSmith</Text><Heading level={1} className="mt-3">{title}</Heading>{detail?<Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text>:null}{action?<div className="mt-6">{action}</div>:null}</section></main></>}
 function DirectoryNotice({onRetry}:{onRetry:()=>Promise<void>}){return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted px-4 py-2" role="status"><Text color="secondary">Workspace navigation is unavailable. This page may still be used.</Text><Button label="Retry navigation" size="sm" variant="ghost" onClick={()=>void onRetry()}/></div>}
-function ShellRecoveryState({title,detail,projectsHref,projectHref,retry}:{title:string;detail:string;projectsHref?:string;projectHref?:string;retry:()=>Promise<void>}){return <><DocumentTitle title={title}/><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><Heading level={1}>{title}</Heading><Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref?<Button label="Open project" variant="primary" href={projectHref}/>:null}{projectsHref?<Button label="View all projects" variant="secondary" href={projectsHref}/>:null}<Button label="Back to workspaces" variant="secondary" href="/"/><Button label="Check access again" variant="ghost" onClick={()=>void retry()}/></div></div></section></>}
+function ShellRecoveryState({title,detail,projectsHref,projectHref,retryLabel="Check access again",retry}:{title:string;detail:string;projectsHref?:string;projectHref?:string;retryLabel?:string;retry:()=>Promise<void>}){return <><DocumentTitle title={title}/><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><Heading level={1}>{title}</Heading><Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref?<Button label="Open project" variant="primary" href={projectHref}/>:null}{projectsHref?<Button label="View all projects" variant="secondary" href={projectsHref}/>:null}<Button label="Back to workspaces" variant="secondary" href="/"/><Button label={retryLabel} variant="ghost" onClick={()=>void retry()}/></div></div></section></>}
+
+function exactReadIssue(reason:unknown):ExactReadIssue {
+  return reason instanceof ApiError&&(reason.status===403||reason.status===404)?"unavailable":"outage";
+}

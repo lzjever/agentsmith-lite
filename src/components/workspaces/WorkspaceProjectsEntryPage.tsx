@@ -11,6 +11,12 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 
 type LoadState = "loading" | "ready" | "error";
+type DirectoryAttempt = {
+  cursor?: string;
+  query: string;
+  history: string[];
+  includeWorkspace?: boolean;
+};
 
 export function WorkspaceProjectsEntryPage({ workspaceId }: { workspaceId: string }) {
   return <WorkspaceProjectsScope key={workspaceId} workspaceId={workspaceId} />;
@@ -21,13 +27,19 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
   const active = useRef(true);
   const request = useRef(0);
   const searchMounted = useRef(false);
+  const hasContent = useRef(false);
+  const workspaceRef = useRef<WorkspaceDetail|undefined>(undefined);
+  const queryIntent = useRef("");
+  const displayedScope = useRef<DirectoryAttempt>({ query: "", history: [] });
   const [workspace, setWorkspace] = useState<WorkspaceDetail>();
   const [page, setPage] = useState<ProjectDirectoryPage>({ items: [], nextCursor: null, total: 0 });
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState("");
+  const [failedAttempt, setFailedAttempt] = useState<DirectoryAttempt>();
   const [query, setQuery] = useState("");
   const [committedQuery, setCommittedQuery] = useState("");
-  const [currentCursor, setCurrentCursor] = useState<string>();
   const [cursorHistory, setCursorHistory] = useState<string[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [createError, setCreateError] = useState("");
@@ -36,43 +48,65 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
-  async function load(cursor?:string,q=committedQuery,includeWorkspace=false) {
+  async function load(attempt:DirectoryAttempt) {
     const loadRequest=++request.current;
-    setState("loading");
-    setError("");
+    const preserveContent=hasContent.current;
+    setFailedAttempt(undefined);
+    if(preserveContent){setRefreshing(true);setRefreshError("");}
+    else {setState("loading");setError("");}
     try {
       const [detail,projects]=await Promise.all([
-        includeWorkspace||!workspace?apiClient.workspace(workspaceId):Promise.resolve(workspace),
-        apiClient.workspaceProjects(workspaceId,{...(q?{q}:{}),...(cursor?{cursor}:{}),limit:20})
+        attempt.includeWorkspace||!workspaceRef.current?apiClient.workspace(workspaceId):Promise.resolve(workspaceRef.current),
+        apiClient.workspaceProjects(workspaceId,{...(attempt.query?{q:attempt.query}:{}),...(attempt.cursor?{cursor:attempt.cursor}:{}),limit:20})
       ]);
       if(!active.current||loadRequest!==request.current)return;
+      workspaceRef.current=detail;
+      displayedScope.current=attempt;
+      hasContent.current=true;
       setWorkspace(detail);
       setPage(projects);
-      setCurrentCursor(cursor);
+      setCommittedQuery(attempt.query);
+      setCursorHistory(attempt.history);
+      setRefreshError("");
       setState("ready");
     } catch(reason) {
       if(!active.current||loadRequest!==request.current)return;
-      setError(reason instanceof ApiError?reason.message:"Projects could not be loaded.");
-      setState("error");
+      const message=reason instanceof ApiError?reason.message:"Projects could not be loaded.";
+      setFailedAttempt(attempt);
+      if(hasContent.current){setRefreshError(message);setState("ready");}
+      else {setError(message);setState("error");}
+    } finally {
+      if(active.current&&loadRequest===request.current)setRefreshing(false);
     }
   }
 
-  useEffect(() => { void load(undefined,"",true); }, [workspaceId]);
+  useEffect(() => { void load({query:"",history:[],includeWorkspace:true}); }, [workspaceId]);
   useEffect(() => {
     if(!searchMounted.current){searchMounted.current=true;return;}
     const timer=window.setTimeout(()=>{
-      const q=query.trim();
-      setCommittedQuery(q);
-      setCursorHistory([]);
-      void load(undefined,q);
+      const nextQuery=queryIntent.current;
+      if(nextQuery===displayedScope.current.query&&displayedScope.current.cursor===undefined)return;
+      void load({query:nextQuery,history:[]});
     },250);
     return()=>window.clearTimeout(timer);
   },[query]);
 
+  function changeQuery(value:string) {
+    queryIntent.current=value.trim();
+    request.current+=1;
+    setRefreshing(false);
+    setRefreshError("");
+    setFailedAttempt(undefined);
+    setQuery(value);
+  }
+
+  function firstPageAttempt(includeWorkspace=false):DirectoryAttempt {
+    return {query:queryIntent.current,history:[],...(includeWorkspace?{includeWorkspace:true}:{})};
+  }
+
   function created(project:Project) {
     if(!active.current)return;
     setCreateOpen(false);
-    setCursorHistory([]);
     router.push(`/workspaces/${workspaceId}/projects/${project.id}/overview`);
   }
 
@@ -85,12 +119,11 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
     try {
       await apiClient.setProjectPinned(projectId,pinned);
       if(!active.current)return;
-      setCursorHistory([]);
       notifyDirectoryChanged();
-      await load(undefined,committedQuery);
+      await load(firstPageAttempt());
     } catch(reason) {
       if(!active.current)return;
-      if(reason instanceof ApiError&&[403,404,409].includes(reason.status)){setCursorHistory([]);await load(undefined,committedQuery,true);return;}
+      if(reason instanceof ApiError&&[403,404,409].includes(reason.status)){await load(firstPageAttempt(true));return;}
       setPinError({projectId,pinned,message:reason instanceof Error?reason.message:"Project pin could not be updated."});
     } finally {
       if(active.current)setPinBusyId(null);
@@ -101,15 +134,16 @@ function WorkspaceProjectsScope({ workspaceId }: { workspaceId: string }) {
   const workspaceRecord=workspace?.workspace;
   return <PageLayout header={<PageHeader title="Projects" subtitle={workspaceRecord&&workspace?`${workspaceRecord.name} · Owner: ${workspace.owner.displayName||workspace.owner.email} · Your access: ${roleLabel(workspace.memberRole)}`:"Projects keep endpoints, members, files, and tasks together."} actions={canCreateProject?<Button label="New project" variant="primary" icon={<Plus size={16}/>} isDisabled={state!=="ready"} onClick={()=>{setCreateError("");setCreateOpen(true);}}/>:undefined}/>}>
     {state==="loading"?<div className="flex min-h-48 items-center justify-center"><Spinner label="Loading projects..."/></div>:null}
-    {state==="error"?<WorkspaceProjectsError message={error} onRetry={()=>load(currentCursor,committedQuery,true)}/>:null}
+    {state==="error"?<WorkspaceProjectsError message={error} onRetry={()=>load(failedAttempt??{query:"",history:[],includeWorkspace:true})}/>:null}
     {state==="ready"&&createError?<Banner className="mb-4" status="error" title="Project could not be created" description={createError}/>:null}
     {state==="ready"&&pinError?<Banner className="mb-4" status="error" title="Project pin could not be updated" description={pinError.message} endContent={<Button label="Retry" variant="ghost" size="sm" onClick={()=>void togglePin(pinError.projectId,pinError.pinned)}/>} />:null}
-    {state==="ready"?<section className="space-y-4" aria-label="Project directory">
-      <TextInput label="Search projects" isLabelHidden startIcon={<Search size={16}/>} value={query} onChange={setQuery} className="max-w-sm" placeholder="Search projects" size="lg"/>
-      {page.items.length>0?<ProjectsTable workspaceId={workspaceId} projects={page.items} pinBusyId={pinBusyId} onTogglePin={(projectId)=>void togglePin(projectId)}/>:query.trim()?<EmptyState icon={<FolderKanban/>} title="No projects match this search"/>:<ProjectsEmpty canCreateProject={canCreateProject} onCreate={()=>setCreateOpen(true)}/>}
-      {page.items.length>0||cursorHistory.length>0?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={cursorHistory.length===0} onClick={()=>{const history=cursorHistory.slice(0,-1);const previous=cursorHistory.at(-1)||undefined;setCursorHistory(history);void load(previous,committedQuery);}}/><Text type="supporting" color="secondary">Page {cursorHistory.length+1} · {page.total} projects</Text><Button label="Next" variant="secondary" size="sm" isDisabled={!page.nextCursor} onClick={()=>{if(!page.nextCursor)return;setCursorHistory((items)=>[...items,currentCursor??""]);void load(page.nextCursor,committedQuery);}}/></div>:null}
+    {state==="ready"&&refreshError?<Banner className="mb-4" status="error" title="Projects could not be refreshed" description={refreshError} endContent={<Button label="Try again" variant="secondary" size="sm" onClick={()=>{if(failedAttempt)void load(failedAttempt);}}/>}/>:null}
+    {state==="ready"?<section className="space-y-4" aria-label="Project directory" aria-busy={refreshing}>
+      <div className="flex min-h-10 items-center gap-3"><TextInput label="Search projects" isLabelHidden startIcon={<Search size={16}/>} value={query} onChange={changeQuery} className="max-w-sm" placeholder="Search projects" size="lg"/>{refreshing?<Spinner label="Updating projects..."/>:null}</div>
+      {page.items.length>0?<ProjectsTable workspaceId={workspaceId} projects={page.items} pinBusyId={pinBusyId} onTogglePin={(projectId)=>void togglePin(projectId)}/>:committedQuery?<EmptyState icon={<FolderKanban/>} title="No projects match this search"/>:<ProjectsEmpty canCreateProject={canCreateProject} onCreate={()=>setCreateOpen(true)}/>}
+      {page.items.length>0||cursorHistory.length>0?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={refreshing||cursorHistory.length===0} onClick={()=>{const scope=displayedScope.current;const cursor=scope.history.at(-1);void load({...(cursor?{cursor}:{}),query:scope.query,history:scope.history.slice(0,-1)});}}/><Text type="supporting" color="secondary">Page {cursorHistory.length+1} · {page.total} projects</Text><Button label="Next" variant="secondary" size="sm" isDisabled={refreshing||!page.nextCursor} onClick={()=>{if(!page.nextCursor)return;const scope=displayedScope.current;void load({cursor:page.nextCursor,query:scope.query,history:[...scope.history,scope.cursor??""]});}}/></div>:null}
     </section>:null}
-    {canCreateProject?<CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} onAccessChanged={async(message)=>{setCreateError(message);setCursorHistory([]);await load(undefined,committedQuery,true);}}/>:null}
+    {canCreateProject?<CreateProjectDialog workspaceId={workspaceId} open={createOpen} onOpenChange={setCreateOpen} onCreated={created} onAccessChanged={async(message)=>{setCreateError(message);await load(firstPageAttempt(true));}}/>:null}
   </PageLayout>;
 }
 

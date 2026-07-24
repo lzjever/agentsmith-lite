@@ -1869,13 +1869,13 @@ function compareOrdinal(left:string,right:string):number {
 function compareC(left:string,right:string):number{return Buffer.compare(Buffer.from(left,"utf8"),Buffer.from(right,"utf8"))}
 function compareProjectDirectoryItems(left:ProjectDirectoryItem,right:ProjectDirectoryItem):number {
   return Number(left.pinnedAt === null) - Number(right.pinnedAt === null)
-    || compareOrdinal(left.name, right.name)
-    || compareOrdinal(left.id, right.id);
+    || compareC(left.name, right.name)
+    || compareC(left.id, right.id);
 }
 function compareProjectDirectoryItemToCursor(item:ProjectDirectoryItem,cursor:{pinned:boolean;name:string;id:string}):number {
   return Number(item.pinnedAt === null) - Number(!cursor.pinned)
-    || compareOrdinal(item.name, cursor.name)
-    || compareOrdinal(item.id, cursor.id);
+    || compareC(item.name, cursor.name)
+    || compareC(item.id, cursor.id);
 }
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {

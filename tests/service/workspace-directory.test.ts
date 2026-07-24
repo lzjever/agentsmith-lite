@@ -80,6 +80,23 @@ describe("bounded workspace and project directories", () => {
     );
   });
 
+  it("orders Unicode project names by UTF-8 bytes like PostgreSQL C collation", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer, subject: "unicode-owner", email: "unicode-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Unicode projects" });
+    const highBmp = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "\uE000 high BMP" });
+    const astral = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "\u{10000} astral" });
+
+    const first = await services.workspaces.listProjectDirectory(owner.user.id, workspace.id, { limit: 1 });
+    assert.deepEqual(first.items.map((item) => item.id), [highBmp.id]);
+    assert.ok(first.nextCursor);
+    assert.deepEqual(
+      (await services.workspaces.listProjectDirectory(owner.user.id, workspace.id, { cursor: first.nextCursor!, limit: 1 })).items.map((item) => item.id),
+      [astral.id]
+    );
+  });
+
   it("loads an exact project independently from directory page boundaries", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/agentsmith-lite", builtinAdminPassword: "admin-password" });
