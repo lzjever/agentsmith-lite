@@ -75,7 +75,7 @@ describe("endpoint deletion", () => {
     await services.endpoints.deleteEndpoint(userId, projectId, endpoint.id, "endpoint-delete-key");
 
     assert.equal(await store.findEndpoint(endpoint.id), null);
-    assert.equal((await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "endpoint.delete" && event.resourceId === endpoint.id).length, 1);
+    assert.equal(((await store.queryProjectAuditEvents(projectId,{limit:100})).items).filter((event) => event.action === "endpoint.delete" && event.resourceId === endpoint.id).length, 1);
   });
 
   it("retries Task-owned filesystem cleanup before releasing Library and endpoint references",async()=>{
@@ -121,7 +121,7 @@ describe("endpoint deletion", () => {
       await services.tasks.deleteTask(userId,created.task.id,"delete-retry");
       assert.deepEqual(await services.tasks.deleteTask(userId,created.task.id,"delete-retry"),{deleted:true,taskId:created.task.id});
       assert.equal(await store.findTask(created.task.id),null);
-      assert.equal((await store.listProjectAuditEvents(projectId)).filter((event)=>event.action==="task.delete"&&event.resourceId===created.task.id).length,1);
+      assert.equal(((await store.queryProjectAuditEvents(projectId,{limit:100})).items).filter((event)=>event.action==="task.delete"&&event.resourceId===created.task.id).length,1);
       assert.equal(await store.deleteFileLibraryIfUnbound(projectId,library.id),"deleted");
       assert.equal(await store.deleteEndpoint(endpoint.id),"deleted");
     }finally{

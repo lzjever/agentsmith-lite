@@ -144,7 +144,7 @@ describe("profile and settings services", () => {
     const result = await first;
     const replay = await services.settings.runIdempotentProjectLifecycleMutation(owner.user.id, project.id, "project.archive", "archive-key", "project.archive", async () => ({ lifecycleStatus: "archived" as const }));
     assert.deepEqual(replay, result);
-    assert.deepEqual((await store.listProjectAuditEvents(project.id)).map(({ action, status, detail }) => ({ action, status, detail })), [{ action: "project.archive", status: "accepted", detail: {} }]);
+    assert.deepEqual(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).map(({ action, status, detail }) => ({ action, status, detail })), [{ action: "project.archive", status: "accepted", detail: {} }]);
     await services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "settings-key", { name: "One" }, project.id, async () => ({ updated: true }));
     await assert.rejects(() => services.settings.runIdempotentMutation(owner.user.id, project.id, "project.settings.update", "settings-key", { name: "Two" }, project.id, async () => ({ updated: true })), (error: unknown) => error instanceof ProductError && error.statusCode === 409);
   });

@@ -58,14 +58,14 @@ describe("project membership authorization", () => {
     assert.deepEqual((await store.listUserNotifications(viewer.user.id)).map((item) => [item.id, item.readAt]), [["notice_late_after_project_removal", null]]);
     await store.deleteProjectMembership(project.id, viewer.user.id);
 
-    assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.actorId, event.resourceId, event.status]), [
+    assert.deepEqual(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).map((event) => [event.action, event.actorId, event.resourceId, event.status]).sort(), [
+      ["membership.remove", owner.user.id, viewer.user.id, "accepted"],
+      ["membership.change", owner.user.id, member.user.id, "accepted"],
+      ["membership.add", owner.user.id, viewer.user.id, "accepted"],
       ["membership.add", owner.user.id, member.user.id, "rejected"],
       ["membership.add", owner.user.id, member.user.id, "accepted"],
-      ["membership.add", owner.user.id, member.user.id, "rejected"],
-      ["membership.add", owner.user.id, viewer.user.id, "accepted"],
-      ["membership.change", owner.user.id, member.user.id, "accepted"],
-      ["membership.remove", owner.user.id, viewer.user.id, "accepted"]
-    ]);
+      ["membership.add", owner.user.id, member.user.id, "rejected"]
+    ].sort());
 
     assert.equal((await services.workspaces.listWorkspaces(owner.user.id))[0]?.capabilities.canCreateProject, true);
     assert.equal((await services.workspaces.listWorkspaces(member.user.id))[0]?.capabilities.canCreateProject, false);
@@ -86,10 +86,13 @@ describe("project membership authorization", () => {
       () => services.memberships.removeMember(owner.user.id, project.id, owner.user.id, currentOwnerMembership.updatedAt),
       (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
-    assert.deepEqual((await store.listProjectAuditEvents(project.id)).slice(-2).map((event) => [event.action, event.resourceId, event.status]), [
-      ["membership.change", owner.user.id, "rejected"],
-      ["membership.remove", owner.user.id, "rejected"]
-    ]);
+    assert.deepEqual(
+      ((await store.queryProjectAuditEvents(project.id,{limit:100})).items)
+        .filter((event)=>event.resourceId===owner.user.id&&event.status==="rejected")
+        .map((event)=>event.action)
+        .sort(),
+      ["membership.change","membership.remove"],
+    );
 
     await services.memberships.transferOwner(owner.user.id, project.id, member.user.id);
     const ownerMembership = (await store.findProjectMembership(project.id, member.user.id))!;
@@ -123,10 +126,10 @@ describe("project membership authorization", () => {
       () => services.memberships.addMember(owner.user.id, project.id, "user_missing", "viewer"),
       (error: unknown) => error instanceof ProductError && error.statusCode === 409
     );
-    assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.resourceId, event.status]), [
-      ["membership.add", "user_unverified", "rejected"],
-      ["membership.add", "user_missing", "rejected"]
-    ]);
+    assert.deepEqual(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).map((event) => [event.action, event.resourceId, event.status]).sort(), [
+      ["membership.add", "user_missing", "rejected"],
+      ["membership.add", "user_unverified", "rejected"]
+    ].sort());
     await assert.rejects(
       () => services.authorization.requireProject(owner.user.id, "proj_missing"),
       (error: unknown) => error instanceof ProductError && error.statusCode === 404
@@ -172,9 +175,9 @@ describe("project membership authorization", () => {
     const remove = services.memberships.removeMember.bind(services.memberships) as (actor:string,projectId:string,userId:string,expected:string,key:string)=>Promise<void>;
     await remove(owner.user.id, project.id, member.user.id, changed.updatedAt, "project-member-remove-key");
     await remove(owner.user.id, project.id, member.user.id, changed.updatedAt, "project-member-remove-key");
-    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.status === "accepted").length, 1);
-    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.change" && event.status === "accepted").length, 1);
-    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.remove" && event.status === "accepted").length, 1);
+    assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter((event) => event.action === "membership.add" && event.status === "accepted").length, 1);
+    assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter((event) => event.action === "membership.change" && event.status === "accepted").length, 1);
+    assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter((event) => event.action === "membership.remove" && event.status === "accepted").length, 1);
   });
 
   it("reauthorizes a project member addition before replaying it", async () => {
@@ -196,7 +199,7 @@ describe("project membership authorization", () => {
       () => services.memberships.addMember(admin.user.id, project.id, member.user.id, "member", "admin-member-add-key"),
       status(403)
     );
-    assert.equal((await store.listProjectAuditEvents(project.id)).filter((event) => event.action === "membership.add" && event.actorId === admin.user.id && event.status === "rejected").length, 1);
+    assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter((event) => event.action === "membership.add" && event.actorId === admin.user.id && event.status === "rejected").length, 1);
   });
 });
 

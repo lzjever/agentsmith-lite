@@ -78,6 +78,38 @@ result. Gauge rules (`active_tasks`, `project_file_bytes`) have a null window.
 Provider and failure rules default to 3600 seconds and accept only 60 through
 2592000 seconds. Alert and rule resources are looked up by Project and ID.
 
+## Project Audit
+
+`GET /api/v1/projects/{projectId}/audit` is a pure bounded read available to
+Project viewers. It accepts only `actorId`, `subjectUserId`, `action`, `status`,
+`resourceKind`, `resourceId`, `from`, `to`, `cursor`, and `limit`. The default
+limit is 20 and the maximum is 100. Filters are applied before the keyset and
+limit. Results are ordered by `createdAt` and ID descending, with tied IDs
+compared using PostgreSQL `C` collation.
+
+The response is `{ items, nextCursor }`. Each item projects
+`actorDisplayName`, `actorEmail`, `subjectDisplayName`, and `subjectEmail` in
+the same bounded store query. It does not list memberships, fetch full users,
+perform per-row identity queries, or write data. The canonical base64url JSON
+v1 cursor binds the Project, every normalized filter, and the final
+`{ createdAt, id }` key; changing only `limit` is allowed. Malformed,
+noncanonical, cross-Project, or cross-filter cursors are rejected.
+
+`GET /api/v1/projects/{projectId}/audit/identities` accepts only
+`role=actor|subject`, optional `q`, `cursor`, and `limit`. The default limit is
+20 and the maximum is 50; `q` is trimmed, limited to 120 characters, and
+matches ID, display name, or email case-insensitively. Only non-null IDs
+present in the selected Audit column for that Project are candidates, with an
+exact ID match first. It returns `{ items: [{ id, displayName, email }],
+nextCursor }`. Its canonical v1 cursor binds Project, role, normalized query,
+and the final ID key.
+
+Audit actions are final business events. `task.historical_terminal` and
+`sandbox.release_requested` do not exist in the contract. Explicit sandbox
+release still uses the internal `release_requested` Run state for fencing,
+cleanup, and idempotency, while Audit records only the final
+`sandbox.released` event.
+
 ## Task Conversation
 
 Task Conversation has eight routes. The removed transcript and raw `/events` routes have no replacement.

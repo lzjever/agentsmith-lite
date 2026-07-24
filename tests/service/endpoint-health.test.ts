@@ -301,7 +301,7 @@ test("endpoint updates and health rechecks replay without repeating provider wor
   const replayedCheck = await services.endpoints.recheckEndpoint(user.id, project.id, endpoint.id, "endpoint-recheck-key");
   assert.deepEqual(replayedCheck, checked);
   assert.equal(validationCalls, 3);
-  const audit = await store.listProjectAuditEvents(project.id);
+  const audit = (await store.queryProjectAuditEvents(project.id,{limit:100})).items;
   assert.equal(audit.filter((event) => event.action === "endpoint.update" && event.status === "accepted").length, 1);
   assert.equal(audit.filter((event) => event.action === "endpoint.health_check" && event.status === "accepted").length, 1);
 });

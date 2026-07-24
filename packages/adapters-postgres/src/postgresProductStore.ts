@@ -639,9 +639,69 @@ export class PostgresProductStore implements ProductStore {
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const column = status === "resolved" ? "resolved_at" : "dismissed_at"; const rows = await this.queryRows<ProjectAlertRow>(`update project_alerts set status=$3, ${column}=$4, updated_at=$4 where project_id=$1 and id=$2 and status='active' returning *`, [projectId, id, status, updatedAt]); return rows[0] ? mapAlert(rows[0]) : null; }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const rows=await this.queryRows<ProjectAlertRow>(`update project_alerts set acknowledged_at=coalesce($3,acknowledged_at),acknowledged_by=coalesce($4,acknowledged_by),silenced_until=case when $5::boolean then $6::timestamptz else silenced_until end,updated_at=$7 where project_id=$1 and id=$2 and status='active' returning *`,[projectId,id,input.acknowledgedAt??null,input.acknowledgedBy??null,Object.hasOwn(input,'silencedUntil'),input.silencedUntil??null,updatedAt]);return rows[0]?mapAlert(rows[0]):null}
   async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const rows = await this.queryRows<ProjectAlertRow>("update project_alerts set delivery_status=$3, updated_at=$4 where project_id=$1 and id=$2 returning *", [projectId, id, status, updatedAt]); return rows[0] ? mapAlert(rows[0]) : null; }
-  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(event.action==="task.historical_terminal")throw new Error("Historical audit events are read-only");await this.pool.query("insert into project_audit_events (id,project_id,actor_id,subject_user_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict (id) do nothing", [event.id,event.projectId,event.actorId,event.subjectUserId??null,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]); }
-  async listProjectAuditEvents(projectId:string){const rows=await this.queryRows<ProjectAuditRow>('select * from project_audit_events where project_id=$1 order by created_at,id',[projectId]);return rows.map(mapAudit)}
-  async queryProjectAuditEvents(projectId:string,query:import("../../contracts/src/api.js").ProjectAuditQuery){const limit=Math.min(100,Math.max(1,query.limit??20));const values:unknown[]=[projectId];const where=["project_id=$1"];const add=(sql:string,value:unknown)=>{values.push(value);where.push(sql.replace('?',`$${values.length}`))};if(Object.hasOwn(query,'actorId'))query.actorId===null?where.push('actor_id is null'):add('actor_id=?',query.actorId);if(Object.hasOwn(query,'subjectUserId'))query.subjectUserId===null?where.push('subject_user_id is null'):add('subject_user_id=?',query.subjectUserId);if(query.action)add('action=?',query.action);if(query.status)add('status=?',query.status);if(query.resourceKind)add('resource_kind=?',query.resourceKind);if(query.resourceId)add('resource_id=?',query.resourceId);if(query.from)add('created_at>=?',query.from);if(query.to)add('created_at<=?',query.to);if(query.cursor){const split=query.cursor.lastIndexOf('|');if(split<1)throw new Error('Invalid audit cursor');values.push(query.cursor.slice(0,split),query.cursor.slice(split+1));where.push(`(created_at,id)<($${values.length-1},$${values.length})`)}values.push(limit+1);const rows=await this.queryRows<ProjectAuditRow>(`select * from project_audit_events where ${where.join(' and ')} order by created_at desc,id desc limit $${values.length}`,values);const page=rows.slice(0,limit);return{items:page.map(mapAudit),nextCursor:rows.length>limit&&page.length?`${toIso(page.at(-1)!.created_at)}|${page.at(-1)!.id}`:null}}
+  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { await this.pool.query("insert into project_audit_events (id,project_id,actor_id,subject_user_id,action,status,resource_kind,resource_id,detail,created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict (id) do nothing", [event.id,event.projectId,event.actorId,event.subjectUserId??null,event.action,event.status,event.resourceKind,event.resourceId,sanitizeProjectAuditDetail(event.detail),event.createdAt]); }
+  async queryProjectAuditEvents(projectId:string,query:import("../../ports/src/store.js").ProjectAuditStoreQuery):Promise<import("../../ports/src/store.js").ProjectAuditStorePage>{
+    const values:unknown[]=[projectId],where=["event.project_id=$1"];
+    const add=(sql:string,value:unknown)=>{values.push(value);where.push(sql.replace("?",`$${values.length}`))};
+    if(Object.hasOwn(query,"actorId"))query.actorId===null?where.push("event.actor_id is null"):add("event.actor_id=?",query.actorId);
+    if(Object.hasOwn(query,"subjectUserId"))query.subjectUserId===null?where.push("event.subject_user_id is null"):add("event.subject_user_id=?",query.subjectUserId);
+    if(query.action)add("event.action=?",query.action);
+    if(query.status)add("event.status=?",query.status);
+    if(query.resourceKind)add("event.resource_kind=?",query.resourceKind);
+    if(query.resourceId)add("event.resource_id=?",query.resourceId);
+    if(query.from)add("event.created_at>=?",query.from);
+    if(query.to)add("event.created_at<=?",query.to);
+    if(query.after){values.push(query.after.createdAt,query.after.id);where.push(`(event.created_at,event.id collate "C")<($${values.length-1}::timestamptz,$${values.length}::text collate "C")`)}
+    values.push(query.limit+1);
+    const rows=await this.queryRows<ProjectAuditRow>(
+      `select event.*,
+              actor_profile.display_name as actor_display_name,actor.email as actor_email,
+              subject_profile.display_name as subject_display_name,subject.email as subject_email
+       from project_audit_events event
+       left join users actor on actor.id=event.actor_id
+       left join user_profile_preferences actor_profile on actor_profile.user_id=event.actor_id
+       left join users subject on subject.id=event.subject_user_id
+       left join user_profile_preferences subject_profile on subject_profile.user_id=event.subject_user_id
+       where ${where.join(" and ")}
+       order by event.created_at desc,event.id collate "C" desc
+       limit $${values.length}`,
+      values
+    );
+    const page=rows.slice(0,query.limit);
+    return{items:page.map(mapAuditView),hasMore:rows.length>query.limit};
+  }
+  async queryProjectAuditIdentities(projectId:string,query:import("../../ports/src/store.js").ProjectAuditIdentityStoreQuery):Promise<import("../../ports/src/store.js").ProjectAuditIdentityStorePage>{
+    const column=query.role==="actor"?"actor_id":"subject_user_id",values:unknown[]=[projectId,query.q],after:string[]=[];
+    if(query.after){
+      values.push(query.after.id);
+      after.push(query.after.id.toLowerCase()===query.q
+        ? `((lower(candidate.id)=$2 and candidate.id collate "C">$${values.length}::text collate "C") or lower(candidate.id)<>$2)`
+        : `lower(candidate.id)<>$2 and candidate.id collate "C">$${values.length}::text collate "C"`);
+    }
+    values.push(query.limit+1);
+    const rows=await this.queryRows<{id:string;display_name:string|null;email:string|null}>(
+      `with candidate as (
+         select distinct event.${column} as id
+         from project_audit_events event
+         where event.project_id=$1 and event.${column} is not null
+       )
+       select candidate.id,profile.display_name,user_account.email
+       from candidate
+       left join users user_account on user_account.id=candidate.id
+       left join user_profile_preferences profile on profile.user_id=candidate.id
+       where (
+         $2='' or position(lower($2) in lower(candidate.id))>0
+         or position(lower($2) in lower(coalesce(profile.display_name,'')))>0
+         or position(lower($2) in lower(coalesce(user_account.email,'')))>0
+       )
+       ${after.length?`and ${after.join(" and ")}`:""}
+       order by (lower(candidate.id)=$2) desc,candidate.id collate "C"
+       limit $${values.length}`,
+      values
+    );
+    const page=rows.slice(0,query.limit);
+    return{items:page.map((row)=>({id:row.id,displayName:row.display_name,email:row.email})),hasMore:rows.length>query.limit};
+  }
   async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{return transaction(this.pool,async(client)=>{
     const current=await selectSandboxRunWithClient(client,input.runId,true);if(!current)return{kind:"conflict" as const};
     if(current.startedAt){await insertAuditEventWithClient(client,{...input.auditEvent,createdAt:current.startedAt});return{kind:"already_started" as const,run:current};}
@@ -1180,7 +1240,6 @@ export class PostgresProductStore implements ProductStore {
       if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1)return"conflict" as const;
       await updateSandboxRunWithClient(client,input.run);
     }
-    await insertAuditEventWithClient(client,input.auditEvent);
     await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
     return already?"already_requested" as const:"applied" as const;
   })}
@@ -1885,7 +1944,7 @@ interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | nu
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
 interface ProjectAlertRow { id: string; project_id: string; type: ProjectAlertType; status: ProjectAlertStatus; delivery_status: ProjectAlert["deliveryStatus"]; rule_id:string|null;metric:AlertRuleMetric|null;metric_value:number|null;threshold:number|null;endpoint_id:string|null;subject_actor_id:string|null;acknowledged_at:unknown;acknowledged_by:string|null;silenced_until:unknown; created_at: unknown; updated_at: unknown; resolved_at: unknown; dismissed_at: unknown; }
-interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; subject_user_id:string|null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; }
+interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; subject_user_id:string|null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; actor_display_name:string|null;actor_email:string|null;subject_display_name:string|null;subject_email:string|null; }
 interface SandboxUsageSettlementRow { run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;started_at:unknown;released_at:unknown;duration_seconds:number|string;cpu_request_millis:string;memory_request_bytes:string;cpu_limit_millis:string;memory_limit_bytes:string;release_reason:import("../../contracts/src/api.js").SandboxReleaseReason; }
 interface SandboxUsageHistoryRow extends SandboxUsageSettlementRow { task_title:string|null;task_available:boolean; }
 interface SandboxUsageSummaryRow { unreleased_count:string;launches:string;total_duration_ms:string;cpu_request_millis_ms:string;memory_request_byte_ms:string; }
@@ -2092,6 +2151,7 @@ function mapAlert(row:ProjectAlertRow):ProjectAlert{
 }
 function mapActiveAlert(row:ProjectAlertRow):ActiveProjectAlert{const alert=mapAlert(row);if(!isActiveProjectAlert(alert))throw new Error("Expected an active project alert row");return alert}
 function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, subjectUserId:row.subject_user_id??null, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
+function mapAuditView(row:ProjectAuditRow):import("../../contracts/src/api.js").ProjectAuditEventView{return{...mapAudit(row),actorDisplayName:row.actor_display_name,actorEmail:row.actor_email,subjectDisplayName:row.subject_display_name,subjectEmail:row.subject_email}}
 function mapSandboxUsageSettlement(row:SandboxUsageSettlementRow):SandboxUsageSettlement{return{runId:row.run_id,workspaceId:row.workspace_id,projectId:row.project_id,taskId:row.task_id,fileLibraryId:row.file_library_id,startedByUserId:row.started_by_user_id,startedAt:row.started_at?toIso(row.started_at):null,releasedAt:toIso(row.released_at),durationSeconds:Number(row.duration_seconds),resources:{cpuRequestMillis:String(row.cpu_request_millis),memoryRequestBytes:String(row.memory_request_bytes),cpuLimitMillis:String(row.cpu_limit_millis),memoryLimitBytes:String(row.memory_limit_bytes)},releaseReason:row.release_reason}}
 function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
   return {

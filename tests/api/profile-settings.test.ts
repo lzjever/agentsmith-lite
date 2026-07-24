@@ -86,7 +86,7 @@ describe("profile and settings API", () => {
     const deleted = await json("DELETE", `/api/v1/projects/${projectId}`, undefined, "project-delete");
     assert.deepEqual(deleted, { deleted: true });
     assert.equal(await store.findProject(projectId), null);
-    assert.deepEqual(await store.listProjectAuditEvents(projectId), []);
+    assert.deepEqual((await store.queryProjectAuditEvents(projectId,{limit:100})).items, []);
     assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}`, undefined, "project-delete"), { deleted: true });
 
     const failingProjectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Deletion failure" })).id;

@@ -223,7 +223,7 @@ describe("task interactions API", () => {
     assert.equal(run?.state, "failed");
     assert.equal(run?.releaseReason, "failed");
     assert.equal(run?.failureCode, "runtime_unreachable");
-    const failedAudits = (await store.listProjectAuditEvents(auth.projectId))
+    const failedAudits = ((await store.queryProjectAuditEvents(auth.projectId,{limit:100})).items)
       .filter((event) => event.action === "sandbox.failed");
     assert.equal(failedAudits.length, 1);
     assert.equal(failedAudits[0]?.detail?.taskId, task.id);
@@ -255,7 +255,7 @@ describe("task interactions API", () => {
     assert.deepEqual(secondSnapshot.presentation.capabilities, detail.capabilities);
     assert.equal((await store.sandboxRuns.get(run!.runId))?.state, "failed");
     assert.equal(
-      (await store.listProjectAuditEvents(auth.projectId))
+      ((await store.queryProjectAuditEvents(auth.projectId,{limit:100})).items)
         .filter((event) => event.action === "sandbox.failed").length,
       1
     );

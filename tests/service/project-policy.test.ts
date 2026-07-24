@@ -13,6 +13,7 @@ describe("project resource policy", () => {
     for(const filePath of ["files/notes/result.txt","notes/result.txt","libraries/library_1/home/../secret","libraries/library_1/workspace/result.txt"]){
       assert.equal(sanitizeProjectAuditDetail({filePath}).filePath,undefined);
     }
+    assert.deepEqual(sanitizeProjectAuditDetail({taskId:"task_1",historicalAction:"task.failed"}),{taskId:"task_1"});
   });
 
   it("creates the owner membership, default policy, and zero usage with the project", async () => {
@@ -400,7 +401,7 @@ describe("project resource policy", () => {
 
     await assert.rejects(() => services.policies.updatePolicy(user.id, project.id, {}), /requires at least one limit/);
 
-    assert.deepEqual((await store.listProjectAuditEvents(project.id)).map((event) => [event.action, event.resourceKind, event.resourceId, event.status]), [
+    assert.deepEqual(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).map((event) => [event.action, event.resourceKind, event.resourceId, event.status]), [
       ["policy.update", "project", project.id, "rejected"]
     ]);
   });
@@ -427,12 +428,12 @@ describe("project resource policy", () => {
     const replayed = await transitionAlert(user.id, project.id, active.id, "resolved", "alert-resolve-key");
     assert.deepEqual(replayed, resolved);
 
-    const events = await store.listProjectAuditEvents(project.id);
+    const events = (await store.queryProjectAuditEvents(project.id,{limit:100})).items;
     assert.equal(events.filter((event) => event.action === "policy.update").length, 1);
     assert.equal(events.filter((event) => event.action === "alert.resolve").length, 1);
   });
 
-  it("retains audit actor identity after the actor is no longer a project member", async () => {
+  it("pages tied Audit rows with filter-bound cursors and projects actor and subject identities in one bounded read", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-audit-actors", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
@@ -441,15 +442,51 @@ describe("project resource policy", () => {
     await services.profile.updateProfile(former.user.id, { displayName: "Former Member", expectedUpdatedAt: (await services.profile.getProfile(former.user.id)).preferences.updatedAt });
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
-    await services.policies.updatePolicy(user.id, project.id, { providerRequestsLimit: 4 });
-    await store.appendProjectAuditEvent({ id: "removed_actor", projectId: project.id, actorId: former.user.id, action: "sandbox.failed", status: "accepted", resourceKind: "sandbox", resourceId: "task_1", createdAt: new Date().toISOString() });
-    const original = store.listProjectMemberships.bind(store);
-    let membershipReads = 0;
-    store.listProjectMemberships = async (id) => { membershipReads += 1; return original(id); };
+    const otherProject = await services.workspaces.createProject(user.id, workspace.id, { name: "Other" });
+    const tiedAt = "2026-07-20T12:00:00.000Z";
+    for (let index = 0; index < 7; index += 1) {
+      await store.appendProjectAuditEvent({
+        id:`audit_tied_${index}`,projectId:project.id,actorId:former.user.id,subjectUserId:user.id,
+        action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:`task_${index}`,createdAt:tiedAt
+      });
+    }
+    await store.appendProjectAuditEvent({id:"audit_other",projectId:otherProject.id,actorId:former.user.id,subjectUserId:user.id,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:"task_other",createdAt:tiedAt});
+    store.listProjectMemberships=async()=>{throw new Error("Audit reads must not list memberships")};
+    store.findUserById=async()=>{throw new Error("Audit reads must not fetch full users")};
+    store.findUserProfilePreferences=async()=>{throw new Error("Audit reads must not perform identity N+1 queries")};
 
-    const events = await services.policies.audit(user.id, project.id);
-    assert.equal(membershipReads, 1);
-    assert.deepEqual(events.map((event) => [event.actorId, event.actorDisplayName, event.actorEmail]), [[former.user.id, "Former Member", former.user.email],[user.id, "Policy Owner", user.email]]);
+    const first=await services.policies.audit(user.id,project.id,{action:"sandbox.failed",limit:3});
+    assert.deepEqual(first.items.map((event)=>event.id),["audit_tied_6","audit_tied_5","audit_tied_4"]);
+    assert.deepEqual(first.items.map((event)=>[event.actorDisplayName,event.actorEmail,event.subjectDisplayName,event.subjectEmail]),Array(3).fill(["Former Member",former.user.email,"Policy Owner",user.email]));
+    assert.ok(first.nextCursor);
+    const second=await services.policies.audit(user.id,project.id,{action:"sandbox.failed",limit:4,cursor:first.nextCursor!});
+    assert.deepEqual(second.items.map((event)=>event.id),["audit_tied_3","audit_tied_2","audit_tied_1","audit_tied_0"]);
+    assert.equal(second.nextCursor,null);
+    await assert.rejects(()=>services.policies.audit(user.id,project.id,{action:"sandbox.released",cursor:first.nextCursor!}),/Audit cursor is invalid/);
+    await assert.rejects(()=>services.policies.audit(user.id,otherProject.id,{action:"sandbox.failed",cursor:first.nextCursor!}),/Audit cursor is invalid/);
+    await assert.rejects(()=>services.policies.audit(user.id,project.id,{action:"sandbox.failed",cursor:`${first.nextCursor}=`}),/Audit cursor is invalid/);
+  });
+
+  it("lists only actor or subject identities present in the selected Project Audit column",async()=>{
+    const store=createInMemoryProductStore();
+    const services=createApplicationServices({store,dataRoot:"/tmp/agentsmith-audit-identities",builtinAdminPassword:"admin-password"});
+    const {user}=await services.auth.loginAfterBootstrap("admin-password");
+    const former=await services.auth.loginExternalPrincipal({issuer:"https://idp.test",subject:"former",email:"former@example.test",emailVerified:true});
+    const subject=await services.auth.loginExternalPrincipal({issuer:"https://idp.test",subject:"subject",email:"subject@example.test",emailVerified:true});
+    await services.profile.updateProfile(former.user.id,{displayName:"Former Operator",expectedUpdatedAt:(await services.profile.getProfile(former.user.id)).preferences.updatedAt});
+    await services.profile.updateProfile(subject.user.id,{displayName:"Subject Person",expectedUpdatedAt:(await services.profile.getProfile(subject.user.id)).preferences.updatedAt});
+    const workspace=await services.workspaces.createWorkspace(user.id,{name:"W"});
+    const project=await services.workspaces.createProject(user.id,workspace.id,{name:"P"});
+    const other=await services.workspaces.createProject(user.id,workspace.id,{name:"Other"});
+    await store.appendProjectAuditEvent({id:"identity_primary",projectId:project.id,actorId:former.user.id,subjectUserId:subject.user.id,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:"task_1",createdAt:"2026-07-20T12:00:00.000Z"});
+    await store.appendProjectAuditEvent({id:"identity_other",projectId:other.id,actorId:subject.user.id,subjectUserId:former.user.id,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:"task_2",createdAt:"2026-07-20T12:00:00.000Z"});
+
+    const actors=await services.policies.auditIdentities(user.id,project.id,{role:"actor",q:"former",limit:20});
+    assert.deepEqual(actors.items,[{id:former.user.id,displayName:"Former Operator",email:former.user.email}]);
+    const subjects=await services.policies.auditIdentities(user.id,project.id,{role:"subject",q:"subject",limit:20});
+    assert.deepEqual(subjects.items,[{id:subject.user.id,displayName:"Subject Person",email:subject.user.email}]);
+    assert.deepEqual((await services.policies.auditIdentities(user.id,project.id,{role:"actor",q:"subject"})).items,[]);
+    assert.deepEqual((await services.policies.auditIdentities(user.id,project.id,{role:"subject",q:"former"})).items,[]);
   });
 
   it("filters an exact audit resource before applying pagination", async () => {

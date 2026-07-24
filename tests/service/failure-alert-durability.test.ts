@@ -32,9 +32,9 @@ describe("durable failure alerts", () => {
     const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus, alert?.endpointId], [1, 1, "delivered", endpoint.id]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
-    const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "endpoint.health_check");
+    const event = ((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items).find((item) => item.action === "endpoint.health_check");
     assert.deepEqual([event?.status, event?.resourceKind, event?.detail], ["rejected", "endpoint", { endpointId: endpoint.id, healthStatus: "unavailable", errorCategory: "auth" }]);
-    assert.doesNotMatch(JSON.stringify(await setup.store.listProjectAuditEvents(setup.projectId)), new RegExp(secret));
+    assert.doesNotMatch(JSON.stringify((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items), new RegExp(secret));
   });
 
   it("does not evaluate an endpoint failure whose audit event was not persisted", async () => {
@@ -75,9 +75,9 @@ describe("durable failure alerts", () => {
     const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus, alert?.endpointId], [1, 1, "delivered", endpoint.id]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
-    const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "provider.request" && item.status === "rejected");
+    const event = ((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items).find((item) => item.action === "provider.request" && item.status === "rejected");
     assert.deepEqual([event?.resourceKind, event?.resourceId, event?.detail], ["provider", endpoint.id, { endpointId: endpoint.id, errorCategory: "unknown" }]);
-    assert.doesNotMatch(JSON.stringify(await setup.store.listProjectAuditEvents(setup.projectId)), new RegExp(secret));
+    assert.doesNotMatch(JSON.stringify((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items), new RegExp(secret));
   });
 
   it("does not evaluate a provider failure whose audit event was not persisted", async () => {
@@ -106,9 +106,9 @@ describe("durable failure alerts", () => {
     const alert = (await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.find((item) => item.ruleId === rule.id);
     assert.deepEqual([alert?.metricValue, alert?.threshold, alert?.deliveryStatus], [1, 1, "delivered"]);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
-    const event = (await setup.store.listProjectAuditEvents(setup.projectId)).find((item) => item.action === "sandbox.failed");
+    const event = ((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items).find((item) => item.action === "sandbox.failed");
     assert.deepEqual([event?.status, event?.resourceKind, event?.resourceId, event?.detail], ["accepted", "sandbox", setup.run.taskId, { endpointId: setup.task.endpointId, taskId: setup.run.taskId, runId:setup.run.runId }]);
-    assert.doesNotMatch(JSON.stringify(await setup.store.listProjectAuditEvents(setup.projectId)), /sandbox-secret-must-not-leak/);
+    assert.doesNotMatch(JSON.stringify((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items), /sandbox-secret-must-not-leak/);
   });
 
   it("does not evaluate a missing sandbox audit event and retries it once through maintenance", async () => {
@@ -130,7 +130,7 @@ describe("durable failure alerts", () => {
     const releasedRun = await setup.store.sandboxRuns.get(setup.run.runId);
     assert.deepEqual([releasedRun?.state, releasedRun?.releaseReason, releasedRun?.failureCode], ["released", "failed", "runner_failed"]);
     assert.equal(measurements(), 1);
-    assert.equal((await setup.store.listProjectAuditEvents(setup.projectId)).filter((item) => item.action === "sandbox.failed").length, 1);
+    assert.equal(((await setup.store.queryProjectAuditEvents(setup.projectId,{limit:100})).items).filter((item) => item.action === "sandbox.failed").length, 1);
     assert.equal((await setup.store.queryProjectAlerts(setup.projectId,{view:"active",limit:50})).items.filter((item) => item.type === "sandbox_failure" && item.metricValue === 1).length, 1);
     assert.equal((await setup.services.notifications.list(setup.userId)).filter((item) => item.type === "project_alert").length, 1);
   });

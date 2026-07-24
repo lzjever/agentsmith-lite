@@ -133,6 +133,7 @@ describe("sandbox Run store", () => {
     unblock();
     assert.equal((await startup).kind,"applied");
     assert.equal(await release,"applied");
+    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items,[]);
     assert.equal((await store.runSandboxStartupOperation(startupInput,async()=>null)).kind,"conflict");
 
     const requested=await store.sandboxRuns.get(run.runId);assert.ok(requested);
@@ -254,7 +255,7 @@ describe("sandbox Run store", () => {
     assert.equal(reclaimed.kind,"created");
     assert.equal(reclaimed.kind==="created"?reclaimed.message.id:null,"message_original");
     assert.deepEqual((await store.listTaskMessages(task.id)).map((message)=>message.id),["message_original"]);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.action==="task.message.create").length,1);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,1);
   });
 
   it("rejects archive and deletion while any Task Run remains unreleased",async()=>{
@@ -295,7 +296,7 @@ async function beginRelease(store:ReturnType<typeof createLocalInMemoryProductSt
   const now=runTimestamp(2),claimToken=`claim_${key}`,requestHash=`hash_${key}`;
   const ownership={actorId:current.startedByUserId,projectId:current.projectId,operation:"release-sandbox" as const,key,requestHash,resourceId:current.runId,claimToken,now,leaseExpiresAt:runTimestamp(4)};
   assert.equal((await store.beginTaskIdempotency(ownership)).kind,"claimed");
-  return{runId:current.runId,taskId:current.taskId,expectedFencingToken:current.fencingToken,run:{...current,state:"release_requested" as const,releaseReason:current.releaseReason??"requested",releaseRequestedAt:current.releaseRequestedAt??now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:now},auditEvent:{id:`audit_release_${key}`,projectId:current.projectId,actorId:current.startedByUserId,subjectUserId:current.startedByUserId,action:"sandbox.release_requested" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId},createdAt:now},idempotency:{actorId:ownership.actorId,projectId:ownership.projectId,operation:ownership.operation,key,requestHash,claimToken,responseStatus:200,responseBody:{ok:true},updatedAt:now}};
+  return{runId:current.runId,taskId:current.taskId,expectedFencingToken:current.fencingToken,run:{...current,state:"release_requested" as const,releaseReason:current.releaseReason??"requested",releaseRequestedAt:current.releaseRequestedAt??now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:now},idempotency:{actorId:ownership.actorId,projectId:ownership.projectId,operation:ownership.operation,key,requestHash,claimToken,responseStatus:200,responseBody:{ok:true},updatedAt:now}};
 }
 
 function sandboxRun(overrides: Partial<PersistedSandboxRunState> = {}): PersistedSandboxRunState {

@@ -377,6 +377,71 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
     });
   });
 
+  it("removes obsolete Audit actions and detail compatibility in migration 071",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"071_finalize_project_audit",async(client,migrationSql)=>{
+      const ids=await insertProjectFixture(client,"audit_071");
+      const timestamp="2026-07-24T12:00:00.000Z";
+      await client.query(
+        `insert into project_audit_events (
+           id,project_id,actor_id,subject_user_id,action,status,resource_kind,resource_id,detail,created_at
+         ) values
+           ($1,$4,$5,null,'task.historical_terminal','accepted','task','task_old',$6::jsonb,$7),
+           ($2,$4,$5,$5,'sandbox.release_requested','accepted','sandbox','task_release',$6::jsonb,$7),
+           ($3,$4,$5,$5,'sandbox.released','accepted','sandbox','task_final',$8::jsonb,$7)`,
+        [
+          `audit_historical_${ids.suffix}`,
+          `audit_requested_${ids.suffix}`,
+          `audit_released_${ids.suffix}`,
+          ids.projectId,
+          ids.userId,
+          JSON.stringify({taskId:"task_old",historicalAction:"task.failed"}),
+          timestamp,
+          JSON.stringify({taskId:"task_final",runId:"run_final",releaseReason:"requested",historicalAction:"task.failed"}),
+        ]
+      );
+
+      await client.query(migrationSql);
+
+      assert.deepEqual(
+        (await client.query<{id:string;action:string;detail:Record<string,unknown>}>("select id,action,detail from project_audit_events where project_id=$1 order by id",[ids.projectId])).rows,
+        [{id:`audit_released_${ids.suffix}`,action:"sandbox.released",detail:{taskId:"task_final",runId:"run_final",releaseReason:"requested"}}],
+      );
+      const actionConstraint=await client.query<{definition:string}>("select pg_get_constraintdef(oid) as definition from pg_constraint where conrelid='project_audit_events'::regclass and conname='project_audit_events_action_check'");
+      assert.equal(actionConstraint.rowCount,1);
+      assert.doesNotMatch(actionConstraint.rows[0]!.definition,/historical_terminal|release_requested/i);
+      const paginationIndexes=await client.query<{indexname:string;definition:string}>(
+        `select indexname,substr(indexdef,strpos(indexdef,'(')) as definition
+         from pg_indexes
+         where schemaname=current_schema()
+           and indexname in (
+             'project_audit_events_page_idx',
+             'project_audit_events_actor_page_idx',
+             'project_audit_events_subject_page_idx',
+             'project_audit_events_resource_idx',
+             'project_audit_events_resource_lookup_idx'
+           )
+         order by indexname`
+      );
+      assert.deepEqual(paginationIndexes.rows,[
+        {indexname:"project_audit_events_actor_page_idx",definition:'(project_id, actor_id, created_at DESC, id COLLATE "C" DESC)'},
+        {indexname:"project_audit_events_page_idx",definition:'(project_id, created_at DESC, id COLLATE "C" DESC)'},
+        {indexname:"project_audit_events_resource_lookup_idx",definition:'(project_id, resource_id, resource_kind, created_at DESC, id COLLATE "C" DESC)'},
+        {indexname:"project_audit_events_subject_page_idx",definition:'(project_id, subject_user_id, created_at DESC, id COLLATE "C" DESC)'},
+      ]);
+      for(const action of ["task.historical_terminal","sandbox.release_requested"]){
+        await assert.rejects(
+          client.query(
+            `insert into project_audit_events (id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at)
+             values ($1,$2,$3,$4,'accepted','sandbox',null,'{}'::jsonb,$5)`,
+            [`audit_rejected_${action}_${ids.suffix}`,ids.projectId,ids.userId,action,timestamp]
+          ),
+          isCheckViolation
+        );
+      }
+    });
+  });
+
   it("preserves non-Task receipts, bound endpoints, and read-only historical rows through migration 066", async () => {
     assert.ok(postgresUrl);
     await withMigration066Database(postgresUrl, async (client, cutoverSql) => {
@@ -451,24 +516,6 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
         [`alert_sandbox_${ids.suffix}`, ids.projectId, timestamp]
       );
 
-      const terminalActions = ["task.cancel","task.completed","task.failed","task.expired","task.cleaned"];
-      for (const [index, action] of terminalActions.entries()) {
-        await client.query(
-          `insert into project_audit_events (
-             id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at
-           ) values ($1,$2,$3,$4,'accepted','task',$5,$6::jsonb,$7)`,
-          [
-            `audit_terminal_${index}_${ids.suffix}`,
-            ids.projectId,
-            ids.userId,
-            action,
-            `task_terminal_${index}_${ids.suffix}`,
-            JSON.stringify({ taskId: `task_terminal_${index}_${ids.suffix}`, historicalAction: "unsafe-value" }),
-            timestamp,
-          ]
-        );
-      }
-
       await client.query(cutoverSql);
 
       assert.deepEqual(
@@ -505,15 +552,6 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
         (await client.query<{ retired_was_enabled:boolean|null }>("select retired_was_enabled from project_alert_rules where id=$1", [activeRuleId])).rows,
         [{ retired_was_enabled:null }]
       );
-
-      const historicalAudits = await client.query<{ action:string; resource_id:string; detail:Record<string,unknown> }>(
-        "select action,resource_id,detail from project_audit_events where id like $1 order by resource_id",
-        [`audit_terminal_%_${ids.suffix}`]
-      );
-      assert.equal(historicalAudits.rowCount, terminalActions.length);
-      assert.equal(historicalAudits.rows.every((row) => row.action === "task.historical_terminal"), true);
-      assert.deepEqual(historicalAudits.rows.map((row) => row.resource_id), terminalActions.map((_, index) => `task_terminal_${index}_${ids.suffix}`));
-      assert.deepEqual(historicalAudits.rows.map((row) => row.detail.historicalAction), terminalActions);
 
       await client.query("savepoint historical_alert_active");
       await assert.rejects(client.query("update project_alerts set status='active' where id=$1", [alertIds[0]]), isCheckViolation);

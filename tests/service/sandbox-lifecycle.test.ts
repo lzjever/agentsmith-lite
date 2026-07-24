@@ -78,9 +78,11 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
     assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,0);
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+    assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.map((event)=>event.action),["sandbox.released"]);
 
     await new SandboxLifecycleService(store,{namespace:run.namespace,port:retryPort,now:()=>new Date(timestamp(5))}).reapSandboxRunsOnce({apply:true,runId:run.runId});
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+    assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.length,1);
   });
 
   it("persists a safe inventory failure without consuming a cleanup claim",async()=>{

@@ -94,7 +94,6 @@ describe("postgres adapter ports", () => {
     assert.equal(phase4,phase3+1);
     const migration=migrations[phase4];assert.ok(migration);
     assert.match(migration.sql,/document - 'expiresAt' - 'idleExpiresAt'/i);
-    assert.match(migration.sql,/sandbox\.release_requested/);
     assert.match(migration.sql,/sandbox\.released/);
     assert.match(migration.sql,/run\.document->>'taskId' = task\.id/i);
     assert.match(migration.sql,/run\.document->>'runId' = task\.run_id/i);

@@ -34,7 +34,7 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   const replayedRotation = await rotate(user.id, project.id, credential.id, { secret: "second-secret" }, "credential-rotate-key");
   assert.equal(rotated.version, 2);
   assert.equal(replayedRotation.version,2);
-  assert.equal((await store.listProjectAuditEvents(project.id)).filter(event=>event.action==="credential.rotate"&&event.status==="accepted").length,1);
+  assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter(event=>event.action==="credential.rotate"&&event.status==="accepted").length,1);
   assert.notEqual(rotated.fingerprint, credential.fingerprint);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "second-secret");
   assert.equal((await services.endpoints.requireEndpointForProject(project.id, endpoint.id)).health?.status, "unknown");
@@ -49,7 +49,7 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   await services.credentials.remove(user.id, project.id, credential.id, rotated.version, "credential-delete-key");
   await services.credentials.remove(user.id, project.id, credential.id, rotated.version, "credential-delete-key");
   assert.deepEqual(await services.credentials.list(user.id, project.id), []);
-  assert.equal((await store.listProjectAuditEvents(project.id)).filter(event=>event.action==="credential.delete"&&event.status==="accepted").length,1);
+  assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter(event=>event.action==="credential.delete"&&event.status==="accepted").length,1);
 });
 
 test("concurrent credential rotations reject the stale writer", async () => {

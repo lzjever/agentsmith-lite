@@ -635,9 +635,39 @@ export class InMemoryProductStore implements ProductStore {
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.status !== "active") return null; const next = { ...alert, status, updatedAt, ...(status === "resolved" ? { resolvedAt: updatedAt } : { dismissedAt: updatedAt }) }; this.alerts.set(id, clone(next)); return clone(next); }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const alert=this.alerts.get(id);if(!alert||alert.projectId!==projectId||alert.status!=="active")return null;const next={...alert,...input,updatedAt};this.alerts.set(id,clone(next));return clone(next)}
   async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId) return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
-  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(event.action==="task.historical_terminal")throw new Error("Historical audit events are read-only");if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
-  async listProjectAuditEvents(projectId:string){return this.auditEvents.filter(event=>event.projectId===projectId).map(clone)}
-  async queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery) { const limit=Math.min(100,Math.max(1,query.limit??20)); const filtered=this.auditEvents.filter((event)=>event.projectId===projectId&&(!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)&&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)&&(!query.action||event.action===query.action)&&(!query.status||event.status===query.status)&&(!query.resourceKind||event.resourceKind===query.resourceKind)&&(!query.resourceId||event.resourceId===query.resourceId)&&(!query.from||event.createdAt>=query.from)&&(!query.to||event.createdAt<=query.to)&&(!query.cursor||`${event.createdAt}|${event.id}`<query.cursor)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id)); const items=filtered.slice(0,limit); return {items:items.map(clone),nextCursor:filtered.length>limit&&items.length?`${items.at(-1)!.createdAt}|${items.at(-1)!.id}`:null}; }
+  async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
+  async queryProjectAuditEvents(projectId:string,query:import("../../ports/src/store.js").ProjectAuditStoreQuery):Promise<import("../../ports/src/store.js").ProjectAuditStorePage>{
+    const events=this.auditEvents.filter((event)=>event.projectId===projectId).map(clone);
+    const users=new Map([...this.users].map(([id,user])=>[id,clone(user)]));
+    const profiles=new Map([...this.profiles].map(([id,profile])=>[id,clone(profile)]));
+    const filtered=events.filter((event)=>
+      (!Object.hasOwn(query,"actorId")||event.actorId===query.actorId)
+      &&(!Object.hasOwn(query,"subjectUserId")||(event.subjectUserId??null)===query.subjectUserId)
+      &&(!query.action||event.action===query.action)
+      &&(!query.status||event.status===query.status)
+      &&(!query.resourceKind||event.resourceKind===query.resourceKind)
+      &&(!query.resourceId||event.resourceId===query.resourceId)
+      &&(!query.from||event.createdAt>=query.from)
+      &&(!query.to||event.createdAt<=query.to)
+      &&(!query.after||event.createdAt<query.after.createdAt||event.createdAt===query.after.createdAt&&compareC(event.id,query.after.id)<0)
+    ).sort((left,right)=>compareOrdinal(right.createdAt,left.createdAt)||compareC(right.id,left.id));
+    const identity=(id:string|null|undefined)=>{const user=id?users.get(id):undefined;return{displayName:id?profiles.get(id)?.displayName??null:null,email:user?.email??null}};
+    const page=filtered.slice(0,query.limit);
+    return{items:page.map((event)=>{const actor=identity(event.actorId),subject=identity(event.subjectUserId);return{...event,actorDisplayName:actor.displayName,actorEmail:actor.email,subjectDisplayName:subject.displayName,subjectEmail:subject.email}}),hasMore:filtered.length>query.limit};
+  }
+  async queryProjectAuditIdentities(projectId:string,query:import("../../ports/src/store.js").ProjectAuditIdentityStoreQuery):Promise<import("../../ports/src/store.js").ProjectAuditIdentityStorePage>{
+    const ids=new Set(this.auditEvents.filter((event)=>event.projectId===projectId).flatMap((event)=>{const id=query.role==="actor"?event.actorId:event.subjectUserId??null;return id?[id]:[]}));
+    const normalizedQ=query.q.toLowerCase();
+    const candidates=[...ids].map((id)=>({id,displayName:this.profiles.get(id)?.displayName??null,email:this.users.get(id)?.email??null}))
+      .filter((identity)=>!normalizedQ||[identity.id,identity.displayName,identity.email].some((value)=>value?.toLowerCase().includes(normalizedQ)))
+      .sort((left,right)=>Number(right.id.toLowerCase()===query.q)-Number(left.id.toLowerCase()===query.q)||compareC(left.id,right.id))
+      .filter((identity)=>{
+        if(!query.after)return true;
+        const identityExact=identity.id.toLowerCase()===query.q,afterExact=query.after.id.toLowerCase()===query.q;
+        return afterExact?(identityExact&&compareC(identity.id,query.after.id)>0||!identityExact):!identityExact&&compareC(identity.id,query.after.id)>0;
+      });
+    return{items:candidates.slice(0,query.limit).map(clone),hasMore:candidates.length>query.limit};
+  }
   async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{
     return this.sandboxRuns.confirmStarted(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
   }
@@ -1051,7 +1081,6 @@ export class InMemoryProductStore implements ProductStore {
     const key=taskIdempotencyKey(input.idempotency),record=this.taskIdempotency.get(key);
     if(!record||record.status!=="in_progress"||record.requestHash!==input.idempotency.requestHash||record.claimToken!==input.idempotency.claimToken)return"conflict" as const;
     return this.sandboxRuns.requestExplicitCleanup(input,()=>{
-      if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
       this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
     });
   }

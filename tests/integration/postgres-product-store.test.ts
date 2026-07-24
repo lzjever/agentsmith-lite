@@ -105,6 +105,59 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(history.hasMore,false);
   });
 
+  it("pages projected Audit rows and isolates actor and subject identity candidates",async()=>{
+    const actorId="user_audit_actor";
+    const subjectId="user_audit_subject";
+    await store.createUser({id:actorId,email:"actor@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
+    await store.createUser({id:subjectId,email:"subject@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
+    await store.upsertUserProfilePreferences({userId:actorId,displayName:"Former Actor",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:at},null);
+    await store.upsertUserProfilePreferences({userId:subjectId,displayName:"Audit Subject",timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:at},null);
+    const tiedAt="2026-07-23T00:01:30.000Z";
+    for(let index=0;index<3;index+=1)await store.appendProjectAuditEvent({
+      id:`audit_page_${index}`,projectId:"project_atomic",actorId,subjectUserId:subjectId,
+      action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:`task_audit_${index}`,createdAt:tiedAt
+    });
+
+    const first=await store.queryProjectAuditEvents("project_atomic",{action:"sandbox.failed",limit:2});
+    assert.deepEqual(first.items.map((event)=>event.id),["audit_page_2","audit_page_1"]);
+    assert.deepEqual(first.items.map((event)=>[event.actorDisplayName,event.actorEmail,event.subjectDisplayName,event.subjectEmail]),[
+      ["Former Actor","actor@example.test","Audit Subject","subject@example.test"],
+      ["Former Actor","actor@example.test","Audit Subject","subject@example.test"],
+    ]);
+    assert.equal(first.hasMore,true);
+    const last=first.items.at(-1)!;
+    const second=await store.queryProjectAuditEvents("project_atomic",{action:"sandbox.failed",after:{createdAt:last.createdAt,id:last.id},limit:2});
+    assert.deepEqual(second.items.map((event)=>event.id),["audit_page_0"]);
+    assert.equal(second.hasMore,false);
+    assert.deepEqual((await store.queryProjectAuditIdentities("project_atomic",{role:"actor",q:"actor",limit:20})).items,[{id:actorId,displayName:"Former Actor",email:"actor@example.test"}]);
+    assert.deepEqual((await store.queryProjectAuditIdentities("project_atomic",{role:"subject",q:"subject",limit:20})).items,[{id:subjectId,displayName:"Audit Subject",email:"subject@example.test"}]);
+    assert.deepEqual((await store.queryProjectAuditIdentities("project_atomic",{role:"actor",q:"subject",limit:20})).items,[]);
+    assert.deepEqual((await store.queryProjectAuditIdentities("project_atomic",{role:"subject",q:"actor",limit:20})).items,[]);
+  });
+
+  it("pages Audit identity exact ID matches before ordinary IDs",async()=>{
+    const identityIds=["audit","audit_a","audit_b"];
+    for(const [index,id] of identityIds.entries()){
+      await store.createUser({id,email:`${id}@example.test`,emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
+      await store.appendProjectAuditEvent({
+        id:`audit_identity_page_${index}`,projectId:"project_atomic",actorId:id,subjectUserId:"user_atomic",
+        action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:`task_identity_page_${index}`,createdAt:at
+      });
+    }
+
+    const first=await store.queryProjectAuditIdentities("project_atomic",{role:"actor",q:"audit",limit:1});
+    assert.deepEqual(first.items.map((identity)=>identity.id),["audit"]);
+    assert.equal(first.hasMore,true);
+
+    const second=await store.queryProjectAuditIdentities("project_atomic",{role:"actor",q:"audit",after:{id:first.items[0]!.id},limit:1});
+    assert.deepEqual(second.items.map((identity)=>identity.id),["audit_a"]);
+    assert.equal(second.hasMore,true);
+
+    const third=await store.queryProjectAuditIdentities("project_atomic",{role:"actor",q:"audit",after:{id:second.items[0]!.id},limit:1});
+    assert.deepEqual(third.items.map((identity)=>identity.id),["audit_b"]);
+    assert.equal(third.hasMore,false);
+  });
+
   it("keeps endpoint quota fallback identity scoped to the subject actor",async()=>{
     const actorB="user_alert_actor_b";
     await store.createUser({id:actorB,email:"alert-actor-b@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
@@ -173,7 +226,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.sandboxRuns.get(loser.sandboxRun.runId),null);
     assert.equal(await store.findTaskMessage(loser.initialMessage.id),null);
     assert.equal((await store.findProjectResourceUsage("project_atomic"))?.activeTasks,1);
-    assert.deepEqual((await store.listProjectAuditEvents("project_atomic")).filter((event)=>event.action==="task.create").map((event)=>event.resourceId),[winner.task.id]);
+    assert.deepEqual(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.action==="task.create").map((event)=>event.resourceId),[winner.task.id]);
   });
 
   it("lets racing messages share one exact new Run",async()=>{
@@ -191,7 +244,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal((await store.listTaskMessages(task.id)).filter((item)=>["message_first","message_second"].includes(item.id)).length,2);
     assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeTasks,1);
     assert.equal((await store.sandboxRuns.listActive()).filter((item)=>item.taskId===task.id).length,1);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.action==="task.message.create").length,2);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,2);
   });
 
   it("reclaims an expired message lease without changing its persisted identity",async()=>{
@@ -215,7 +268,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(reclaimed.kind,"created");
     assert.equal(reclaimed.kind==="created"?reclaimed.message.id:null,"message_original");
     assert.deepEqual((await store.listTaskMessages(task.id)).map((message)=>message.id),["message_original"]);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.action==="task.message.create").length,1);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,1);
   });
 
   it("completes resource idempotency only for the matching Project and operation",async()=>{
@@ -277,7 +330,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal((await store.editTaskMessageAtomically(edit)).kind,"updated");
     assert.equal((await store.findTaskMessage(original.id))?.content,"edited");
     assert.equal((await store.findLatestTaskInteractionChange(task.id,interaction.id))?.interaction.body,"edited");
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.id==="audit_message_edit").length,1);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.id==="audit_message_edit").length,1);
     const editReplay=await store.editTaskMessageAtomically({...edit,idempotency:{...edit.idempotency,claimToken:"edit-replay"}});
     assert.deepEqual(editReplay,{kind:"replay",responseStatus:200,responseBody:{messageId:original.id,kind:"edited"}});
     const staleEdit=await store.editTaskMessageAtomically({
@@ -289,7 +342,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     });
     assert.equal(staleEdit.kind,"conflict");
     assert.equal((await store.findTaskMessage(original.id))?.content,"edited");
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).some((event)=>event.id==="audit_message_stale_edit"),false);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).some((event)=>event.id==="audit_message_stale_edit"),false);
 
     const deletedAt="2026-07-23T00:02:00.000Z";
     const deletion=await store.deleteTaskMessageAtomically({
@@ -304,7 +357,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(deletion.kind,"deleted");
     assert.equal((await store.findTaskMessage(original.id))?.deletedAt,deletedAt);
     assert.equal(await store.findLatestTaskInteractionChange(task.id,interaction.id),null);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).filter((event)=>event.id==="audit_message_delete").length,1);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.id==="audit_message_delete").length,1);
   });
 
   it("returns not_ready for a live reservation without partially finalizing the Project",async()=>{
@@ -492,7 +545,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(projectResult,"deleted");
     assert.equal(archiveResult.kind,"not_found_or_forbidden");
     assert.equal(await store.findTask(task.id),null);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).some((event)=>event.id===auditId),false);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).some((event)=>event.id===auditId),false);
   });
 
   it("lets Project deletion win against Task deletion without deadlocking",async()=>{
@@ -506,7 +559,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(projectResult,"deleted");
     assert.equal(deleteResult.kind,"not_found_or_forbidden");
     assert.equal(await store.findTask(task.id),null);
-    assert.equal((await store.listProjectAuditEvents(task.projectId)).some((event)=>event.id===auditId),false);
+    assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).some((event)=>event.id===auditId),false);
   });
 
   it("reserves a first Run and restarts only the exact released Run through one atomic path",async()=>{

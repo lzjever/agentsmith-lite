@@ -56,7 +56,7 @@ describe("file library API", () => {
     assert.equal(await preview.text(),"preview");
 
     assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,10);
-    const fileAudits=await store.listProjectAuditEvents(projectId);
+    const fileAudits=(await store.queryProjectAuditEvents(projectId,{limit:100})).items;
     const uploadAudits=fileAudits.filter((item)=>item.action==="file.upload");
     assert.equal(uploadAudits.length,2);
     assert.equal(uploadAudits.every((item)=>item.detail?.filePath?.startsWith(`libraries/${first.id}/home/`)),true);

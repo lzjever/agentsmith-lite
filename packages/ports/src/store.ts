@@ -13,6 +13,9 @@ import type {
   ProjectMembershipView,
   ProjectAlert,
   ProjectAuditEvent,
+  ProjectAuditEventView,
+  ProjectAuditIdentity,
+  ProjectAuditIdentityRole,
   ProjectResourcePolicy,
   ProjectResourceUsage,
   ProviderUsage,
@@ -73,6 +76,36 @@ export interface ProjectAlertStorePage {
   items: ProjectAlert[];
   hasMore: boolean;
   activeCount: number;
+}
+
+export interface ProjectAuditStoreQuery {
+  actorId?: string | null;
+  subjectUserId?: string | null;
+  action?: import("../../contracts/src/api.js").ProjectAuditAction;
+  status?: "accepted" | "rejected";
+  resourceKind?: import("../../contracts/src/api.js").ProjectAuditResourceKind;
+  resourceId?: string;
+  from?: string;
+  to?: string;
+  after?: { createdAt:string; id:string };
+  limit: number;
+}
+
+export interface ProjectAuditStorePage {
+  items: ProjectAuditEventView[];
+  hasMore: boolean;
+}
+
+export interface ProjectAuditIdentityStoreQuery {
+  role: ProjectAuditIdentityRole;
+  q: string;
+  after?: { id:string };
+  limit: number;
+}
+
+export interface ProjectAuditIdentityStorePage {
+  items: ProjectAuditIdentity[];
+  hasMore: boolean;
 }
 
 export type PersistedTaskMessageDeliveryStatus = "pending" | "dispatching" | "accepted" | "failed";
@@ -400,7 +433,6 @@ export interface TaskSandboxReleaseMutationInput {
   taskId: string;
   expectedFencingToken: number;
   run: PersistedSandboxRunState;
-  auditEvent: ProjectAuditEvent;
   idempotency: CompleteTaskIdempotencyInput;
 }
 
@@ -562,8 +594,8 @@ export interface ProductStore {
   updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string):Promise<ProjectAlert|null>;
   updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null>;
   appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void>;
-  listProjectAuditEvents(projectId: string): Promise<ProjectAuditEvent[]>;
-  queryProjectAuditEvents(projectId: string, query: import("../../contracts/src/api.js").ProjectAuditQuery): Promise<{ items: ProjectAuditEvent[]; nextCursor: string | null }>;
+  queryProjectAuditEvents(projectId: string, query: ProjectAuditStoreQuery): Promise<ProjectAuditStorePage>;
+  queryProjectAuditIdentities(projectId:string,query:ProjectAuditIdentityStoreQuery):Promise<ProjectAuditIdentityStorePage>;
   confirmSandboxRunStarted(input: ConfirmSandboxRunStartedInput): Promise<ConfirmSandboxRunStartedResult>;
   activateTaskSandboxRun(input: ActivateTaskSandboxRunInput): Promise<ActivateTaskSandboxRunResult>;
   completeSandboxRunRelease(input: CompleteSandboxRunReleaseInput): Promise<CompleteSandboxRunReleaseResult>;

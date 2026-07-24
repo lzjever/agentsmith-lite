@@ -1,4 +1,4 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditIdentityPage, type ProjectAuditIdentityQuery, type ProjectAuditQuery, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
@@ -12,9 +12,14 @@ const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, act
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
 interface SandboxRunCursor { v:1;projectId:string;selectedUserId:string;scopeMeasuredAt:string;key:{releasedAt:string;runId:string}; }
 interface ProjectAlertCursor { v:1;projectId:string;view:ProjectAlertView;key:ProjectAlertCursorKey; }
+type ProjectAuditFilters=Omit<ProjectAuditQuery,"cursor"|"limit">;
+interface ProjectAuditCursor { v:1;projectId:string;filters:ProjectAuditFilters;key:{createdAt:string;id:string}; }
+interface ProjectAuditIdentityCursor { v:1;projectId:string;role:"actor"|"subject";q:string;key:{id:string}; }
 
 function encodeSandboxRunCursor(value:SandboxRunCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
 function encodeProjectAlertCursor(value:ProjectAlertCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
+function encodeProjectAuditCursor(value:ProjectAuditCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
+function encodeProjectAuditIdentityCursor(value:ProjectAuditIdentityCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
 function decodeSandboxRunCursor(cursor:string,projectId:string,selectedUserId:string):SandboxRunCursor{
   const invalid=()=>new ProductError("Sandbox Run history cursor is invalid");
   if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
@@ -33,6 +38,26 @@ function decodeProjectAlertCursor(cursor:string,projectId:string,view:ProjectAle
   if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","view","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||(parsed.view!=="active"&&parsed.view!=="history")||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["createdAt","id"])||typeof parsed.key.createdAt!=="string"||typeof parsed.key.id!=="string")throw invalid();
   const value=parsed as unknown as ProjectAlertCursor;
   if(value.projectId!==projectId||value.view!==view||!isCanonicalIso(value.key.createdAt)||!validCursorId(value.key.id)||encodeProjectAlertCursor(value)!==cursor)throw invalid();
+  return value;
+}
+function decodeProjectAuditCursor(cursor:string,projectId:string,filters:ProjectAuditFilters):ProjectAuditCursor{
+  const invalid=()=>new ProductError("Audit cursor is invalid");
+  if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
+  let parsed:unknown;
+  try{parsed=JSON.parse(Buffer.from(cursor,"base64url").toString("utf8"))}catch{throw invalid()}
+  if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","filters","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||!isRecord(parsed.filters)||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["createdAt","id"])||typeof parsed.key.createdAt!=="string"||typeof parsed.key.id!=="string")throw invalid();
+  const value=parsed as unknown as ProjectAuditCursor;
+  if(value.projectId!==projectId||JSON.stringify(value.filters)!==JSON.stringify(filters)||!isCanonicalIso(value.key.createdAt)||!validCursorId(value.key.id)||encodeProjectAuditCursor(value)!==cursor)throw invalid();
+  return value;
+}
+function decodeProjectAuditIdentityCursor(cursor:string,projectId:string,role:"actor"|"subject",q:string):ProjectAuditIdentityCursor{
+  const invalid=()=>new ProductError("Audit identity cursor is invalid");
+  if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
+  let parsed:unknown;
+  try{parsed=JSON.parse(Buffer.from(cursor,"base64url").toString("utf8"))}catch{throw invalid()}
+  if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","role","q","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||(parsed.role!=="actor"&&parsed.role!=="subject")||typeof parsed.q!=="string"||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["id"])||typeof parsed.key.id!=="string")throw invalid();
+  const value=parsed as unknown as ProjectAuditIdentityCursor;
+  if(value.projectId!==projectId||value.role!==role||value.q!==q||!validCursorId(value.key.id)||encodeProjectAuditIdentityCursor(value)!==cursor)throw invalid();
   return value;
 }
 function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==="object"&&value!==null&&!Array.isArray(value)}
@@ -123,26 +148,28 @@ export class ProjectPolicyService {
     if (!idempotencyKey) return transition();
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.alert.transition", key: idempotencyKey, request: { alertId, status }, resourceId: alertId, failureMessage: "Alert could not be updated", run: transition });
   }
-  async audit(userId:string,projectId:string):Promise<import("../../contracts/src/api.js").ProjectAuditEventView[]>;
-  async audit(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAuditQuery):Promise<import("../../contracts/src/api.js").ProjectAuditPage>;
-  async audit(userId: string, projectId: string, query?: import("../../contracts/src/api.js").ProjectAuditQuery):Promise<import("../../contracts/src/api.js").ProjectAuditEventView[]|import("../../contracts/src/api.js").ProjectAuditPage> {
+  async audit(userId:string,projectId:string,query:ProjectAuditQuery):Promise<import("../../contracts/src/api.js").ProjectAuditPage>{
     await this.authorization.requireProject(userId, projectId);
-    const [events, members] = await Promise.all([
-      this.store.queryProjectAuditEvents(projectId, query??{limit:100}),
-      this.store.listProjectMemberships(projectId)
-    ]);
-    const actors = new Map(members.map((member) => [member.userId, { displayName: member.displayName, email: member.email }]));
-    const missingActorIds = new Set(events.items.flatMap((event) => event.actorId && !actors.has(event.actorId) ? [event.actorId] : []));
-    for (const actorId of missingActorIds) {
-      const actor = await this.store.findUserById(actorId);
-      if (!actor) continue;
-      const profile = await this.store.findUserProfilePreferences(actorId);
-      actors.set(actorId, { displayName: profile?.displayName ?? null, email: actor.email });
-    }
-    const items=events.items.map((event) => {
-      const actor = event.actorId ? actors.get(event.actorId) : undefined;
-      return { ...event,detail:safeAuditDetail(event.detail), actorDisplayName: actor?.displayName ?? null, actorEmail: actor?.email ?? null };
-    });return query===undefined?items:{nextCursor:events.nextCursor,items};
+    const limit=query.limit??20;
+    if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new ProductError("Audit limit must be between 1 and 100");
+    const filters=normalizeProjectAuditFilters(query);
+    const decoded=query.cursor?decodeProjectAuditCursor(query.cursor,projectId,filters):null;
+    const page=await this.store.queryProjectAuditEvents(projectId,{...filters,...(decoded?{after:decoded.key}:{}),limit});
+    const items=page.items.map((event)=>({...event,detail:safeAuditDetail(event.detail)}));
+    const last=items.at(-1);
+    return{items,nextCursor:page.hasMore&&last?encodeProjectAuditCursor({v:1,projectId,filters,key:{createdAt:last.createdAt,id:last.id}}):null};
+  }
+  async auditIdentities(userId:string,projectId:string,query:ProjectAuditIdentityQuery):Promise<ProjectAuditIdentityPage>{
+    await this.authorization.requireProject(userId,projectId);
+    if(query.role!=="actor"&&query.role!=="subject")throw new ProductError("Audit identity role is invalid");
+    const q=(query.q??"").trim().toLowerCase();
+    if(q.length>120||/[\u0000-\u001f\u007f]/u.test(q))throw new ProductError("Audit identity query is invalid");
+    const limit=query.limit??20;
+    if(!Number.isSafeInteger(limit)||limit<1||limit>50)throw new ProductError("Audit identity limit must be between 1 and 50");
+    const decoded=query.cursor?decodeProjectAuditIdentityCursor(query.cursor,projectId,query.role,q):null;
+    const page=await this.store.queryProjectAuditIdentities(projectId,{role:query.role,q,...(decoded?{after:decoded.key}:{}),limit});
+    const last=page.items.at(-1);
+    return{items:page.items,nextCursor:page.hasMore&&last?encodeProjectAuditIdentityCursor({v:1,projectId,role:query.role,q,key:{id:last.id}}):null};
   }
   async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput & Partial<Pick<UpdateProjectResourcePolicyRequest,"expectedUpdatedAt">>, idempotencyKey?: string): Promise<ProjectResourcePolicy> {
     try {
@@ -420,3 +447,31 @@ function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdatePro
 function expectedPolicyTimestamp(value:string|undefined,current:string):string{if(value===undefined)return current;if(!Number.isFinite(Date.parse(value)))throw new ProductError("expectedUpdatedAt must be an ISO timestamp");return new Date(value).toISOString()}
 function nextTimestamp(previous:string):string{const now=Date.now();const prior=Date.parse(previous);return new Date(Number.isFinite(prior)&&now<=prior?prior+1:now).toISOString()}
 function safeAuditDetail(detail:import("../../contracts/src/api.js").ProjectAuditSafeDetail|undefined){return sanitizeProjectAuditDetail(detail)}
+function normalizeProjectAuditFilters(query:ProjectAuditQuery):ProjectAuditFilters{
+  const actor=Object.hasOwn(query,"actorId")?normalizeAuditUserFilter(query.actorId,"actorId"):undefined;
+  const subject=Object.hasOwn(query,"subjectUserId")?normalizeAuditUserFilter(query.subjectUserId,"subjectUserId"):undefined;
+  return{
+    ...(actor!==undefined?{actorId:actor}:{}),
+    ...(subject!==undefined?{subjectUserId:subject}:{}),
+    ...(query.action!==undefined?{action:query.action}:{}),
+    ...(query.status!==undefined?{status:query.status}:{}),
+    ...(query.resourceKind!==undefined?{resourceKind:query.resourceKind}:{}),
+    ...(query.resourceId!==undefined?{resourceId:normalizeAuditText(query.resourceId,"resource ID",1024)}:{}),
+    ...(query.from!==undefined?{from:normalizeAuditTimestamp(query.from,"from")}:{}),
+    ...(query.to!==undefined?{to:normalizeAuditTimestamp(query.to,"to")}:{}),
+  };
+}
+function normalizeAuditUserFilter(value:string|null|undefined,name:string):string|null{
+  if(value===null)return null;
+  if(value===undefined)throw new ProductError(`Audit ${name} is invalid`);
+  return normalizeAuditText(value,name,128);
+}
+function normalizeAuditText(value:string,name:string,max:number):string{
+  if(!value||value.length>max||/[\u0000-\u001f\u007f]/u.test(value))throw new ProductError(`Audit ${name} is invalid`);
+  return value;
+}
+function normalizeAuditTimestamp(value:string,name:string):string{
+  const time=Date.parse(value);
+  if(!Number.isFinite(time))throw new ProductError(`Audit ${name} timestamp is invalid`);
+  return new Date(time).toISOString();
+}

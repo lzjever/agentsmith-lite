@@ -1,12 +1,22 @@
 "use client";
 
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import {
+  PROJECT_AUDIT_ACTIONS,
+  PROJECT_AUDIT_RESOURCE_KINDS,
+} from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
 export type ProjectAuditEvent = ProjectAuditEventView;
+export type ProjectAuditIdentity = ApiProjectAuditIdentity;
+export type ProjectAuditIdentityPage = ApiProjectAuditIdentityPage;
+export type ProjectAuditIdentityQuery = ApiProjectAuditIdentityQuery;
+export type ProjectAuditQuery = Omit<ApiProjectAuditQuery, "subjectUserId"> & {
+  subjectUserId?: string;
+};
 export type ProjectSandboxRunHistoryPage = ApiProjectSandboxRunHistoryPage;
 export type ProjectUsageOverview = ApiProjectUsageOverview;
 
@@ -274,11 +284,43 @@ export const apiClient = {
   updateAlertRule: (projectId: string, ruleId: string, input: { name?:string;alertType?:ProjectAlertType;threshold?:number;windowSeconds?:number|null;scope?:{kind:"project"}|{kind:"endpoint";endpointId:string};enabled?:boolean;expectedUpdatedAt:string }, idempotencyKey: string) => jsonIdempotent<ProjectAlertRule>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "PATCH", idempotencyKey, input),
   deleteAlertRule: (projectId: string, ruleId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}`, "DELETE", idempotencyKey),
   testAlertRule:(projectId:string,ruleId:string)=>json<{matched:boolean;metric:string;value:number;threshold:number;evaluatedAt:string}>(`/projects/${encodeURIComponent(projectId)}/alert-rules/${encodeURIComponent(ruleId)}/test`,"POST",{}),
-  async audit(projectId: string, query:Record<string,string|number|undefined>={}): Promise<{items:ProjectAuditEvent[];nextCursor:string|null}> {
-    const params=new URLSearchParams();for(const [key,value] of Object.entries(query))if(value!==undefined)params.set(key,String(value));
-    const payload = await request<{items:unknown[];nextCursor:string|null}>(`/projects/${encodeURIComponent(projectId)}/audit${params.size?`?${params}`:""}`);
-    if (!Array.isArray(payload.items) || payload.items.some((event) => !isProjectAuditEvent(event))) throw new ApiError(502, "Audit response contains an unknown action.");
-    return payload as {items:ProjectAuditEvent[];nextCursor:string|null};
+  async audit(projectId: string, query: ProjectAuditQuery = {}): Promise<ApiProjectAuditPage> {
+    const params = new URLSearchParams();
+    if (query.actorId !== undefined) {
+      params.set("actorId", query.actorId === null ? "system" : query.actorId);
+    }
+    if (query.subjectUserId !== undefined) params.set("subjectUserId", query.subjectUserId);
+    if (query.action !== undefined) params.set("action", query.action);
+    if (query.status !== undefined) params.set("status", query.status);
+    if (query.resourceKind !== undefined) params.set("resourceKind", query.resourceKind);
+    if (query.resourceId !== undefined) params.set("resourceId", query.resourceId);
+    if (query.from !== undefined) params.set("from", query.from);
+    if (query.to !== undefined) params.set("to", query.to);
+    if (query.cursor !== undefined) params.set("cursor", query.cursor);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const payload = await request<unknown>(
+      `/projects/${encodeURIComponent(projectId)}/audit${params.size ? `?${params}` : ""}`,
+    );
+    if (!isProjectAuditPage(payload)) {
+      throw new ApiError(502, "Audit response is invalid.");
+    }
+    return payload;
+  },
+  async auditIdentities(
+    projectId: string,
+    query: ProjectAuditIdentityQuery,
+  ): Promise<ProjectAuditIdentityPage> {
+    const params = new URLSearchParams({ role: query.role });
+    if (query.q !== undefined) params.set("q", query.q);
+    if (query.cursor !== undefined) params.set("cursor", query.cursor);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const payload = await request<unknown>(
+      `/projects/${encodeURIComponent(projectId)}/audit/identities?${params}`,
+    );
+    if (!isProjectAuditIdentityPage(payload)) {
+      throw new ApiError(502, "Audit identity response is invalid.");
+    }
+    return payload;
   },
   fileLibraries: (projectId: string) => request<FileLibraryProjection[]>(`/projects/${encodeURIComponent(projectId)}/file-libraries`),
   createFileLibrary: (projectId: string, name: string, idempotencyKey: string) => jsonIdempotent<FileLibraryProjection>(`/projects/${encodeURIComponent(projectId)}/file-libraries`, "POST", idempotencyKey, { name }),
@@ -396,8 +438,68 @@ export function newIdempotencyKey(operation: string): string {
   return `web-${operation}-${id}`;
 }
 
+const projectAuditActions = new Set<string>(PROJECT_AUDIT_ACTIONS);
+const projectAuditResourceKinds = new Set<string>(
+  PROJECT_AUDIT_RESOURCE_KINDS,
+);
+
+function isProjectAuditPage(value: unknown): value is ApiProjectAuditPage {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isProjectAuditEvent) &&
+    isNullableString(value.nextCursor)
+  );
+}
+
 function isProjectAuditEvent(value: unknown): value is ProjectAuditEvent {
-  return Boolean(value && typeof value === "object" && "action" in value && typeof value.action === "string" && value.action.length > 0 && "resourceKind" in value && typeof value.resourceKind === "string" && value.resourceKind.length > 0);
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    typeof value.projectId === "string" &&
+    value.projectId.length > 0 &&
+    isNullableString(value.actorId) &&
+    (value.subjectUserId === undefined ||
+      isNullableString(value.subjectUserId)) &&
+    typeof value.action === "string" &&
+    projectAuditActions.has(value.action) &&
+    (value.status === "accepted" || value.status === "rejected") &&
+    typeof value.resourceKind === "string" &&
+    projectAuditResourceKinds.has(value.resourceKind) &&
+    isNullableString(value.resourceId) &&
+    typeof value.createdAt === "string" &&
+    Number.isFinite(Date.parse(value.createdAt)) &&
+    Object.hasOwn(value, "actorDisplayName") &&
+    isNullableString(value.actorDisplayName) &&
+    Object.hasOwn(value, "actorEmail") &&
+    isNullableString(value.actorEmail) &&
+    Object.hasOwn(value, "subjectDisplayName") &&
+    isNullableString(value.subjectDisplayName) &&
+    Object.hasOwn(value, "subjectEmail") &&
+    isNullableString(value.subjectEmail) &&
+    (value.detail === undefined || isRecord(value.detail))
+  );
+}
+
+function isProjectAuditIdentityPage(
+  value: unknown,
+): value is ProjectAuditIdentityPage {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(
+      (identity) =>
+        isRecord(identity) &&
+        typeof identity.id === "string" &&
+        identity.id.length > 0 &&
+        Object.hasOwn(identity, "displayName") &&
+        isNullableString(identity.displayName) &&
+        Object.hasOwn(identity, "email") &&
+        isNullableString(identity.email),
+    ) &&
+    isNullableString(value.nextCursor)
+  );
 }
 
 function parseTaskInteractionStreamEvent(event: string, cursor: string | undefined, value: unknown): TaskInteractionStreamEvent {

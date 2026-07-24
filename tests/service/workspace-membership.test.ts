@@ -65,7 +65,7 @@ describe("workspace memberships", () => {
     assert.deepEqual(await store.listUserNotifications(member.user.id),[]);
     assert.deepEqual((await store.listUserNotifications(owner.user.id)).map((item)=>item.id),["notice_workspace_owner"]);
     for (const projectId of [firstProject.id, secondProject.id]) {
-      const removals = (await store.listProjectAuditEvents(projectId)).filter((event) => event.action === "membership.remove");
+      const removals = ((await store.queryProjectAuditEvents(projectId,{limit:100})).items).filter((event) => event.action === "membership.remove");
       assert.deepEqual(removals.map((event) => [event.actorId, event.resourceKind, event.resourceId, event.status]), [[admin.user.id, "member", member.user.id, "accepted"]]);
     }
     await assert.rejects(()=>services.authorization.requireProject(member.user.id,firstProject.id,"view"),status(403));
