@@ -5,11 +5,8 @@ import {
   Badge,
   Banner,
   Button,
-  DialogHeader,
   EmptyState,
   IconButton,
-  Layout,
-  LayoutContent,
   MoreMenu,
   Spinner,
   Tab,
@@ -34,7 +31,6 @@ import {
 import {
   useCallback,
   useEffect,
-  useId,
   useReducer,
   useRef,
   useState
@@ -61,7 +57,7 @@ import {
 import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { ConfirmationDialog } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -107,8 +103,6 @@ function ProjectAlertsPage({
   const mounted = useRef(true);
   const supportGeneration = useRef(0);
   const requestGeneration = useRef({ list: 0, lookup: 0, mutation: 0 });
-  const dismissTitleId = useId();
-  const dismissDescriptionId = useId();
   const mutationKeys = useMutationKeys();
   const showToast = useToast();
   const projectBasePath = workspaceId
@@ -520,81 +514,36 @@ function ProjectAlertsPage({
         />
       )}
 
-      <Dialog
+      <ConfirmationDialog
         isOpen={dismiss !== null}
         onOpenChange={(open) => {
           if (!open && !dismissBusy) {
             dispatch({ type: "mutation_dismiss_changed", alert: null });
           }
         }}
-        purpose="form"
-        role="alertdialog"
-        width="min(32rem, calc(100vw - 2rem))"
-        aria-labelledby={dismissTitleId}
-        aria-describedby={dismissDescriptionId}
+        title="Dismiss project alert"
+        description={
+          <Text as="p" display="block" color="secondary">
+            {dismiss
+              ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
+              : ""}
+          </Text>
+        }
+        actionLabel={dismissBusy ? "Dismissing" : "Dismiss"}
+        busy={dismissBusy}
+        isActionDisabled={!dismiss}
+        onAction={() => {
+          if (dismiss) void mutate(dismiss, "dismiss");
+        }}
       >
-        <Layout
-          defaultHasDividers
-          header={
-            <DialogHeader id={dismissTitleId} title="Dismiss project alert" />
-          }
-          content={
-            <LayoutContent>
-              <div className="grid gap-4">
-                <Text
-                  id={dismissDescriptionId}
-                  as="p"
-                  display="block"
-                  color="secondary"
-                >
-                  {dismiss
-                    ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
-                    : ""}
-                </Text>
-                {dismiss && alertState.mutation.error ? (
-                  <Banner
-                    status="error"
-                    title="Alert could not be dismissed"
-                    description={alertState.mutation.error}
-                  />
-                ) : null}
-              </div>
-            </LayoutContent>
-          }
-          footer={
-            <DialogFooter
-              secondaryAction={
-                <Button
-                  label="Cancel"
-                  type="button"
-                  variant="ghost"
-                  size="lg"
-                  isDisabled={dismissBusy}
-                  onClick={() =>
-                    dispatch({
-                      type: "mutation_dismiss_changed",
-                      alert: null
-                    })
-                  }
-                />
-              }
-              primaryAction={
-                <Button
-                  label={dismissBusy ? "Dismissing" : "Dismiss"}
-                  type="button"
-                  variant="destructive"
-                  size="lg"
-                  isDisabled={!dismiss || dismissBusy}
-                  isLoading={dismissBusy}
-                  onClick={() => {
-                    if (dismiss) void mutate(dismiss, "dismiss");
-                  }}
-                />
-              }
-            />
-          }
-        />
-      </Dialog>
+        {dismiss && alertState.mutation.error ? (
+          <Banner
+            status="error"
+            title="Alert could not be dismissed"
+            description={alertState.mutation.error}
+          />
+        ) : null}
+      </ConfirmationDialog>
     </PageLayout>
   );
 }

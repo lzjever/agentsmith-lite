@@ -1,13 +1,10 @@
 import {
   Banner,
   Button,
-  DialogHeader,
-  Layout,
-  LayoutContent,
   TextInput,
 } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useId, useState } from "react";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { Dialog } from "../ui/Dialog";
 import { CredentialSecretField } from "./CredentialSecretField";
 
 export function CredentialDialog({ open, onOpenChange, title, busy, error, onSubmit, submit, includeName = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; busy: boolean; error: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; submit: string; includeName?: boolean }) {
@@ -38,93 +35,64 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
     <Dialog
       isOpen={open}
       onOpenChange={handleOpenChange}
-      purpose="form"
-      width="min(34rem, calc(100vw - 2rem))"
-      aria-label={title}
+      title={title}
+      subtitle="The secret is sent once and is never displayed again."
+      busy={busy}
+      primaryAction={
+        <Button
+          label={busy ? "Working..." : submit}
+          type="submit"
+          form={formId}
+          variant="primary"
+          size="lg"
+          isDisabled={busy || !canSubmit}
+          isLoading={busy}
+        />
+      }
     >
-      <Layout
-        height="fill"
-        defaultHasDividers
-        header={
-          <DialogHeader
-            title={title}
-            subtitle="The secret is sent once and is never displayed again."
-            onOpenChange={handleOpenChange}
+      <form id={formId} onSubmit={handleSubmit}>
+        {error ? (
+          <Banner
+            className="mb-4"
+            status="error"
+            title="Credential could not be saved"
+            description={error}
           />
-        }
-        content={
-          <LayoutContent>
-            <form id={formId} onSubmit={handleSubmit}>
-              {error ? (
-                <Banner
-                  className="mb-4"
-                  status="error"
-                  title="Credential could not be saved"
-                  description={error}
-                />
-              ) : null}
-              <div className="grid gap-4">
-                {includeName ? (
-                  <TextInput
-                    label="Name"
-                    htmlName="name"
-                    value={name}
-                    onChange={(value) => setName(value.slice(0, 160))}
-                    isRequired
-                    hasAutoFocus
-                    isDisabled={busy}
-                    width="100%"
-                  />
-                ) : null}
-                {includeName ? (
-                  <TextInput
-                    label="Base URL"
-                    htmlName="baseUrl"
-                    value={baseUrl}
-                    onChange={setBaseUrl}
-                    isRequired
-                    placeholder="https://api.example.com/v1"
-                    isDisabled={busy}
-                    {...(baseUrl.length > 0 && !baseUrlValid && {
-                      status: {
-                        type: "error",
-                        message: "Enter a valid HTTP or HTTPS URL.",
-                      } as const,
-                    })}
-                    width="100%"
-                  />
-                ) : null}
-                <CredentialSecretField value={secret} onChange={setSecret} disabled={busy} />
-              </div>
-            </form>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                label="Cancel"
-                type="button"
-                variant="ghost"
-                size="lg"
-                onClick={() => handleOpenChange(false)}
-                isDisabled={busy}
-              />
-            }
-            primaryAction={
-              <Button
-                label={busy ? "Working..." : submit}
-                type="submit"
-                form={formId}
-                variant="primary"
-                size="lg"
-                isDisabled={busy || !canSubmit}
-                isLoading={busy}
-              />
-            }
-          />
-        }
-      />
+        ) : null}
+        <div className="grid gap-4">
+          {includeName ? (
+            <TextInput
+              label="Name"
+              htmlName="name"
+              value={name}
+              onChange={(value) => setName(value.slice(0, 160))}
+              isRequired
+              hasAutoFocus
+              isDisabled={busy}
+              width="100%"
+            />
+          ) : null}
+          {includeName ? (
+            <TextInput
+              label="Base URL"
+              htmlName="baseUrl"
+              value={baseUrl}
+              onChange={setBaseUrl}
+              isRequired
+              placeholder="https://api.example.com/v1"
+              isDisabled={busy}
+              {...(baseUrl.length > 0 && !baseUrlValid && {
+                status: {
+                  type: "error",
+                  message: "Enter a valid HTTP or HTTPS URL.",
+                } as const,
+              })}
+              width="100%"
+            />
+          ) : null}
+          <CredentialSecretField value={secret} onChange={setSecret} disabled={busy} />
+        </div>
+      </form>
     </Dialog>
   );
 }

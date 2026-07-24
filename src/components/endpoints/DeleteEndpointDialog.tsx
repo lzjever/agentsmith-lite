@@ -1,14 +1,7 @@
-import {
-  Banner,
-  Button,
-  DialogHeader,
-  Layout,
-  LayoutContent,
-  Text,
-} from "@astryxdesign/core";
-import { useEffect, useId, useState } from "react";
+import { Banner, Text } from "@astryxdesign/core";
+import { useEffect, useState } from "react";
 import type { Endpoint } from "../../lib/api/client";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { ConfirmationDialog } from "../ui/Dialog";
 
 export function DeleteEndpointDialog({
   endpoint,
@@ -24,8 +17,6 @@ export function DeleteEndpointDialog({
   onConfirm: () => Promise<void>;
 }) {
   const [failure, setFailure] = useState("");
-  const titleId = useId();
-  const descriptionId = useId();
 
   useEffect(() => {
     setFailure("");
@@ -48,62 +39,29 @@ export function DeleteEndpointDialog({
   };
 
   return (
-    <Dialog
+    <ConfirmationDialog
       isOpen={Boolean(endpoint)}
       onOpenChange={handleOpenChange}
-      purpose="form"
-      role="alertdialog"
-      width="min(34rem, calc(100vw - 2rem))"
-      aria-labelledby={titleId}
-      aria-describedby={descriptionId}
+      title="Delete endpoint"
+      description={
+        <Text as="p" display="block" color="secondary">
+          {endpoint
+            ? `Remove ${endpoint.name}? This also removes its rolling limits and endpoint alert rules, and resolves active endpoint alerts. Tasks that reference it must be deleted first.`
+            : ""}
+        </Text>
+      }
+      actionLabel={deleting ? "Deleting" : "Delete endpoint"}
+      isActionDisabled={!canConfirm}
+      busy={deleting}
+      onAction={() => void confirm()}
     >
-      <Layout
-        defaultHasDividers
-        header={<DialogHeader id={titleId} title="Delete endpoint" />}
-        content={
-          <LayoutContent>
-            <div className="grid gap-4">
-              <Text id={descriptionId} as="p" display="block" color="secondary">
-                {endpoint
-                  ? `Remove ${endpoint.name}? This also removes its rolling limits and endpoint alert rules, and resolves active endpoint alerts. Tasks that reference it must be deleted first.`
-                  : ""}
-              </Text>
-              {failure ? (
-                <Banner
-                  status="error"
-                  title="Endpoint could not be deleted"
-                  description={failure}
-                />
-              ) : null}
-            </div>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                label="Cancel"
-                type="button"
-                variant="ghost"
-                size="lg"
-                isDisabled={deleting}
-                onClick={() => handleOpenChange(false)}
-              />
-            }
-            primaryAction={
-              <Button
-                label={deleting ? "Deleting" : "Delete endpoint"}
-                type="button"
-                variant="destructive"
-                size="lg"
-                isDisabled={!canConfirm || deleting}
-                isLoading={deleting}
-                onClick={() => void confirm()}
-              />
-            }
-          />
-        }
-      />
-    </Dialog>
+      {failure ? (
+        <Banner
+          status="error"
+          title="Endpoint could not be deleted"
+          description={failure}
+        />
+      ) : null}
+    </ConfirmationDialog>
   );
 }

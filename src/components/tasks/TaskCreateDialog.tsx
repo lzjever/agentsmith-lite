@@ -3,9 +3,9 @@
 import { Library, Plus } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Banner, Button, DialogHeader, Layout, LayoutContent, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
+import { Banner, Button, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { Dialog } from "../ui/Dialog";
 
 export type TaskCreateValue = {
   title: string;
@@ -87,8 +87,7 @@ export function TaskCreateDialog({
     if (!nextOpen && !busy) onClose();
   };
 
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" aria-label="Create task">
-    <Layout defaultHasDividers header={<DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." onOpenChange={handleOpenChange} />} content={<LayoutContent>
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title="Create task" subtitle="Describe the work for the Botified sandbox." size="lg" busy={busy} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />}>
       <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
         <div className="grid gap-5">
           {error ? <Banner status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
@@ -109,7 +108,6 @@ export function TaskCreateDialog({
           </>}
         </div>
       </form>
-    </LayoutContent>} footer={<DialogFooter secondaryAction={<Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} />} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />} />} />
   </Dialog>;
 
   function clearError() { setError(""); setErrorCode(""); }

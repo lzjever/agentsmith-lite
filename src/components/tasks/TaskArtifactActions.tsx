@@ -1,11 +1,11 @@
 "use client";
 
 import { Download, Image as ImageIcon } from "lucide-react";
-import { Banner, Button, DialogHeader, IconButton, Layout, LayoutContent, Spinner, Text } from "@astryxdesign/core";
+import { Banner, Button, IconButton, Spinner, Text } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
 import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient } from "../../lib/api/client";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { Dialog } from "../ui/Dialog";
 import { formatArtifactBytes } from "./task-ui";
 
 const MAX_TEXT_PREVIEW_BYTES = 512 * 1024;
@@ -106,5 +106,5 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     onOpenChange(nextOpen);
   }
 
-  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100dvh - 2rem))" aria-label={artifact.name}><Layout defaultHasDividers header={<DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} />} content={<LayoutContent padding={0}>{loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}{error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70dvh] max-w-full object-contain p-5" /> : null}</LayoutContent>} footer={<DialogFooter primaryAction={<Button label="Close" variant="ghost" onClick={() => close(false)} />} />} /></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={close} mode="info" title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} contentPadding={0}>{loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}{error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70dvh] max-w-full object-contain p-5" /> : null}</Dialog>;
 }

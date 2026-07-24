@@ -6,16 +6,13 @@ import {
   Banner,
   Button,
   CheckboxInput,
-  DialogHeader,
-  Layout,
-  LayoutContent,
   NumberInput,
   Selector,
   TextInput,
 } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { Dialog } from "../ui/Dialog";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "active_tasks_limit", label: "Task capacity", metric: "active_tasks", defaultWindowSeconds: null },
@@ -46,24 +43,23 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
     <Dialog
       isOpen={open}
       onOpenChange={handleOpenChange}
-      purpose="form"
-      width="min(34rem, calc(100vw - 2rem))"
-      maxHeight="calc(100dvh - 2rem)"
-      aria-label={title}
+      title={title}
+      subtitle={description}
+      busy={saving}
+      primaryAction={
+        <Button
+          label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"}
+          type="submit"
+          form={formId}
+          variant="primary"
+          size="lg"
+          icon={<Save size={15} />}
+          isDisabled={saving || !canSave}
+          isLoading={saving}
+        />
+      }
     >
-      <Layout
-        height="fill"
-        defaultHasDividers
-        header={
-          <DialogHeader
-            title={title}
-            subtitle={description}
-            onOpenChange={handleOpenChange}
-          />
-        }
-        content={
-          <LayoutContent>
-            <form id={formId} className="grid gap-4" onSubmit={onSubmit}>
+      <form id={formId} className="grid gap-4" onSubmit={onSubmit}>
               {error ? (
                 <Banner
                   status="error"
@@ -157,36 +153,7 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
                 isDisabled={saving}
                 onChange={(enabled) => onChange({ ...value, enabled })}
               />
-            </form>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                label="Cancel"
-                type="button"
-                variant="ghost"
-                size="lg"
-                isDisabled={saving}
-                onClick={() => handleOpenChange(false)}
-              />
-            }
-            primaryAction={
-              <Button
-                label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"}
-                type="submit"
-                form={formId}
-                variant="primary"
-                size="lg"
-                icon={<Save size={15} />}
-                isDisabled={saving || !canSave}
-                isLoading={saving}
-              />
-            }
-          />
-        }
-      />
+      </form>
     </Dialog>
   );
 }

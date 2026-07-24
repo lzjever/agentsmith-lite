@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Banner, Button, DialogHeader, EmptyState, IconButton, Layout, LayoutContent, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
+import { Banner, Button, EmptyState, IconButton, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { Plus, RefreshCw, Users, X } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type MemberRole, type ProjectCapabilities, type ProjectMember, type WorkspaceMember } from "../../lib/api/client";
@@ -9,7 +9,7 @@ import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 import { memberIdentityLabel, memberMatchesQuery, removeMemberById } from "./members-page-utils";
 import { MembersTable } from "./MembersTable";
 
@@ -43,8 +43,6 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
   const [roleError, setRoleError] = useState<{ userId: string; message: string }>();
   const [removeError, setRemoveError] = useState("");
   const inviteFormId = useId();
-  const removeTitleId = useId();
-  const removeDescriptionId = useId();
 
   const loadCandidates = useCallback(async () => {
     const request = ++candidateRequest.current;
@@ -266,21 +264,11 @@ function ProjectMembersPage({ workspaceId, projectId }: { workspaceId: string; p
       <div className="flex flex-wrap items-center justify-between gap-3"><div className="relative min-w-[15rem] flex-1 sm:max-w-sm"><TextInput label="Search members" isLabelHidden value={query} onChange={setQuery} placeholder="Search by identity" size="lg" /></div><Selector label="Member role" isLabelHidden options={[{ value: "all", label: "All roles" }, { value: "owner", label: "Owner" }, { value: "admin", label: "Admin" }, { value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }]} value={roleFilter} onChange={(value) => setRoleFilter(value as typeof roleFilter)} size="sm" width={144} />{!canManage ? <Text type="supporting" color="secondary">Your project access is read-only.</Text> : null}</div>
       {filtered.length === 0 ? <EmptyState title="No members match these filters" actions={<Button label="Clear filters" variant="ghost" size="lg" onClick={() => { setQuery(""); setRoleFilter("all"); }} />} /> : <MembersTable members={filtered} canManage={canManage} busyUserId={busyUserId} roleError={roleError} onDismissRoleError={() => setRoleError(undefined)} onChangeRole={(member, nextRole) => void changeRole(member, nextRole)} onRemove={(member) => { setRemoveError(""); setRemoving(member); }} onView={setSelected} />}
     </section> : null}
-    <Dialog isOpen={inviteOpen} onOpenChange={handleInviteOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" aria-label="Add member">
-      <Layout
-        header={<DialogHeader title="Add member" subtitle="Choose someone who already belongs to this workspace." onOpenChange={handleInviteOpenChange} hasDivider />}
-        content={<LayoutContent>{inviteError ? <Banner className="mb-4" status="error" title="Member could not be added" description={inviteError} endContent={<IconButton label="Dismiss member error" tooltip="Dismiss member error" variant="ghost" size="lg" icon={<X size={15} />} onClick={() => setInviteError("")} />} /> : null}<form id={inviteFormId} className="grid gap-4" onSubmit={addMember}><Selector label="Workspace member" options={eligible.map((member) => ({ value: member.userId, label: workspaceMemberLabel(member) }))} value={candidateUserId} onChange={setCandidateUserId} placeholder="Select a workspace member" isDisabled={busyUserId === "new"} size="lg" /><Selector label="Role" options={[{ value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }, { value: "admin", label: "Admin" }]} value={role} onChange={(value) => setRole(value as Exclude<MemberRole, "owner">)} isDisabled={busyUserId === "new"} size="lg" /></form></LayoutContent>}
-        footer={<DialogFooter hasDivider secondaryAction={<Button type="button" label="Cancel" variant="ghost" size="lg" onClick={() => handleInviteOpenChange(false)} isDisabled={busyUserId === "new"} />} primaryAction={<Button type="submit" form={inviteFormId} label={busyUserId === "new" ? "Adding..." : "Add member"} variant="primary" size="lg" isDisabled={!canAdd || !candidateUserId || busyUserId === "new"} isLoading={busyUserId === "new"} />} />}
-      />
+    <Dialog isOpen={inviteOpen} onOpenChange={handleInviteOpenChange} title="Add member" subtitle="Choose someone who already belongs to this workspace." busy={busyUserId === "new"} primaryAction={<Button type="submit" form={inviteFormId} label={busyUserId === "new" ? "Adding..." : "Add member"} variant="primary" size="lg" isDisabled={!canAdd || !candidateUserId || busyUserId === "new"} isLoading={busyUserId === "new"} />}>
+      {inviteError ? <Banner className="mb-4" status="error" title="Member could not be added" description={inviteError} endContent={<IconButton label="Dismiss member error" tooltip="Dismiss member error" variant="ghost" size="lg" icon={<X size={15} />} onClick={() => setInviteError("")} />} /> : null}<form id={inviteFormId} className="grid gap-4" onSubmit={addMember}><Selector label="Workspace member" options={eligible.map((member) => ({ value: member.userId, label: workspaceMemberLabel(member) }))} value={candidateUserId} onChange={setCandidateUserId} placeholder="Select a workspace member" isDisabled={busyUserId === "new"} size="lg" /><Selector label="Role" options={[{ value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }, { value: "admin", label: "Admin" }]} value={role} onChange={(value) => setRole(value as Exclude<MemberRole, "owner">)} isDisabled={busyUserId === "new"} size="lg" /></form>
     </Dialog>
-    <Dialog isOpen={Boolean(removing)} onOpenChange={(open) => { if (busyUserId !== undefined) return; if (!open) { setRemoving(undefined); setRemoveError(""); } }} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={removeTitleId} aria-describedby={removeDescriptionId}>
-      <Layout
-        header={<DialogHeader id={removeTitleId} title="Remove member" hasDivider />}
-        content={<LayoutContent><Text as="p" id={removeDescriptionId} color="secondary">{removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : "This member is no longer available."}</Text>{removeError ? <Banner className="mt-4" status="error" title="Member could not be removed" description={removeError} /> : null}</LayoutContent>}
-        footer={<DialogFooter hasDivider secondaryAction={<Button label="Cancel" variant="ghost" size="lg" isDisabled={busyUserId !== undefined} onClick={() => setRemoving(undefined)} />} primaryAction={<Button label={busyUserId === removing?.userId ? "Removing" : "Remove member"} variant="destructive" size="lg" isDisabled={!canManage || busyUserId !== undefined} isLoading={busyUserId === removing?.userId} onClick={() => void removeMember()} />} />}
-      />
-    </Dialog>
-    <Dialog isOpen={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)} purpose="info" width="min(34rem, calc(100vw - 2rem))" aria-label="Member details">{selected ? <Layout header={<DialogHeader title="Member details" subtitle="Project membership identity." onOpenChange={(open) => !open && setSelected(undefined)} hasDivider />} content={<LayoutContent><dl className="grid gap-4 sm:grid-cols-[8rem_1fr]"><dt><Text color="secondary">Name</Text></dt><dd><Text wordBreak="break-all">{memberIdentityLabel(selected)}</Text></dd><dt><Text color="secondary">Email</Text></dt><dd><Text wordBreak="break-all">{selected.email}</Text></dd><dt><Text color="secondary">Role</Text></dt><dd><Text>{selected.role}</Text></dd><dt><Text color="secondary">Joined</Text></dt><dd><Text>{formatLocalDateTime(selected.createdAt)}</Text></dd><dt><Text color="secondary">Updated</Text></dt><dd><Text>{formatLocalDateTime(selected.updatedAt)}</Text></dd></dl></LayoutContent>} /> : null}</Dialog>
+    <ConfirmationDialog isOpen={Boolean(removing)} onOpenChange={(open) => { if (busyUserId !== undefined) return; if (!open) { setRemoving(undefined); setRemoveError(""); } }} title="Remove member" description={<Text as="p" color="secondary">{removing ? `Remove ${memberIdentityLabel(removing)} from this project? They will no longer be able to access its resources.` : "This member is no longer available."}</Text>} actionLabel={busyUserId === removing?.userId ? "Removing" : "Remove member"} busy={busyUserId !== undefined} isActionDisabled={!canManage} onAction={() => void removeMember()}>{removeError ? <Banner status="error" title="Member could not be removed" description={removeError} /> : null}</ConfirmationDialog>
+    <Dialog isOpen={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)} mode="info" title="Member details" subtitle="Project membership identity.">{selected ? <dl className="grid gap-4 sm:grid-cols-[8rem_1fr]"><dt><Text color="secondary">Name</Text></dt><dd><Text wordBreak="break-all">{memberIdentityLabel(selected)}</Text></dd><dt><Text color="secondary">Email</Text></dt><dd><Text wordBreak="break-all">{selected.email}</Text></dd><dt><Text color="secondary">Role</Text></dt><dd><Text>{selected.role}</Text></dd><dt><Text color="secondary">Joined</Text></dt><dd><Text>{formatLocalDateTime(selected.createdAt)}</Text></dd><dt><Text color="secondary">Updated</Text></dt><dd><Text>{formatLocalDateTime(selected.updatedAt)}</Text></dd></dl> : null}</Dialog>
   </PageLayout>;
 }
 

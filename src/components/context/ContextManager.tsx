@@ -1,12 +1,12 @@
 "use client";
 
 import { FilePlus2, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Banner, Button, DialogHeader, Heading, IconButton, Layout, LayoutContent, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Banner, Button, Heading, IconButton, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextList, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { AlertDialog, Dialog, DialogFooter } from "../ui/Dialog";
+import { ConfirmationDialog } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
@@ -50,8 +50,6 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const [deleteError, setDeleteError] = useState("");
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>();
   const loadVersion = useRef(0);
-  const deleteTitleId = useId();
-  const deleteDescriptionId = useId();
   const projectScope = scope === "project_shared" || scope === "project_personal";
 
   const load = useCallback(async (preserveDraft = false, preferredEntryId?: string): Promise<ContextList | null> => {
@@ -232,68 +230,35 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading context..." /></div> : null}
     {state === "error" ? <Banner status="error" title="Context unavailable" description={error} endContent={<Button label="Try again" size="lg" onClick={() => void load()} />} /> : null}
     {state === "ready" && result ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]"><section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5"><div className="mb-3 flex items-center justify-between"><Heading level={3}>Entries</Heading>{result.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>{result.items.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="py-4">No context entries yet.</Text> : <div className="space-y-1">{result.items.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", contextKey: entry.contextKey })} className={`w-full px-3 py-2 text-left disabled:cursor-not-allowed ${selected?.id === entry.id ? "bg-muted text-primary" : "text-secondary hover:bg-overlay-hover hover:text-primary"}`}><Text as="span" display="block" maxLines={1} color="inherit">{entry.contextKey}</Text><Text as="span" type="code" color="inherit" display="block" className="mt-1 capitalize">{entry.contentType}</Text></button>)}</div>}</section><section className="min-w-0"><div className="mb-4"><Heading level={3}>{selected ? "Edit entry" : "New entry"}</Heading>{!result.canWrite ? <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Your access to this context is read-only.</Text> : null}</div><div className="grid gap-4"><TextInput label="Key" value={contextKey} isDisabled={!result.canWrite || saving || deleting} onChange={setContextKey} placeholder="for example, project.conventions" /><Selector label="Content type" options={contentTypes.map((type) => ({ value: type, label: type }))} value={contentType} onChange={(value) => setContentType(value as ContextContentType)} isDisabled={!result.canWrite || saving || deleting} size="lg" /><TextArea label="Content" value={content} isDisabled={!result.canWrite || saving || deleting} onChange={setContent} rows={14} className="min-h-64" width="100%" />{error ? <Banner status="error" title="Context update failed" description={error} endContent={conflict ? <Button label="Reload latest" size="md" variant="secondary" onClick={() => void load(false, selected?.id)} /> : undefined} /> : null}<div className="flex flex-wrap gap-2">{result.canWrite ? <Button label={saving ? "Saving..." : "Save"} size="lg" variant="primary" isDisabled={!dirty || saving || deleting} isLoading={saving} onClick={() => void save()} /> : null}{result.canWrite && selected ? <Button label="Delete" size="lg" variant="destructive" icon={<Trash2 size={16} />} isDisabled={saving || deleting} onClick={() => { setDeleteError(""); setDeleteOpen(true); }} /> : null}</div></div></section></div> : null}
-    <AlertDialog isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description="Your edits have not been saved. Discard them and continue?" actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} />
-    <Dialog
+    <ConfirmationDialog isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description={<Text as="p" display="block" color="secondary">Your edits have not been saved. Discard them and continue?</Text>} actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} />
+    <ConfirmationDialog
       isOpen={deleteOpen}
       onOpenChange={(open) => {
         if (deleting) return;
         setDeleteOpen(open);
         if (!open) setDeleteError("");
       }}
-      purpose="form"
-      role="alertdialog"
-      width="min(32rem, calc(100vw - 2rem))"
-      aria-labelledby={deleteTitleId}
-      aria-describedby={deleteDescriptionId}
+      title="Delete context entry"
+      description={
+        <Text as="p" display="block" color="secondary">
+          {selected
+            ? `Delete ${selected.contextKey}? This cannot be undone.`
+            : "This entry is no longer available."}
+        </Text>
+      }
+      actionLabel={deleting ? "Deleting" : "Delete entry"}
+      isActionDisabled={!selected}
+      busy={deleting}
+      onAction={() => void remove()}
     >
-      <Layout
-        defaultHasDividers
-        header={<DialogHeader id={deleteTitleId} title="Delete context entry" />}
-        content={
-          <LayoutContent>
-            <div className="grid gap-4">
-              <Text id={deleteDescriptionId} as="p" display="block" color="secondary">
-                {selected
-                  ? `Delete ${selected.contextKey}? This cannot be undone.`
-                  : "This entry is no longer available."}
-              </Text>
-              {deleteError ? (
-                <Banner
-                  status="error"
-                  title="Context entry could not be deleted"
-                  description={deleteError}
-                />
-              ) : null}
-            </div>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                label="Cancel"
-                type="button"
-                variant="ghost"
-                size="lg"
-                isDisabled={deleting}
-                onClick={() => setDeleteOpen(false)}
-              />
-            }
-            primaryAction={
-              <Button
-                label={deleting ? "Deleting" : "Delete entry"}
-                type="button"
-                variant="destructive"
-                size="lg"
-                isDisabled={!selected || deleting}
-                isLoading={deleting}
-                onClick={() => void remove()}
-              />
-            }
-          />
-        }
-      />
-    </Dialog>
+      {deleteError ? (
+        <Banner
+          status="error"
+          title="Context entry could not be deleted"
+          description={deleteError}
+        />
+      ) : null}
+    </ConfirmationDialog>
   </PageLayout>;
 }
 

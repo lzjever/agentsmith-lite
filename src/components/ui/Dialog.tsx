@@ -7,170 +7,282 @@ import {
   Layout,
   LayoutContent,
   LayoutFooter,
+  LayoutHeader,
   Text,
   useTranslator,
-  type AlertDialogProps,
-  type DialogProps,
+  type ButtonVariant,
 } from "@astryxdesign/core";
+import { X } from "lucide-react";
 import {
+  useCallback,
+  useEffect,
   useId,
-  type ComponentProps,
-  type KeyboardEvent,
+  useRef,
   type ReactNode,
 } from "react";
 
-export type {
-  AlertDialogProps,
-  DialogPosition,
-  DialogProps,
-  DialogPurpose,
-  DialogVariant,
-  DialogVariantMap,
-} from "@astryxdesign/core";
+type DialogSize = "sm" | "md" | "lg";
+type DialogMode = "form" | "info";
 
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), a[href], area[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled]), [contenteditable]:not([contenteditable="false"]), audio[controls], video[controls], iframe, details > summary:first-child';
+const dialogWidths: Record<DialogSize, string> = {
+  sm: "min(32rem, calc(100dvw - 1rem))",
+  md: "min(34rem, calc(100dvw - 1rem))",
+  lg: "min(42rem, calc(100dvw - 1rem))",
+};
 
-export interface DialogFooterProps
-  extends Omit<ComponentProps<typeof LayoutFooter>, "children"> {
-  secondaryAction?: ReactNode;
-  primaryAction: ReactNode;
+interface DialogShellProps {
+  isOpen: boolean;
+  onOpenChange: (isOpen: boolean) => unknown;
+  title: string;
+  subtitle?: string;
+  children?: ReactNode;
+  size?: DialogSize;
+  mode: DialogMode | "confirmation";
+  busy?: boolean;
+  headerStart?: ReactNode;
+  primaryAction?: ReactNode;
+  cancelLabel?: string;
+  contentPadding?: 0;
+  confirmationDescription?: ReactNode;
+  confirmationAction?: {
+    label: string;
+    variant: ButtonVariant;
+    disabled: boolean;
+    form?: string;
+    onAction?: () => unknown;
+  };
 }
 
-export function DialogFooter({
-  secondaryAction,
-  primaryAction,
-  ...props
-}: DialogFooterProps) {
-  return (
-    <LayoutFooter {...props}>
-      <div className="flex flex-col items-end gap-2 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-end">
-        {secondaryAction}
-        {primaryAction}
-      </div>
-    </LayoutFooter>
-  );
-}
-
-function handleDialogTabBoundary(
-  event: KeyboardEvent<HTMLDialogElement>,
-): void {
-  if (event.key !== "Tab") {
-    return;
-  }
-
-  const focusable = Array.from(
-    event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ).filter(
-    (element) =>
-      !element.closest("[hidden], [inert]") &&
-      !element.matches(":disabled") &&
-      element.getClientRects().length > 0 &&
-      window.getComputedStyle(element).visibility !== "hidden",
-  );
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last?.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first?.focus();
-  }
-}
-
-export function Dialog({
-  ref,
+function DialogShell({
   isOpen,
-  isInline = false,
-  onKeyDown,
-  ...props
-}: DialogProps) {
-  return (
-    <AstryxDialog
-      {...props}
-      {...(ref !== undefined ? { ref } : {})}
-      isOpen={isOpen}
-      isInline={isInline}
-      onKeyDown={(event) => {
-        onKeyDown?.(event);
-        if (!isInline && !event.defaultPrevented) {
-          handleDialogTabBoundary(event);
-        }
-      }}
-    />
-  );
-}
-
-export function AlertDialog({
-  ref,
-  isOpen,
-  isInline = false,
   onOpenChange,
   title,
-  description,
-  cancelLabel: cancelLabelFromProps,
-  actionLabel,
-  actionVariant = "destructive",
-  isActionLoading,
-  onAction,
-  width = 400,
-  ...props
-}: AlertDialogProps) {
+  subtitle,
+  children,
+  size = "md",
+  mode,
+  busy = false,
+  headerStart,
+  primaryAction,
+  cancelLabel,
+  contentPadding,
+  confirmationDescription,
+  confirmationAction,
+}: DialogShellProps) {
   const translate = useTranslator();
-  const cancelLabel =
-    cancelLabelFromProps ?? translate("@astryx.alertDialog.cancel");
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const titleId = useId();
-  const descriptionId = useId();
+  const subtitleId = useId();
+  const contentId = useId();
+  const isConfirmation = mode === "confirmation";
+  const hasFooter = isConfirmation || primaryAction !== undefined;
+
+  const requestOpenChange = useCallback(
+    (next: boolean) => {
+      if (next || !busy) {
+        onOpenChange(next);
+      }
+    },
+    [busy, onOpenChange],
+  );
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      const dialog = dialogRef.current;
+      if (!dialog?.open) {
+        return;
+      }
+
+      const target = isConfirmation
+        ? dialog.querySelector<HTMLElement>("[data-dialog-cancel]")
+        : mode === "form"
+          ? dialog.querySelector<HTMLElement>("[data-autofocus]")
+          : null;
+      (target ?? titleRef.current)?.focus({ preventScroll: true });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [isConfirmation, isOpen, mode]);
 
   return (
-    <Dialog
-      {...props}
-      {...(ref !== undefined ? { ref } : {})}
+    <AstryxDialog
+      ref={dialogRef}
       isOpen={isOpen}
-      isInline={isInline}
-      onOpenChange={onOpenChange}
-      width={width}
-      purpose="form"
-      role="alertdialog"
+      onOpenChange={requestOpenChange}
+      purpose={mode === "info" ? "info" : "form"}
+      role={isConfirmation ? "alertdialog" : "dialog"}
       aria-labelledby={titleId}
-      aria-describedby={descriptionId}
+      aria-describedby={
+        isConfirmation ? contentId : subtitle ? subtitleId : undefined
+      }
+      width={dialogWidths[size]}
+      maxHeight="calc(100dvh - 1rem)"
     >
       <Layout
+        height="fill"
+        defaultHasDividers
+        header={
+          <LayoutHeader hasDivider>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 flex-1 items-start gap-3">
+                {headerStart}
+                <div className="min-w-0 flex-1">
+                  <Heading
+                    ref={titleRef}
+                    id={titleId}
+                    level={2}
+                    tabIndex={-1}
+                    className="outline-none"
+                  >
+                    {title}
+                  </Heading>
+                  {subtitle ? (
+                    <Text
+                      id={subtitleId}
+                      as="p"
+                      type="body"
+                      size="sm"
+                      color="secondary"
+                    >
+                      {subtitle}
+                    </Text>
+                  ) : null}
+                </div>
+              </div>
+              {!hasFooter && !busy ? (
+                <Button
+                  label={translate("@astryx.dialog.close")}
+                  tooltip={translate("@astryx.dialog.close")}
+                  icon={<X size={18} />}
+                  variant="ghost"
+                  isIconOnly
+                  onClick={() => requestOpenChange(false)}
+                />
+              ) : null}
+            </div>
+          </LayoutHeader>
+        }
         content={
-          <LayoutContent>
-            <Heading level={2} id={titleId}>
-              {title}
-            </Heading>
-            <Text type="body" color="secondary" id={descriptionId}>
-              {description}
-            </Text>
+          <LayoutContent {...(contentPadding === 0 ? { padding: 0 } : {})}>
+            {isConfirmation ? (
+              <div className="grid gap-4">
+                <div id={contentId}>{confirmationDescription}</div>
+                {children}
+              </div>
+            ) : (
+              children
+            )}
           </LayoutContent>
         }
         footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                data-autofocus
-                variant="ghost"
-                label={cancelLabel}
-                onClick={() => onOpenChange(false)}
-              />
-            }
-            primaryAction={
-              <Button
-                variant={actionVariant}
-                label={actionLabel}
-                onClick={onAction}
-                {...(isActionLoading !== undefined
-                  ? { isLoading: isActionLoading }
-                  : {})}
-              />
-            }
-          />
+          hasFooter ? (
+            <LayoutFooter hasDivider>
+              <div className="grid w-full grid-cols-1 gap-2 sm:flex sm:justify-end [&>*]:w-full sm:[&>*]:w-auto">
+                <Button
+                  data-dialog-cancel=""
+                  {...(isConfirmation ? { "data-autofocus": "" } : {})}
+                  label={
+                    cancelLabel ?? translate("@astryx.alertDialog.cancel")
+                  }
+                  type="button"
+                  variant="ghost"
+                  size="lg"
+                  isDisabled={busy}
+                  onClick={() => requestOpenChange(false)}
+                />
+                {isConfirmation && confirmationAction ? (
+                  <Button
+                    label={confirmationAction.label}
+                    type={confirmationAction.form ? "submit" : "button"}
+                    {...(confirmationAction.form
+                      ? { form: confirmationAction.form }
+                      : {})}
+                    variant={confirmationAction.variant}
+                    size="lg"
+                    isDisabled={confirmationAction.disabled || busy}
+                    isLoading={busy}
+                    {...(confirmationAction.onAction
+                      ? { onClick: confirmationAction.onAction }
+                      : {})}
+                  />
+                ) : (
+                  primaryAction
+                )}
+              </div>
+            </LayoutFooter>
+          ) : undefined
         }
       />
-    </Dialog>
+    </AstryxDialog>
+  );
+}
+
+export interface DialogProps {
+  isOpen: boolean;
+  onOpenChange: (isOpen: boolean) => unknown;
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  mode?: DialogMode;
+  size?: DialogSize;
+  busy?: boolean;
+  headerStart?: ReactNode;
+  primaryAction?: ReactNode;
+  cancelLabel?: string;
+  contentPadding?: 0;
+}
+
+export function Dialog({
+  mode = "form",
+  ...props
+}: DialogProps) {
+  return <DialogShell {...props} mode={mode} />;
+}
+
+export interface ConfirmationDialogProps {
+  isOpen: boolean;
+  onOpenChange: (isOpen: boolean) => unknown;
+  title: string;
+  description: ReactNode;
+  children?: ReactNode;
+  actionLabel: string;
+  onAction?: () => unknown;
+  actionVariant?: ButtonVariant;
+  actionForm?: string;
+  isActionDisabled?: boolean;
+  busy?: boolean;
+  cancelLabel?: string;
+}
+
+export function ConfirmationDialog({
+  actionLabel,
+  description,
+  onAction,
+  actionVariant = "destructive",
+  actionForm,
+  isActionDisabled = false,
+  busy = false,
+  ...props
+}: ConfirmationDialogProps) {
+  return (
+    <DialogShell
+      {...props}
+      mode="confirmation"
+      size="sm"
+      busy={busy}
+      confirmationDescription={description}
+      confirmationAction={{
+        label: actionLabel,
+        variant: actionVariant,
+        disabled: isActionDisabled,
+        ...(actionForm ? { form: actionForm } : {}),
+        ...(onAction ? { onAction } : {}),
+      }}
+    />
   );
 }

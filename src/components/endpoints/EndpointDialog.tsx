@@ -6,10 +6,7 @@ import {
   Banner,
   Button,
   CheckboxInput,
-  DialogHeader,
   IconButton,
-  Layout,
-  LayoutContent,
   NumberInput,
   Selector,
   Text,
@@ -20,7 +17,7 @@ import type {
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { Dialog } from "../ui/Dialog";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -81,24 +78,29 @@ export function EndpointDialog({
     <Dialog
       isOpen={open}
       onOpenChange={handleOpenChange}
-      purpose="form"
-      width="min(34rem, calc(100vw - 2rem))"
-      maxHeight="calc(100dvh - 2rem)"
-      aria-label={title}
+      title={title}
+      subtitle="Configure an OpenAI-compatible model connection."
+      busy={saving || discovering}
+      primaryAction={
+        <Button
+          type="submit"
+          form={formId}
+          variant="primary"
+          size="lg"
+          label="Save"
+          icon={<Save size={15} />}
+          isDisabled={
+            !canSubmit ||
+            !canSave ||
+            saving ||
+            discovering ||
+            !input.credentialId ||
+            input.capabilities.length === 0
+          }
+        />
+      }
     >
-      <Layout
-        height="fill"
-        defaultHasDividers
-        header={
-          <DialogHeader
-            title={title}
-            subtitle="Configure an OpenAI-compatible model connection."
-            onOpenChange={handleOpenChange}
-          />
-        }
-        content={
-          <LayoutContent>
-            <form id={formId} onSubmit={onSubmit}>
+      <form id={formId} onSubmit={onSubmit}>
               {error ? (
                 <Banner
                   className="mb-4"
@@ -247,42 +249,7 @@ export function EndpointDialog({
                   </div>
                 </fieldset>
               </div>
-            </form>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                type="button"
-                variant="ghost"
-                size="lg"
-                label="Cancel"
-                onClick={() => handleOpenChange(false)}
-                isDisabled={saving || discovering}
-              />
-            }
-            primaryAction={
-              <Button
-                type="submit"
-                form={formId}
-                variant="primary"
-                size="lg"
-                label="Save"
-                icon={<Save size={15} />}
-                isDisabled={
-                  !canSubmit ||
-                  !canSave ||
-                  saving ||
-                  discovering ||
-                  !input.credentialId ||
-                  input.capabilities.length === 0
-                }
-              />
-            }
-          />
-        }
-      />
+      </form>
     </Dialog>
   );
 }

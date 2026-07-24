@@ -1,11 +1,11 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { Banner, Button, DialogHeader, EmptyState, Heading, IconButton, Layout, LayoutContent, Text, useToast } from "@astryxdesign/core";
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { Banner, Button, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { Dialog, DialogFooter } from "../ui/Dialog";
+import { ConfirmationDialog } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
@@ -227,64 +227,28 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
 }
 function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: { open: boolean; busy: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (next: boolean) => !busy && onOpenChange(next);
-  const titleId = useId();
-  const descriptionId = useId();
   return (
-    <Dialog
+    <ConfirmationDialog
       isOpen={open}
       onOpenChange={handleOpenChange}
-      purpose="form"
-      role="alertdialog"
-      width="min(32rem, calc(100vw - 2rem))"
-      aria-labelledby={titleId}
-      aria-describedby={descriptionId}
+      title="Delete alert rule"
+      description={
+        <Text as="p" display="block" color="secondary">
+          This permanently removes the rule from this project.
+        </Text>
+      }
+      actionLabel="Delete"
+      busy={busy}
+      onAction={() => void onConfirm()}
     >
-      <Layout
-        defaultHasDividers
-        header={<DialogHeader id={titleId} title="Delete alert rule" />}
-        content={
-          <LayoutContent>
-            <div className="grid gap-4">
-              <Text id={descriptionId} as="p" display="block" color="secondary">
-                This permanently removes the rule from this project.
-              </Text>
-              {error ? (
-                <Banner
-                  status="error"
-                  title="Alert rule could not be deleted"
-                  description={error}
-                />
-              ) : null}
-            </div>
-          </LayoutContent>
-        }
-        footer={
-          <DialogFooter
-            secondaryAction={
-              <Button
-                label="Cancel"
-                type="button"
-                variant="ghost"
-                size="lg"
-                isDisabled={busy}
-                onClick={() => handleOpenChange(false)}
-              />
-            }
-            primaryAction={
-              <Button
-                label="Delete"
-                type="button"
-                variant="destructive"
-                size="lg"
-                isDisabled={busy}
-                isLoading={busy}
-                onClick={() => void onConfirm()}
-              />
-            }
-          />
-        }
-      />
-    </Dialog>
+      {error ? (
+        <Banner
+          status="error"
+          title="Alert rule could not be deleted"
+          description={error}
+        />
+      ) : null}
+    </ConfirmationDialog>
   );
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
