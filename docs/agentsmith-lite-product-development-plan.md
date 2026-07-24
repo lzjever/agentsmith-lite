@@ -7,7 +7,7 @@
 AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、多个 Project-scoped File Library、task 和 artifact。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
 
 - Keycloak/OIDC 是唯一生产身份路径。服务端建立 session，并持久化本地 OIDC identity、English-only local profile、workspace/project 归属和 membership；不发放或接受 personal API key。
-- Web 保留原项目的 Next App Router、页面组织、样式体系和可复用 UI 组件；Next 不是 Lite 要删除的依赖。最终 Web 运行时只替换被明确排除的旧后端、BFF、mock 和业务实现，不重做用户可见的产品结构。
+- Web 保留原项目的 Next App Router、保留功能的信息架构和工作流；Next 不是 Lite 要删除的依赖。视觉实现全面迁入 Astryx，旧样式、主题 token 和 primitive 只能迁移、基于 Astryx 重写或删除，不保留历史包覆、兼容层或平行视觉体系。`docs/web-experience-improvement-plan.md` 是后续 Web 体验和视觉实现的权威计划。
 - Lite 当前只提供英文产品界面。迁移原 Web 时彻底排除 `next-intl`、翻译 catalog、locale layout、URL locale 前缀和语言切换；页面只有一份英文实现，不为假设中的未来多语言预留抽象。
 - Web UI 仅是产品 API 客户端。授权、endpoint 调用、文件路径安全、task 生命周期、artifact 投影和 sandbox 清理均由服务端拥有。页面不得承载 agent、Kubernetes、数据库、Botified 或 provider 业务逻辑。AgentSmith 服务端只通过 Botified 服务接口与其交互。
 - 每个 project 在 substrate 提供的 JuiceFS PVC 上拥有多个独立 File Library。每个 Task 必须独占绑定一个 Library；Task 创建时可新建 Library 或选择当前用户有权使用且未绑定的 Library。Files 页面列出当前 Project 中用户可访问的 Libraries，并提供所选 Library 的 list、二进制 upload、preview、download 和 delete。
@@ -20,20 +20,20 @@ AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同�
 
 ## Web 体验恢复原则
 
-Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmith 的工作台体验。原 Web App 是用户可见体验的基线：workspace/project 信息架构、导航、页面层级、详情页、表格/列表密度、空态/错误态和关键交互应尽量保持一致。
+Lite 简化的是产品能力、外部依赖和治理负担，不是保留功能的用户结果。原 Web App 只作为保留能力、workspace/project 信息架构、导航关系和工作流的参考；视觉和组件实现统一以 Astryx 重新建立，不再以旧主题或旧 UI 代码作为权威。
 
-- 页面和组件优先从 `.reference/agentsmith` 的 Next 源码复制后直接适配最终 API；不得以“参考视觉”名义重新设计一套 Lite 控制台。
+- 页面业务结构可从 `.reference/agentsmith` 的 Next 源码复制后适配最终 API；旧主题、CSS 和 primitive 不得复制为兼容层。页面应直接使用 Astryx，不能平替的领域界面基于 Astryx 重写。
 - 先从原页面删除明确排除的入口、数据和交互，再将剩余页面直接接到 Lite 的最终 `/api/v1` 合约。不得保留兼容 adapter、双数据层、mock、BFF 过渡层或第二套页面路径。
 - 保留 Next App Router、布局、路由和组件组织。运行时迁移只能在保持同等用户可见结构的前提下进行；当前任何 Vite/独立 SPA 实现均是过渡实现，不是最终架构基线。
 - 每个功能阶段同时交付服务端 API 和对应原页面的恢复范围。只有 API 而没有可到达的原工作台页面，不算该功能完成。
 - 删除的体验必须有明确的 Lite 产品理由：LLMUP、Codex runner、独立 Agent Runners 管理 UI、JVS/WebDAV/挂载、文件 savepoint/template/version/restore、全局 operator 控制面、治理 explainability、治理历史、report/gate 页面与流程。其余核心工作台体验默认保留。
 - 由于 Keycloak/OIDC-only identity 和唯一 OpenAI-compatible completions broker，明确不迁移 personal API keys，也不迁移旧 `use-guide` 的 personal-key、Anthropic、universal proxy 或 protocol-conversion 路径。
-- 视觉恢复先完成共同基础，再迁业务页面：直接复用原字体资产、light/dark 主题令牌、全局排版、图标、按钮/输入/对话框/表格等基础组件，以及 topbar、workspace/project switcher、分组 sidebar、折叠和响应式行为。不得用一份 Lite 专用 CSS 对原设计做近似仿制。
-- `AgentSmith` 是 Lite 的产品名称；可保留原工作台的结构和视觉语言，但不继承原仓库内部的 MBOS 名称、已删除产品入口或与 Lite 无关的品牌文案。
+- 视觉迁移先完成共同基础，再迁业务页面：建立唯一的 AgentSmith Astryx Theme，并以 Astryx 的字体、light/dark token、全局排版、图标、按钮/输入/对话框/表格、topbar、switcher、sidebar 和响应式 primitive 为共同实现。不得保留旧视觉 token、兼容 CSS、adapter 或第二套 primitive。
+- `AgentSmith` 是 Lite 的产品名称；保留功能的产品结构和用户结果，视觉语言统一由 AgentSmith Astryx Theme 与 `docs/ux-ui-design-principles.md` 定义，不继承旧主题、MBOS 名称、已删除产品入口或与 Lite 无关的品牌文案。
 
 ### 最终 Web 架构
 
-- Next App Router 是 Web 的最终运行时和路由边界。原 layout、page、loading/error 状态、样式和可复用 UI 组件应按原有目录关系迁回；不以 Vite SPA 或平行页面树替代它。
+- Next App Router 是 Web 的最终运行时和路由边界。保留功能的 layout、page、loading/error 路由关系可沿用原目录结构；视觉和交互 primitive 全部由 Astryx 实现，不迁回旧样式或旧 UI 组件，不以 Vite SPA 或平行页面树替代 Next。
 - Web 页面直接调用最终同源 `/api/v1` 产品合约。Next 不能成为另一个业务 BFF、兼容 adapter 或数据复制层；鉴权和业务判断始终在产品服务端完成。
 - Ingress 仅将公开的 `/api/v1` 路由转给 API workload；`/api/internal` 只经 API ClusterIP Service 供 sandbox 调用，绝不经公开 Ingress 暴露。
 - `APP_PUBLIC_BASE_URL` 是 Next image build 与 deploy 的共同不变量：构建时以其规范化 path 生成 Next `basePath` 和公开 API path，部署时必须使用同一 URL；变更 host 或 mount path（例如 `/app`）必须重建 image 后再部署。
@@ -46,11 +46,11 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 共同视觉基础和每个保留页面都必须同时满足：
 
-- desktop light/dark 和窄屏均保持原工作台的信息层级、密度、间距、控件形态和响应式行为；不能只更换颜色后宣称完成。
+- desktop light/dark 和窄屏均满足 `docs/ux-ui-design-principles.md` 规定的信息层级、密度、间距、控件形态和响应式行为；不能只更换颜色后宣称完成。
 - 页面正常、加载、空、错误、无权限和主要 dialog/drawer 状态使用迁回的共同组件；删除能力不显示禁用入口、占位 tab 或“coming soon”。
-- 以 `.reference/agentsmith/e2e/__screenshots__/visual.spec.ts/` 中对应页面截图作为人工对照基线，但只检查 Lite 保留的内容。Playwright 可由开发者临时运行并现场修正，不提交截图报告、不建立视觉基线仓库、不加入发布 gate。
+- `.reference/agentsmith/e2e/__screenshots__/visual.spec.ts/` 中对应页面截图只用于临时检查保留工作流和内容是否遗漏，不是视觉基线。AgentSmith Astryx Theme 和 `docs/ux-ui-design-principles.md` 是唯一视觉判断依据。Playwright 可由开发者临时运行并现场修正，不提交截图报告、不建立视觉基线仓库、不加入发布 gate。
 - Web 不出现 `/en`、`/zh` 等 locale 路径，不加载翻译 runtime；同一产品页面只存在一个英文实现。
-- 共享 UI 先于业务页面迁回：原 `PageLayout`、`PageHeader`、`PageState`、toolbar、table/list、Button/Input/Dialog/Sheet、status badge、theme 和 responsive shell 是唯一共同实现；后续页面不得引入 Lite 专用平行表面或兼容 CSS。
+- 共享 UI 先于业务页面迁移：Astryx 的 layout、typography、toolbar、table/list、Button/Input/Dialog/Sheet、status、theme 和 responsive shell 是唯一 primitive 来源；AgentSmith 只保留有业务语义的领域组合，后续页面不得引入平行表面、adapter 或兼容 CSS。
 
 ## 阶段计划
 
@@ -62,7 +62,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 - workspace/project membership 和 owner、admin、member、viewer 四种角色；membership 是唯一服务端授权真相，所有 workspace/project API 经 `AuthorizationService` 判定。成员管理仅指向已有本地 OIDC identity。
 - PostgreSQL migrations；Next Web App 与 `/api/v1` 同源部署，并消费 substrates 输出的 PostgreSQL、JuiceFS、OIDC env/secrets。
 - 原 AgentSmith workspace/project shell、导航和 session 体验恢复为后续页面的共同基础，不以新的 Lite 控制台替代。
-- 从原仓库复制字体资产、theme tokens、全局样式和实际使用的基础 UI 组件；先恢复 `PageLayout`、`PageHeader`、`PageState`、toolbar、table/list、Button/Input/Dialog/Sheet、status badge、light/dark、topbar、workspace/project switcher、sidebar 分组/折叠、用户菜单和窄屏导航。复制时删除 i18n、旧权限 hook、旧 BFF 和已排除入口的依赖，直接连接 Lite session 与 API。
+- 建立唯一的 AgentSmith Astryx Theme，并用 Astryx 迁移 `PageLayout`、`PageHeader`、`PageState`、toolbar、table/list、Button/Input/Dialog/Sheet、status、light/dark、topbar、workspace/project switcher、sidebar、用户菜单和窄屏导航。旧主题和 UI 实现不能直接平替时基于 Astryx 重写；迁移完成即删除旧 token、CSS、primitive、i18n、旧权限 hook、旧 BFF 和已排除入口依赖。
 - 恢复 English-only local profile：Keycloak subject、email 和 verified 状态只读；仅保留 display name、bio、job title、company、timezone、greeting preference 和 interests 等本地 profile 字段，不提供 locale 或 language preference。
 - 恢复 workspace/project 生命周期与 settings：workspace/project create、rename、archive/delete（如原页面支持）、project list、project metadata、owner transfer 和成员入口；不恢复 join policy、join request、group、project-creator governance 或治理历史。
 - 恢复 workspace shared context、project shared context 和 project personal context；各自按 workspace/project membership 授权，personal context 只对当前 identity 可见，context 不承载 provider credential、session、文件内容或 sandbox 数据。
@@ -77,8 +77,8 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 - 恢复 project credential lifecycle：authorized user 可 list、create、rotate、delete 项目 provider credential，并由 endpoint 以 credential identifier 绑定；删除被 endpoint 使用的 credential 必须由服务端拒绝或要求先解除绑定。
 - Botified 仅获得 task-scoped credential，用于其被授权 task 的产品 API 调用；绝不获得 provider key。浏览器、Botified 和项目 API 响应均不暴露 provider key。
 - 不实现 adapter、fallback、legacy model path 或第二套 broker；Task 是唯一的授权、broker 和资源策略路径。
-- Endpoint UI 按 `.reference/agentsmith/src/components/endpoints/` 的实际依赖顺序迁移：先复制 `endpoints-page-utils.tsx`、`EndpointStatusBadge.tsx`、`create-endpoint-dialog/EndpointBasicsForm.tsx`、`EndpointDialogFooter.tsx`；再适配 `CreateEndpointDialog.tsx`、`edit-endpoint-dialog/EditEndpointForm.tsx`、`EditEndpointDialog.tsx`；随后适配 `EndpointsToolbar.tsx`、`EndpointsHeaderActions.tsx`、`EndpointsContent.tsx`、`EndpointsDialogs.tsx`；最后接入原 Next 页面路由。所有数据和 mutation 直连 `/api/v1`。
-- 不迁移 `CustomEndpointWizard`、旧 BFF、mock 数据层、批量 import/export、catalog sync 或 agent-task model setting。保留 Next 和原样式/组件体系。
+- Endpoint UI 参考 `.reference/agentsmith/src/components/endpoints/` 的业务拆分和依赖顺序，以 Astryx primitive 和 AgentSmith 领域组合直接实现；不复制旧主题、CSS 或 primitive。所有数据和 mutation 直连 `/api/v1`。
+- 不迁移 `CustomEndpointWizard`、旧 BFF、mock 数据层、批量 import/export、catalog sync 或 agent-task model setting。保留 Next、路由、信息架构和工作流；视觉与交互 primitive 全部使用 Astryx。
 
 **定向验证：** 在本地单节点 K8s 用 authorized project user 创建/轮换 provider credential、绑定 endpoint，并使用管理员本地环境提供的真实 DeepSeek OpenAI-compatible 配置完成一次 Task 调用；确认未授权请求、credential 明文和 provider-key 暴露均被拒绝。mock/fake provider 只用于窄单元测试，不能代替该真实后端确认。
 
@@ -89,7 +89,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 - 从原 Files 页面恢复多 Library 选择器和 Library-scoped list、二进制 upload、preview、download、delete 体验；服务端执行项目授权、独占绑定和路径规范化。仍移除 savepoint、template、version、restore 与挂载入口。
 - Task 创建原子执行 `create_new` 或 `use_existing` Library 绑定；一个 Task ID 固定对应一个 Botified session，并在同一 Conversation 中处理所有后续消息。
 - Sandbox Run 按需启动，由用户明确确认后无条件 release。release 终止 agent、Terminal、工具和全部进程，但保留 Task、Botified 已完成会话历史、Library 和 artifact；下一条消息或 Terminal open 创建新 Run 并恢复同一 Task。
-- 最终实现、删除范围、API、存储布局和阶段顺序以 `docs/task-workspace-product-improvement-plan.md` 为准。
+- 最终业务实现、删除范围、API 和存储布局以 `docs/task-workspace-product-improvement-plan.md` 为准；Files 的 Astryx 迁移、当前目录有界呈现和媒体安全以 `docs/web-experience-improvement-plan.md` 的 7.3、9.2 和 Phase 4 为准。
 
 **定向验证：** 在本地单节点 K8s 创建两个 Library，分别绑定 Task 并验证文件和上下文隔离；在同一 Task 完成多轮对话，主动 release 正在工作的 Sandbox，确认只终止该 Run，并在下一次消息中恢复同一 session、Library 和已落盘文件。
 
@@ -102,6 +102,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
   为准：Botified NDJSON 只存在于服务端 transport；AgentSmith Server 生成唯一 typed Interaction
   read model、message disposition、run state 和 capabilities；Web 不解析 timeline、不合并 lifecycle、
   不推断 action。Conversation 提供服务端持久化的 typed conversation history，但不公开 Botified raw transcript、NDJSON、transport events，也不提供独立 follow-up UI、Codex parser、adapter 或双 contract。
+- Task 工作面的 Astryx 迁移、following/reading 心智、长会话性能、Artifact 分页和完成条件以 `docs/web-experience-improvement-plan.md` 的 7.4、7.5 和 Phase 2 为准。
 **定向验证：** 在本地单节点 K8s 查看运行任务的 Conversation updates、artifacts、summary 和 preview，下载授权 artifact，并完成同一 Task 中的消息流、停止与 Markdown 呈现；viewer/member 权限按 API 返回的边界生效。
 
 ### 阶段 5：Policy、Usage、Alerts 与 Light Audit
@@ -110,6 +111,7 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 - 从原 Resource Policy、Usage、Alerts 和 Audit 页面恢复项目级服务端资源 policy、最小 usage、alert-rule CRUD、notifications 和 light audit API/UI。删除全局 dashboard、治理 explainability、报告和控制面入口。
 - usage 按实际可验证用量写入，包括每个 Sandbox Run 的运行时长、启动次数、CPU request-time 和 memory request-time；alert rule 覆盖 Sandbox、endpoint、配额状态并由服务端评估；notifications、audit 仅保留必要项目操作和生命周期元数据。
+- Usage 的汇总/live 与按需 settled history、Alerts active-first 及 Audit 最终 allowlist/连续性以 `docs/web-experience-improvement-plan.md` 的 7.1、7.2、9.1、9.5 和 Phase 3/4 为准。
 
 **定向验证：** 在本地单节点 K8s 创建、编辑、enable/disable 和删除一条项目 alert rule，触发一条资源限制，检查对应 usage/notification/audit 的项目授权读取和敏感数据不落库。
 
@@ -117,6 +119,6 @@ Lite 简化的是产品能力、外部依赖和治理负担，不是原 AgentSmi
 
 本地单节点 K8s 是唯一最终验收目标。agents 负责 substrates 配置、安装、部署、重部署和所需的本地 OIDC/K8s 产品验证；用户不需要手动操作目标环境。每阶段只运行与当前业务路径有关、输出 stdout/stderr 且失败非零的窄验证。
 
-禁止默认 gate、evidence/report/rehearsal 产物、宽泛测试包装和云验收。也不实现 LLMUP、Codex runner core、JVS、WebDAV、AFSCP、ASBCP、本地或远程文件挂载、operator/全局控制面、全局资源 CLI，或浏览器直连 Kubernetes、数据库、Botified、provider。Next、原工作台信息架构和原 UI 组件体系不属于排除范围。
+禁止默认 gate、evidence/report/rehearsal 产物、宽泛测试包装和云验收。也不实现 LLMUP、Codex runner core、JVS、WebDAV、AFSCP、ASBCP、本地或远程文件挂载、operator/全局控制面、全局资源 CLI，或浏览器直连 Kubernetes、数据库、Botified、provider。Next、保留功能的信息架构和工作流不属于排除范围；旧 UI primitive、主题和样式不保留。
 
 最终完成判断只看本地单节点 K8s 中的真实产品行为：OIDC 登录、保留页面、真实 DeepSeek Task、多 File Library 和独占 Task 绑定、JuiceFS 文件和 artifact、显式 Sandbox release/恢复、Sandbox usage、成员授权、policy/alerts/audit。开发中发现缺陷立即在实现处修正；不为完成判断生成测试报告、证据目录、诊断文档或额外验收框架。
