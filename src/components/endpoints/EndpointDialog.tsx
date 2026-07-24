@@ -1,12 +1,11 @@
 "use client";
 
 import { RefreshCw, Save, X } from "lucide-react";
-import type { FormEvent } from "react";
+import { type FormEvent, useId } from "react";
 import {
   Banner,
   Button,
   CheckboxInput,
-  Dialog,
   DialogHeader,
   IconButton,
   Layout,
@@ -22,6 +21,7 @@ import type {
   EndpointInput,
   ProjectCredential,
 } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -61,6 +61,8 @@ export function EndpointDialog({
   onChange: (value: EndpointInput) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const formId = useId();
+  const title = editing ? "Edit endpoint" : "Create endpoint";
   const set = <K extends keyof EndpointInput>(
     key: K,
     value: EndpointInput[K],
@@ -83,21 +85,21 @@ export function EndpointDialog({
       purpose="form"
       width="min(34rem, calc(100vw - 2rem))"
       maxHeight="calc(100dvh - 2rem)"
-      padding={0}
+      aria-label={title}
     >
-      <form className="flex min-h-0 flex-1" onSubmit={onSubmit}>
-        <Layout
-          height="fill"
-          defaultHasDividers
-          header={
-            <DialogHeader
-              title={editing ? "Edit endpoint" : "Create endpoint"}
-              subtitle="Configure an OpenAI-compatible model connection."
-              onOpenChange={handleOpenChange}
-            />
-          }
-          content={
-            <LayoutContent>
+      <Layout
+        height="fill"
+        defaultHasDividers
+        header={
+          <DialogHeader
+            title={title}
+            subtitle="Configure an OpenAI-compatible model connection."
+            onOpenChange={handleOpenChange}
+          />
+        }
+        content={
+          <LayoutContent>
+            <form id={formId} onSubmit={onSubmit}>
               {error ? (
                 <Banner
                   className="mb-4"
@@ -246,39 +248,40 @@ export function EndpointDialog({
                   </div>
                 </fieldset>
               </div>
-            </LayoutContent>
-          }
-          footer={
-            <LayoutFooter>
-              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="lg"
-                  label="Cancel"
-                  onClick={() => handleOpenChange(false)}
-                  isDisabled={saving || discovering}
-                />
-                <Button
-                  type="submit"
-                  variant="primary"
-                  size="lg"
-                  label="Save"
-                  icon={<Save size={15} />}
-                  isDisabled={
-                    !canSubmit ||
-                    !canSave ||
-                    saving ||
-                    discovering ||
-                    !input.credentialId ||
-                    input.capabilities.length === 0
-                  }
-                />
-              </div>
-            </LayoutFooter>
-          }
-        />
-      </form>
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="lg"
+                label="Cancel"
+                onClick={() => handleOpenChange(false)}
+                isDisabled={saving || discovering}
+              />
+              <Button
+                type="submit"
+                form={formId}
+                variant="primary"
+                size="lg"
+                label="Save"
+                icon={<Save size={15} />}
+                isDisabled={
+                  !canSubmit ||
+                  !canSave ||
+                  saving ||
+                  discovering ||
+                  !input.credentialId ||
+                  input.capabilities.length === 0
+                }
+              />
+            </div>
+          </LayoutFooter>
+        }
+      />
     </Dialog>
   );
 }

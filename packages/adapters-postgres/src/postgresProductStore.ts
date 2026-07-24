@@ -30,7 +30,7 @@ import type {
   User,
   Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertRuleView, ProjectCredential, StoredProjectCredential
 } from "../../contracts/src/api.js";
-import { PROFILE_GREETING_PREFERENCES, isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { PREVIEW_IMAGE_MEDIA_TYPES, PREVIEW_TEXT_MEDIA_TYPES, PROFILE_GREETING_PREFERENCES, isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
@@ -58,6 +58,8 @@ import type {
   AtomicTaskMessageDeleteResult,
   TaskStoreListQuery,
   TaskStoreListPage,
+  TaskArtifactStoreListQuery,
+  TaskArtifactStoreListPage,
   TaskDeliveryClaimInput,
   TaskDeliveryReclaimInput,
   TaskMessageReceiptInput,
@@ -1001,17 +1003,28 @@ export class PostgresProductStore implements ProductStore {
     const values: unknown[] = [projectId];
     const where = ["project_id = $1", "deleted_at is null"];
     if (query.search) {
-      values.push(`%${query.search}%`);
-      where.push(`(title ilike $${values.length} or prompt ilike $${values.length})`);
+      values.push(`%${escapeLikePattern(query.search)}%`);
+      where.push(`(title ilike $${values.length} escape E'\\\\' or prompt ilike $${values.length} escape E'\\\\')`);
     }
     if (query.archived === "exclude") where.push("archived_at is null");
     if (query.archived === "only") where.push("archived_at is not null");
     const count = await this.queryRows<{ count: string }>(`select count(*)::text as count from agent_tasks where ${where.join(" and ")}`, values);
     const sortColumn = query.sort === "created_at" ? "created_at" : query.sort === "updated_at" ? "updated_at" : "title";
+    const sortExpression = query.sort === "title" ? `${sortColumn} collate "C"` : sortColumn;
+    const idExpression = `id collate "C"`;
     const direction = query.direction === "asc" ? "asc" : "desc";
-    values.push(query.limit, query.offset);
-    const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where ${where.join(" and ")} order by ${sortColumn} ${direction}, id ${direction} limit $${values.length - 1} offset $${values.length}`, values);
-    return { items: rows.map(mapTask), total: Number(count[0]?.count ?? 0) };
+    if (query.after) {
+      values.push(query.after.value, query.after.taskId);
+      const valueCast = query.sort === "title" ? "text" : "timestamptz";
+      const comparison = query.direction === "asc" ? ">" : "<";
+      const afterValue = query.sort === "title"
+        ? `$${values.length - 1}::${valueCast} collate "C"`
+        : `$${values.length - 1}::${valueCast}`;
+      where.push(`(${sortExpression}, ${idExpression}) ${comparison} (${afterValue}, $${values.length}::text collate "C")`);
+    }
+    values.push(query.limit + 1);
+    const rows = await this.queryRows<AgentTaskRow>(`select * from agent_tasks where ${where.join(" and ")} order by ${sortExpression} ${direction}, ${idExpression} ${direction} limit $${values.length}`, values);
+    return { items: rows.slice(0, query.limit).map(mapTask), total: Number(count[0]?.count ?? 0), hasMore: rows.length > query.limit };
   }
 
   async findTask(id: string): Promise<PersistedAgentTask | null> {
@@ -1197,12 +1210,57 @@ export class PostgresProductStore implements ProductStore {
     });
   }
 
-  async listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]> {
+  async queryTaskArtifacts(taskId: string, query: TaskArtifactStoreListQuery): Promise<TaskArtifactStoreListPage> {
+    const values: unknown[] = [];
+    const bind = (value:unknown,type:"text"|"text[]"|"timestamptz"|"integer"):string => {
+      values.push(value);
+      return `$${values.length}::${type}`;
+    };
+    const where = [`task_id = ${bind(taskId,"text")}`];
+    if (query.mediaType !== null) {
+      where.push(`media_type = ${bind(query.mediaType,"text")}`);
+    }
+    if (query.previewOnly) where.push("preview_text is not null");
+    if (query.kind !== null) {
+      const essence = "lower(btrim(split_part(media_type, ';', 1)))";
+      if (query.kind === "image") {
+        where.push(`${essence} = any(${bind([...PREVIEW_IMAGE_MEDIA_TYPES],"text[]")})`);
+      } else if (query.kind === "text") {
+        where.push(`${essence} = any(${bind([...PREVIEW_TEXT_MEDIA_TYPES],"text[]")})`);
+      } else {
+        const textMatch = `${essence} = any(${bind([...PREVIEW_TEXT_MEDIA_TYPES],"text[]")})`;
+        const imageMatch = `${essence} = any(${bind([...PREVIEW_IMAGE_MEDIA_TYPES],"text[]")})`;
+        where.push(`not coalesce(${textMatch} or ${imageMatch}, false)`);
+      }
+    }
+    if (query.after) {
+      const createdAt = bind(query.after.createdAt,"timestamptz");
+      const artifactId = bind(query.after.artifactId,"text");
+      where.push(`(created_at, id collate "C") < (${createdAt}, ${artifactId} collate "C")`);
+    }
+    const limit = bind(query.limit + 1,"integer");
     const rows = await this.queryRows<AgentTaskArtifactRow>(
-      `select * from agent_task_artifacts where task_id = $1 order by created_at, id`,
-      [taskId]
+      `select * from agent_task_artifacts where ${where.join(" and ")} order by created_at desc, id collate "C" desc limit ${limit}`,
+      values
     );
-    return rows.map(mapTaskArtifact);
+    return { items: rows.slice(0, query.limit).map(mapTaskArtifact), hasMore: rows.length > query.limit };
+  }
+
+  async findTaskArtifact(taskId: string, artifactId: string): Promise<PersistedTaskArtifact | null> {
+    const rows = await this.queryRows<AgentTaskArtifactRow>(
+      "select * from agent_task_artifacts where task_id=$1 and id=$2",
+      [taskId, artifactId]
+    );
+    return rows[0] ? mapTaskArtifact(rows[0]) : null;
+  }
+
+  async findExistingTaskArtifactFileIds(taskId: string, fileIds: string[]): Promise<string[]> {
+    if (fileIds.length === 0) return [];
+    const rows = await this.queryRows<{ file_id: string }>(
+      "select file_id from agent_task_artifacts where task_id=$1 and file_id=any($2::text[])",
+      [taskId, fileIds]
+    );
+    return rows.map((row) => row.file_id);
   }
 
   async createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage> { return transaction(this.pool, async (client) => mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message))); }
@@ -2025,6 +2083,7 @@ function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement
 function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,released:PersistedSandboxRunState):boolean{const releasedAt=released.releasedAt;const duration=current.startedAt===null||!releasedAt?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(current.startedAt))/1000);return Boolean(releasedAt)&&value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===releasedAt&&value.durationSeconds===duration&&value.releaseReason===released.releaseReason&&strictStructuralEqual(value.resources,current.resourceSnapshot)}
 function taskMatchesActiveSandboxRunRow(task:SandboxReleaseTaskRow|undefined,run:PersistedSandboxRunState):task is SandboxReleaseTaskRow{return Boolean(task&&task.deleted_at===null&&task.id===run.taskId&&task.current_run_id===run.runId&&task.project_id===run.projectId&&task.workspace_id===run.workspaceId&&task.file_library_id===run.fileLibraryId&&task.project_workspace_id===run.workspaceId)}
 function nullableNumber(value: string | number | null): number | null { return value === null ? null : Number(value); }
+function escapeLikePattern(value:string):string{return value.replace(/[\\%_]/g,"\\$&");}
 function isUniqueConstraintError(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "23505"; }
 function isConstraintError(error: unknown, constraint: string): boolean { return isUniqueConstraintError(error) && typeof error === "object" && error !== null && "constraint" in error && error.constraint === constraint; }
 function isForeignKeyConstraintError(error:unknown,constraint:string):boolean{return typeof error==="object"&&error!==null&&"code" in error&&error.code==="23503"&&"constraint" in error&&error.constraint===constraint;}

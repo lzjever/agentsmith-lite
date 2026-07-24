@@ -85,6 +85,11 @@ export const agentSmithTheme = defineTheme({
     "--color-icon-accent": ["#1769aa", "#6bb6ff"],
   },
   components: {
+    dialog: {
+      base: {
+        animationName: "none",
+      },
+    },
     button: {
       "variant:primary": {
         backgroundColor: "var(--color-data-categorical-orange)",

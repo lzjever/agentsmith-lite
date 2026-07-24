@@ -6,11 +6,12 @@ import {
   Banner,
   Button,
   DateTimeInput,
-  Dialog,
   DialogHeader,
   EmptyState,
   Heading,
   IconButton,
+  Layout,
+  LayoutContent,
   Selector,
   Table,
   TableBody,
@@ -33,6 +34,7 @@ import {
   type ProjectMember,
   type ProjectUsageOverview,
 } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
@@ -724,16 +726,16 @@ function DetailDialog({
   onClose: () => void;
 }) {
   return (
-    <Dialog isOpen={event !== null} onOpenChange={(open) => !open && onClose()} purpose="info" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label="Audit event detail">
+    <Dialog isOpen={event !== null} onOpenChange={(open) => !open && onClose()} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" aria-label="Audit event detail">
       {event ? (
-        <>
-          <DialogHeader
+        <Layout
+          header={<DialogHeader
             title="Audit event detail"
             subtitle="Event metadata for this project activity."
             onOpenChange={(open) => !open && onClose()}
             hasDivider
-          />
-          <dl className="grid gap-3 px-5 py-5 sm:grid-cols-[8rem_1fr]">
+          />}
+          content={<LayoutContent><dl className="grid gap-3 sm:grid-cols-[8rem_1fr]">
             <DT label="Timestamp" value={event.createdAt} />
             <DT label="Action" value={auditActionLabel(event.action)} />
             <DT label="Action ID" value={event.action} />
@@ -757,8 +759,8 @@ function DetailDialog({
                 key={key}
               />
             ))}
-          </dl>
-        </>
+          </dl></LayoutContent>}
+        />
       ) : null}
     </Dialog>
   );

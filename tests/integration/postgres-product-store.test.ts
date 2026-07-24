@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
-import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskMessage } from "../../packages/ports/src/store.js";
+import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskArtifact, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 import { readPostgresTestUrl } from "./postgres-test-database.js";
 
 const postgresUrl=readPostgresTestUrl();
@@ -24,6 +24,69 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   });
 
   after(async()=>{await store.close();});
+
+  it("uses stable keysets, ordinal title order, and literal Task search patterns",async()=>{
+    const records=[
+      {id:"task_page_percent",title:"100%",createdAt:"2026-07-23T00:00:01.000Z"},
+      {id:"task_page_percent_wildcard",title:"100x",createdAt:"2026-07-23T00:00:02.000Z"},
+      {id:"task_page_zed",title:"Zulu",createdAt:"2026-07-23T00:00:03.000Z"},
+      {id:"task_page_underscore",title:"_under",createdAt:"2026-07-23T00:00:04.000Z"},
+      {id:"task_page_alpha",title:"alpha",createdAt:"2026-07-23T00:00:04.000Z"},
+      {id:"task_page_backslash",title:String.raw`path\name`,createdAt:"2026-07-23T00:00:05.000Z"}
+    ];
+    for(const record of records){
+      const task={...taskRecord(record.id,`library_${record.id}`,"unused"),currentRunId:null,title:record.title,prompt:record.title,createdAt:record.createdAt,updatedAt:record.createdAt};
+      assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,record.title)})).kind,"created");
+    }
+
+    const scope={search:"",archived:"exclude" as const,sort:"title" as const,direction:"asc" as const,limit:3};
+    const first=await store.queryTasksForProject("project_atomic",scope);
+    assert.deepEqual(first.items.map((task)=>task.id),["task_page_percent","task_page_percent_wildcard","task_page_zed"]);
+    assert.equal(first.hasMore,true);
+    const last=first.items.at(-1)!;
+    const second=await store.queryTasksForProject("project_atomic",{...scope,after:{value:last.title!,taskId:last.id}});
+    assert.deepEqual(second.items.map((task)=>task.id),["task_page_underscore","task_page_alpha","task_page_backslash"]);
+    assert.equal(second.hasMore,false);
+    assert.equal(second.total,records.length);
+
+    for(const [search,expected] of [
+      ["%",["task_page_percent"]],
+      ["_",["task_page_underscore"]],
+      ["\\",["task_page_backslash"]]
+    ] as const){
+      const page=await store.queryTasksForProject("project_atomic",{...scope,search,limit:20});
+      assert.deepEqual(page.items.map((task)=>task.id),expected,search);
+    }
+
+    const newest=await store.queryTasksForProject("project_atomic",{...scope,sort:"created_at",direction:"desc",limit:2});
+    assert.deepEqual(newest.items.map((task)=>task.id),["task_page_backslash","task_page_underscore"]);
+    const newestLast=newest.items.at(-1)!;
+    const older=await store.queryTasksForProject("project_atomic",{...scope,sort:"created_at",direction:"desc",limit:2,after:{value:newestLast.createdAt,taskId:newestLast.id}});
+    assert.deepEqual(older.items.map((task)=>task.id),["task_page_alpha","task_page_zed"]);
+  });
+
+  it("pages Artifacts by timestamp and ordinal ID while sharing safe preview kinds",async()=>{
+    const task={...taskRecord("task_artifact_page","library_artifact_page","unused"),currentRunId:null};
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Artifact page")})).kind,"created");
+    const artifacts:PersistedTaskArtifact[]=[
+      taskArtifact("artifact_old",task.id,"2026-07-23T00:00:01.000Z","application/octet-stream"),
+      taskArtifact("artifact_png",task.id,"2026-07-23T00:00:02.000Z","IMAGE/PNG; charset=binary"),
+      taskArtifact("artifact_svg",task.id,"2026-07-23T00:00:02.000Z","image/svg+xml"),
+      taskArtifact("artifact_avif",task.id,"2026-07-23T00:00:03.000Z","image/avif")
+    ];
+    await store.appendTaskArtifacts(artifacts);
+
+    const scope={kind:null,mediaType:null,previewOnly:false,limit:2};
+    const first=await store.queryTaskArtifacts(task.id,scope);
+    assert.deepEqual(first.items.map((artifact)=>artifact.id),["artifact_avif","artifact_svg"]);
+    assert.equal(first.hasMore,true);
+    const last=first.items.at(-1)!;
+    const second=await store.queryTaskArtifacts(task.id,{...scope,after:{createdAt:last.createdAt,artifactId:last.id}});
+    assert.deepEqual(second.items.map((artifact)=>artifact.id),["artifact_png","artifact_old"]);
+    assert.equal(second.hasMore,false);
+    assert.deepEqual((await store.queryTaskArtifacts(task.id,{...scope,kind:"image",limit:10})).items.map((artifact)=>artifact.id),["artifact_png"]);
+    assert.deepEqual((await store.queryTaskArtifacts(task.id,{...scope,kind:"file",limit:10})).items.map((artifact)=>artifact.id),["artifact_avif","artifact_svg","artifact_old"]);
+  });
 
   it("reserves capacity, Task, Run, initial message, and Library atomically under a race",async()=>{
     const inputs=[0,1].map((index)=>{
@@ -275,7 +338,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findTask(seeded.task.id),null);
     assert.equal(await store.findFileLibrary(seeded.task.fileLibraryId!),null);
     assert.equal(await store.findTaskMessage(seeded.message.id),null);
-    assert.deepEqual(await store.listTaskArtifacts(seeded.task.id),[]);
+    assert.deepEqual((await store.queryTaskArtifacts(seeded.task.id,{kind:null,mediaType:null,previewOnly:false,limit:100})).items,[]);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state",seeded.task.id),null);
     assert.equal(finalized,"deleted");
     assert.deepEqual(await store.beginTaskIdempotency({...deleteClaim,claimToken:"project-delete-success-replay"}),{
@@ -571,6 +634,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   function taskRecord(id:string,fileLibraryId:string,currentRunId:string):PersistedAgentTask{return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",endpointId:"endpoint_atomic",fileLibraryId,createdByUserId:"user_atomic",title:"Task",prompt:"Work",agentContext:"",currentRunId,archivedAt:null,deletedAt:null,createdAt:at,updatedAt:at};}
   function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
+  function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:"workspaces/workspace_atomic/projects/project_atomic",fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
 
@@ -616,7 +680,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.ok(await store.findTask(seeded.task.id));
     assert.ok(await store.findFileLibrary(seeded.task.fileLibraryId!));
     assert.ok(await store.findTaskMessage(seeded.message.id));
-    assert.equal((await store.listTaskArtifacts(seeded.task.id)).length,1);
+    assert.equal((await store.queryTaskArtifacts(seeded.task.id,{kind:null,mediaType:null,previewOnly:false,limit:100})).items.length,1);
     assert.deepEqual(await store.jsonDocs.get("sandbox_runtime_state",seeded.task.id),{
       prompt:seeded.task.prompt,
       message:seeded.message.content

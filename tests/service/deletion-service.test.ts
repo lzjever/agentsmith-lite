@@ -37,7 +37,7 @@ describe("deletion lifecycle", () => {
     assert.equal(await store.findTask(seeded.task.id),null);
     assert.equal(await store.findFileLibrary(seeded.task.fileLibraryId!),null);
     assert.equal(await store.findTaskMessage(seeded.message.id),null);
-    assert.deepEqual(await store.listTaskArtifacts(seeded.task.id),[]);
+    assert.deepEqual((await store.queryTaskArtifacts(seeded.task.id,{kind:null,mediaType:null,previewOnly:false,limit:100})).items,[]);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state",seeded.task.id),null);
     for(const receipt of seeded.receipts){
       assert.equal((await store.beginTaskIdempotency({...receipt,claimToken:`retry-${receipt.claimToken}`})).kind,"claimed");
@@ -534,7 +534,7 @@ async function assertProjectDeletionBusinessDataIsPresent(
   assert.ok(await store.findTask(seeded.task.id));
   assert.ok(await store.findFileLibrary(seeded.task.fileLibraryId!));
   assert.ok(await store.findTaskMessage(seeded.message.id));
-  assert.equal((await store.listTaskArtifacts(seeded.task.id)).length,1);
+  assert.equal((await store.queryTaskArtifacts(seeded.task.id,{kind:null,mediaType:null,previewOnly:false,limit:100})).items.length,1);
   assert.deepEqual(await store.jsonDocs.get("sandbox_runtime_state",seeded.task.id),{
     prompt:seeded.task.prompt,
     message:seeded.message.content

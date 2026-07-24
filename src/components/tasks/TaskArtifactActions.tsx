@@ -1,9 +1,11 @@
 "use client";
 
 import { Download, Image as ImageIcon } from "lucide-react";
-import { Banner, Button, Dialog, DialogHeader, IconButton, Spinner, Text } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, IconButton, Layout, LayoutContent, LayoutFooter, Spinner, Text } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
+import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 import { formatArtifactBytes } from "./task-ui";
 
 const MAX_TEXT_PREVIEW_BYTES = 512 * 1024;
@@ -21,8 +23,9 @@ export type PreviewableTaskArtifact = {
 export function TaskArtifactActions({ taskId, artifact, available = true, className }: { taskId: string; artifact: PreviewableTaskArtifact; available?: boolean; className?: string }) {
   const [textOpen, setTextOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
-  const safeText = isPreviewableText(artifact.mediaType) && (artifact.previewText !== null && artifact.previewText !== undefined || artifact.bytes <= MAX_TEXT_PREVIEW_BYTES);
-  const safeImage = artifact.mediaType?.startsWith("image/") === true && artifact.bytes <= MAX_IMAGE_PREVIEW_BYTES;
+  const previewKind = classifyPreviewMediaType(artifact.mediaType);
+  const safeText = previewKind === "text" && (artifact.previewText !== null && artifact.previewText !== undefined || artifact.bytes <= MAX_TEXT_PREVIEW_BYTES);
+  const safeImage = previewKind === "image" && artifact.bytes <= MAX_IMAGE_PREVIEW_BYTES;
 
   if (!available) return null;
 
@@ -49,6 +52,10 @@ function ArtifactTextPreview({ taskId, artifact }: { taskId: string; artifact: P
     void apiClient.downloadTaskArtifact(taskId, artifact.id, controller.signal).then(async (blob) => {
       if (blob.size > MAX_TEXT_PREVIEW_BYTES) {
         if (!cancelled) setError("Text preview is too large.");
+        return;
+      }
+      if (classifyPreviewMediaType(artifact.mediaType) !== "text" || classifyPreviewMediaType(blob.type) !== "text") {
+        if (!cancelled) setError("The downloaded file type does not match its text preview metadata. Download the file to inspect it safely.");
         return;
       }
       const value = await blob.text();
@@ -79,7 +86,13 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     void apiClient.downloadTaskArtifact(taskId, artifact.id, controller.signal).then((blob) => {
       if (cancelled) return;
       if (blob.size > MAX_IMAGE_PREVIEW_BYTES) { setError("Image preview is too large."); return; }
-      setUrl(URL.createObjectURL(new Blob([blob], { type: artifact.mediaType ?? "application/octet-stream" })));
+      if (classifyPreviewMediaType(artifact.mediaType) !== "image" || classifyPreviewMediaType(blob.type) !== "image") {
+        setError("The downloaded file type does not match its image preview metadata. Download the file to inspect it safely.");
+        return;
+      }
+      const nextUrl = URL.createObjectURL(blob);
+      if (cancelled) { URL.revokeObjectURL(nextUrl); return; }
+      setUrl(nextUrl);
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof ApiError ? reason.message : "Image preview could not be loaded.");
     }).finally(() => { if (!cancelled) setLoading(false); });
@@ -93,7 +106,5 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     onOpenChange(nextOpen);
   }
 
-  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100vh - 2rem))" padding={0} aria-label={artifact.name}><div className="overflow-auto"><DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} hasDivider />{loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}{error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70vh] max-w-full object-contain p-5" /> : null}<div className="flex justify-end border-t border-border px-5 py-4"><Button label="Close" variant="ghost" onClick={() => close(false)} /></div></div></Dialog>;
+  return <Dialog isOpen={open} onOpenChange={close} purpose="info" width="min(34rem, calc(100vw - 2rem))" maxHeight="min(48rem, calc(100dvh - 2rem))" aria-label={artifact.name}><Layout defaultHasDividers header={<DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} onOpenChange={close} />} content={<LayoutContent padding={0}>{loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}{error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}{url ? <img src={url} alt={artifact.name} className="mx-auto block max-h-[70dvh] max-w-full object-contain p-5" /> : null}</LayoutContent>} footer={<LayoutFooter><div className="flex justify-end"><Button label="Close" variant="ghost" onClick={() => close(false)} /></div></LayoutFooter>} /></Dialog>;
 }
-
-export function isPreviewableText(mediaType: string | null | undefined): boolean { return mediaType === "application/json" || mediaType?.startsWith("text/") === true && mediaType !== "text/html"; }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { AlertDialog, Badge, Banner, Button, EmptyState, IconButton, Selector, Spinner, Tab, TabList, Text, useToast } from "@astryxdesign/core";
+import { Badge, Banner, Button, DialogHeader, EmptyState, IconButton, Layout, LayoutContent, LayoutFooter, Selector, Spinner, Tab, TabList, Text, useToast } from "@astryxdesign/core";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -14,7 +14,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ApiError,
   apiClient,
@@ -26,6 +26,7 @@ import {
 import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
+import { Dialog } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -56,6 +57,8 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
   const mutationKeys = useMutationKeys();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
+  const dismissTitleId = useId();
+  const dismissDescriptionId = useId();
   const [alerts, setAlerts] = useState<ProjectAlert[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [activeCount, setActiveCount] = useState(0);
@@ -308,6 +311,7 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
     }
     return accessDenied;
   }
+  const dismissBusy = Boolean(dismiss && busyId === dismiss.id);
   return (
     <PageLayout
       header={
@@ -402,19 +406,68 @@ function ProjectAlertsPage({ workspaceId, projectId }: { workspaceId: string | u
           ) : null}
         </>
       ) : null}
-      <AlertDialog
+      <Dialog
         isOpen={dismiss !== null}
-        onOpenChange={(open) => !open && busyId === null && setDismiss(null)}
-        title="Dismiss project alert"
-        description={
-          dismiss
-            ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.${error ? ` Last attempt failed: ${error}` : ""}`
-            : ""
-        }
-        actionLabel="Dismiss"
-        isActionLoading={Boolean(dismiss && busyId === dismiss.id)}
-        onAction={() => dismiss ? transition(dismiss, "dismissed").catch(() => undefined) : undefined}
-      />
+        onOpenChange={(open) => {
+          if (dismissBusy) return;
+          if (!open) setDismiss(null);
+        }}
+        purpose="form"
+        role="alertdialog"
+        width="min(32rem, calc(100vw - 2rem))"
+        aria-labelledby={dismissTitleId}
+        aria-describedby={dismissDescriptionId}
+      >
+        <Layout
+          defaultHasDividers
+          header={<DialogHeader id={dismissTitleId} title="Dismiss project alert" />}
+          content={
+            <LayoutContent>
+              <div className="grid gap-4">
+                <Text id={dismissDescriptionId} as="p" display="block" color="secondary">
+                  {dismiss
+                    ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
+                    : ""}
+                </Text>
+                {error ? (
+                  <Banner
+                    status="error"
+                    title="Alert could not be dismissed"
+                    description={error}
+                  />
+                ) : null}
+              </div>
+            </LayoutContent>
+          }
+          footer={
+            <LayoutFooter>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button
+                  label="Cancel"
+                  type="button"
+                  variant="ghost"
+                  size="lg"
+                  isDisabled={dismissBusy}
+                  onClick={() => {
+                    if (!dismissBusy) setDismiss(null);
+                  }}
+                />
+                <Button
+                  label={dismissBusy ? "Dismissing" : "Dismiss"}
+                  type="button"
+                  variant="destructive"
+                  size="lg"
+                  isDisabled={!dismiss || dismissBusy}
+                  isLoading={dismissBusy}
+                  onClick={() => {
+                    if (dismiss) void transition(dismiss, "dismissed").catch(() => undefined);
+                  }}
+                />
+              </div>
+            </LayoutFooter>
+          }
+        />
+      </Dialog>
     </PageLayout>
   );
 }

@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { chmod, chown, lstat, mkdir, readdir, rm, rmdir, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -23,13 +23,17 @@ import type {
   TaskCurrentTurnProjection,
   TaskRuntimeReachability,
   TaskSandboxReleaseReceipt,
+  TaskArtifactKind,
+  TaskArtifactListPage,
+  TaskArtifactListQuery,
   TaskListPage,
   TaskListQuery
 } from "../../contracts/src/api.js";
+import { classifyPreviewMediaType } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { normalizeSandboxResources } from "../../domain/src/kubernetesQuantity.js";
-import { DEFAULT_SANDBOX_NAMESPACE_LIMIT, MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
+import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
 import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
@@ -187,7 +191,6 @@ const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home/workspace";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
 const ACTIVE_TASKS_LIMIT_MESSAGE = "Project active tasks limit reached";
 const ACTIVE_TASKS_LIMIT_CODE = "active_tasks_limit_reached";
-const MAX_TASK_ARTIFACT_FILES = 128;
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
@@ -448,9 +451,14 @@ export class TaskService {
       sort: query.sort ?? "updated_at",
       direction: query.direction ?? "desc"
     };
-    const offset = decodeTaskListCursor(query.cursor, listQuery);
-    const page = await this.store.queryTasksForProject(projectId, { ...listQuery, offset, limit });
-    return { items:await Promise.all(page.items.map((task)=>this.taskPresentation(userId,task))), total: page.total, nextCursor: offset + page.items.length < page.total ? encodeTaskListCursor(offset + page.items.length, listQuery) : null };
+    const after = decodeTaskListCursor(query.cursor, projectId, listQuery);
+    const page = await this.store.queryTasksForProject(projectId, { ...listQuery, ...(after ? { after } : {}), limit });
+    const last = page.items.at(-1);
+    return {
+      items:await Promise.all(page.items.map((task)=>this.taskPresentation(userId,task))),
+      total:page.total,
+      nextCursor:page.hasMore&&last?encodeTaskListCursor(projectId,listQuery,{value:taskListSortValue(last,listQuery.sort),taskId:last.id}):null
+    };
   }
 
   async getTask(userId: string, taskId: string): Promise<TaskPresentation> {
@@ -1015,21 +1023,22 @@ export class TaskService {
     });
   }
 
-  async listTaskArtifacts(userId: string, taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}): Promise<AgentTaskArtifact[]> {
-    const task = await this.requireTaskForUser(userId, taskId, "view");
-    if(await this.activeSandboxRun(task))await this.bestEffortSyncTaskTimeline(task);
-    return filterTaskArtifacts((await this.store.listTaskArtifacts(taskId)).map(publicArtifact), filter);
+  async listTaskArtifacts(userId: string, taskId: string, query: TaskArtifactListQuery = {}): Promise<TaskArtifactListPage> {
+    await this.requireTaskForUser(userId, taskId, "view");
+    const limit=Math.min(100,Math.max(1,Math.floor(query.limit??20)));
+    const filter={kind:query.kind??null,mediaType:query.mediaType?.trim()||null,previewOnly:query.previewOnly===true};
+    const after=decodeTaskArtifactCursor(query.cursor,taskId,filter);
+    const page=await this.store.queryTaskArtifacts(taskId,{...filter,...(after?{after}:{}),limit});
+    const last=page.items.at(-1);
+    return{
+      items:page.items.map(publicArtifact),
+      nextCursor:page.hasMore&&last?encodeTaskArtifactCursor(taskId,filter,{createdAt:last.createdAt,artifactId:last.id}):null
+    };
   }
 
   async downloadTaskArtifact(userId: string, taskId: string, artifactId: string): Promise<TaskArtifactDownload> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
-    let artifacts = await this.store.listTaskArtifacts(taskId);
-    let artifact = artifacts.find((candidate) => candidate.id === artifactId);
-    if (!artifact && await this.activeSandboxRun(task)) {
-      await this.bestEffortSyncTaskTimeline(task);
-      artifacts = await this.store.listTaskArtifacts(taskId);
-      artifact = artifacts.find((candidate) => candidate.id === artifactId);
-    }
+    const artifact = await this.store.findTaskArtifact(taskId,artifactId);
     if (!artifact) {
       throw new ProductError("Task artifact not found", 404);
     }
@@ -1183,7 +1192,11 @@ export class TaskService {
     const inBatchCorrelations = new Map<string, TaskInteractionProjectionState>();
     const artifactProjections: PersistTaskArtifactProjectionInput[] = [];
     const newlyWrittenArtifactPaths: string[] = [];
-    const existingArtifacts = new Set((await this.store.listTaskArtifacts(task.id)).map((artifact) => artifact.fileId));
+    const candidateArtifactFileIds=[...new Set(timeline.events.flatMap((event)=>{
+      const fileId=stringValue(event.data.file_id)??(event.item?.type==="file"?event.item.id:undefined);
+      return fileId?[fileId]:[];
+    }))];
+    const existingArtifacts = new Set(await this.store.findExistingTaskArtifactFileIds(task.id,candidateArtifactFileIds));
     for (const event of timeline.events) {
       if (isAbortedCycleEvent(event)) continue;
       const previous = await this.previousProjectionState(task, event, latest, messages, redaction, inBatchCorrelations);
@@ -1478,54 +1491,6 @@ export class TaskService {
     const filePath = sandboxPath ? path.resolve(root, ...sandboxPath.split("/")) : path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
     return { root, filePath };
-  }
-
-  private async projectSandboxArtifactFiles(task: PersistedAgentTask): Promise<void> {
-    const project = await this.store.findProject(task.projectId);
-    if (!project) throw new ProductError("Task project not found", 409);
-    const dataRoot = path.resolve(this.config.dataRoot);
-    if(!task.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
-    const library=await this.store.findFileLibrary(task.fileLibraryId);
-    if(!library||library.projectId!==task.projectId)throw new ProductError("Task File Library is unavailable",409);
-    const root=path.resolve(dataRoot,project.rootPath,library.rootSubPath,"workspace",".artifacts",task.id);
-    assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
-    const existing = await this.store.listTaskArtifacts(task.id);
-    const existingFileIds = new Set(existing.map((artifact) => artifact.fileId));
-    const productStoredNames = new Set(existing
-      .filter((artifact)=>!artifact.fileId.startsWith("sandbox-published:"))
-      .map((artifact)=>`${artifactStorageSegment(artifact.id,"artifact")}-${artifactStorageSegment(artifact.name,artifact.fileId)}`));
-    const files = await listRegularArtifactFiles(root);
-    await this.reconcileTaskLibraryBytes(task);
-    let discovered=0;
-    for (const relativePath of files) {
-      const fileId = `sandbox-published:${relativePath}`;
-      const filePath = path.resolve(root, ...relativePath.split("/"));
-      assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
-      if(existingFileIds.has(fileId)||productStoredNames.has(relativePath)) {
-        continue;
-      }
-      discovered+=1;
-      if(discovered>MAX_TASK_ARTIFACT_FILES)throw new ProductError(`Task artifacts may contain at most ${MAX_TASK_ARTIFACT_FILES} files`,409);
-      const bytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task input source");
-      if (bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) throw new ProductError("Task artifact exceeds the maximum file size", 409);
-      const artifact: PersistedTaskArtifact = {
-        id: stableSandboxArtifactId(task.id, fileId),
-        taskId: task.id,
-        fileId,
-        name: normalizeArtifactDisplayName(relativePath, "artifact"),
-        bytes: bytes.byteLength,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        ...artifactPreview(bytes, relativePath),
-        createdAt: nowIso()
-      };
-      await this.store.persistTaskArtifactProjection({
-        projectId: task.projectId,
-        artifact,
-        auditEvent: { id: `audit_artifact_${artifact.id}`, projectId: task.projectId, actorId: null, action: "artifact.project", status: "accepted", resourceKind: "artifact", resourceId: artifact.id, createdAt: nowIso() },
-        updatedAt: nowIso()
-      });
-      existingFileIds.add(fileId);
-    }
   }
 
   private async reconcileTaskLibraryBytes(task:PersistedAgentTask):Promise<void>{
@@ -2347,49 +2312,63 @@ type TaskListCursorScope = {
   direction: NonNullable<TaskListQuery["direction"]>;
 };
 
-function encodeTaskListCursor(offset: number, query: TaskListCursorScope): string {
-  return Buffer.from(JSON.stringify({ offset, query }), "utf8").toString("base64url");
+type TaskListCursorAfter={value:string;taskId:string};
+type TaskArtifactCursorFilter={kind:TaskArtifactKind|null;mediaType:string|null;previewOnly:boolean};
+type TaskArtifactCursorAfter={createdAt:string;artifactId:string};
+
+function taskListSortValue(task:PersistedAgentTask,sort:TaskListCursorScope["sort"]):string{
+  return sort==="created_at"?task.createdAt:sort==="updated_at"?task.updatedAt:task.title??"";
 }
 
-function decodeTaskListCursor(cursor: string | undefined, query: TaskListCursorScope): number {
-  if (!cursor) return 0;
-  const text = Buffer.from(cursor, "base64url").toString("utf8");
-  let decoded: { offset?: unknown; query?: unknown };
-  try { decoded = JSON.parse(text) as { offset?: unknown; query?: unknown }; }
-  catch { throw new ProductError("Task list cursor is invalid", 400); }
-  const matchesQuery = isUnknownRecord(decoded.query) && canonicalJson(decoded.query) === canonicalJson(query);
-  if (Buffer.from(text, "utf8").toString("base64url") !== cursor || !Number.isSafeInteger(decoded.offset) || (decoded.offset as number) < 0 || !matchesQuery) throw new ProductError("Task list cursor is invalid for this query", 400);
-  return decoded.offset as number;
+function encodeTaskListCursor(projectId:string,scope:TaskListCursorScope,after:TaskListCursorAfter):string{
+  return Buffer.from(JSON.stringify({v:1,projectId,scope,after}),"utf8").toString("base64url");
 }
 
-function stableSandboxArtifactId(taskId: string, fileId: string): string {
-  return `art_${createHash("sha256").update(taskId).update("\0").update(fileId).digest("base64url").slice(0, 24)}`;
-}
-
-async function listRegularArtifactFiles(root:string):Promise<string[]> {
-  const files: string[] = [];
-  const pending = [""];
-  while (pending.length > 0) {
-    const relativeDirectory = pending.shift()!;
-    const directory = relativeDirectory ? path.resolve(root, ...relativeDirectory.split("/")) : root;
-    let entries;
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      if (isNotFound(error)) continue;
-      throw error;
-    }
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.isSymbolicLink()) continue;
-      const relativePath = relativeDirectory ? path.posix.join(relativeDirectory, entry.name) : entry.name;
-      if (entry.isDirectory()) {
-        pending.push(relativePath);
-      } else if (entry.isFile()) {
-        files.push(relativePath);
-      }
-    }
+function decodeTaskListCursor(cursor:string|undefined,projectId:string,scope:TaskListCursorScope):TaskListCursorAfter|undefined{
+  if(!cursor)return undefined;
+  const decoded=decodeCursorRecord(cursor,"Task list cursor is invalid");
+  const after=decoded.after;
+  if(!isUnknownRecord(after)||typeof after.value!=="string"||typeof after.taskId!=="string"||!after.taskId){
+    throw new ProductError("Task list cursor is invalid for this query",400);
   }
-  return files;
+  if(scope.sort!=="title"&&!isCanonicalIsoDate(after.value))throw new ProductError("Task list cursor is invalid for this query",400);
+  const normalizedAfter={value:after.value,taskId:after.taskId};
+  if(canonicalJson(decoded)!==canonicalJson({v:1,projectId,scope,after:normalizedAfter}))throw new ProductError("Task list cursor is invalid for this query",400);
+  return normalizedAfter;
+}
+
+function encodeTaskArtifactCursor(taskId:string,filter:TaskArtifactCursorFilter,after:TaskArtifactCursorAfter):string{
+  return Buffer.from(JSON.stringify({v:1,taskId,filter,after}),"utf8").toString("base64url");
+}
+
+function decodeTaskArtifactCursor(cursor:string|undefined,taskId:string,filter:TaskArtifactCursorFilter):TaskArtifactCursorAfter|undefined{
+  if(!cursor)return undefined;
+  const decoded=decodeCursorRecord(cursor,"Task Artifact cursor is invalid");
+  const after=decoded.after;
+  if(!isUnknownRecord(after)||typeof after.createdAt!=="string"||!isCanonicalIsoDate(after.createdAt)||typeof after.artifactId!=="string"||!after.artifactId){
+    throw new ProductError("Task Artifact cursor is invalid for this query",400);
+  }
+  const normalizedAfter={createdAt:after.createdAt,artifactId:after.artifactId};
+  if(canonicalJson(decoded)!==canonicalJson({v:1,taskId,filter,after:normalizedAfter}))throw new ProductError("Task Artifact cursor is invalid for this query",400);
+  return normalizedAfter;
+}
+
+function decodeCursorRecord(cursor:string,message:string):Record<string,unknown>{
+  let text:string,decoded:unknown;
+  try{
+    text=Buffer.from(cursor,"base64url").toString("utf8");
+    decoded=JSON.parse(text);
+  }catch{throw new ProductError(message,400);}
+  if(Buffer.from(text,"utf8").toString("base64url")!==cursor||!isUnknownRecord(decoded))throw new ProductError(message,400);
+  return decoded;
+}
+
+function isCanonicalIsoDate(value:string):boolean{
+  try{
+    return new Date(value).toISOString()===value;
+  }catch{
+    return false;
+  }
 }
 
 function createBotifiedServiceKey(secret: string | undefined, input: BotifiedServiceKeyInput): string {
@@ -2655,20 +2634,12 @@ function normalizeArtifactDisplayName(input: string, fallback: string): string {
   return fallbackCleaned.length > 0 ? fallbackCleaned : "artifact";
 }
 
-function filterTaskArtifacts(artifacts: AgentTaskArtifact[], filter: { mediaType?: string; previewOnly?: boolean }): AgentTaskArtifact[] {
-  return artifacts.filter((artifact) =>
-    (filter.mediaType === undefined || artifact.mediaType === filter.mediaType) &&
-    (!filter.previewOnly || artifact.previewText !== null && artifact.previewText !== undefined)
-  );
-}
-
 function artifactPreview(bytes: Uint8Array, name: string): Pick<AgentTaskArtifact, "mediaType" | "previewText"> {
   const extension = path.extname(name).toLowerCase();
   const mediaType = extension === ".html" || extension === ".htm"
     ? "text/html"
     : detectProjectFileMediaType(bytes, name);
-  if (!mediaType.startsWith("text/") && mediaType !== "application/json") return { mediaType, previewText: null };
-  if (mediaType === "text/html" || bytes.byteLength > 1_048_576) return { mediaType, previewText: null };
+  if (classifyPreviewMediaType(mediaType) !== "text" || bytes.byteLength > 1_048_576) return { mediaType, previewText: null };
   const preview = Buffer.from(bytes.subarray(0, ARTIFACT_PREVIEW_MAX_BYTES)).toString("utf8").replace(/\u0000/g, "");
   return { mediaType, previewText: isSecretLikeText(preview) ? redactSecretLikeText(preview) : preview };
 }

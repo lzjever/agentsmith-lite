@@ -319,6 +319,9 @@ export function detectProjectFileMediaType(bytes: Uint8Array, filename: string):
   if (!isUtf8Text(bytes)) return "application/octet-stream";
   const text = Buffer.from(bytes).toString("utf8");
   const extension = path.posix.extname(filename).toLowerCase();
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".html" || extension === ".htm") return "text/html";
+  if (extension === ".xml") return "application/xml";
   if (extension === ".json") {
     try { JSON.parse(text); return "application/json"; } catch { return "text/plain"; }
   }
@@ -329,6 +332,10 @@ export function detectProjectFileMediaType(bytes: Uint8Array, filename: string):
 
 function projectFileMediaTypeFromName(filename: string): string {
   switch (path.posix.extname(filename).toLowerCase()) {
+    case ".svg": return "image/svg+xml";
+    case ".html":
+    case ".htm": return "text/html";
+    case ".xml": return "application/xml";
     case ".png": return "image/png";
     case ".jpg":
     case ".jpeg": return "image/jpeg";

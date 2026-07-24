@@ -126,11 +126,11 @@ export function AppShell({ children, workspaceId, projectId }: ShellProps) {
   const profileReturnTo = typeof window === "undefined" ? pathname : `${window.location.pathname}${window.location.search}${window.location.hash}`;
   return <AstryxAppShell
     variant="section"
-    height="auto"
+    height="fill"
     topNav={<Topbar user={user!} workspaces={workspaces} workspace={workspace} project={project} profileReturnTo={profileReturnTo} onOpenNavigation={() => setMobileNavigationOpen(true)} />}
     sideNav={<ShellNavigation workspace={workspace} project={project} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed} />}
     mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full flex-col"><div className="min-h-0 flex-1"><ShellNavigation workspace={workspace} project={project} pathname={pathname} onNavigate={() => setMobileNavigationOpen(false)} /></div><ThemeToggle mobile /></div></MobileNav>}
-  ><div ref={contentStart} tabIndex={-1} className="min-h-full outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell>;
+  ><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState === "error" ? <DirectoryNotice onRetry={() => loadDirectory(true)} /> : null}{contextError ?? children}</div></AstryxAppShell>;
 }
 
 function ShellLoadingFrame() {

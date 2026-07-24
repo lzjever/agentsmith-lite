@@ -8,10 +8,12 @@ export type PageLayoutProps = {
   footer?: ReactNode;
   density?: "default" | "immersive";
   contentWidth?: "full" | "wide" | "narrow";
+  height?: "auto" | "fill";
 };
 
-export function PageLayout({ header, toolbar, children, footer, density = "default", contentWidth = "wide" }: PageLayoutProps) {
+export function PageLayout({ header, toolbar, children, footer, density = "default", contentWidth = "wide", height = "auto" }: PageLayoutProps) {
   const immersive = density === "immersive";
+  const fill = height === "fill";
   const contentWidthProps = contentWidth === "full"
     ? {}
     : { contentWidth: contentWidth === "narrow" ? "64rem" : "1480px" };
@@ -32,8 +34,9 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
   return (
     <Layout
       data-testid="page-layout"
-      height="auto"
+      height={height}
       padding={0}
+      className={fill ? "min-h-0 overflow-hidden" : undefined}
       {...contentWidthProps}
       header={header || toolbar ? (
         <LayoutHeader padding={0}>
@@ -48,9 +51,9 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
           data-testid="page-layout__body"
           padding={0}
           isScrollable={false}
-          className={`${gutters} ${bodyTopPadding} ${bottomPadding}`}
+          className={`${gutters} ${bodyTopPadding} ${bottomPadding} ${fill ? "min-h-0 overflow-hidden" : ""}`}
         >
-          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+          <div className={`flex min-h-0 flex-1 flex-col ${fill ? "h-full overflow-hidden" : ""}`}>{children}</div>
         </LayoutContent>
       }
       footer={footer ? (

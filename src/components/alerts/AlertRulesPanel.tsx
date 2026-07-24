@@ -1,10 +1,11 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { Banner, Button, Dialog, DialogHeader, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Banner, Button, DialogHeader, EmptyState, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Text, useToast } from "@astryxdesign/core";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule, type ProjectAlertType } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
+import { Dialog } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
@@ -227,7 +228,63 @@ export function AlertRulesPanel({ projectId, endpoints = [], canManage, onAccess
 }
 function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: { open: boolean; busy: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (next: boolean) => !busy && onOpenChange(next);
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete alert rule"><DialogHeader title="Delete alert rule" subtitle="This permanently removes the rule from this project." onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="Alert rule could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={busy} onClick={() => handleOpenChange(false)} /><Button label="Delete" variant="destructive" size="lg" isDisabled={busy} isLoading={busy} onClick={() => void onConfirm()} /></footer></Dialog>;
+  const titleId = useId();
+  const descriptionId = useId();
+  return (
+    <Dialog
+      isOpen={open}
+      onOpenChange={handleOpenChange}
+      purpose="form"
+      role="alertdialog"
+      width="min(32rem, calc(100vw - 2rem))"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+    >
+      <Layout
+        defaultHasDividers
+        header={<DialogHeader id={titleId} title="Delete alert rule" />}
+        content={
+          <LayoutContent>
+            <div className="grid gap-4">
+              <Text id={descriptionId} as="p" display="block" color="secondary">
+                This permanently removes the rule from this project.
+              </Text>
+              {error ? (
+                <Banner
+                  status="error"
+                  title="Alert rule could not be deleted"
+                  description={error}
+                />
+              ) : null}
+            </div>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                label="Cancel"
+                type="button"
+                variant="ghost"
+                size="lg"
+                isDisabled={busy}
+                onClick={() => handleOpenChange(false)}
+              />
+              <Button
+                label="Delete"
+                type="button"
+                variant="destructive"
+                size="lg"
+                isDisabled={busy}
+                isLoading={busy}
+                onClick={() => void onConfirm()}
+              />
+            </div>
+          </LayoutFooter>
+        }
+      />
+    </Dialog>
+  );
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
 function scopeLabel(rule:ProjectAlertRule,endpoints:Endpoint[]){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpoints.find(endpoint=>endpoint.id===scope.endpointId)?.name??"Endpoint";}

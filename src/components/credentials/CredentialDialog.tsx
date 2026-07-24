@@ -1,20 +1,21 @@
 import {
   Banner,
   Button,
-  Dialog,
   DialogHeader,
   Layout,
   LayoutContent,
   LayoutFooter,
   TextInput,
 } from "@astryxdesign/core";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
+import { Dialog } from "../ui/Dialog";
 import { CredentialSecretField } from "./CredentialSecretField";
 
 export function CredentialDialog({ open, onOpenChange, title, busy, error, onSubmit, submit, includeName = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; busy: boolean; error: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; submit: string; includeName?: boolean }) {
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [secret, setSecret] = useState("");
+  const formId = useId();
   useEffect(() => {
     if (open) {
       setName("");
@@ -40,22 +41,21 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
       onOpenChange={handleOpenChange}
       purpose="form"
       width="min(34rem, calc(100vw - 2rem))"
-      padding={0}
       aria-label={title}
     >
-      <form className="flex min-h-0 flex-1" onSubmit={handleSubmit}>
-        <Layout
-          height="fill"
-          defaultHasDividers
-          header={
-            <DialogHeader
-              title={title}
-              subtitle="The secret is sent once and is never displayed again."
-              onOpenChange={handleOpenChange}
-            />
-          }
-          content={
-            <LayoutContent>
+      <Layout
+        height="fill"
+        defaultHasDividers
+        header={
+          <DialogHeader
+            title={title}
+            subtitle="The secret is sent once and is never displayed again."
+            onOpenChange={handleOpenChange}
+          />
+        }
+        content={
+          <LayoutContent>
+            <form id={formId} onSubmit={handleSubmit}>
               {error ? (
                 <Banner
                   className="mb-4"
@@ -97,32 +97,33 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
                 ) : null}
                 <CredentialSecretField value={secret} onChange={setSecret} disabled={busy} />
               </div>
-            </LayoutContent>
-          }
-          footer={
-            <LayoutFooter>
-              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button
-                  label="Cancel"
-                  type="button"
-                  variant="ghost"
-                  size="lg"
-                  onClick={() => handleOpenChange(false)}
-                  isDisabled={busy}
-                />
-                <Button
-                  label={busy ? "Working..." : submit}
-                  type="submit"
-                  variant="primary"
-                  size="lg"
-                  isDisabled={busy || !canSubmit}
-                  isLoading={busy}
-                />
-              </div>
-            </LayoutFooter>
-          }
-        />
-      </form>
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                label="Cancel"
+                type="button"
+                variant="ghost"
+                size="lg"
+                onClick={() => handleOpenChange(false)}
+                isDisabled={busy}
+              />
+              <Button
+                label={busy ? "Working..." : submit}
+                type="submit"
+                form={formId}
+                variant="primary"
+                size="lg"
+                isDisabled={busy || !canSubmit}
+                isLoading={busy}
+              />
+            </div>
+          </LayoutFooter>
+        }
+      />
     </Dialog>
   );
 }

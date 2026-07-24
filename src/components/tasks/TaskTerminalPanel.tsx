@@ -1,7 +1,7 @@
 "use client";
 
 import { Maximize2, RefreshCw, TerminalSquare } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner, IconButton, Text } from "@astryxdesign/core";
 import { useTheme } from "@astryxdesign/core/theme";
 import { apiClient } from "../../lib/api/client";
@@ -19,96 +19,274 @@ export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; a
   const { tokens } = useTheme();
   const terminalTheme = useMemo(() => xtermThemeFromTokens(tokens), [tokens]);
   const viewport = useRef<HTMLDivElement>(null);
-  const terminalInstance=useRef<import("@xterm/xterm").Terminal|null>(null);
-  const terminalThemeRef=useRef(terminalTheme);
-  const fitInstance=useRef<import("@xterm/addon-fit").FitAddon|null>(null);
-  const socketInstance=useRef<WebSocket|null>(null);
-  const reconnectAttempt=useRef(0);
-  const terminalTaskId=useRef(taskId);
-  const [generation,setGeneration]=useState(0);
-  const [state,setState]=useState<TerminalState>("connecting");
-  const [error,setError]=useState("");
-  terminalThemeRef.current=terminalTheme;
+  const terminalInstance = useRef<import("@xterm/xterm").Terminal | null>(null);
+  const terminalThemeRef = useRef(terminalTheme);
+  const fitInstance = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
+  const socketInstance = useRef<WebSocket | null>(null);
+  const reconnectAttempt = useRef(0);
+  const terminalTaskId = useRef(taskId);
+  const activeRef = useRef(active);
+  const previousActive = useRef(active);
+  const needsFit = useRef(true);
+  const focusWhenVisible = useRef(active);
+  const focusFrameReady = useRef(false);
+  const initialReadyHandled = useRef(false);
+  const [terminalEpoch, setTerminalEpoch] = useState(0);
+  const [generation, setGeneration] = useState(0);
+  const [state, setState] = useState<TerminalState>("connecting");
+  const [error, setError] = useState("");
+  terminalThemeRef.current = terminalTheme;
+  if (active && !previousActive.current) {
+    focusWhenVisible.current = true;
+    focusFrameReady.current = false;
+  }
+  activeRef.current = active;
 
-  useEffect(()=>{
-    if(terminalTaskId.current!==taskId){terminalTaskId.current=taskId;reconnectAttempt.current=0;}
-    let disposed=false;
-    let retryScheduled=false;
-    let shellExited=false;
-    let retryTimer:ReturnType<typeof setTimeout>|undefined;
-    let socket:WebSocket|undefined;
-    let terminal:import("@xterm/xterm").Terminal|undefined;
-    let fit:import("@xterm/addon-fit").FitAddon|undefined;
-    let observer:ResizeObserver|undefined;
-    void Promise.all([import("@xterm/xterm"),import("@xterm/addon-fit")]).then(([xterm,addon])=>{
-      if(disposed||!viewport.current)return;
-      terminal=new xterm.Terminal({cursorBlink:true,...terminalTypography(viewport.current),scrollback:5000,theme:terminalThemeRef.current});
-      fit=new addon.FitAddon();terminal.loadAddon(fit);terminal.open(viewport.current);fit.fit();terminal.focus();
-      terminalInstance.current=terminal;fitInstance.current=fit;
-      terminal.writeln("\x1b[90mConnecting to the task workspace...\x1b[0m");
-      socket=new WebSocket(apiClient.taskTerminalWebSocketUrl(taskId));socketInstance.current=socket;
-      const retryOrFail=(message:string)=>{
-        if(disposed||retryScheduled||shellExited)return;
-        const delay=AUTO_RECONNECT_DELAYS_MS[reconnectAttempt.current];
-        if(delay===undefined){setError(message);setState("error");return;}
-        retryScheduled=true;reconnectAttempt.current+=1;setState("connecting");
-        terminal?.writeln(`\r\n\x1b[90mWorkspace is starting. Reconnecting in ${delay/1_000}s...\x1b[0m`);
-        retryTimer=setTimeout(()=>{if(!disposed)setGeneration((value)=>value+1);},delay);
-      };
-      socket.onmessage=(event)=>{
-        let frame:{op?:string;data?:string;message?:string;exit_code?:number|null};
-        try{frame=JSON.parse(String(event.data)) as typeof frame;}catch{return;}
-        if(frame.op==="ready"){reconnectAttempt.current=0;setError("");setState("ready");terminal?.clear();sendSize(socket,terminal);return;}
-        if(frame.op==="output"&&frame.data){terminal?.write(decodeBase64(frame.data));return;}
-        if(frame.op==="completed"){shellExited=true;terminal?.writeln(`\r\n\x1b[90mShell exited${frame.exit_code===null||frame.exit_code===undefined?"":` with code ${frame.exit_code}`}.\x1b[0m`);setState("closed");return;}
-        if(frame.op==="error"){retryOrFail(frame.message??"Task terminal failed.");socket?.close();}
-      };
-      socket.onerror=()=>retryOrFail("Task terminal connection failed.");
-      socket.onclose=(event)=>{
-        if(event.code===1008){shellExited=true;if(retryTimer)clearTimeout(retryTimer);retryScheduled=false;setError(event.reason||"Task terminal access changed.");setState("error");return;}
-        if(shellExited){setState("closed");return;}
-        if(event.code===1009){
-          if(retryTimer)clearTimeout(retryTimer);
-          retryScheduled=false;
-          setError(event.reason||"Task terminal connection exceeded its buffer limit.");
-          setState("error");
-          return;
+  const fitTerminal = useCallback((focus: boolean) => {
+    const container = viewport.current;
+    const fit = fitInstance.current;
+    const terminal = terminalInstance.current;
+    if (!container || !fit || !terminal || container.clientWidth === 0 || container.clientHeight === 0) {
+      needsFit.current = true;
+      if (focus) focusWhenVisible.current = true;
+      return false;
+    }
+    fit.fit();
+    sendSize(socketInstance.current, terminal);
+    needsFit.current = false;
+    if (focus) {
+      terminal.focus();
+      focusWhenVisible.current = false;
+      focusFrameReady.current = false;
+    }
+    return true;
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let initialFrame: number | undefined;
+    let observer: ResizeObserver | undefined;
+    let terminal: import("@xterm/xterm").Terminal | undefined;
+
+    terminalTaskId.current = taskId;
+    reconnectAttempt.current = 0;
+    initialReadyHandled.current = false;
+    needsFit.current = true;
+    focusWhenVisible.current = activeRef.current;
+    focusFrameReady.current = false;
+    setError("");
+    setState("connecting");
+
+    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
+      .then(([xterm, addon]) => {
+        const container = viewport.current;
+        if (disposed || !container) return;
+        terminal = new xterm.Terminal({
+          cursorBlink: true,
+          ...terminalTypography(container),
+          scrollback: 5000,
+          theme: terminalThemeRef.current,
+        });
+        const fit = new addon.FitAddon();
+        terminal.loadAddon(fit);
+        terminal.open(container);
+        terminalInstance.current = terminal;
+        fitInstance.current = fit;
+        terminal.writeln("\x1b[90mConnecting to the task workspace...\x1b[0m");
+        terminal.onData((data) => {
+          const socket = socketInstance.current;
+          if (socket?.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ op: "stdin", data: encodeBase64(data) }));
+          }
+        });
+        observer = new ResizeObserver(() => {
+          if (!activeRef.current) {
+            needsFit.current = true;
+            return;
+          }
+          if (focusWhenVisible.current && !focusFrameReady.current) {
+            needsFit.current = true;
+            return;
+          }
+          fitTerminal(focusWhenVisible.current);
+        });
+        observer.observe(container);
+        setTerminalEpoch((value) => value + 1);
+        initialFrame = requestAnimationFrame(() => {
+          focusFrameReady.current = true;
+          if (activeRef.current) fitTerminal(true);
+        });
+      })
+      .catch(() => {
+        if (disposed) return;
+        setError("Task terminal could not be loaded.");
+        setState("error");
+      });
+
+    return () => {
+      disposed = true;
+      if (initialFrame !== undefined) cancelAnimationFrame(initialFrame);
+      observer?.disconnect();
+      const socket = socketInstance.current;
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ op: "cancel" }));
+      }
+      socket?.close();
+      if (socketInstance.current === socket) socketInstance.current = null;
+      terminal?.dispose();
+      terminalInstance.current = null;
+      fitInstance.current = null;
+    };
+  }, [fitTerminal, taskId]);
+
+  useEffect(() => {
+    if (!terminalInstance.current || terminalTaskId.current !== taskId) return;
+    let disposed = false;
+    let retryScheduled = false;
+    let shellExited = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const socket = new WebSocket(apiClient.taskTerminalWebSocketUrl(taskId));
+    socketInstance.current = socket;
+    setState("connecting");
+
+    const retryOrFail = (message: string) => {
+      if (disposed || retryScheduled || shellExited) return;
+      const delay = AUTO_RECONNECT_DELAYS_MS[reconnectAttempt.current];
+      if (delay === undefined) {
+        setError(message);
+        setState("error");
+        return;
+      }
+      retryScheduled = true;
+      reconnectAttempt.current += 1;
+      setState("connecting");
+      terminalInstance.current?.writeln(
+        `\r\n\x1b[90mWorkspace is starting. Reconnecting in ${delay / 1_000}s...\x1b[0m`,
+      );
+      retryTimer = setTimeout(() => {
+        if (!disposed) setGeneration((value) => value + 1);
+      }, delay);
+    };
+
+    socket.onmessage = (event) => {
+      if (disposed) return;
+      let frame: { op?: string; data?: string; message?: string; exit_code?: number | null };
+      try {
+        frame = JSON.parse(String(event.data)) as typeof frame;
+      } catch {
+        return;
+      }
+      const terminal = terminalInstance.current;
+      if (frame.op === "ready") {
+        reconnectAttempt.current = 0;
+        setError("");
+        setState("ready");
+        if (!initialReadyHandled.current) {
+          terminal?.clear();
+          initialReadyHandled.current = true;
         }
-        retryOrFail("Task terminal connection failed.");
-      };
-      terminal.onData((data)=>{if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:"stdin",data:encodeBase64(data)}));});
-      observer=new ResizeObserver(()=>{fit?.fit();sendSize(socket,terminal);});observer.observe(viewport.current);
-    }).catch(()=>{setError("Task terminal could not be loaded.");setState("error");});
-    return()=>{disposed=true;if(retryTimer)clearTimeout(retryTimer);observer?.disconnect();if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({op:"cancel"}));socket?.close();terminal?.dispose();terminalInstance.current=null;fitInstance.current=null;socketInstance.current=null;};
-  },[generation,taskId]);
+        if (activeRef.current) {
+          fitTerminal(false);
+        } else {
+          needsFit.current = true;
+        }
+        return;
+      }
+      if (frame.op === "output" && frame.data) {
+        terminal?.write(decodeBase64(frame.data));
+        return;
+      }
+      if (frame.op === "completed") {
+        shellExited = true;
+        terminal?.writeln(
+          `\r\n\x1b[90mShell exited${
+            frame.exit_code === null || frame.exit_code === undefined ? "" : ` with code ${frame.exit_code}`
+          }.\x1b[0m`,
+        );
+        setState("closed");
+        return;
+      }
+      if (frame.op === "error") {
+        retryOrFail(frame.message ?? "Task terminal failed.");
+        socket.close();
+      }
+    };
+    socket.onerror = () => {
+      if (!disposed) retryOrFail("Task terminal connection failed.");
+    };
+    socket.onclose = (event) => {
+      if (disposed) return;
+      if (event.code === 1008) {
+        shellExited = true;
+        if (retryTimer) clearTimeout(retryTimer);
+        retryScheduled = false;
+        setError(event.reason || "Task terminal access changed.");
+        setState("error");
+        return;
+      }
+      if (shellExited) {
+        setState("closed");
+        return;
+      }
+      if (event.code === 1009) {
+        if (retryTimer) clearTimeout(retryTimer);
+        retryScheduled = false;
+        setError(event.reason || "Task terminal connection exceeded its buffer limit.");
+        setState("error");
+        return;
+      }
+      retryOrFail("Task terminal connection failed.");
+    };
 
-  useEffect(()=>{
-    const updateAppearance=()=>{
-      const terminal=terminalInstance.current;
-      const container=viewport.current;
-      if(!terminal||!container)return;
-      terminal.options.theme=terminalTheme;
-      const typography=terminalTypography(container);
-      terminal.options.fontFamily=typography.fontFamily;
-      terminal.options.fontSize=typography.fontSize;
-      fitInstance.current?.fit();
-      sendSize(socketInstance.current,terminal);
+    return () => {
+      disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket.close();
+      if (socketInstance.current === socket) socketInstance.current = null;
+    };
+  }, [fitTerminal, generation, taskId, terminalEpoch]);
+
+  useEffect(() => {
+    const updateAppearance = () => {
+      const terminal = terminalInstance.current;
+      const container = viewport.current;
+      if (!terminal || !container) return;
+      terminal.options.theme = terminalTheme;
+      const typography = terminalTypography(container);
+      terminal.options.fontFamily = typography.fontFamily;
+      terminal.options.fontSize = typography.fontSize;
+      if (activeRef.current) {
+        fitTerminal(false);
+      } else {
+        needsFit.current = true;
+      }
     };
     updateAppearance();
-    document.fonts?.addEventListener("loadingdone",updateAppearance);
-    return()=>document.fonts?.removeEventListener("loadingdone",updateAppearance);
-  },[terminalTheme]);
+    document.fonts?.addEventListener("loadingdone", updateAppearance);
+    return () => document.fonts?.removeEventListener("loadingdone", updateAppearance);
+  }, [fitTerminal, terminalTheme]);
 
-  useEffect(()=>{
-    if(!active)return;
-    const frame=requestAnimationFrame(()=>fitTerminal());
-    return()=>cancelAnimationFrame(frame);
-  },[active]);
-
-  function fitTerminal(){fitInstance.current?.fit();sendSize(socketInstance.current,terminalInstance.current);terminalInstance.current?.focus();}
+  useEffect(() => {
+    const wasActive = previousActive.current;
+    previousActive.current = active;
+    if (!active) {
+      needsFit.current = true;
+      focusWhenVisible.current = false;
+      focusFrameReady.current = false;
+      return;
+    }
+    if (wasActive) return;
+    focusWhenVisible.current = true;
+    focusFrameReady.current = false;
+    const frame = requestAnimationFrame(() => {
+      focusFrameReady.current = true;
+      fitTerminal(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, fitTerminal]);
 
   return <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-muted" aria-label="Task terminal">
-    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-card px-3 text-primary"><div className="flex items-center gap-2"><TerminalSquare size={16}/><Text type="supporting">Task terminal</Text><Text type="code" color="secondary">{formatTerminalState(state)}</Text></div><div className="flex items-center gap-1"><IconButton label="Fit terminal" tooltip="Fit terminal" variant="ghost" icon={<Maximize2 size={15}/>} onClick={fitTerminal}/>{state==="closed"||state==="error"?<IconButton label="Reconnect terminal" tooltip="Reconnect terminal" variant="ghost" icon={<RefreshCw size={15}/>} onClick={()=>{reconnectAttempt.current=0;setError("");setState("connecting");setGeneration((value)=>value+1);}}/>:null}</div></div>
+    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-card px-3 text-primary"><div className="flex items-center gap-2"><TerminalSquare size={16}/><Text type="supporting">Task terminal</Text><Text type="code" color="secondary">{formatTerminalState(state)}</Text></div><div className="flex items-center gap-1"><IconButton label="Fit terminal" tooltip="Fit terminal" variant="ghost" icon={<Maximize2 size={15}/>} onClick={() => { focusFrameReady.current = true; fitTerminal(true); }}/>{state==="closed"||state==="error"?<IconButton label="Reconnect terminal" tooltip="Reconnect terminal" variant="ghost" icon={<RefreshCw size={15}/>} onClick={()=>{reconnectAttempt.current=0;setError("");setState("connecting");setGeneration((value)=>value+1);}}/>:null}</div></div>
     {error?<Banner status="error" container="section" title="Terminal connection failed" description={error}/>:null}
     <div ref={viewport} className="min-h-0 w-full flex-1 p-2" style={{ fontFamily: "var(--font-family-code)", fontSize: "var(--font-size-sm)" }} />
   </section>;

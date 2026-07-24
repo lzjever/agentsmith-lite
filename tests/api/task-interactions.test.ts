@@ -104,8 +104,9 @@ describe("task interactions API", () => {
     assert.ok(stored);
     await makeTaskRunActive(store, stored, "http://botified.internal");
     const interactions = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
-    const artifacts = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/artifacts`);
-    const leakedJson = JSON.stringify({ interactions, artifacts });
+    const artifactPage = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/artifacts`);
+    const artifacts=artifactPage.items;
+    const leakedJson = JSON.stringify({ interactions, artifactPage });
 
     assert.equal(interactions.items.some((item: { kind:string; artifactId?:string }) => item.kind === "file" && item.artifactId === artifacts[0].id), true);
     assert.equal(task.prompt, "make notes");

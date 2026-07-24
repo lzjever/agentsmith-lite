@@ -1,15 +1,15 @@
 import {
   Banner,
   Button,
-  Dialog,
   DialogHeader,
   Layout,
   LayoutContent,
   LayoutFooter,
   Text,
 } from "@astryxdesign/core";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { Endpoint } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 
 export function DeleteEndpointDialog({
   endpoint,
@@ -25,6 +25,8 @@ export function DeleteEndpointDialog({
   onConfirm: () => Promise<void>;
 }) {
   const [failure, setFailure] = useState("");
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     setFailure("");
@@ -53,16 +55,16 @@ export function DeleteEndpointDialog({
       purpose="form"
       role="alertdialog"
       width="min(34rem, calc(100vw - 2rem))"
-      padding={0}
-      aria-label="Delete endpoint"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
     >
       <Layout
         defaultHasDividers
-        header={<DialogHeader title="Delete endpoint" onOpenChange={handleOpenChange} />}
+        header={<DialogHeader id={titleId} title="Delete endpoint" />}
         content={
           <LayoutContent>
             <div className="grid gap-4">
-              <Text as="p" display="block" color="secondary">
+              <Text id={descriptionId} as="p" display="block" color="secondary">
                 {endpoint
                   ? `Remove ${endpoint.name}? This also removes its rolling limits and endpoint alert rules, and resolves active endpoint alerts. Tasks that reference it must be deleted first.`
                   : ""}

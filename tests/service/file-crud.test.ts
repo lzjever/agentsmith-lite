@@ -74,6 +74,33 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("infers SVG as non-inline image content and PNG as raster image content", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-media-"));
+    try {
+      const service = new FileService();
+      const svg = await service.uploadLibraryFile(root, LIBRARY_ROOT, {
+        path: "diagram.svg",
+        bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+      });
+      const png = await service.uploadLibraryFile(root, LIBRARY_ROOT, {
+        path: "preview.png",
+        bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      });
+
+      assert.equal(svg.mediaType, "image/svg+xml");
+      assert.equal(png.mediaType, "image/png");
+      assert.deepEqual(
+        (await service.listLibraryFiles(root, LIBRARY_ROOT)).entries.map((entry) => [entry.name, entry.mediaType]),
+        [
+          ["diagram.svg", "image/svg+xml"],
+          ["preview.png", "image/png"]
+        ]
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("requires an explicit canonical Library root and rejects unsafe relative paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {

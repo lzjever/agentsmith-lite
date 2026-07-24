@@ -2,18 +2,18 @@
 
 import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Banner, Button, Collapsible, Dialog, DialogHeader, EmptyState, FileInput, Heading, IconButton, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Banner, Button, Collapsible, DialogHeader, EmptyState, FileInput, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
+import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
+import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
+import { Dialog } from "../ui/Dialog";
 import { showFileDetails, sortFileEntries } from "./fileBrowserState";
 
 type LoadState = "loading" | "ready" | "error";
-const previewImageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const previewTextTypes = new Set(["text/plain", "text/csv", "text/markdown", "application/json"]);
 const maxPreviewBytes = 512_000;
 export type FilePreview = { kind: "text" | "image"; value: string; name: string; path: string };
 
@@ -71,10 +71,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const resetFileSelection = useCallback(() => {
     previewVersion.current += 1;
     setSelected(undefined);
-    setPreview((current) => {
-      if (current?.kind === "image") URL.revokeObjectURL(current.value);
-      return null;
-    });
+    setPreview(null);
     setPreviewError("");
     setMobileDetailsOpen(false);
   }, []);
@@ -294,26 +291,25 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (entry.type !== "file" || !selectedLibrary) return;
     const libraryId = selectedLibrary.id;
     const version = ++previewVersion.current;
-    setPreview((current) => {
-      if (current?.kind === "image") URL.revokeObjectURL(current.value);
-      return null;
-    });
+    setPreview(null);
     setPreviewError("");
     try {
-      if (!isPreviewableProjectFile(entry) || (entry.size ?? 0) > maxPreviewBytes) throw new Error("This file type cannot be previewed safely.");
+      const listedKind = classifyPreviewMediaType(entry.mediaType);
+      if (listedKind === null || (entry.size ?? 0) > maxPreviewBytes) throw new Error("This file type cannot be previewed safely.");
       const blob = await apiClient.previewLibraryFile(projectId, libraryId, entry.path);
       if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
       if (blob.size > maxPreviewBytes) throw new Error("This file is too large to preview.");
-      const mediaType = blob.type || entry.mediaType || "";
-      if (previewImageTypes.has(mediaType)) {
+      const downloadedKind = classifyPreviewMediaType(blob.type);
+      if (downloadedKind !== listedKind) throw new Error("The downloaded file type does not match its preview metadata. Download the file to inspect it safely.");
+      if (downloadedKind === "image") {
         const value = URL.createObjectURL(blob);
         if (version !== previewVersion.current) { URL.revokeObjectURL(value); return; }
         setPreview({ kind: "image", value, name: entry.name, path: entry.path });
         return;
       }
-      if (previewTextTypes.has(mediaType) || (!mediaType && /\.(txt|md|markdown|json|csv|log)$/i.test(entry.name))) {
+      if (downloadedKind === "text") {
         const value = (await blob.text()).slice(0, 16_000);
-        if (!mounted.current || version !== previewVersion.current) return;
+        if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
         setPreview({ kind: "text", value, name: entry.name, path: entry.path });
         return;
       }
@@ -475,7 +471,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     </div>
     <div className="lg:hidden">{selected ? <Collapsible trigger="File details" isOpen={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}><div className="mt-2 rounded-md border border-border bg-surface p-4">{showFileDetails(selected, true, mobileDetailsOpen) ? <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /> : null}</div></Collapsible> : null}</div>
     {previewError && selected ? <Banner className="mt-4" status="error" title="File preview unavailable" description={previewError} endContent={<div className="flex items-center gap-2"><Button label="Try preview again" variant="ghost" size="md" icon={<RefreshCw size={14} />} onClick={() => void openPreview(selected)} /><IconButton label="Dismiss preview error" tooltip="Dismiss preview error" variant="ghost" icon={<X size={15} />} onClick={() => setPreviewError("")} /></div>} /> : null}
-    {preview ? <div className="mt-4 rounded-md border border-border bg-surface p-4"><div className="mb-3 flex min-w-0 justify-between gap-3"><Text weight="semibold" maxLines={1}>{preview.name}</Text><IconButton label="Close preview" tooltip="Close preview" variant="ghost" icon={<X size={15} />} onClick={() => { previewVersion.current += 1; if (preview.kind === "image") URL.revokeObjectURL(preview.value); setPreview(null); }} /></div>{preview.kind === "image" ? <img className="max-h-96 max-w-full" src={preview.value} alt={preview.name} /> : <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words"><Text type="code">{preview.value}</Text></pre>}</div> : null}
+    {preview ? <div className="mt-4 rounded-md border border-border bg-surface p-4"><div className="mb-3 flex min-w-0 justify-between gap-3"><Text weight="semibold" maxLines={1}>{preview.name}</Text><IconButton label="Close preview" tooltip="Close preview" variant="ghost" icon={<X size={15} />} onClick={() => { previewVersion.current += 1; setPreview(null); }} /></div>{preview.kind === "image" ? <img className="max-h-96 max-w-full" src={preview.value} alt={preview.name} /> : <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words"><Text type="code">{preview.value}</Text></pre>}</div> : null}
     <LibraryNameDialog mode="create" open={createOpen} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!libraryMutationPending) { setCreateOpen(open); if (!open) setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={createLibrary} />
     <LibraryNameDialog mode="rename" open={Boolean(renameTarget)} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setRenameTarget(undefined); setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={renameLibrary} />
     <DeleteLibraryDialog library={deleteLibraryTarget} pending={libraryMutationPending} error={libraryDeleteError} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setDeleteLibraryTarget(undefined); setLibraryDeleteError(""); } }} onConfirm={deleteLibrary} />
@@ -512,7 +508,8 @@ function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onN
   const title = create ? "Create File Library" : "Rename File Library";
   const subtitle = create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move.";
   const handleOpenChange = (next: boolean) => { if (!pending) onOpenChange(next); };
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" padding={0} aria-label={title}><DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}<form id={`${mode}-library-form`} className="px-5 py-5 md:px-6" onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form><footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => handleOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={`${mode}-library-form`} variant="primary" size="lg" isLoading={pending} isDisabled={pending || !name.trim()} /></footer></Dialog>;
+  const formId = useId();
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(34rem, calc(100vw - 2rem))" aria-label={title}><Layout header={<DialogHeader title={title} subtitle={subtitle} onOpenChange={handleOpenChange} hasDivider />} content={<LayoutContent>{error ? <Banner className="mb-4" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}<form id={formId} onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form></LayoutContent>} footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button label="Cancel" type="button" variant="ghost" size="lg" onClick={() => handleOpenChange(false)} isDisabled={pending} /><Button label={create ? "Create" : "Save"} type="submit" form={formId} variant="primary" size="lg" isLoading={pending} isDisabled={pending || !name.trim()} /></div></LayoutFooter>} /></Dialog>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) {
@@ -547,11 +544,13 @@ function FileRow({ entry, selected, onNavigate, onSelect }: { entry: ProjectFile
 function FileDetails({ entry, projectId, library, mutationBusy, onDelete, onPreview }: { entry: ProjectFile | undefined; projectId: string; library: FileLibrary | undefined; mutationBusy: boolean; onDelete: (entry: ProjectFile) => void; onPreview: (entry: ProjectFile) => void }) {
   if (!entry || !library) return <EmptyState className="min-h-48" isCompact title="No file selected" description="Select a file to view its details." />;
   const file = entry.type === "file";
-  return <div className="space-y-4"><div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div><dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>{file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{isPreviewableProjectFile(entry) && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}</div>;
+  return <div className="space-y-4"><div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div><dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>{file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{classifyPreviewMediaType(entry.mediaType) !== null && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}</div>;
 }
 
 export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { entry: ProjectFile | undefined; deleting: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const [error, setError] = useState("");
+  const titleId = useId();
+  const descriptionId = useId();
   useEffect(() => setError(""), [entry?.path]);
   async function confirm() {
     setError("");
@@ -567,17 +566,21 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
       onCancel();
     }
   };
-  return <Dialog isOpen={entry !== undefined} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete file"><DialogHeader title="Delete file?" subtitle="This permanently removes the file from this File Library." onOpenChange={handleOpenChange} hasDivider />{entry ? <Text as="p" display="block" color="secondary" className="px-5 pt-4 md:px-6">File: <Text weight="semibold">{entry.name}</Text></Text> : null}{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={deleting} onClick={() => handleOpenChange(false)} /><Button label="Delete" variant="destructive" size="lg" isDisabled={deleting} isLoading={deleting} onClick={() => void confirm()} /></footer></Dialog>;
+  return <Dialog isOpen={entry !== undefined} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={titleId} aria-describedby={descriptionId}><Layout header={<DialogHeader id={titleId} title="Delete file?" hasDivider />} content={<LayoutContent><Text as="p" id={descriptionId} color="secondary">This permanently removes the file from this File Library.</Text>{entry ? <Text as="p" display="block" className="mt-3">File: <Text weight="semibold">{entry.name}</Text></Text> : null}{error ? <Banner className="mt-4" status="error" title="File could not be deleted" description={error} /> : null}</LayoutContent>} footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button label="Cancel" variant="ghost" size="lg" isDisabled={deleting} onClick={() => handleOpenChange(false)} /><Button label="Delete" variant="destructive" size="lg" isDisabled={deleting} isLoading={deleting} onClick={() => void confirm()} /></div></LayoutFooter>} /></Dialog>;
 }
 
 function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm }: { library: FileLibrary | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
-  return <Dialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Delete File Library"><DialogHeader title="Delete File Library?" subtitle="The server will only delete an unbound, empty library." onOpenChange={handleOpenChange} hasDivider />{library ? <Text as="p" display="block" color="secondary" className="px-5 pt-4 md:px-6">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File Library could not be deleted" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Delete library" variant="destructive" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></footer></Dialog>;
+  const titleId = useId();
+  const descriptionId = useId();
+  return <Dialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={titleId} aria-describedby={descriptionId}><Layout header={<DialogHeader id={titleId} title="Delete File Library?" hasDivider />} content={<LayoutContent><Text as="p" id={descriptionId} color="secondary">The server will only delete an unbound, empty library.</Text>{library ? <Text as="p" display="block" className="mt-3">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner className="mt-4" status="error" title="File Library could not be deleted" description={error} /> : null}</LayoutContent>} footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Delete library" variant="destructive" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></div></LayoutFooter>} /></Dialog>;
 }
 
 function ReplaceFileDialog({ target, pending, error, onOpenChange, onConfirm }: { target: { file: File } | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> | undefined }) {
   const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
-  return <Dialog isOpen={Boolean(target)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" padding={0} aria-label="Replace file"><DialogHeader title={`Replace ${target?.file.name ?? "file"}?`} subtitle="A file with this name already exists in this folder. This permanently replaces its contents." onOpenChange={handleOpenChange} hasDivider />{error ? <Banner className="mx-5 mt-4 md:mx-6" status="error" title="File could not be replaced" description={error} /> : null}<footer className="mt-4 flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Replace file" variant="primary" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></footer></Dialog>;
+  const titleId = useId();
+  const descriptionId = useId();
+  return <Dialog isOpen={Boolean(target)} onOpenChange={handleOpenChange} purpose="form" role="alertdialog" width="min(32rem, calc(100vw - 2rem))" aria-labelledby={titleId} aria-describedby={descriptionId}><Layout header={<DialogHeader id={titleId} title={`Replace ${target?.file.name ?? "file"}?`} hasDivider />} content={<LayoutContent><Text as="p" id={descriptionId} color="secondary">A file with this name already exists in this folder. This permanently replaces its contents.</Text>{error ? <Banner className="mt-4" status="error" title="File could not be replaced" description={error} /> : null}</LayoutContent>} footer={<LayoutFooter hasDivider><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button label="Cancel" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} /><Button label="Replace file" variant="primary" size="lg" isDisabled={pending} isLoading={pending} onClick={() => void onConfirm()} /></div></LayoutFooter>} /></Dialog>;
 }
 
 function normalizeLibraryPath(input: string | null | undefined): string {
@@ -616,10 +619,6 @@ function writeFileBrowserLocation(libraryId: string | null, path: string, replac
   const url = `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`;
   if (replace) window.history.replaceState(window.history.state, "", url);
   else window.history.pushState(window.history.state, "", url);
-}
-
-function isPreviewableProjectFile(entry: ProjectFile): boolean {
-  return previewImageTypes.has(entry.mediaType ?? "") || previewTextTypes.has(entry.mediaType ?? "") || (!entry.mediaType && /\.(png|jpe?g|gif|webp|txt|md|markdown|json|csv|log)$/i.test(entry.name));
 }
 
 function errorMessage(error: unknown, fallback: string): string {

@@ -1,6 +1,6 @@
 "use client";
 
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
@@ -84,6 +84,7 @@ export interface ProjectCredential { id: string; projectId: string; name: string
 export type Task = AgentTask;
 export type TaskDetail = TaskDetailProjection;
 export type TaskArtifact = AgentTaskArtifact;
+export type { TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery };
 export interface ProjectFile { name: string; path: string; type: "file" | "directory"; size?: number; mediaType?: string; updatedAt: string; }
 export type TaskListQuery = ApiTaskListQuery;
 export type TaskListPage = ApiTaskListPage;
@@ -356,7 +357,13 @@ export const apiClient = {
   editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
   archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
   deleteTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true; taskId: string }>(`/tasks/${encodeURIComponent(taskId)}`, "DELETE", idempotencyKey),
-  taskArtifacts: (taskId: string, filter: { mediaType?: string; previewOnly?: boolean } = {}) => request<TaskArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({ ...(filter.mediaType ? { mediaType: filter.mediaType } : {}), ...(filter.previewOnly ? { preview: "true" } : {}) })}`),
+  taskArtifacts: (taskId: string, query: TaskArtifactListQuery = {}) => request<TaskArtifactListPage>(`/tasks/${encodeURIComponent(taskId)}/artifacts?${new URLSearchParams({
+    ...(query.cursor ? { cursor:query.cursor } : {}),
+    ...(query.kind ? { kind:query.kind } : {}),
+    ...(query.limit ? { limit:String(query.limit) } : {}),
+    ...(query.mediaType ? { mediaType:query.mediaType } : {}),
+    ...(query.previewOnly ? { preview:"true" } : {})
+  })}`),
   artifactDownloadUrl: (taskId: string, artifactId: string) => taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId),
   async downloadTaskArtifact(taskId: string, artifactId: string, signal?: AbortSignal): Promise<Blob> {
     const response = observeSession(await fetch(taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId), { credentials: "same-origin", ...(signal ? { signal } : {}) }));

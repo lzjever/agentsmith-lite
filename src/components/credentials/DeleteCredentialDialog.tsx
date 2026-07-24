@@ -1,15 +1,15 @@
 import {
   Banner,
   Button,
-  Dialog,
   DialogHeader,
   Layout,
   LayoutContent,
   LayoutFooter,
   Text,
 } from "@astryxdesign/core";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ProjectCredential } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 
 export function DeleteCredentialDialog({
   credential,
@@ -25,6 +25,8 @@ export function DeleteCredentialDialog({
   onConfirm: () => Promise<void>;
 }) {
   const [failure, setFailure] = useState("");
+  const titleId = useId();
+  const descriptionId = useId();
 
   useEffect(() => {
     setFailure("");
@@ -53,16 +55,16 @@ export function DeleteCredentialDialog({
       purpose="form"
       role="alertdialog"
       width="min(32rem, calc(100vw - 2rem))"
-      padding={0}
-      aria-label="Delete credential"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
     >
       <Layout
         defaultHasDividers
-        header={<DialogHeader title="Delete credential" onOpenChange={handleOpenChange} />}
+        header={<DialogHeader id={titleId} title="Delete credential" />}
         content={
           <LayoutContent>
             <div className="grid gap-4">
-              <Text as="p" display="block" color="secondary">
+              <Text id={descriptionId} as="p" display="block" color="secondary">
                 {credential
                   ? `Delete ${credential.name}? This cannot be undone. Endpoints using this credential must be updated first.`
                   : ""}

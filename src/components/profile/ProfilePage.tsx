@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeft, Save, UserRound } from "lucide-react";
-import { AlertDialog, Banner, Button, Heading, Selector, Spinner, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
+import { Banner, Button, Heading, Selector, Spinner, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -9,6 +9,7 @@ import { ApiError, apiClient, notifyIdentityChanged, type Profile, type ProfileG
 import { workspaceReturnPath } from "../../lib/navigation/return-path";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
+import { AlertDialog } from "../ui/Dialog";
 
 const unsetGreeting = "unset" as const;
 const greetings = ["formal", "casual", "friendly", "professional"] as const satisfies readonly ProfileGreetingPreference[];

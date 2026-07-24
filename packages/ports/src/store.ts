@@ -31,6 +31,7 @@ import type {
   WorkspaceMembershipView,
   TaskListArchivedFilter,
   TaskListSort,
+  TaskArtifactKind,
   SandboxRenderResult,
   SandboxResourceSnapshot,
   SandboxReleaseReason,
@@ -542,7 +543,9 @@ export interface ProductStore {
   findTaskInteractionByCorrelation(taskId: string, correlation: TaskInteractionCorrelation): Promise<TaskInteractionItem | null>;
   appendTaskArtifacts(artifacts: PersistedTaskArtifact[]): Promise<void>;
   persistTaskArtifactProjection(input: PersistTaskArtifactProjectionInput): Promise<"created" | "existing">;
-  listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]>;
+  queryTaskArtifacts(taskId: string, query: TaskArtifactStoreListQuery): Promise<TaskArtifactStoreListPage>;
+  findTaskArtifact(taskId: string, artifactId: string): Promise<PersistedTaskArtifact | null>;
+  findExistingTaskArtifactFileIds(taskId: string, fileIds: string[]): Promise<string[]>;
   createTaskMessage(message: PersistedTaskMessage): Promise<PersistedTaskMessage>;
   createPendingTaskMessage(message: PersistedTaskMessage, interactionChange?: TaskInteractionChangeInput): Promise<PersistedTaskMessage | null>;
   listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]>;
@@ -656,13 +659,33 @@ export interface TaskStoreListQuery {
   archived: TaskListArchivedFilter;
   sort: TaskListSort;
   direction: "asc" | "desc";
-  offset: number;
+  after?: {
+    value: string;
+    taskId: string;
+  };
   limit: number;
 }
 
 export interface TaskStoreListPage {
   items: PersistedAgentTask[];
   total: number;
+  hasMore: boolean;
+}
+
+export interface TaskArtifactStoreListQuery {
+  kind: TaskArtifactKind | null;
+  mediaType: string | null;
+  previewOnly: boolean;
+  after?: {
+    createdAt: string;
+    artifactId: string;
+  };
+  limit: number;
+}
+
+export interface TaskArtifactStoreListPage {
+  items: PersistedTaskArtifact[];
+  hasMore: boolean;
 }
 
 export interface TaskDeliveryClaimInput {

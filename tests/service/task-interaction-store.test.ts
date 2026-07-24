@@ -75,7 +75,7 @@ describe("task interaction store", () => {
       sourceSync: { expectedSourceCursor:"cursor:tool",sourceCursor:"cursor:rollback",historyStatus:"complete",lastSyncedAt:timestamp(3) }
     }), /revision is not monotonic/);
 
-    assert.deepEqual(await store.listTaskArtifacts("task_interactions"), []);
+    assert.deepEqual((await store.queryTaskArtifacts("task_interactions",{kind:null,mediaType:null,previewOnly:false,limit:100})).items, []);
     assert.equal((await store.findProjectResourceUsage("project"))?.projectFileBytes, 0);
     const snapshot = await store.readTaskInteractionSnapshot("task_interactions", null, 10);
     assert.equal(snapshot?.sourceCursor, "cursor:tool");
@@ -136,7 +136,7 @@ describe("task interaction store", () => {
       artifactProjections:[{projectId:"project",artifact:{id:"turn-artifact",taskId:"task_interactions",fileId:"botified-file",name:"result.txt",bytes:1,createdAt:timestamp(3)},auditEvent:{id:"turn-artifact-audit",projectId:"project",actorId:null,action:"artifact.project",status:"accepted",resourceKind:"artifact",resourceId:"turn-artifact",createdAt:timestamp(3)},updatedAt:timestamp(3)}],
       sourceSync:{expectedSourceCursor:null,sourceCursor:"turn-cursor",historyStatus:"complete",lastSyncedAt:timestamp(3)}
     });
-    assert.equal((await store.listTaskArtifacts("task_interactions"))[0]?.fileId,"botified-file");
+    assert.equal((await store.queryTaskArtifacts("task_interactions",{kind:null,mediaType:null,previewOnly:false,limit:100})).items[0]?.fileId,"botified-file");
     assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"turn-cursor");
     assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"pending");
   });

@@ -12,7 +12,7 @@ import {
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
+import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
@@ -728,8 +728,8 @@ async function routeApi(
     }
     if (segments[4] === "artifacts" && !segments[5] && method === "GET") {
       try {
-        assertOnlySearchParams(url, ["mediaType", "preview"]);
-        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, { ...(url.searchParams.get("mediaType") ? { mediaType: url.searchParams.get("mediaType")! } : {}), ...(optionalBooleanSearchParam(url,"preview") ? { previewOnly: true } : {}) }));
+        assertOnlySearchParams(url, ["cursor", "kind", "limit", "mediaType", "preview"]);
+        return sendJson(res, 200, await services.tasks.listTaskArtifacts(user.id, taskId, asTaskArtifactListQuery(url)));
       } catch (error) {
         return handleTaskRouteError(res, error);
       }
@@ -1281,8 +1281,7 @@ function sendProjectFileDownload(
 }
 
 function sendProjectFilePreview(res:ServerResponse,download:Awaited<ReturnType<Services["files"]["downloadFile"]>>):void{
-  const safeTypes=new Set(["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp"]);
-  if(!safeTypes.has(download.mediaType))throw new ProductError("File type cannot be previewed",415);
+  if(classifyPreviewMediaType(download.mediaType)===null)throw new ProductError("File type cannot be previewed",415);
   const bytes=Buffer.from(download.bytes);
   res.writeHead(200,{"content-type":download.mediaType,"content-length":String(bytes.byteLength),"content-disposition":"inline","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; sandbox"});
   res.end(bytes);
@@ -1380,6 +1379,15 @@ function asTaskListQuery(params:URLSearchParams):TaskListQuery{
   const sort=params.get("sort");if(sort){if(!["created_at","updated_at","title"].includes(sort))throw new ProductError("Task sort is invalid");query.sort=sort as NonNullable<TaskListQuery["sort"]>;}
   const direction=params.get("direction");if(direction){if(direction!=="asc"&&direction!=="desc")throw new ProductError("Task sort direction is invalid");query.direction=direction;}
   const cursor=params.get("cursor");if(cursor)query.cursor=cursor;const limit=params.get("limit");if(limit)query.limit=asPositiveQueryInteger(limit,"limit");return query;
+}
+function asTaskArtifactListQuery(url:URL):TaskArtifactListQuery{
+  const query:TaskArtifactListQuery={};
+  const cursor=url.searchParams.get("cursor");if(cursor)query.cursor=cursor;
+  const kind=url.searchParams.get("kind");if(kind){if(!["text","image","file"].includes(kind))throw new ProductError("Task Artifact kind is invalid");query.kind=kind as NonNullable<TaskArtifactListQuery["kind"]>;}
+  const limit=url.searchParams.get("limit");if(limit)query.limit=asPositiveQueryInteger(limit,"limit");
+  const mediaType=url.searchParams.get("mediaType");if(mediaType)query.mediaType=mediaType;
+  if(optionalBooleanSearchParam(url,"preview"))query.previewOnly=true;
+  return query;
 }
 function asBoolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new ProductError(`${field} must be a boolean`); return value; }
 function asPositiveInteger(value:unknown,field:string):number{if(typeof value!=="number"||!Number.isInteger(value)||value<1)throw new ProductError(`${field} must be a positive integer`);return value;}

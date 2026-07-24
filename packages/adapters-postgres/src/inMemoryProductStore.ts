@@ -22,7 +22,7 @@ import type {
   ManagedWorkspaceMembershipRole,
   UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertRuleView, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
 } from "../../contracts/src/api.js";
-import { isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { classifyPreviewMediaType, isActiveProjectAlert, isActiveProjectAlertRuleView, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
@@ -50,6 +50,8 @@ import type {
   AtomicTaskMessageDeleteResult,
   TaskStoreListQuery,
   TaskStoreListPage,
+  TaskArtifactStoreListQuery,
+  TaskArtifactStoreListPage,
   TaskDeliveryClaimInput,
   TaskDeliveryReclaimInput,
   TaskMessageReceiptInput,
@@ -874,8 +876,13 @@ export class InMemoryProductStore implements ProductStore {
     const field = (task: PersistedAgentTask): string => query.sort === "created_at" ? task.createdAt
       : query.sort === "updated_at" ? task.updatedAt
       : task.title ?? "";
-    filtered.sort((left, right) => direction * (field(left).localeCompare(field(right)) || left.id.localeCompare(right.id)));
-    return { items: filtered.slice(query.offset, query.offset + query.limit).map(clone), total: filtered.length };
+    filtered.sort((left, right) => direction * (compareOrdinal(field(left),field(right)) || compareOrdinal(left.id,right.id)));
+    const after = query.after;
+    const pageCandidates = after
+      ? filtered.filter((task) => direction * (compareOrdinal(field(task),after.value) || compareOrdinal(task.id,after.taskId)) > 0)
+      : filtered;
+    const hasMore = pageCandidates.length > query.limit;
+    return { items: pageCandidates.slice(0, query.limit).map(clone), total: filtered.length, hasMore };
   }
 
   async findTask(id: string): Promise<PersistedAgentTask | null> {
@@ -1077,8 +1084,33 @@ export class InMemoryProductStore implements ProductStore {
     return "created";
   }
 
-  async listTaskArtifacts(taskId: string): Promise<PersistedTaskArtifact[]> {
-    return this.artifacts.filter((artifact) => artifact.taskId === taskId).map(clone);
+  async queryTaskArtifacts(taskId: string, query: TaskArtifactStoreListQuery): Promise<TaskArtifactStoreListPage> {
+    const filtered = this.artifacts
+      .filter((artifact) =>
+        artifact.taskId === taskId &&
+        (query.mediaType === null || artifact.mediaType === query.mediaType) &&
+        (!query.previewOnly || artifact.previewText !== null && artifact.previewText !== undefined) &&
+        (query.kind === null || taskArtifactKind(artifact) === query.kind)
+      )
+      .sort((left, right) => compareOrdinal(right.createdAt,left.createdAt) || compareOrdinal(right.id,left.id))
+      .filter((artifact) => !query.after ||
+        artifact.createdAt < query.after.createdAt ||
+        artifact.createdAt === query.after.createdAt && artifact.id < query.after.artifactId
+      );
+    const hasMore = filtered.length > query.limit;
+    return { items: filtered.slice(0, query.limit).map(clone), hasMore };
+  }
+
+  async findTaskArtifact(taskId: string, artifactId: string): Promise<PersistedTaskArtifact | null> {
+    return clone(this.artifacts.find((artifact) => artifact.taskId === taskId && artifact.id === artifactId) ?? null);
+  }
+
+  async findExistingTaskArtifactFileIds(taskId: string, fileIds: string[]): Promise<string[]> {
+    if (fileIds.length === 0) return [];
+    const candidates = new Set(fileIds);
+    return this.artifacts
+      .filter((artifact) => artifact.taskId === taskId && candidates.has(artifact.fileId))
+      .map((artifact) => artifact.fileId);
   }
   async createTaskMessage(v: PersistedTaskMessage): Promise<PersistedTaskMessage> {
     if (this.messages.some((value) => value.id === v.id)) throw new Error("Task message already exists");
@@ -1686,6 +1718,14 @@ function providerWindowValue(settlement:ProjectProviderSettlement,metric:import(
   if(metric==="providerRequests")return 1;
   if(settlement.status==="settled")return metric==="providerTokens"?settlement.usage?.tokens??0:settlement.usage?.cost??0;
   return metric==="providerTokens"?settlement.reservedTokens:settlement.reservedCost;
+}
+
+function taskArtifactKind(artifact: PersistedTaskArtifact): import("../../contracts/src/api.js").TaskArtifactKind {
+  return classifyPreviewMediaType(artifact.mediaType) ?? "file";
+}
+
+function compareOrdinal(left:string,right:string):number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {

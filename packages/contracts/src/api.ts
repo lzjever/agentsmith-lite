@@ -428,6 +428,41 @@ export interface AgentTaskArtifact {
   previewText?: string | null;
   createdAt: ISODateString;
 }
+
+export const PREVIEW_TEXT_MEDIA_TYPES = [
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "application/json"
+] as const;
+
+export const PREVIEW_IMAGE_MEDIA_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp"
+] as const;
+
+export function classifyPreviewMediaType(mediaType: string | null | undefined): "text" | "image" | null {
+  if (typeof mediaType !== "string") return null;
+  const essence = mediaType.split(";", 1)[0]?.trim().toLowerCase();
+  if (PREVIEW_TEXT_MEDIA_TYPES.some((candidate) => candidate === essence)) return "text";
+  if (PREVIEW_IMAGE_MEDIA_TYPES.some((candidate) => candidate === essence)) return "image";
+  return null;
+}
+
+export type TaskArtifactKind = "text" | "image" | "file";
+export interface TaskArtifactListQuery {
+  cursor?: string;
+  kind?: TaskArtifactKind;
+  limit?: number;
+  mediaType?: string;
+  previewOnly?: boolean;
+}
+export interface TaskArtifactListPage {
+  items: AgentTaskArtifact[];
+  nextCursor: string | null;
+}
 export interface TaskLifecycleProjection { state: "active" | "archived"; }
 export interface TaskCurrentTurnProjection { state: "ready" | "starting" | "queued" | "running" | "aborting"; }
 export type SandboxFailureCode = "startup_failed" | "runtime_unreachable" | "runner_failed" | "cleanup_failed";

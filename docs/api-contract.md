@@ -54,4 +54,18 @@ released` and includes the Run ID plus a safe Run-owned cause while a failed Run
 is failed or awaiting release.
 There is no public Task execution status or second SSE Run-state channel.
 
+`GET /api/v1/projects/{projectId}/tasks` returns `{ items, nextCursor, total }`.
+Its opaque v1 cursor is a keyset bound to the Project, normalized search and
+archive scope, selected sort and direction, final sort value, and Task ID.
+`total` describes the complete filtered scope and is unchanged while paging.
+Offset cursors are not accepted.
+
+`GET /api/v1/tasks/{taskId}/artifacts` returns
+`{ items, nextCursor }`, newest publication first, with Artifact ID as the
+tie-breaker. `limit` defaults to 20 and is capped at 100. Optional `kind`
+(`text | image | file`), `mediaType`, and `preview=true` filters are applied
+before limiting. The opaque v1 cursor is bound to the Task and normalized
+filters. Artifact list payloads never expose the stored Botified file ID;
+download remains the authorized attachment route for one exact Artifact.
+
 `POST .../turn/abort` stops only the current turn and does not release the Sandbox or stop detached work. `POST .../sandbox/release` fences later delivery to the current Run, unconditionally stops its agent, terminals, and processes, deletes only its app-owned Kubernetes resources, and settles that Run's Usage once. Conversation history and the bound File Library remain available. The next message or Terminal open starts a new Run without resuming work interrupted by the release. Both routes return server-authoritative state or capabilities; neither action is inferred by the Web client.

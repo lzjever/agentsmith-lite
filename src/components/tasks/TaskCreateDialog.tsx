@@ -1,10 +1,11 @@
 "use client";
 
-import { Library, Plus, X } from "lucide-react";
+import { Library, Plus } from "lucide-react";
 import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Banner, Button, Dialog, DialogHeader, IconButton, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
+import { Banner, Button, DialogHeader, Layout, LayoutContent, LayoutFooter, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
+import { Dialog } from "../ui/Dialog";
 
 export type TaskCreateValue = {
   title: string;
@@ -86,12 +87,11 @@ export function TaskCreateDialog({
     if (!nextOpen && !busy) onClose();
   };
 
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" padding={0} aria-label="Create task">
-    <div className="overflow-y-auto">
-      <form onSubmit={(event) => void submit(event)} aria-label="Create task">
-        <DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." hasDivider endContent={<IconButton label="Close create task" tooltip="Close create task" variant="ghost" size="lg" icon={<X size={17} />} isDisabled={busy} onClick={() => handleOpenChange(false)} />} />
-        {error ? <Banner className="mx-5 mt-4" status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
-        <div className="grid gap-5 px-5 py-5">
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} purpose="form" width="min(42rem, calc(100vw - 2rem))" maxHeight="calc(100dvh - 2rem)" aria-label="Create task">
+    <Layout defaultHasDividers header={<DialogHeader title="Create task" subtitle="Describe the work for the Botified sandbox." onOpenChange={handleOpenChange} />} content={<LayoutContent>
+      <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
+        <div className="grid gap-5">
+          {error ? <Banner status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
           {endpoints.length === 0 ? <Banner status="warning" title="No task-ready endpoint" description="Add or repair an endpoint before creating a task." /> : <>
             <div className="grid gap-4 sm:grid-cols-2">
               <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
@@ -108,9 +108,8 @@ export function TaskCreateDialog({
             <TextArea label="Task prompt" value={prompt} onChange={setPrompt} rows={7} placeholder="Describe the result you need" isDisabled={busy} width="100%" />
           </>}
         </div>
-        <footer className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end md:px-6"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></footer>
       </form>
-    </div>
+    </LayoutContent>} footer={<LayoutFooter><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" label="Cancel" variant="ghost" size="lg" onClick={onClose} isDisabled={busy} /><Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} /></div></LayoutFooter>} />
   </Dialog>;
 
   function clearError() { setError(""); setErrorCode(""); }
