@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  auditIdentityPresentationLabel,
   auditIdentityHydrationQuery,
   auditIdentityListPaging,
   createAuditIdentityPickerState,
+  formatAuditIdentityLabel,
   reduceAuditIdentityPickerState,
 } from "../../src/components/audit/auditIdentityPickerState.js";
 
@@ -12,6 +14,41 @@ const identity = {
   displayName: "User One",
   email: "one@example.test",
 };
+
+describe("audit identity presentation", () => {
+  it("formats identity fields consistently", () => {
+    assert.equal(
+      formatAuditIdentityLabel("user_1", "User One", "one@example.test"),
+      "User One (one@example.test)",
+    );
+    assert.equal(
+      formatAuditIdentityLabel("user_1", "User One", null),
+      "User One",
+    );
+    assert.equal(
+      formatAuditIdentityLabel("user_1", null, "one@example.test"),
+      "one@example.test",
+    );
+    assert.equal(formatAuditIdentityLabel("user_1", null, null), "user_1");
+  });
+
+  it("uses a resolved label only for the current filter identity", () => {
+    const presentation = {
+      key: "user_1",
+      identity,
+    };
+
+    assert.equal(
+      auditIdentityPresentationLabel("user_1", presentation),
+      "User One (one@example.test)",
+    );
+    assert.equal(
+      auditIdentityPresentationLabel("user_2", presentation),
+      "user_2",
+    );
+    assert.equal(auditIdentityPresentationLabel("user_2", null), "user_2");
+  });
+});
 
 describe("audit identity picker list state", () => {
   it("keeps last-good options but removes stale paging authority for a failed search", () => {

@@ -20,6 +20,11 @@ export interface AuditIdentityHydrationKey {
   value: string;
 }
 
+export interface AuditIdentityPresentation {
+  key: string;
+  identity: ProjectAuditIdentity;
+}
+
 interface AuditIdentityListState {
   candidate: AuditIdentityListKey;
   cursorStack: Array<string | null>;
@@ -371,6 +376,32 @@ export function auditIdentityHydrationQuery(
     q: key.value,
     limit: AUDIT_IDENTITY_PAGE_SIZE,
   };
+}
+
+export function formatAuditIdentityLabel(
+  id: string,
+  displayName: string | null,
+  email: string | null,
+): string {
+  if (displayName && email) return `${displayName} (${email})`;
+  return displayName ?? email ?? id;
+}
+
+export function auditIdentityPresentationLabel(
+  value: string,
+  presentation: AuditIdentityPresentation | null,
+): string {
+  if (
+    presentation?.key !== value ||
+    presentation.identity.id !== value
+  ) {
+    return value;
+  }
+  return formatAuditIdentityLabel(
+    presentation.identity.id,
+    presentation.identity.displayName,
+    presentation.identity.email,
+  );
 }
 
 export function auditIdentityListPaging(state: AuditIdentityPickerState): {

@@ -25,7 +25,9 @@ import {
   auditIdentityListPaging,
   auditIdentityListQuery,
   createAuditIdentityPickerState,
+  formatAuditIdentityLabel,
   reduceAuditIdentityPickerState,
+  type AuditIdentityPresentation,
 } from "./auditIdentityPickerState";
 
 export function AuditIdentityPicker({
@@ -34,12 +36,14 @@ export function AuditIdentityPicker({
   label,
   value,
   onChange,
+  onIdentityResolved,
 }: {
   projectId: string;
   role: ProjectAuditIdentityQuery["role"];
   label: string;
   value: string | null;
   onChange: (value: string | null) => void;
+  onIdentityResolved: (presentation: AuditIdentityPresentation) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [state, dispatch] = useReducer(
@@ -174,6 +178,16 @@ export function AuditIdentityPicker({
   const hydrationError = hydrationMatches
     ? state.hydration.error
     : null;
+  const resolvedIdentity =
+    value && value !== "system"
+      ? items.find((identity) => identity.id === value) ??
+        (selectedIdentity?.id === value ? selectedIdentity : null)
+      : null;
+
+  useEffect(() => {
+    if (!value || !resolvedIdentity) return;
+    onIdentityResolved({ key: value, identity: resolvedIdentity });
+  }, [onIdentityResolved, resolvedIdentity, value]);
 
   const options = useMemo(() => {
     const identities = new Map<string, ProjectAuditIdentity>();
@@ -195,7 +209,11 @@ export function AuditIdentityPicker({
       ...(role === "actor" ? [{ value: "system", label: "System" }] : []),
       ...[...identities.values()].map((identity) => ({
         value: identity.id,
-        label: auditIdentityLabel(identity),
+        label: formatAuditIdentityLabel(
+          identity.id,
+          identity.displayName,
+          identity.email,
+        ),
       })),
     ];
   }, [items, role, selectedIdentity, value]);
@@ -319,11 +337,4 @@ export function AuditIdentityPicker({
       ) : null}
     </div>
   );
-}
-
-export function auditIdentityLabel(identity: ProjectAuditIdentity): string {
-  if (identity.displayName && identity.email) {
-    return `${identity.displayName} (${identity.email})`;
-  }
-  return identity.displayName ?? identity.email ?? identity.id;
 }

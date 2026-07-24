@@ -16,6 +16,7 @@ import { ClipboardList, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import {
   type FormEvent,
+  useCallback,
   useEffect,
   useReducer,
   useRef,
@@ -37,6 +38,11 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { Dialog } from "../ui/Dialog";
 import { AuditIdentityPicker } from "./AuditIdentityPicker";
+import {
+  auditIdentityPresentationLabel,
+  formatAuditIdentityLabel,
+  type AuditIdentityPresentation,
+} from "./auditIdentityPickerState";
 import {
   AUDIT_PAGE_SIZE,
   auditFiltersEqual,
@@ -76,8 +82,34 @@ function ProjectAuditPage({ projectId }: { projectId: string }) {
   const [resourceIdDraft, setResourceIdDraft] = useState(
     initialFilters.resourceId ?? "",
   );
+  const [identityPresentations, setIdentityPresentations] = useState<{
+    actor: AuditIdentityPresentation | null;
+    subject: AuditIdentityPresentation | null;
+  }>({
+    actor: null,
+    subject: null,
+  });
   const mounted = useRef(true);
   const requestGeneration = useRef(0);
+
+  const handleActorIdentityResolved = useCallback(
+    (presentation: AuditIdentityPresentation) => {
+      setIdentityPresentations((current) => ({
+        ...current,
+        actor: presentation,
+      }));
+    },
+    [],
+  );
+  const handleSubjectIdentityResolved = useCallback(
+    (presentation: AuditIdentityPresentation) => {
+      setIdentityPresentations((current) => ({
+        ...current,
+        subject: presentation,
+      }));
+    },
+    [],
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -157,7 +189,10 @@ function ProjectAuditPage({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  const activeFilters = auditFilterChips(state.filters);
+  const activeFilters = auditFilterChips(
+    state.filters,
+    identityPresentations,
+  );
   const pageMatchesFilters = Boolean(
     state.query && auditFiltersEqual(state.query.filters, state.filters),
   );
@@ -256,6 +291,7 @@ function ProjectAuditPage({ projectId }: { projectId: string }) {
             label="Actor"
             value={state.filters.actorId}
             onChange={(actorId) => commitPatch({ actorId })}
+            onIdentityResolved={handleActorIdentityResolved}
           />
           <AuditIdentityPicker
             projectId={projectId}
@@ -263,6 +299,7 @@ function ProjectAuditPage({ projectId }: { projectId: string }) {
             label="Sandbox user"
             value={state.filters.subjectUserId}
             onChange={(subjectUserId) => commitPatch({ subjectUserId })}
+            onIdentityResolved={handleSubjectIdentityResolved}
           />
           <AuditEnumFilter
             label="Action"
@@ -660,7 +697,13 @@ function auditClientQuery(
   };
 }
 
-function auditFilterChips(filters: AuditFilters): Array<{
+function auditFilterChips(
+  filters: AuditFilters,
+  identityPresentations: {
+    actor: AuditIdentityPresentation | null;
+    subject: AuditIdentityPresentation | null;
+  },
+): Array<{
   key: keyof AuditFilters;
   label: string;
 }> {
@@ -670,7 +713,12 @@ function auditFilterChips(filters: AuditFilters): Array<{
           {
             key: "actorId" as const,
             label: `Actor: ${
-              filters.actorId === "system" ? "System" : filters.actorId
+              filters.actorId === "system"
+                ? "System"
+                : auditIdentityPresentationLabel(
+                    filters.actorId,
+                    identityPresentations.actor,
+                  )
             }`,
           },
         ]
@@ -679,7 +727,10 @@ function auditFilterChips(filters: AuditFilters): Array<{
       ? [
           {
             key: "subjectUserId" as const,
-            label: `Sandbox user: ${filters.subjectUserId}`,
+            label: `Sandbox user: ${auditIdentityPresentationLabel(
+              filters.subjectUserId,
+              identityPresentations.subject,
+            )}`,
           },
         ]
       : []),
@@ -749,7 +800,7 @@ function auditPageStatus(
 function actorName(event: ProjectAuditEvent): string {
   return event.actorId === null
     ? "System"
-    : projectedIdentityLabel(
+    : formatAuditIdentityLabel(
         event.actorId,
         event.actorDisplayName,
         event.actorEmail,
@@ -758,21 +809,12 @@ function actorName(event: ProjectAuditEvent): string {
 
 function subjectName(event: ProjectAuditEvent): string {
   return event.subjectUserId
-    ? projectedIdentityLabel(
+    ? formatAuditIdentityLabel(
         event.subjectUserId,
         event.subjectDisplayName,
         event.subjectEmail,
       )
     : "-";
-}
-
-function projectedIdentityLabel(
-  id: string,
-  displayName: string | null,
-  email: string | null,
-): string {
-  if (displayName && email) return `${displayName} (${email})`;
-  return displayName ?? email ?? id;
 }
 
 function auditResourceDisplay(event: ProjectAuditEvent): string {
