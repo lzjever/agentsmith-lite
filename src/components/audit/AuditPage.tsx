@@ -26,7 +26,7 @@ import {
   PROJECT_AUDIT_RESOURCE_KINDS,
   type ProjectAuditAction,
   type ProjectAuditResourceKind,
-} from "../../../packages/contracts/src/api.js";
+} from "../../../packages/contracts/src/api";
 import {
   apiClient,
   type ProjectAuditEvent,

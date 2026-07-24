@@ -1,13 +1,13 @@
 import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
-  type ProjectAuditAction,
-  type ProjectAuditResourceKind,
+} from "../../../packages/contracts/src/api.ts";
+import type {
+  ProjectAuditAction,
+  ProjectAuditResourceKind,
 } from "../../../packages/contracts/src/api.js";
-import {
-  emptyAuditFilters,
-  type AuditFilters,
-} from "./auditPageState.js";
+import { emptyAuditFilters } from "./auditPageState.ts";
+import type { AuditFilters } from "./auditPageState.js";
 
 export interface AuditPageNavigation {
   kind: "push" | "replace";
