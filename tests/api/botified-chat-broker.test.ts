@@ -92,7 +92,7 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("uses the prefix-independent in-cluster route and transparently forwards streaming tool calls", async () => {
-    const { task, projectId, cookie } = await createTask("one");
+    const { task, projectId, cookie, userId } = await createTask("one");
     const requestBody = {
       model: "gpt-compatible",
       messages: [{ role: "user", content: "run a command" }],
@@ -126,11 +126,16 @@ describe("Botified Chat Completions broker", () => {
     assert.equal(providerCalls[0]?.headers.get("x-untrusted-header"), null);
     assert.deepEqual(JSON.parse(providerCalls[0]?.body ?? ""), requestBody);
     const usage = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
+    assert.equal(usage.provider.userId, userId);
+    assert.deepEqual(usage.provider.totals, { requests: 1, tokens: 0, cost: 0 });
     assert.deepEqual(
-      { requests: usage.usage.providerRequests, tokens: usage.usage.providerTokens, cost: usage.usage.providerCost },
-      { requests: 2, tokens: 4096, cost: 1 }
+      Object.fromEntries(
+        usage.limits
+          .filter((limit: { metric: string }) => ["providerRequests", "providerTokens", "providerCost"].includes(limit.metric))
+          .map((limit: { metric: string; current: number }) => [limit.metric, limit.current])
+      ),
+      { providerRequests: 2, providerTokens: 4096, providerCost: 1 }
     );
-    assert.deepEqual(usage.trendTotals, { requests: 1, tokens: 0, cost: 0 });
   });
 
   it("rejects invalid and cross-task keys before provider forwarding", async () => {
@@ -215,8 +220,8 @@ describe("Botified Chat Completions broker", () => {
     }
     assert.match(remainder, /total_tokens/);
 
-    const { usage: current } = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
-    assert.equal(current.providerTokens, 9);
+    const { provider } = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
+    assert.deepEqual(provider.totals, { requests: 2, tokens: 9, cost: 0 });
   });
 
   it("drains an SSE provider after the client closes and settles later usage", async () => {
@@ -241,8 +246,8 @@ describe("Botified Chat Completions broker", () => {
     await response.body?.getReader().read();
     controller.abort();
     await new Promise((resolve) => setTimeout(resolve, 75));
-    const { usage: current } = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
-    assert.equal(current.providerTokens, 6);
+    const { provider } = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
+    assert.deepEqual(provider.totals, { requests: 2, tokens: 6, cost: 0 });
   });
 
   it("returns a generic provider error without reflecting credential-like provider text", async () => {
@@ -272,7 +277,8 @@ describe("Botified Chat Completions broker", () => {
       body: JSON.stringify({ email: "admin@agentsmith-lite.local", password: "broker-test-admin-password" })
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
-    const csrf = (await login.json()).csrfToken as string;
+    const loginBody = await login.json() as { csrfToken: string; user: { id: string } };
+    const csrf = loginBody.csrfToken;
     const workspace = await post("/api/v1/workspaces", { name: `Workspace ${name}` }, cookie, csrf, `workspace-${name}`);
     const project = await post(`/api/v1/workspaces/${workspace.id}/projects`, { name: `Project ${name}` }, cookie, csrf, `project-${name}`);
     const credential = await post(`/api/v1/projects/${project.id}/credentials`, {
@@ -307,7 +313,8 @@ describe("Botified Chat Completions broker", () => {
       task: activeTask,
       projectId: project.id,
       cookie,
-      csrf
+      csrf,
+      userId: loginBody.user.id
     };
   }
 

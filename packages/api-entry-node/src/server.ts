@@ -624,8 +624,20 @@ async function routeApi(
     }
     if (segments[4] === "usage" && !segments[5] && method === "GET") {
       assertOnlySearchParams(url, ["endpointId","userId"]);
-      await services.fileLibraries.reconcileProjectFileBytes(user.id,projectId,(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes));
       return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined, optionalUserId(url.searchParams,"userId")??user.id));
+    }
+    if(segments[4]==="usage"&&segments[5]==="file-storage"&&segments[6]==="refresh"&&!segments[7]&&method==="POST"){
+      assertOnlySearchParams(url,[]);
+      const body=await readJson(req);assertOnlyKeys(body,[]);
+      const fileStorage=await services.fileLibraries.refreshProjectFileStorage(user.id,projectId,(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes));
+      return sendJson(res,200,{projectId,fileStorage});
+    }
+    if(segments[4]==="usage"&&segments[5]==="sandbox-runs"&&!segments[6]&&method==="GET"){
+      assertOnlySearchParams(url,["userId","cursor","limit"]);
+      const limitValue=url.searchParams.get("limit"),limit=limitValue===null?undefined:asPositiveQueryInteger(limitValue,"limit");
+      if(limit!==undefined&&limit>50)throw new ProductError("Sandbox Run history limit must be between 1 and 50");
+      const cursor=url.searchParams.get("cursor");
+      return sendJson(res,200,await services.policies.getSandboxRunHistory(user.id,projectId,{selectedUserId:optionalUserId(url.searchParams,"userId")??user.id,...(cursor!==null?{cursor}:{}),...(limit!==undefined?{limit}:{})}));
     }
     if (segments[4] === "alerts") {
       if (!segments[5] && method === "GET") { assertOnlySearchParams(url,["limit","cursor","status"]);return sendJson(res, 200, await services.policies.alerts(user.id, projectId, asProjectAlertQuery(url.searchParams))); }
@@ -666,12 +678,12 @@ async function routeApi(
         if(!action&&method==="PUT"){
           assertOnlySearchParams(url,["path","overwrite"]);const key=requireIdempotencyKey(req);
           const filePath=requiredSearchParam(url,"path"),overwrite=optionalBooleanSearchParam(url,"overwrite"),bytes=await readRawProjectFileBytes(req);
-          const saved=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.upload",key,{projectId,libraryId,filePath,overwrite,contentSha256:createHash("sha256").update(bytes).digest("base64url")},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,({library,projectRoot,rootSubPaths})=>services.files.uploadLibraryFileWithAccounting(projectRoot,library.rootSubPath,{path:filePath,bytes,overwrite},{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.upload",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})));
+          const saved=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.upload",key,{projectId,libraryId,filePath,overwrite,contentSha256:createHash("sha256").update(bytes).digest("base64url")},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,({library,projectRoot,rootSubPaths})=>services.files.uploadLibraryFileWithAccounting(projectRoot,library.rootSubPath,{path:filePath,bytes,overwrite},{rootSubPaths,reconcile:async(measured)=>{await services.policies.reconcileFileLibraryBytes(projectId,measured)},record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.upload",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})));
           return sendJson(res,200,saved);
         }
         if(!action&&method==="DELETE"){
           assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,["path"]);const filePath=asString(body.path);
-          const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",key,{projectId,libraryId,filePath},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,async({library,projectRoot,rootSubPaths})=>(await services.files.deleteLibraryFileWithAccounting(projectRoot,library.rootSubPath,filePath,{rootSubPaths,reconcile:(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured),record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})).response));
+          const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",key,{projectId,libraryId,filePath},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,async({library,projectRoot,rootSubPaths})=>(await services.files.deleteLibraryFileWithAccounting(projectRoot,library.rootSubPath,filePath,{rootSubPaths,reconcile:async(measured)=>{await services.policies.reconcileFileLibraryBytes(projectId,measured)},record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})).response));
           return sendJson(res,200,response);
         }
         if((action==="download"||action==="preview")&&!segments[8]&&method==="GET"){
@@ -1020,6 +1032,8 @@ function isKnownApiRoutePath(pathname: string): boolean {
   ].includes(pathname) ||
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|overview|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/usage\/sandbox-runs$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/usage\/file-storage\/refresh$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alert-rules\/[^/]+(?:\/test)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/alerts\/[^/]+(?:\/(?:acknowledge|silence))?$/.test(pathname) ||

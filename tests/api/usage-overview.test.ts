@@ -6,7 +6,7 @@ import test from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { createTestApiServer as createApiServer } from "../../packages/api-entry-node/src/server.js";
 
-test("usage overview returns project limits and server-filtered settled endpoint trends", async () => {
+test("usage overview returns project limits and authenticated-user provider aggregates", async () => {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-usage-api-"));
   const store = createLocalInMemoryProductStore();
   const api = await createApiServer({
@@ -33,24 +33,62 @@ test("usage overview returns project limits and server-filtered settled endpoint
     const now = new Date().toISOString();
     await settle(store, "settlement_primary", project.id, first.id, user.id, now, { tokens: 8, cost: 1.25 });
     await settle(store, "settlement_secondary", project.id, second.id, user.id, now, { tokens: 2, cost: 0.25 });
+    await settle(store, "settlement_other_user", project.id, first.id, "user_not_authenticated", now, { tokens: 100, cost: 50 });
     const filesRoot = path.join(dataRoot, project.rootPath, library.rootSubPath);
     await mkdir(filesRoot, { recursive: true });
-    await writeFile(path.join(filesRoot, "unaccounted.txt"), "storage");
+    const directFile = path.join(filesRoot, "unaccounted.txt");
+    await writeFile(directFile, "storage");
+    await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 1 }, now);
 
     const all = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie);
-    assert.equal(all.usage.projectFileBytes, 7);
-    assert.equal(all.daily.length, 30);
-    assert.deepEqual(all.endpoints.map((endpoint: { endpointName: string; requests: number; tokens: number; cost: number }) => [endpoint.endpointName, endpoint.requests, endpoint.tokens, endpoint.cost]), [["Primary", 1, 8, 1.25], ["Secondary", 1, 2, 0.25], ["Other provider activity", 2, 0, 0]]);
+    assert.deepEqual(Object.keys(all).sort(), ["fileStorage", "limits", "projectId", "provider", "sandbox"]);
+    assert.equal(all.sandbox.unreleasedCount,0);
+    assert.equal("activeCount" in all.sandbox,false);
+    assert.equal(all.provider.userId, user.id);
+    assert.equal(all.provider.daily.length, 30);
+    assert.match(all.provider.periodStart, /T00:00:00\.000Z$/);
+    assert.match(all.provider.periodEnd, /T00:00:00\.000Z$/);
+    assert.deepEqual(all.provider.endpoints.map((endpoint: { endpointName: string; requests: number; tokens: number; cost: number }) => [endpoint.endpointName, endpoint.requests, endpoint.tokens, endpoint.cost]), [["Primary", 1, 8, 1.25], ["Secondary", 1, 2, 0.25], ["Other provider activity", 2, 0, 0]]);
     assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "activeTasks"), { metric: "activeTasks", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });
-    assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 10, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
+    assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 110, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
+    assert.equal(all.limits.some((limit: { metric: string }) => limit.metric === "projectFileBytes"),false);
+    assert.deepEqual(all.fileStorage,{recordedBytes:0,measuredAt:null,limitBytes:1,remainingBytes:1});
+
+    const refreshUrl=`${api.baseUrl}/api/v1/projects/${project.id}/usage/file-storage/refresh`;
+    assert.equal((await fetch(refreshUrl,{method:"POST",headers:{cookie,"content-type":"application/json"},body:"{}"})).status,403);
+    assert.equal((await fetch(`${refreshUrl}?force=true`,{method:"POST",headers:{cookie,"x-csrf-token":csrfToken,"content-type":"application/json"},body:"{}"})).status,400);
+    assert.equal((await fetch(refreshUrl,{method:"POST",headers:{cookie,"x-csrf-token":csrfToken,"content-type":"application/json"},body:JSON.stringify({force:true})})).status,400);
+    const refreshedResponse=await fetch(refreshUrl,{method:"POST",headers:{cookie,"x-csrf-token":csrfToken,"content-type":"application/json"},body:"{}"});
+    assert.equal(refreshedResponse.status,200,await refreshedResponse.clone().text());
+    const refreshed=await refreshedResponse.json() as {projectId:string;fileStorage:{recordedBytes:number;measuredAt:string|null;limitBytes:number|null;remainingBytes:number|null}};
+    assert.equal(refreshed.projectId,project.id);
+    assert.deepEqual({...refreshed.fileStorage,measuredAt:"measured"},{recordedBytes:7,measuredAt:"measured",limitBytes:1,remainingBytes:0});
+    assert.match(refreshed.fileStorage.measuredAt??"",/Z$/);
+    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),true);
+    assert.deepEqual((await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie)).fileStorage,refreshed.fileStorage);
+
+    await rm(directFile);
+    const recoveredResponse=await fetch(refreshUrl,{method:"POST",headers:{cookie,"x-csrf-token":csrfToken,"content-type":"application/json"},body:"{}"});
+    assert.equal(recoveredResponse.status,200,await recoveredResponse.clone().text());
+    const recovered=await recoveredResponse.json() as {fileStorage:{recordedBytes:number;measuredAt:string|null;limitBytes:number|null;remainingBytes:number|null}};
+    assert.deepEqual({...recovered.fileStorage,measuredAt:"measured"},{recordedBytes:0,measuredAt:"measured",limitBytes:1,remainingBytes:1});
+    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),false);
 
     const filtered = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage?endpointId=${second.id}`, cookie);
-    assert.equal(filtered.selectedEndpointId, second.id);
-    assert.deepEqual(filtered.daily.reduce((total: { requests: number; tokens: number; cost: number }, day: { requests: number; tokens: number; cost: number }) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), { requests: 1, tokens: 2, cost: 0.25 });
+    assert.equal(filtered.provider.selectedEndpointId, second.id);
+    assert.deepEqual(filtered.provider.totals, { requests: 1, tokens: 2, cost: 0.25 });
+    assert.deepEqual(filtered.provider.daily.reduce((total: { requests: number; tokens: number; cost: number }, day: { requests: number; tokens: number; cost: number }) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), filtered.provider.totals);
+    assert.deepEqual(filtered.provider.endpoints, all.provider.endpoints);
     const invalid = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?endpointId=other`, { headers: { cookie } });
     assert.equal(invalid.status, 404);
     const removedFilter = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?groupBy=provider`, { headers: { cookie } });
     assert.equal(removedFilter.status, 400);
+    const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/sandbox-runs?limit=50`, { headers: { cookie } });
+    assert.equal(history.status, 200);
+    assert.deepEqual((await history.json() as { items: unknown[]; nextCursor: string | null }).items, []);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/sandbox-runs?limit=51`, { headers: { cookie } })).status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/sandbox-runs?endpointId=${first.id}`, { headers: { cookie } })).status, 400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/sandbox-runs?cursor=malformed`, { headers: { cookie } })).status, 400);
     assert.doesNotMatch(JSON.stringify(all), /usage-secret|credentialId|ciphertext|nonce/);
   } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
 });

@@ -46,6 +46,10 @@ import type {
   LegacyExternalIdentityBinding,
   ProductStore,
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
+  ProjectUsageOverviewReadInput,
+  ProjectUsageOverviewReadResult,
+  ProjectSandboxSettlementQuery,
+  ProjectSandboxSettlementPage,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
   AtomicTaskSandboxRestartInput,
@@ -498,10 +502,10 @@ export class PostgresProductStore implements ProductStore {
     const rows = await this.queryRows<ProjectUsageRow>("select * from project_resource_usage where project_id = $1", [projectId]); return rows[0] ? mapUsage(rows[0]) : null;
   }
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> {
-    const rows = await this.queryRows<ProjectUsageRow>(`insert into project_resource_usage (project_id,active_tasks,provider_requests,provider_tokens,provider_cost,project_file_bytes,updated_at) values ($1,$2,$3,$4,$5,$6,$7) on conflict (project_id) do update set active_tasks=excluded.active_tasks,provider_requests=excluded.provider_requests,provider_tokens=excluded.provider_tokens,provider_cost=excluded.provider_cost,project_file_bytes=excluded.project_file_bytes,updated_at=excluded.updated_at returning *`, usageValues(usage)); return mapUsage(rows[0]!);
+    const rows = await this.queryRows<ProjectUsageRow>(`insert into project_resource_usage (project_id,active_tasks,provider_requests,provider_tokens,provider_cost,project_file_bytes,project_file_bytes_measured_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (project_id) do update set active_tasks=excluded.active_tasks,provider_requests=excluded.provider_requests,provider_tokens=excluded.provider_tokens,provider_cost=excluded.provider_cost,project_file_bytes=excluded.project_file_bytes,project_file_bytes_measured_at=excluded.project_file_bytes_measured_at,updated_at=excluded.updated_at returning *`, usageValues(usage)); return mapUsage(rows[0]!);
   }
-  async setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null> {
-    const rows = await this.queryRows<ProjectUsageRow>("update project_resource_usage set project_file_bytes=$2,updated_at=$3 where project_id=$1 returning *", [projectId, bytes, updatedAt]);
+  async setProjectFileBytes(projectId: string, bytes: number, measuredAt: string): Promise<ProjectResourceUsage | null> {
+    const rows = await this.queryRows<ProjectUsageRow>("update project_resource_usage set project_file_bytes=$2,project_file_bytes_measured_at=$3,updated_at=$3 where project_id=$1 returning *", [projectId, bytes, measuredAt]);
     return rows[0] ? mapUsage(rows[0]) : null;
   }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
@@ -570,6 +574,52 @@ export class PostgresProductStore implements ProductStore {
   async expireProjectProviderSettlements(now: string): Promise<number> { return transaction(this.pool, async (client) => { const locked=await client.query<ProviderSettlementRow>("select * from project_provider_settlements where status in ('reserved','dispatched','delivered') and expires_at <= $1 for update",[now]); if (!locked.rowCount) return 0; const totals=new Map<string,{requests:number;tokens:number;cost:number}>(); for (const row of locked.rows) {if(row.status!=='reserved')continue;const total=totals.get(row.project_id)??{requests:0,tokens:0,cost:0};total.requests+=1;total.tokens+=Number(row.reserved_tokens);total.cost+=Number(row.reserved_cost);totals.set(row.project_id,total)} for (const [projectId,total] of totals) await client.query("update project_resource_usage set provider_requests=greatest(0,provider_requests-$2),provider_tokens=greatest(0,provider_tokens-$3),provider_cost=greatest(0,provider_cost-$4),updated_at=$5 where project_id=$1",[projectId,total.requests,total.tokens,total.cost,now]); await client.query("update project_provider_settlements set status=case when status='reserved' then 'failed' else 'unknown' end,updated_at=$1 where status in ('reserved','dispatched','delivered') and expires_at <= $1",[now]); return locked.rowCount; }); }
   async pruneProjectProviderSettlements(before: string, limit: number): Promise<number> { const result=await this.pool.query(`delete from project_provider_settlements where id in (select id from project_provider_settlements where status in ('settled','unknown','failed') and updated_at < $1 order by updated_at limit $2)`,[before,limit]); return result.rowCount ?? 0; }
   async listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]> { const rows = await this.queryRows<ProviderSettlementRow>(`select * from project_provider_settlements where project_id=$1 and status='settled' and settled_at >= $2${endpointId === undefined ? "" : " and endpoint_id=$3"} order by settled_at,id`, endpointId === undefined ? [projectId, since] : [projectId, since, endpointId]); return rows.map(mapProviderSettlement); }
+  async readProjectUsageOverview(input:ProjectUsageOverviewReadInput):Promise<ProjectUsageOverviewReadResult>{
+    return transaction(this.pool,async(client)=>{
+      const projectRow=(await client.query<ProjectRow>("select * from projects where id=$1",[input.projectId])).rows[0];
+      if(!projectRow)return{kind:"project_not_found" as const};
+      const policyRow=(await client.query<ProjectPolicyRow>("select * from project_resource_policies where project_id=$1",[input.projectId])).rows[0];
+      if(!policyRow)return{kind:"policy_not_found" as const};
+      if(!(await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2",[input.projectId,input.selectedUserId])).rowCount)return{kind:"selected_member_not_found" as const};
+      const policy=mapPolicy(policyRow);
+      policy.endpointWindows=(await client.query<{endpoint_id:string;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;limit_value:number;window_seconds:number}>("select endpoint_id,metric,limit_value,window_seconds from project_endpoint_policy_windows where project_id=$1 order by endpoint_id collate \"C\",metric",[input.projectId])).rows.map((row)=>({endpointId:row.endpoint_id,metric:row.metric,limit:Number(row.limit_value),windowSeconds:Number(row.window_seconds)}));
+      const usageRow=(await client.query<ProjectUsageRow>("select * from project_resource_usage where project_id=$1",[input.projectId])).rows[0];
+      if(input.selectedEndpointId!==null){
+        const endpoint=await client.query("select 1 from model_endpoints where project_id=$1 and id=$2",[input.projectId,input.selectedEndpointId]);
+        if(!endpoint.rowCount)return{kind:"endpoint_not_found" as const};
+      }
+      const dailyValues:unknown[]=[input.projectId,input.userId,input.periodStart,input.periodEnd];
+      const endpointClause=input.selectedEndpointId===null?"":` and endpoint_id=$${dailyValues.push(input.selectedEndpointId)}`;
+      const dailyRows=(await client.query<ProviderUsageAggregateRow>(`select to_char(settled_at at time zone 'UTC','YYYY-MM-DD') as bucket,count(*)::text as requests,coalesce(sum(provider_tokens),0)::text as tokens,coalesce(sum(provider_cost),0)::text as cost from project_provider_settlements where project_id=$1 and actor_id=$2 and status='settled' and settled_at >= $3 and settled_at < $4${endpointClause} group by bucket order by bucket`,dailyValues)).rows;
+      const endpointRows=(await client.query<ProviderEndpointUsageAggregateRow>("select endpoint_id,count(*)::text as requests,coalesce(sum(provider_tokens),0)::text as tokens,coalesce(sum(provider_cost),0)::text as cost from project_provider_settlements where project_id=$1 and actor_id=$2 and status='settled' and settled_at >= $3 and settled_at < $4 group by endpoint_id",[input.projectId,input.userId,input.periodStart,input.periodEnd])).rows;
+      const windowRows=(await client.query<ProviderWindowAggregateRow>(`select policy_window.endpoint_id,policy_window.metric,policy_window.limit_value::text,policy_window.window_seconds,coalesce(sum(case when settlement.id is null then 0 when policy_window.metric='providerRequests' then 1 when policy_window.metric='providerTokens' then case when settlement.status='settled' then coalesce(settlement.provider_tokens,0) else settlement.reserved_tokens end else case when settlement.status='settled' then coalesce(settlement.provider_cost,0) else settlement.reserved_cost end end),0)::text as current,min(settlement.reserved_at) as oldest_reserved_at from project_endpoint_policy_windows policy_window left join project_provider_settlements settlement on settlement.project_id=policy_window.project_id and settlement.endpoint_id=policy_window.endpoint_id and settlement.actor_id=$2 and settlement.status<>'failed' and settlement.reserved_at >= $3::timestamptz-policy_window.window_seconds*interval '1 second' where policy_window.project_id=$1 group by policy_window.endpoint_id,policy_window.metric,policy_window.limit_value,policy_window.window_seconds order by policy_window.endpoint_id collate "C",policy_window.metric`,[input.projectId,input.userId,input.measuredAt])).rows;
+      const endpoints=(await client.query<ModelEndpointRow>("select * from model_endpoints where project_id=$1 order by created_at,id collate \"C\"",[input.projectId])).rows.map(mapEndpoint);
+      const aggregates=new Map(endpointRows.map((row)=>[row.endpoint_id,row]));
+      const limits=new Map<string,import("../../contracts/src/api.js").ProjectUsageLimit[]>();
+      for(const row of windowRows){const cutoff=new Date(Date.parse(input.measuredAt)-Number(row.window_seconds)*1000).toISOString(),current=Number(row.current),limit=Number(row.limit_value),values=limits.get(row.endpoint_id)??[];values.push({metric:row.metric,current,limit,remaining:Math.max(0,limit-current),window:{kind:"rolling",windowSeconds:Number(row.window_seconds),startedAt:cutoff,resetAt:row.oldest_reserved_at?new Date(Date.parse(toIso(row.oldest_reserved_at))+Number(row.window_seconds)*1000).toISOString():null}});limits.set(row.endpoint_id,values)}
+      const endpointUsage:import("../../contracts/src/api.js").ProjectUsageEndpoint[]=endpoints.map((endpoint)=>{const row=aggregates.get(endpoint.id);return{endpointId:endpoint.id,endpointName:endpoint.name,requests:Number(row?.requests??0),tokens:Number(row?.tokens??0),cost:Number(row?.cost??0),limits:limits.get(endpoint.id)??[]}});
+      const unassigned=aggregates.get(null);
+      if(unassigned)endpointUsage.push({endpointId:null,endpointName:"Other provider activity",requests:Number(unassigned.requests),tokens:Number(unassigned.tokens),cost:Number(unassigned.cost)});
+      const daily=dailyRows.map((row)=>({date:row.bucket,requests:Number(row.requests),tokens:Number(row.tokens),cost:Number(row.cost)}));
+      const totals=daily.reduce((total,day)=>({requests:total.requests+day.requests,tokens:total.tokens+day.tokens,cost:total.cost+day.cost}),{requests:0,tokens:0,cost:0});
+      const missingSettlement=await client.query("select 1 from sandbox_runs run left join sandbox_usage_settlements settlement on settlement.run_id=run.run_id where run.project_id=$1 and run.started_by_user_id=$2 and run.state='released' and settlement.run_id is null limit 1",[input.projectId,input.selectedUserId]);
+      if(missingSettlement.rowCount)return{kind:"integrity_error" as const};
+      const mismatchedOwnedRun=await client.query(`select 1 from sandbox_runs run left join agent_tasks task on task.id=run.task_id where run.project_id=$1 and run.started_by_user_id=$2 and run.state<>'released' and (task.id is null or task.deleted_at is not null or task.current_run_id is distinct from run.run_id or task.project_id is distinct from run.project_id or task.workspace_id is distinct from run.workspace_id or task.file_library_id is distinct from run.file_library_id) limit 1`,[input.projectId,input.selectedUserId]);
+      if(mismatchedOwnedRun.rowCount)return{kind:"integrity_error" as const};
+      const summary=(await client.query<SandboxUsageSummaryRow>(`with usage_rows as (
+        select round(settlement.duration_seconds::numeric*1000) as duration_ms,settlement.cpu_request_millis::numeric as cpu_request_millis,settlement.memory_request_bytes::numeric as memory_request_bytes,false as live,(settlement.started_at is not null) as launched
+        from sandbox_usage_settlements settlement where settlement.project_id=$1 and settlement.started_by_user_id=$2
+        union all
+        select case when run.started_at is null then 0::numeric else round(greatest(0,extract(epoch from ($3::timestamptz-run.started_at))*1000)) end,(run.resource_snapshot->>'cpuRequestMillis')::numeric,(run.resource_snapshot->>'memoryRequestBytes')::numeric,true,(run.started_at is not null)
+        from sandbox_runs run where run.project_id=$1 and run.started_by_user_id=$2 and run.state<>'released'
+      )
+      select count(*) filter (where live)::text as unreleased_count,count(*) filter (where launched)::text as launches,coalesce(sum(duration_ms),0)::text as total_duration_ms,coalesce(sum(cpu_request_millis*duration_ms),0)::text as cpu_request_millis_ms,coalesce(sum(memory_request_bytes*duration_ms),0)::text as memory_request_byte_ms from usage_rows`,[input.projectId,input.selectedUserId,input.measuredAt])).rows[0];
+      const liveRows=await client.query<SandboxLiveRunRow>(`select run.*,task.title as task_title from sandbox_runs run join agent_tasks task on task.id=run.task_id and task.deleted_at is null and task.current_run_id=run.run_id and task.project_id=run.project_id and task.workspace_id=run.workspace_id and task.file_library_id=run.file_library_id where run.project_id=$1 and run.started_by_user_id=$2 and run.state<>'released' order by coalesce(run.started_at,run.created_at) desc,run.run_id collate "C" desc`,[input.projectId,input.selectedUserId]);
+      const measured=Date.parse(input.measuredAt);
+      if(!summary||!Number.isFinite(measured))return{kind:"integrity_error" as const};
+      return{kind:"available" as const,value:{projectCreatedAt:toIso(projectRow.created_at),policy,usage:usageRow?mapUsage(usageRow):null,provider:{daily,totals,endpoints:endpointUsage},sandbox:{unreleasedCount:Number(summary.unreleased_count),launches:Number(summary.launches),totalDurationMilliseconds:summary.total_duration_ms,cpuRequestMillisMilliseconds:summary.cpu_request_millis_ms,memoryRequestByteMilliseconds:summary.memory_request_byte_ms,liveRuns:liveRows.rows.map((row)=>{const run=mapSandboxRun(row);return{taskId:run.taskId,taskTitle:row.task_title??null,taskAvailable:true,runId:run.runId,fileLibraryId:run.fileLibraryId,state:run.state as Exclude<PersistedSandboxRunState["state"],"released">,startedAt:run.startedAt,durationSeconds:run.startedAt?Math.max(0,(measured-Date.parse(run.startedAt))/1000):0,resources:structuredClone(run.resourceSnapshot)}})}}};
+    },"repeatable read");
+  }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const rows=await this.queryRows<{value:string;oldest_reserved_at:unknown}>(`select coalesce(sum(case when $4='providerRequests' then 1 when $4='providerTokens' then case when status='settled' then coalesce(provider_tokens,0) else reserved_tokens end else case when status='settled' then coalesce(provider_cost,0) else reserved_cost end end),0)::text as value,min(reserved_at) as oldest_reserved_at from project_provider_settlements where project_id=$1 and endpoint_id=$2 and actor_id is not distinct from $3 and status<>'failed' and reserved_at >= $5`,[input.projectId,input.endpointId,input.actorId,input.metric,input.since]);return{current:Number(rows[0]?.value??0),oldestReservedAt:rows[0]?.oldest_reserved_at?toIso(rows[0].oldest_reserved_at):null};}
   async measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>{
     if(input.metric==="active_tasks"||input.metric==="project_file_bytes"){const column=input.metric==="active_tasks"?"active_tasks":"project_file_bytes";const rows=await this.queryRows<{value:string}>(`select coalesce(${column},0)::text as value from project_resource_usage where project_id=$1`,[input.projectId]);return Number(rows[0]?.value??0)}
@@ -660,6 +710,14 @@ export class PostgresProductStore implements ProductStore {
       if(!task.rows[0]||task.rows[0].deleted_at||task.rows[0].archived_at||task.rows[0].current_run_id!==run.runId)return{kind:"conflict" as const};
       return{kind:"applied" as const,value:await operation()};
     });
+  }
+  async querySandboxUsageSettlements(query:ProjectSandboxSettlementQuery):Promise<ProjectSandboxSettlementPage>{
+    const values:unknown[]=[query.projectId,query.selectedUserId,query.scopeMeasuredAt],where=["settlement.project_id=$1","settlement.started_by_user_id=$2","settlement.released_at<=$3"];
+    if(query.after){values.push(query.after.releasedAt,query.after.runId);where.push(`(settlement.released_at,settlement.run_id collate "C")<($${values.length-1}::timestamptz,$${values.length}::text collate "C")`)}
+    values.push(query.limit+1);
+    const rows=await this.queryRows<SandboxUsageHistoryRow>(`select settlement.*,task.title as task_title,(task.id is not null) as task_available from sandbox_usage_settlements settlement left join agent_tasks task on task.id=settlement.task_id and task.deleted_at is null where ${where.join(" and ")} order by settlement.released_at desc,settlement.run_id collate "C" desc limit $${values.length}`,values);
+    const page=rows.slice(0,query.limit);
+    return{items:page.map((row)=>{const settlement=mapSandboxUsageSettlement(row);return{taskId:settlement.taskId,taskTitle:row.task_available?row.task_title:null,taskAvailable:row.task_available,runId:settlement.runId,fileLibraryId:settlement.fileLibraryId,startedAt:settlement.startedAt,releasedAt:settlement.releasedAt,durationSeconds:settlement.durationSeconds,resources:settlement.resources,releaseReason:settlement.releaseReason}}),hasMore:rows.length>query.limit};
   }
   async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{const rows=await this.queryRows<SandboxUsageSettlementRow>("select * from sandbox_usage_settlements where project_id=$1 and started_by_user_id=$2 order by released_at desc,run_id desc",[projectId,startedByUserId]);return rows.map(mapSandboxUsageSettlement)}
 
@@ -1805,6 +1863,9 @@ interface ProviderSettlementRow {
   reserved_at: unknown; expires_at: unknown; dispatched_at: unknown; delivered_at: unknown; settled_at: unknown;
   provider_tokens: string | number | null; provider_cost: string | number | null; updated_at: unknown;
 }
+interface ProviderUsageAggregateRow { bucket:string;requests:string;tokens:string;cost:string; }
+interface ProviderEndpointUsageAggregateRow { endpoint_id:string|null;requests:string;tokens:string;cost:string; }
+interface ProviderWindowAggregateRow { endpoint_id:string;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;limit_value:string;window_seconds:number;current:string;oldest_reserved_at:unknown|null; }
 
 interface AgentTaskArtifactRow {
   id: string;
@@ -1821,11 +1882,13 @@ interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; cont
 interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
 interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
-interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; updated_at: unknown; }
+interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
 interface ProjectAlertRow { id: string; project_id: string; type: ProjectAlertReadType; status: ProjectAlertStatus; delivery_status: ProjectAlert["deliveryStatus"]; rule_id:string|null;metric:AlertRuleMetric|null;metric_value:number|null;threshold:number|null;endpoint_id:string|null;acknowledged_at:unknown;acknowledged_by:string|null;silenced_until:unknown; created_at: unknown; updated_at: unknown; resolved_at: unknown; dismissed_at: unknown; }
 interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; subject_user_id:string|null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; }
 interface SandboxUsageSettlementRow { run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;started_at:unknown;released_at:unknown;duration_seconds:number|string;cpu_request_millis:string;memory_request_bytes:string;cpu_limit_millis:string;memory_limit_bytes:string;release_reason:import("../../contracts/src/api.js").SandboxReleaseReason; }
+interface SandboxUsageHistoryRow extends SandboxUsageSettlementRow { task_title:string|null;task_available:boolean; }
+interface SandboxUsageSummaryRow { unreleased_count:string;launches:string;total_duration_ms:string;cpu_request_millis_ms:string;memory_request_byte_ms:string; }
 interface SandboxRunRow {
   run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;
   state:PersistedSandboxRunState["state"];namespace:string;image:string;pvc_name:string;project_sub_path:string;
@@ -1836,6 +1899,7 @@ interface SandboxRunRow {
   release_reason:PersistedSandboxRunState["releaseReason"];started_at:unknown|null;release_requested_at:unknown|null;
   failed_at:unknown|null;released_at:unknown|null;created_at:unknown;updated_at:unknown;
 }
+interface SandboxLiveRunRow extends SandboxRunRow { task_title:string|null; }
 
 interface RuntimeLeaseRow {
   name: string;
@@ -2018,12 +2082,12 @@ function mapTaskDeliveryReceipt(value: unknown): NonNullable<PersistedTaskMessag
 }
 
 function policyValues(policy: ProjectResourcePolicy): unknown[] { return [policy.projectId, policy.activeTasksLimit, policy.providerRequestsLimit, policy.providerTokensLimit, policy.providerCostLimit, policy.projectFileBytesLimit, policy.createdAt, policy.updatedAt]; }
-function usageValues(usage: ProjectResourceUsage): unknown[] { return [usage.projectId, usage.activeTasks, usage.providerRequests, usage.providerTokens, usage.providerCost, usage.projectFileBytes, usage.updatedAt]; }
+function usageValues(usage: ProjectResourceUsage): unknown[] { return [usage.projectId, usage.activeTasks, usage.providerRequests, usage.providerTokens, usage.providerCost, usage.projectFileBytes, usage.projectFileBytesMeasuredAt, usage.updatedAt]; }
 function mapPolicy(row: ProjectPolicyRow): ProjectResourcePolicy {
   if (row.active_tasks_limit === null) throw new Error("Project active task limit is not configured");
   return { projectId: row.project_id, activeTasksLimit: row.active_tasks_limit, providerRequestsLimit: nullableNumber(row.provider_requests_limit), providerTokensLimit: nullableNumber(row.provider_tokens_limit), providerCostLimit: row.provider_cost_limit, projectFileBytesLimit: nullableNumber(row.project_file_bytes_limit), endpointWindows:[], createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) };
 }
-function mapUsage(row: ProjectUsageRow): ProjectResourceUsage { return { projectId: row.project_id, activeTasks: row.active_tasks, providerRequests: Number(row.provider_requests), providerTokens: Number(row.provider_tokens), providerCost: row.provider_cost, projectFileBytes: Number(row.project_file_bytes), updatedAt: toIso(row.updated_at) }; }
+function mapUsage(row: ProjectUsageRow): ProjectResourceUsage { return { projectId: row.project_id, activeTasks: row.active_tasks, providerRequests: Number(row.provider_requests), providerTokens: Number(row.provider_tokens), providerCost: row.provider_cost, projectFileBytes: Number(row.project_file_bytes), projectFileBytesMeasuredAt: row.project_file_bytes_measured_at?toIso(row.project_file_bytes_measured_at):null, updatedAt: toIso(row.updated_at) }; }
 
 function usageColumn(limit: ProjectAlertType): string { return limit === "active_tasks_limit" ? "active_tasks" : limit === "provider_requests_limit" ? "provider_requests" : limit === "provider_tokens_limit" ? "provider_tokens" : limit === "provider_cost_limit" ? "provider_cost" : "project_file_bytes"; }
 function usageLimitColumn(limit: ProjectAlertType): string { return `${usageColumn(limit)}_limit`; }

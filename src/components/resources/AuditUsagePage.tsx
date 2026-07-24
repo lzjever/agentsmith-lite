@@ -1,6 +1,6 @@
 "use client";
 
-import { ClipboardList, ExternalLink, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { ClipboardList, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
   Badge,
   Banner,
@@ -32,6 +32,7 @@ import {
   apiClient,
   type ProjectAuditEvent,
   type ProjectMember,
+  type ProjectSandboxRunHistoryPage,
   type ProjectUsageOverview,
 } from "../../lib/api/client";
 import { Dialog } from "../ui/Dialog";
@@ -49,87 +50,286 @@ export function UsagePage({ projectId }: { projectId: string }) {
   return <UsageProjectPage key={projectId} projectId={projectId} />;
 }
 
-type UsageProvenance = {
+type UsageOverviewProvenance = {
   projectId: string;
-  userId: string;
+  sandboxScope: string;
   endpointId: string;
   overview: ProjectUsageOverview;
 };
 
+type UsageState = {
+  usage: UsageOverviewProvenance | undefined;
+  fileStorage: { projectId: string; value: ProjectUsageOverview["fileStorage"] } | undefined;
+};
+
+type UsageCommit =
+  | { kind: "overview"; usage: UsageOverviewProvenance }
+  | { kind: "file_storage"; projectId: string; fileStorage: ProjectUsageOverview["fileStorage"] }
+  | { kind: "clear_overview"; projectId: string };
+
+function mergeUsageCommit(current: UsageState, commit: UsageCommit): UsageState {
+  if (commit.kind === "clear_overview") {
+    return current.usage?.projectId === commit.projectId ? { ...current, usage: undefined } : current;
+  }
+  if (commit.kind === "file_storage") {
+    const sameUsage = current.usage?.projectId === commit.projectId;
+    const sameStorage = current.fileStorage?.projectId === commit.projectId;
+    if (!sameUsage && !sameStorage) return current;
+    const fileStorage = sameStorage
+      ? newerFileStorage(current.fileStorage!.value, commit.fileStorage)
+      : commit.fileStorage;
+    return {
+      usage: sameUsage
+        ? { ...current.usage!, overview: { ...current.usage!.overview, fileStorage } }
+        : current.usage,
+      fileStorage: { projectId: commit.projectId, value: fileStorage },
+    };
+  }
+  const preserved = current.fileStorage?.projectId === commit.usage.projectId
+    ? current.fileStorage.value
+    : undefined;
+  const fileStorage = preserved
+    ? newerFileStorage(preserved, commit.usage.overview.fileStorage)
+    : commit.usage.overview.fileStorage;
+  return {
+    usage: {
+      ...commit.usage,
+      overview: { ...commit.usage.overview, fileStorage },
+    },
+    fileStorage: { projectId: commit.usage.projectId, value: fileStorage },
+  };
+}
+
+function newerFileStorage(
+  current: ProjectUsageOverview["fileStorage"],
+  incoming: ProjectUsageOverview["fileStorage"],
+): ProjectUsageOverview["fileStorage"] {
+  const currentTime = current.measuredAt === null ? Number.NEGATIVE_INFINITY : Date.parse(current.measuredAt);
+  const incomingTime = incoming.measuredAt === null ? Number.NEGATIVE_INFINITY : Date.parse(incoming.measuredAt);
+  return incomingTime >= currentTime ? incoming : current;
+}
+
+type UsageHistoryProvenance = {
+  projectId: string;
+  sandboxScope: string;
+  cursor: string | null;
+  cursorStack: Array<string | null>;
+  page: ProjectSandboxRunHistoryPage;
+};
+
+type UsageLoadState = "idle" | "loading" | "ready" | "error";
+type HistoryOperation = "initial" | "pagination" | "refresh";
+type FileStorageState = "idle" | "loading" | "error";
+type HistoryRequest = {
+  requestedUserId: string | undefined;
+  cursor: string | null;
+  cursorStack: Array<string | null>;
+  operation: HistoryOperation;
+};
+
 function UsageProjectPage({ projectId }: { projectId: string }) {
-  const [usage, setUsage] = useState<UsageProvenance>();
+  const [usageState, setUsageState] = useState<UsageState>({ usage: undefined, fileStorage: undefined });
+  const usage = usageState.usage;
+  const [history, setHistory] = useState<UsageHistoryProvenance>();
   const [endpointId, setEndpointId] = useState(() => browserQuery().get("endpointId") || "all");
   const [selectedUserId, setSelectedUserId] = useState<string>();
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [canSelectUser, setCanSelectUser] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string>();
-  const [error, setError] = useState<unknown>();
-  const [state, setState] = useState<"loading" | "ready" | "error">(
-    "loading",
-  );
+  const [accessError, setAccessError] = useState<unknown>();
+  const [overviewError, setOverviewError] = useState<unknown>();
+  const [historyError, setHistoryError] = useState<unknown>();
+  const [fileStorageError, setFileStorageError] = useState<unknown>();
+  const [scopeNotice, setScopeNotice] = useState<string>();
+  const [accessState, setAccessState] = useState<UsageLoadState>("loading");
+  const [overviewState, setOverviewState] = useState<UsageLoadState>("loading");
+  const [historyState, setHistoryState] = useState<UsageLoadState>("idle");
+  const [historyOperation, setHistoryOperation] = useState<HistoryOperation>("initial");
+  const [fileStorageState, setFileStorageState] = useState<FileStorageState>("idle");
+  const [historyRetry, setHistoryRetry] = useState<HistoryRequest>();
+  const [historyOpen, setHistoryOpen] = useState(false);
   const active = useRef(true);
-  const requestRevision = useRef(0);
+  const overviewRevision = useRef(0);
+  const historyRevision = useRef(0);
   const accessRevision = useRef(0);
-  const userScope = selectedUserId ?? "self";
-  const visibleUsage = usage?.projectId === projectId && usage.userId === userScope && usage.endpointId === endpointId ? usage.overview : undefined;
+  const fileStorageRevision = useRef(0);
+  const sandboxScope = selectedUserId ?? "self";
+  const visibleUsage = usage?.projectId === projectId && usage.sandboxScope === sandboxScope && usage.endpointId === endpointId ? usage.overview : undefined;
+  const visibleHistory = history?.projectId === projectId && history.sandboxScope === sandboxScope ? history : undefined;
 
-  const load = useCallback(async () => {
-    const revision = ++requestRevision.current;
+  const loadOverview = useCallback(async () => {
+    const revision = ++overviewRevision.current;
     const requestedProjectId = projectId;
-    const requestedUserId = selectedUserId ?? "self";
+    const requestedSandboxScope = selectedUserId ?? "self";
     const requestedEndpointId = endpointId;
-    setState("loading");
-    setError(undefined);
+    setOverviewState("loading");
+    setOverviewError(undefined);
     try {
       const loaded = await apiClient.usage(projectId, {
         ...(endpointId === "all" ? {} : { endpointId }),
         ...(selectedUserId ? { userId: selectedUserId } : {}),
       });
-      if (!active.current || revision !== requestRevision.current || requestedProjectId !== projectId) return;
-      setUsage({ projectId: requestedProjectId, userId: requestedUserId, endpointId: requestedEndpointId, overview: loaded });
-      setError(undefined);
-      setState("ready");
+      if (!active.current || revision !== overviewRevision.current || requestedProjectId !== projectId) return;
+      setUsageState((current) => mergeUsageCommit(current, {
+        kind: "overview",
+        usage: {
+          projectId: requestedProjectId,
+          sandboxScope: requestedSandboxScope,
+          endpointId: requestedEndpointId,
+          overview: loaded,
+        },
+      }));
+      setOverviewError(undefined);
+      setOverviewState("ready");
     } catch (cause) {
-      if (!active.current || revision !== requestRevision.current || requestedProjectId !== projectId) return;
+      if (!active.current || revision !== overviewRevision.current || requestedProjectId !== projectId) return;
+      if (selectedUserId && cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+        historyRevision.current += 1;
+        setUsageState((current) => mergeUsageCommit(current, { kind: "clear_overview", projectId: requestedProjectId }));
+        setHistory(undefined);
+        setSelectedUserId(undefined);
+        setHistoryError(undefined);
+        setHistoryRetry(undefined);
+        setHistoryState("idle");
+        setScopeNotice("That member's Sandbox usage is no longer available. Showing your usage.");
+        return;
+      }
       if (endpointId !== "all" && cause instanceof ApiError && cause.status === 404) {
         const query = browserQuery();
         query.delete("endpointId");
         replaceBrowserQuery(query);
+        setUsageState((current) => mergeUsageCommit(current, { kind: "clear_overview", projectId: requestedProjectId }));
         setEndpointId("all");
+        setScopeNotice("That endpoint is no longer available. Showing all endpoints.");
         return;
       }
-      setError(cause);
-      setState("error");
+      setOverviewError(cause);
+      setOverviewState("error");
     }
   }, [projectId, endpointId, selectedUserId]);
 
-  useEffect(() => {
-    active.current = true;
+  const loadAccess = useCallback(async () => {
     const revision = ++accessRevision.current;
     const requestedProjectId = projectId;
-    void Promise.all([apiClient.currentIdentity(), apiClient.members(projectId)])
-      .then(([identity, listed]) => {
-        if (!active.current || revision !== accessRevision.current || requestedProjectId !== projectId) return;
-        const current = listed.find((member) => member.userId === identity.user.id);
-        setMembers(listed);
-        setCurrentUserId(identity.user.id);
-        setCanSelectUser(current?.role === "owner" || current?.role === "admin");
-      })
-      .catch(() => undefined);
+    setAccessState("loading");
+    setAccessError(undefined);
+    try {
+      const [identity, listed] = await Promise.all([apiClient.currentIdentity(), apiClient.members(projectId)]);
+      if (!active.current || revision !== accessRevision.current || requestedProjectId !== projectId) return;
+      const current = listed.find((member) => member.userId === identity.user.id);
+      setMembers(listed);
+      setCurrentUserId(identity.user.id);
+      setCanSelectUser(current?.role === "owner" || current?.role === "admin");
+      setAccessState("ready");
+    } catch (cause) {
+      if (!active.current || revision !== accessRevision.current || requestedProjectId !== projectId) return;
+      setAccessError(cause);
+      setAccessState("error");
+    }
+  }, [projectId]);
+
+  const loadHistory = useCallback(async ({
+    requestedUserId,
+    cursor,
+    cursorStack,
+    operation,
+  }: HistoryRequest) => {
+    const revision = ++historyRevision.current;
+    const requestedProjectId = projectId;
+    const requestedSandboxScope = requestedUserId ?? "self";
+    setHistoryOperation(operation);
+    setHistoryState("loading");
+    setHistoryError(undefined);
+    try {
+      const page = await apiClient.sandboxRunHistory(projectId, {
+        ...(requestedUserId ? { userId: requestedUserId } : {}),
+        ...(cursor ? { cursor } : {}),
+        limit: 20,
+      });
+      if (!active.current || revision !== historyRevision.current || requestedProjectId !== projectId) return;
+      setHistory({
+        projectId: requestedProjectId,
+        sandboxScope: requestedSandboxScope,
+        cursor,
+        cursorStack,
+        page,
+      });
+      setHistoryRetry(undefined);
+      setHistoryState("ready");
+    } catch (cause) {
+      if (!active.current || revision !== historyRevision.current || requestedProjectId !== projectId) return;
+      if (requestedUserId && cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+        overviewRevision.current += 1;
+        setUsageState((current) => mergeUsageCommit(current, { kind: "clear_overview", projectId: requestedProjectId }));
+        setHistory(undefined);
+        setSelectedUserId(undefined);
+        setOverviewError(undefined);
+        setOverviewState("loading");
+        setHistoryRetry(undefined);
+        setHistoryState("idle");
+        setScopeNotice("That member's Sandbox usage is no longer available. Showing your usage.");
+        return;
+      }
+      setHistoryRetry({ requestedUserId, cursor, cursorStack, operation });
+      setHistoryError(cause);
+      setHistoryState("error");
+    }
+  }, [projectId]);
+
+  const measureFileStorage = useCallback(async () => {
+    const revision = ++fileStorageRevision.current;
+    const requestedProjectId = projectId;
+    setFileStorageState("loading");
+    setFileStorageError(undefined);
+    try {
+      const measured = await apiClient.measureFileStorage(projectId);
+      if (!active.current || revision !== fileStorageRevision.current || requestedProjectId !== projectId) return;
+      if (measured.projectId !== requestedProjectId) throw new ApiError(502, "File storage measurement returned the wrong project.");
+      setUsageState((current) => mergeUsageCommit(current, {
+        kind: "file_storage",
+        projectId: requestedProjectId,
+        fileStorage: measured.fileStorage,
+      }));
+      setFileStorageState("idle");
+    } catch (cause) {
+      if (!active.current || revision !== fileStorageRevision.current || requestedProjectId !== projectId) return;
+      setFileStorageError(cause);
+      setFileStorageState("error");
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    active.current = true;
     return () => {
       active.current = false;
-      requestRevision.current += 1;
+      overviewRevision.current += 1;
+      historyRevision.current += 1;
       accessRevision.current += 1;
+      fileStorageRevision.current += 1;
     };
-  }, [projectId]);
+  }, []);
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadAccess();
+  }, [loadAccess]);
+  useEffect(() => {
+    void loadOverview();
+  }, [loadOverview]);
+  useEffect(() => {
+    if (!historyOpen || visibleHistory || historyState !== "idle") return;
+    void loadHistory({
+      requestedUserId: selectedUserId,
+      cursor: null,
+      cursorStack: [],
+      operation: "initial",
+    });
+  }, [historyOpen, historyState, loadHistory, selectedUserId, visibleHistory]);
 
   function changeEndpoint(nextEndpointId: string) {
-    requestRevision.current += 1;
-    setError(undefined);
-    setState("loading");
+    if (nextEndpointId === endpointId) return;
+    overviewRevision.current += 1;
+    setOverviewError(undefined);
+    setOverviewState("loading");
+    setScopeNotice(undefined);
     const query = browserQuery();
     if (nextEndpointId === "all") query.delete("endpointId");
     else query.set("endpointId", nextEndpointId);
@@ -138,10 +338,75 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
   }
 
   function changeUser(userId: string) {
-    requestRevision.current += 1;
-    setError(undefined);
-    setState("loading");
-    setSelectedUserId(userId === currentUserId ? undefined : userId);
+    const nextUserId = userId === currentUserId ? undefined : userId;
+    if (nextUserId === selectedUserId) return;
+    overviewRevision.current += 1;
+    historyRevision.current += 1;
+    setOverviewError(undefined);
+    setOverviewState("loading");
+    setHistory(undefined);
+    setHistoryError(undefined);
+    setHistoryRetry(undefined);
+    setHistoryState("idle");
+    setScopeNotice(undefined);
+    setSelectedUserId(nextUserId);
+  }
+
+  function refresh() {
+    void loadOverview();
+    if (historyOpen && visibleHistory) {
+      void loadHistory({
+        requestedUserId: selectedUserId,
+        cursor: visibleHistory.cursor,
+        cursorStack: visibleHistory.cursorStack,
+        operation: "refresh",
+      });
+    }
+  }
+
+  function nextHistoryPage() {
+    if (!visibleHistory?.page.nextCursor || historyState === "loading") return;
+    void loadHistory({
+      requestedUserId: selectedUserId,
+      cursor: visibleHistory.page.nextCursor,
+      cursorStack: [...visibleHistory.cursorStack, visibleHistory.cursor],
+      operation: "pagination",
+    });
+  }
+
+  function previousHistoryPage() {
+    if (!visibleHistory || historyState === "loading") return;
+    const previousCursor = visibleHistory.cursorStack.at(-1);
+    if (previousCursor === undefined) return;
+    void loadHistory({
+      requestedUserId: selectedUserId,
+      cursor: previousCursor,
+      cursorStack: visibleHistory.cursorStack.slice(0, -1),
+      operation: "pagination",
+    });
+  }
+
+  function refreshHistory() {
+    if (!visibleHistory || historyState === "loading") return;
+    void loadHistory({
+      requestedUserId: selectedUserId,
+      cursor: visibleHistory.cursor,
+      cursorStack: visibleHistory.cursorStack,
+      operation: "refresh",
+    });
+  }
+
+  function retryHistory() {
+    if (historyRetry) {
+      void loadHistory(historyRetry);
+      return;
+    }
+    void loadHistory({
+      requestedUserId: selectedUserId,
+      cursor: visibleHistory?.cursor ?? null,
+      cursorStack: visibleHistory?.cursorStack ?? [],
+      operation: visibleHistory ? "refresh" : "initial",
+    });
   }
 
   return (
@@ -156,152 +421,50 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
               tooltip="Refresh usage"
               variant="ghost"
               icon={<RefreshCw size={16} />}
-              onClick={() => void load()}
+              onClick={refresh}
             />
           }
         />
       }
     >
-      {canSelectUser && currentUserId ? (
-        <div className="flex justify-end border-y border-border py-3">
-          <div className="grid gap-1 text-secondary">
-            <Text type="label" color="secondary">Sandbox member</Text>
-            <Selector
-              label="Sandbox usage member"
-              isLabelHidden
-              options={members.map((member) => ({ value: member.userId, label: memberLabel(member) }))}
-              value={selectedUserId ?? currentUserId}
-              onChange={changeUser}
-              size="lg"
-              className="w-64 max-w-full"
-            />
-          </div>
-        </div>
-      ) : null}
-      {state === "loading" && !visibleUsage ? (
-        <div className="grid min-h-64 place-items-center" role="status"><Text color="secondary">Loading usage...</Text></div>
-      ) : null}
-      {state === "loading" && visibleUsage ? (
-        <div className="border-y border-border px-3 py-2 text-secondary" role="status"><Text type="supporting" color="secondary">Refreshing usage...</Text></div>
-      ) : null}
-      {state === "error" && !visibleUsage ? (
-        <Banner status="error" title={usageError(error).title} description={usageError(error).message} endContent={<Button label="Try again" variant="ghost" onClick={() => void load()} />} />
-      ) : null}
-      {visibleUsage ? (
-        <div className="space-y-7">
-          {state === "error" ? <InlineUsageError error={error} onRetry={load} /> : null}
-          <SandboxUsageView
-            projectId={projectId}
-            usage={visibleUsage}
-            members={members}
-          />
-          <UsageView overview={visibleUsage} selectedEndpointId={endpointId} onEndpointChange={changeEndpoint} />
-        </div>
-      ) : null}
+      <UsageView
+        projectId={projectId}
+        overview={visibleUsage}
+        overviewState={overviewState}
+        overviewError={overviewError}
+        accessState={accessState}
+        accessError={accessError}
+        scopeNotice={scopeNotice}
+        members={members}
+        currentUserId={currentUserId}
+        canSelectUser={canSelectUser}
+        selectedEndpointId={endpointId}
+        selectedSandboxUserId={selectedUserId}
+        historyOpen={historyOpen}
+        history={visibleHistory?.page}
+        historyPageIndex={visibleHistory?.cursorStack.length ?? 0}
+        historyState={historyState}
+        historyError={historyError}
+        historyOperation={historyOperation}
+        fileStorageState={fileStorageState}
+        fileStorageError={fileStorageError}
+        onEndpointChange={changeEndpoint}
+        onSandboxUserChange={changeUser}
+        onRetryAccess={loadAccess}
+        onRetryOverview={loadOverview}
+        onHistoryOpenChange={setHistoryOpen}
+        onHistoryPrevious={previousHistoryPage}
+        onHistoryNext={nextHistoryPage}
+        onHistoryRefresh={refreshHistory}
+        onHistoryRetry={retryHistory}
+        onMeasureFileStorage={measureFileStorage}
+      />
     </PageLayout>
   );
 }
 
-function SandboxUsageView({
-  projectId,
-  usage,
-  members,
-}: {
-  projectId: string;
-  usage: ProjectUsageOverview;
-  members: ProjectMember[];
-}) {
-  const sandbox = usage.sandbox;
-  const selectedMember = members.find((member) => member.userId === sandbox.selectedUserId);
-  return (
-    <section className="space-y-4 border-y border-border py-5" aria-labelledby="sandbox-usage">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <Heading level={2} id="sandbox-usage">Sandbox usage</Heading>
-          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
-            Task sandbox runtime and requested resources for {selectedMember ? memberLabel(selectedMember) : "you"}.
-          </Text>
-        </div>
-      </div>
-      <dl className="grid overflow-hidden border border-border sm:grid-cols-2 xl:grid-cols-5">
-        <SandboxTotal label="Active" value={formatInteger(String(sandbox.activeCount))} />
-        <SandboxTotal label="Launches" value={formatInteger(String(sandbox.launches))} />
-        <SandboxTotal label="Total runtime" value={`${formatDecimal(sandbox.totalDurationSeconds)} s`} />
-        <SandboxTotal label="CPU request-time" value={`${formatDecimal(sandbox.cpuRequestSeconds)} CPU-s`} />
-        <SandboxTotal label="Memory request-time" value={`${formatDecimal(sandbox.memoryRequestByteSeconds, 1_073_741_824n)} GiB-s`} />
-      </dl>
-      {sandbox.rows.length ? (
-        <Table aria-label="Sandbox runs" density="balanced" dividers="rows" verticalAlign="top">
-          <TableHeader><TableRow isHeaderRow><TableHeaderCell>Task and run</TableHeaderCell><TableHeaderCell>State</TableHeaderCell><TableHeaderCell>Started</TableHeaderCell><TableHeaderCell>Released</TableHeaderCell><TableHeaderCell>Duration</TableHeaderCell><TableHeaderCell>Resources</TableHeaderCell></TableRow></TableHeader>
-          <TableBody>{sandbox.rows.map((row) => <TableRow key={row.runId}><TableCell><div className="min-w-0">{row.taskAvailable ? <a className="inline-flex max-w-full items-center gap-1 hover:underline" href={taskHref(projectId, row.taskId)}><Text weight="medium" maxLines={1}>Task {row.taskId}</Text><ExternalLink className="size-3 shrink-0" /></a> : <span title="This task was deleted"><Text type="supporting" color="secondary">Task {row.taskId} (deleted)</Text></span>}<span className="mt-1 block" title={row.runId}><Text type="code" color="secondary" display="block" maxLines={1}>Run {row.runId}</Text></span></div></TableCell><TableCell><Badge variant={row.state === "live" ? "success" : "neutral"} label={row.state === "live" ? "Live" : "Settled"} /></TableCell><TableCell>{row.startedAt ? formatDate(row.startedAt) : "-"}</TableCell><TableCell>{row.releasedAt ? formatDate(row.releasedAt) : "-"}</TableCell><TableCell>{formatDuration(row.durationSeconds)}</TableCell><TableCell><Text display="block">{formatInteger(row.resources.cpuRequestMillis)} mCPU · {formatBytes(row.resources.memoryRequestBytes)} requested</Text><Text type="supporting" color="secondary" display="block" className="mt-1">Limits {formatInteger(row.resources.cpuLimitMillis)} mCPU · {formatBytes(row.resources.memoryLimitBytes)}</Text></TableCell></TableRow>)}</TableBody>
-        </Table>
-      ) : <EmptyState className="border border-dashed border-border" isCompact title="No sandbox runs" description="No sandbox runs for this member." />}
-    </section>
-  );
-}
-
-function SandboxTotal({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 border-b border-border p-4 sm:border-r xl:border-b-0"><dt><Text type="supporting" color="secondary">{label}</Text></dt><dd className="mt-2 break-words"><Text type="large">{value}</Text></dd></div>;
-}
-
-function InlineUsageError({ error, onRetry }: { error: unknown; onRetry: () => Promise<void> }) {
-  const copy = usageError(error);
-  return <Banner status="error" title={copy.title} description={copy.message} endContent={<Button label="Retry" variant="ghost" size="md" onClick={() => void onRetry()} />} />;
-}
-
-function usageError(error: unknown): { title: string; message: string } {
-  if (error instanceof ApiError && error.status === 503 && error.code === "sandbox_usage_unavailable") return { title: "Sandbox usage unavailable", message: "Sandbox accounting is temporarily unavailable. Retry after the run state is reconciled." };
-  if (error instanceof ApiError && error.status === 403) return { title: "Sandbox usage not permitted", message: "You do not have permission to view that member's sandbox usage." };
-  if (error instanceof ApiError && error.status === 404) return { title: "Usage scope not found", message: "The selected member or endpoint is no longer available." };
-  return { title: "Usage unavailable", message: "Usage could not be loaded." };
-}
-
 function memberLabel(member: ProjectMember): string {
   return member.displayName ? `${member.displayName} (${member.email})` : member.email;
-}
-
-function taskHref(_projectId: string, taskId: string): string {
-  const pathname = typeof window === "undefined" ? "" : window.location.pathname;
-  const projectBase = /^(.*)\/usage\/?$/.exec(pathname)?.[1] || "..";
-  return `${projectBase}/tasks/${encodeURIComponent(taskId)}`;
-}
-
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "-";
-  if (seconds < 60) return `${seconds.toLocaleString(undefined, { maximumFractionDigits: 3 })} s`;
-  const whole = Math.floor(seconds);
-  const hours = Math.floor(whole / 3600);
-  const minutes = Math.floor((whole % 3600) / 60);
-  const remainder = whole % 60;
-  return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", `${remainder}s`].filter(Boolean).join(" ");
-}
-
-function formatBytes(value: string): string {
-  if (!/^\d+$/.test(value)) return value;
-  const bytes = BigInt(value);
-  if (bytes >= 1_073_741_824n) return `${formatDecimal(value, 1_073_741_824n)} GiB`;
-  if (bytes >= 1_048_576n) return `${formatDecimal(value, 1_048_576n)} MiB`;
-  if (bytes >= 1_024n) return `${formatDecimal(value, 1_024n)} KiB`;
-  return `${formatInteger(value)} B`;
-}
-
-function formatInteger(value: string): string {
-  if (!/^\d+$/.test(value)) return value;
-  return BigInt(value).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-function formatDecimal(value: string, divisor = 1n, maximumFractionDigits = 2): string {
-  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
-  if (!match || divisor <= 0n) return value;
-  const fraction = match[2] ?? "";
-  const scale = 10n ** BigInt(fraction.length);
-  const numerator = BigInt(`${match[1]}${fraction}`);
-  const denominator = scale * divisor;
-  const displayScale = 10n ** BigInt(maximumFractionDigits);
-  const rounded = (numerator * displayScale + denominator / 2n) / denominator;
-  const whole = rounded / displayScale;
-  const decimals = (rounded % displayScale).toString().padStart(maximumFractionDigits, "0").replace(/0+$/, "");
-  return `${formatInteger(whole.toString())}${decimals ? `.${decimals}` : ""}`;
 }
 
 const actions = ["all", ...PROJECT_AUDIT_ACTIONS] as const;

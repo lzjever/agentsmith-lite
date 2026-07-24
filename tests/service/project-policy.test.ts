@@ -23,15 +23,13 @@ describe("project resource policy", () => {
 
     assert.equal((await services.memberships.listMembers(user.id, project.id)).find((member) => member.userId === user.id)?.role, "owner");
     assert.equal((await services.policies.getPolicy(user.id, project.id)).activeTasksLimit, 3);
-    assert.deepEqual((await services.policies.getUsageOverview(user.id, project.id)).usage, {
-      projectId: project.id,
-      activeTasks: 0,
-      providerRequests: 0,
-      providerTokens: 0,
-      providerCost: 0,
-      projectFileBytes: 0,
-      updatedAt: project.updatedAt
-    });
+    const overview = await services.policies.getUsageOverview(user.id, project.id);
+    assert.deepEqual(
+      overview.limits.map((limit) => [limit.metric, limit.current]),
+      [["activeTasks", 0], ["providerRequests", 0], ["providerTokens", 0], ["providerCost", 0]]
+    );
+    assert.deepEqual(overview.fileStorage,{recordedBytes:0,measuredAt:null,limitBytes:null,remainingBytes:null});
+    assert.equal("usage" in overview, false);
   });
 
   it("uses resource policy as the only mutable active-task limit", async () => {
@@ -73,7 +71,7 @@ describe("project resource policy", () => {
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 1);
   });
 
-  it("uses measured Library bytes as the sole truth despite artifact metadata", async () => {
+  it("records over-limit Library measurements without failing and recovers the alert", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-file-reconcile", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
@@ -85,10 +83,22 @@ describe("project resource policy", () => {
     assert.equal((await store.createTaskAtomically({task,reserveActive:false})).kind,"created");
     await store.appendTaskArtifacts([{ id: "artifact_file_reconcile", taskId: task.id, fileId: "file_reconcile", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: project.createdAt }]);
 
-    await assert.rejects(()=>services.policies.reconcileFileLibraryBytes(project.id,8),/Project file bytes limit reached/);
+    const over=await services.policies.reconcileFileLibraryBytes(project.id,8);
+    assert.deepEqual({...over,measuredAt:"measured"},{recordedBytes:8,measuredAt:"measured",limitBytes:5,remainingBytes:0});
+    assert.match(over.measuredAt??"",/Z$/);
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,8);
-    await services.policies.reconcileFileLibraryBytes(project.id, 3);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytesMeasuredAt,over.measuredAt);
+    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),true);
+    await store.adjustProjectResourceUsage({
+      projectId:project.id,
+      delta:{activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:-1},
+      updatedAt:"2026-07-12T00:01:00.000Z"
+    });
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytesMeasuredAt,over.measuredAt);
+    const recovered=await services.policies.reconcileFileLibraryBytes(project.id, 3);
+    assert.deepEqual({...recovered,measuredAt:"measured"},{recordedBytes:3,measuredAt:"measured",limitBytes:5,remainingBytes:2});
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,3);
+    assert.equal((await store.listActiveProjectAlerts(project.id)).some((alert)=>alert.type==="project_file_bytes_limit"),false);
   });
 
   it("expires stale provider reservations with conservative request accounting", async () => {
@@ -108,14 +118,14 @@ describe("project resource policy", () => {
     await services.policies.markProviderDelivered(settled);
     await services.policies.settleProvider(settled, { tokens: 3, cost: 0.25 });
     await store.expireProjectProviderSettlements("9999-01-01T00:00:00.000Z");
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
+    const current = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual({ requests: current.providerRequests, tokens: current.providerTokens, cost: current.providerCost }, { requests: 3, tokens: 8195, cost: 2.25 });
     await assert.rejects(() => services.policies.markProviderDispatched(reserved), /Provider settlement not found/);
     await services.policies.markProviderDelivered(dispatched);
     await services.policies.settleProvider(dispatched, { tokens: 1, cost: 1 });
     await services.policies.markProviderDelivered(delivered);
     await services.policies.settleProvider(delivered, { tokens: 2, cost: 0.5 });
-    const afterLateSettlement = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    const afterLateSettlement = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual({ requests: afterLateSettlement.providerRequests, tokens: afterLateSettlement.providerTokens, cost: afterLateSettlement.providerCost }, { requests: 3, tokens: 6, cost: 1.75 });
   });
 
@@ -130,25 +140,26 @@ describe("project resource policy", () => {
     await services.policies.markProviderDelivered(settled);
     await services.policies.settleProvider(settled, { tokens: 3, cost: 1 });
     await services.policies.settleProvider(settled, { tokens: 99, cost: 99 });
-    const { usage: current } = await services.policies.getUsageOverview(user.id, project.id);
+    const current = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual(current.providerTokens, 3);
     const unknown = await services.policies.reserveProvider(project.id, user.id, "endpoint");
     await services.policies.markProviderDispatched(unknown);
     await services.policies.markProviderDelivered(unknown);
     await services.policies.markProviderUnknown(unknown);
-    const afterUnknown = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    const afterUnknown = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual(
       { requests: afterUnknown.providerRequests, tokens: afterUnknown.providerTokens, cost: afterUnknown.providerCost },
       { requests: 2, tokens: 4099, cost: 2 }
     );
     assert.ok(await store.settleProjectProviderSettlement(unknown, { tokens: 1 }, new Date().toISOString()));
-    const afterLateUsage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    const afterLateUsage = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual({ requests: afterLateUsage.providerRequests, tokens: afterLateUsage.providerTokens, cost: afterLateUsage.providerCost }, { requests: 2, tokens: 4, cost: 1 });
   });
 
   it("keeps conservative usage when a dispatched provider request fails ambiguously", async () => {
+    const store = createInMemoryProductStore();
     const services = createApplicationServices({
-      store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-provider-unknown", builtinAdminPassword: "admin-password",
+      store, dataRoot: "/tmp/agentsmith-provider-unknown", builtinAdminPassword: "admin-password",
       providerClient: { async completeChat() { throw new Error("connection lost after dispatch"); } }
     });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
@@ -158,7 +169,7 @@ describe("project resource policy", () => {
 
     await assert.rejects(() => services.providerBroker.completeChat({ endpoint, settlementEndpointId: null, apiKey: "secret", actorId: user.id }, [{ role: "user", content: "hello" }]), /provider request failed/i);
 
-    const usage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    const usage = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual({ requests: usage.providerRequests, tokens: usage.providerTokens, cost: usage.providerCost }, { requests: 1, tokens: 4096, cost: 1 });
   });
 
@@ -210,7 +221,7 @@ describe("project resource policy", () => {
     releaseResponse();
 
     assert.equal((await pending).message.content, "late success");
-    const usage = (await services.policies.getUsageOverview(user.id, project.id)).usage;
+    const usage = (await store.findProjectResourceUsage(project.id))!;
     assert.deepEqual({ requests:usage.providerRequests, tokens:usage.providerTokens, cost:usage.providerCost }, { requests:1, tokens:2, cost:0.5 });
   });
 

@@ -1,44 +1,918 @@
 "use client";
 
-import { EmptyState, Heading, Selector, Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow, Text } from "@astryxdesign/core";
-import type { ProjectUsageOverview, ProjectUsageWindow } from "../../lib/api/client";
-import { formatLocalDate, formatLocalTime } from "../../lib/format/date";
+import { Check, Copy, ExternalLink, RefreshCw } from "lucide-react";
+import {
+  Banner,
+  Button,
+  Collapsible,
+  EmptyState,
+  Heading,
+  IconButton,
+  Selector,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+  Text,
+} from "@astryxdesign/core";
+import { useId, useState } from "react";
+import type {
+  ProjectMember,
+  ProjectSandboxRunHistoryPage,
+  ProjectUsageOverview,
+  ProjectUsageWindow,
+} from "../../lib/api/client";
+import {
+  formatLocalDate,
+  formatLocalDateTime,
+  formatLocalTime,
+} from "../../lib/format/date";
 
-const labels = { activeTasks: "Active tasks", providerRequests: "Provider requests", providerTokens: "Provider tokens", providerCost: "Provider cost", projectFileBytes: "Project file storage" } as const;
+const labels = {
+  activeTasks: "Active tasks",
+  providerRequests: "Provider requests",
+  providerTokens: "Provider tokens",
+  providerCost: "Provider cost",
+} as const;
 
-export function UsageView({ overview, selectedEndpointId, onEndpointChange }: { overview: ProjectUsageOverview; selectedEndpointId: string; onEndpointChange: (endpointId: string) => void }) {
-  const peak = Math.max(1, ...overview.daily.map((day) => day.requests));
-  const hasTrend = overview.daily.some((day) => day.requests > 0 || day.tokens > 0 || day.cost > 0);
-  const selectedEndpoint = overview.endpoints.find((endpoint) => endpoint.endpointId === selectedEndpointId);
-  const scopeLabel = selectedEndpointId === "all" ? "All endpoints" : (selectedEndpoint?.endpointName ?? selectedEndpointId);
-  return <section className="space-y-7" aria-label="Project usage">
-    <section className="flex flex-wrap items-end justify-between gap-3 border-y border-border py-4" aria-labelledby="usage-scope">
-      <div><Heading level={2} id="usage-scope">Usage scope</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1 max-w-2xl">The endpoint filter applies to your settled 30-day provider usage. Project lifetime limits and settled endpoint totals remain project-wide; rolling endpoint limits show your capacity.</Text></div>
-      <Selector label="Endpoint" options={[{ value: "all", label: "All endpoints" }, ...overview.endpoints.filter((endpoint) => endpoint.endpointId !== null).map((endpoint) => ({ value: endpoint.endpointId!, label: endpoint.endpointName }))]} value={selectedEndpointId} onChange={onEndpointChange} size="sm" width={224} />
-    </section>
-    <section aria-labelledby="usage-limits">
-      <Heading level={2} id="usage-limits">Project limits</Heading>
-      <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Project-wide, independent of the endpoint filter.</Text>
-      <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Provider totals include conservative reservations when final delivery usage is unknown.</Text>
-      <dl className="mt-4 grid overflow-hidden border border-border sm:grid-cols-2 xl:grid-cols-5">{overview.limits.map((limit, index) => <div key={limit.metric} className={`min-w-0 border-b border-border p-4 sm:border-r sm:last:border-r-0 xl:border-b-0 ${index >= 2 ? "sm:border-b-0" : ""}`}><dt><Text type="supporting" color="secondary">{labels[limit.metric]}</Text></dt><dd className="mt-3"><Text type="large">{formatMetric(limit.metric, limit.current)}</Text></dd><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">{limit.limit === null ? "No limit" : `${formatMetric(limit.metric, limit.remaining!)} remaining of ${formatMetric(limit.metric, limit.limit)}`}</Text><Text as="p" type="supporting" color="secondary" display="block" className="mt-2">{formatUsageWindow(limit.window)}</Text></div>)}</dl>
-    </section>
-    <section className="border-y border-border py-5" aria-labelledby="usage-trend">
-      <Heading level={2} id="usage-trend">Your 30-day trend</Heading>
-      <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Your settled provider requests · {scopeLabel}.</Text>
-      {hasTrend ? <><div className="mt-5 flex h-40 items-end gap-px border-b border-border" aria-label="30-day request trend">{overview.daily.map((day) => <div className="relative min-w-0 flex-1 bg-accent-bg" key={day.date} style={{ height: `${day.requests === 0 ? 0 : Math.max(3, Math.round(day.requests / peak * 100))}%` }} title={`${day.date}: ${day.requests} requests, ${day.tokens} tokens, ${formatCost(day.cost)}`} aria-label={`${day.date}: ${day.requests} requests`} />)}</div><div className="mt-2 flex justify-between"><Text type="supporting" color="secondary">{overview.daily[0]?.date}</Text><Text type="supporting" color="secondary">{overview.daily.at(-1)?.date}</Text></div><dl className="mt-5 grid gap-3 sm:grid-cols-3"><UsageTotal label="Requests" value={String(overview.trendTotals.requests)} /><UsageTotal label="Tokens" value={formatNumber(overview.trendTotals.tokens)} /><UsageTotal label="Cost" value={formatCost(overview.trendTotals.cost)} /></dl></> : <EmptyState className="min-h-40 border border-dashed border-border" isCompact title="No settled provider usage" description="No settled provider usage in this period." />}
-    </section>
-    <section aria-labelledby="usage-endpoints">
-      <Heading level={2} id="usage-endpoints">Project endpoint usage</Heading>
-      <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Settled totals from the last 30 days, including activity not tied to a current endpoint.</Text>
-      {overview.endpoints.length === 0 ? <EmptyState className="mt-3" isCompact title="No project endpoint usage" description="No project endpoint usage in this period." /> : <div className="mt-4"><Table aria-label="Project endpoint usage" density="balanced" dividers="rows" verticalAlign="top"><TableHeader><TableRow isHeaderRow><TableHeaderCell>Endpoint</TableHeaderCell><TableHeaderCell>Settled totals</TableHeaderCell><TableHeaderCell>Your rolling limits</TableHeaderCell></TableRow></TableHeader><TableBody>{overview.endpoints.map((endpoint) => <TableRow key={endpoint.endpointId ?? "unassigned-endpoints"}><TableCell>{endpoint.endpointName}</TableCell><TableCell><Text type="supporting" color="secondary">{endpoint.requests} requests · {formatNumber(endpoint.tokens)} tokens · {formatCost(endpoint.cost)}</Text></TableCell><TableCell>{endpoint.limits?.length ? endpoint.limits.map((limit) => <Text type="supporting" color="secondary" display="block" key={limit.metric}>{labels[limit.metric]}: {limit.remaining === null ? "unlimited" : `${formatMetric(limit.metric, limit.remaining)} remaining`} · {formatUsageWindow(limit.window)}</Text>) : <Text type="supporting" color="secondary">No rolling limits</Text>}</TableCell></TableRow>)}</TableBody></Table></div>}
-    </section>
-  </section>;
+const providerDayFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeZone: "UTC",
+});
+
+type LoadState = "idle" | "loading" | "ready" | "error";
+type HistoryOperation = "initial" | "pagination" | "refresh";
+
+export function UsageView({
+  projectId,
+  overview,
+  overviewState,
+  overviewError,
+  accessState,
+  accessError,
+  scopeNotice,
+  members,
+  currentUserId,
+  canSelectUser,
+  selectedEndpointId,
+  selectedSandboxUserId,
+  historyOpen,
+  history,
+  historyPageIndex,
+  historyState,
+  historyError,
+  historyOperation,
+  fileStorageState,
+  fileStorageError,
+  onEndpointChange,
+  onSandboxUserChange,
+  onRetryAccess,
+  onRetryOverview,
+  onHistoryOpenChange,
+  onHistoryPrevious,
+  onHistoryNext,
+  onHistoryRefresh,
+  onHistoryRetry,
+  onMeasureFileStorage,
+}: {
+  projectId: string;
+  overview: ProjectUsageOverview | undefined;
+  overviewState: LoadState;
+  overviewError: unknown;
+  accessState: LoadState;
+  accessError: unknown;
+  scopeNotice: string | undefined;
+  members: ProjectMember[];
+  currentUserId: string | undefined;
+  canSelectUser: boolean;
+  selectedEndpointId: string;
+  selectedSandboxUserId: string | undefined;
+  historyOpen: boolean;
+  history: ProjectSandboxRunHistoryPage | undefined;
+  historyPageIndex: number;
+  historyState: LoadState;
+  historyError: unknown;
+  historyOperation: HistoryOperation;
+  fileStorageState: "idle" | "loading" | "error";
+  fileStorageError: unknown;
+  onEndpointChange: (endpointId: string) => void;
+  onSandboxUserChange: (userId: string) => void;
+  onRetryAccess: () => Promise<void>;
+  onRetryOverview: () => Promise<void>;
+  onHistoryOpenChange: (open: boolean) => void;
+  onHistoryPrevious: () => void;
+  onHistoryNext: () => void;
+  onHistoryRefresh: () => void;
+  onHistoryRetry: () => void;
+  onMeasureFileStorage: () => Promise<void>;
+}) {
+  const accessCopy = accessErrorCopy(accessError);
+  const overviewCopy = usageErrorCopy(overviewError);
+  return (
+    <div className="space-y-6">
+      {accessState === "error" ? (
+        <Banner
+          status="error"
+          title={accessCopy.title}
+          description={accessCopy.message}
+          endContent={<Button label="Retry member lookup" variant="ghost" onClick={() => void onRetryAccess()} />}
+        />
+      ) : null}
+      {scopeNotice ? <Banner status="warning" title="Usage scope changed" description={scopeNotice} /> : null}
+      {overviewState === "loading" && !overview ? (
+        <div className="grid min-h-64 place-items-center" role="status">
+          <Text color="secondary">Loading usage...</Text>
+        </div>
+      ) : null}
+      {overviewState === "error" && !overview ? (
+        <Banner
+          status="error"
+          title={overviewCopy.title}
+          description={overviewCopy.message}
+          endContent={<Button label="Try again" variant="ghost" onClick={() => void onRetryOverview()} />}
+        />
+      ) : null}
+      {overview ? (
+        <>
+          {overviewState === "loading" ? (
+            <div className="border-y border-border px-3 py-2" role="status">
+              <Text type="supporting" color="secondary">Refreshing usage...</Text>
+            </div>
+          ) : null}
+          {overviewState === "error" ? (
+            <Banner
+              status="error"
+              title="Usage could not be refreshed"
+              description={overviewCopy.message}
+              endContent={<Button label="Retry" variant="ghost" size="md" onClick={() => void onRetryOverview()} />}
+            />
+          ) : null}
+          <ProjectLimits
+            overview={overview}
+            fileStorageState={fileStorageState}
+            fileStorageError={fileStorageError}
+            onMeasureFileStorage={onMeasureFileStorage}
+          />
+          <ProviderUsage
+            overview={overview}
+            selectedEndpointId={selectedEndpointId}
+            onEndpointChange={onEndpointChange}
+          />
+          <SandboxUsage
+            projectId={projectId}
+            overview={overview}
+            members={members}
+            currentUserId={currentUserId}
+            canSelectUser={canSelectUser}
+            selectedSandboxUserId={selectedSandboxUserId}
+            historyOpen={historyOpen}
+            history={history}
+            historyPageIndex={historyPageIndex}
+            historyState={historyState}
+            historyError={historyError}
+            historyOperation={historyOperation}
+            onSandboxUserChange={onSandboxUserChange}
+            onHistoryOpenChange={onHistoryOpenChange}
+            onHistoryPrevious={onHistoryPrevious}
+            onHistoryNext={onHistoryNext}
+            onHistoryRefresh={onHistoryRefresh}
+            onHistoryRetry={onHistoryRetry}
+          />
+        </>
+      ) : null}
+    </div>
+  );
 }
 
-function UsageTotal({ label, value }: { label: string; value: string }) { return <div><dt><Text type="supporting" color="secondary">{label}</Text></dt><dd className="mt-1"><Text type="large">{value}</Text></dd></div>; }
-function formatMetric(metric: keyof typeof labels, value: number): string { return metric === "providerCost" ? formatCost(value) : metric === "projectFileBytes" ? formatBytes(value) : formatNumber(value); }
-function formatNumber(value: number): string { return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value); }
-function formatCost(value: number): string { return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(value); }
-function formatBytes(value: number): string { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / (1024 * 1024)).toFixed(1)} MiB`; }
-function formatUsageWindow(window: ProjectUsageWindow): string { return window.kind === "current_gauge" ? "Current state" : window.kind === "rolling" ? window.resetAt ? `${duration(window.windowSeconds)} rolling · resets ${formatLocalTime(window.resetAt)}` : `${duration(window.windowSeconds)} rolling · no usage in window` : `Project lifetime · started ${formatLocalDate(window.startedAt)}`; }
-function duration(seconds:number){if(seconds%86400===0)return `${seconds/86400}d`;if(seconds%3600===0)return `${seconds/3600}h`;return `${seconds}s`;}
+function ProjectLimits({
+  overview,
+  fileStorageState,
+  fileStorageError,
+  onMeasureFileStorage,
+}: {
+  overview: ProjectUsageOverview;
+  fileStorageState: "idle" | "loading" | "error";
+  fileStorageError: unknown;
+  onMeasureFileStorage: () => Promise<void>;
+}) {
+  const fileStorage = overview.fileStorage;
+  return (
+    <section aria-labelledby="usage-limits">
+      <Heading level={2} id="usage-limits">Project limits</Heading>
+      <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+        Current project policy and remaining capacity. Provider totals include conservative reservations when final delivery usage is unknown.
+      </Text>
+      <dl className="mt-4 grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 xl:grid-cols-5">
+        {overview.limits.map((limit) => (
+          <div
+            key={limit.metric}
+            className="min-w-0 bg-surface p-4"
+          >
+            <dt><Text type="supporting" color="secondary">{labels[limit.metric]}</Text></dt>
+            <dd className="mt-3"><Text type="large">{formatMetric(limit.metric, limit.current)}</Text></dd>
+            <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+              {limit.limit === null ? "No limit" : `${formatMetric(limit.metric, limit.remaining!)} remaining of ${formatMetric(limit.metric, limit.limit)}`}
+            </Text>
+            <Text as="p" type="supporting" color="secondary" display="block" className="mt-2">
+              {formatUsageWindow(limit.window)}
+            </Text>
+          </div>
+        ))}
+        <div className="min-w-0 bg-surface p-4">
+          <dt className="flex items-start justify-between gap-2">
+            <Text type="supporting" color="secondary">Recorded file storage</Text>
+            <IconButton
+              className="shrink-0"
+              label="Measure file storage"
+              tooltip="Measure file storage"
+              variant="ghost"
+              size="sm"
+              icon={<RefreshCw size={14} />}
+              isLoading={fileStorageState === "loading"}
+              isDisabled={fileStorageState === "loading"}
+              onClick={() => void onMeasureFileStorage()}
+            />
+          </dt>
+          <dd className="mt-3"><Text type="large">{formatBytes(String(fileStorage.recordedBytes))}</Text></dd>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+            {fileStorage.limitBytes === null
+              ? "No limit"
+              : fileStorage.remainingBytes === null
+                ? `${formatBytes(String(fileStorage.limitBytes))} limit · remaining unavailable`
+                : `${formatBytes(String(fileStorage.remainingBytes))} remaining of ${formatBytes(String(fileStorage.limitBytes))}`}
+          </Text>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-2">
+            Point-in-time · {fileStorage.measuredAt ? `Measured ${formatLocalDateTime(fileStorage.measuredAt)}` : "Measurement time unavailable"}
+          </Text>
+          {fileStorageState === "loading" ? (
+            <Text as="p" type="supporting" color="secondary" display="block" className="mt-2" role="status">
+              Measuring file storage...
+            </Text>
+          ) : null}
+          {fileStorageState === "error" ? (
+            <p className="mt-2 text-error" role="alert">
+              <Text type="supporting" color="inherit">{fileStorageMeasurementError(fileStorageError)}</Text>
+            </p>
+          ) : null}
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function ProviderUsage({
+  overview,
+  selectedEndpointId,
+  onEndpointChange,
+}: {
+  overview: ProjectUsageOverview;
+  selectedEndpointId: string;
+  onEndpointChange: (endpointId: string) => void;
+}) {
+  const provider = overview.provider;
+  const peak = Math.max(1, ...provider.daily.map((day) => day.requests));
+  const hasTrend = provider.daily.some((day) => day.requests > 0 || day.tokens > 0 || day.cost > 0);
+  const selectedEndpoint = provider.endpoints.find((endpoint) => endpoint.endpointId === provider.selectedEndpointId);
+  const scopeLabel = provider.selectedEndpointId === null ? "All endpoints" : (selectedEndpoint?.endpointName ?? provider.selectedEndpointId);
+  const firstDay = provider.daily[0]?.date;
+  const lastDay = provider.daily.at(-1)?.date;
+  return (
+    <section className="space-y-6 border-y border-border py-6" aria-labelledby="provider-usage">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <Heading level={2} id="provider-usage">Your provider usage</Heading>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+            Authenticated user only · {scopeLabel}
+          </Text>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+            {firstDay && lastDay ? `30-day period: ${formatProviderDay(firstDay)} through ${formatProviderDay(lastDay)}` : "30-day period"}
+          </Text>
+        </div>
+        <Selector
+          label="Endpoint"
+          options={[
+            { value: "all", label: "All endpoints" },
+            ...provider.endpoints
+              .filter((endpoint) => endpoint.endpointId !== null)
+              .map((endpoint) => ({ value: endpoint.endpointId!, label: endpoint.endpointName })),
+          ]}
+          value={selectedEndpointId}
+          onChange={onEndpointChange}
+          size="lg"
+          className="w-64 max-w-full"
+        />
+      </div>
+      {hasTrend ? (
+        <>
+          <ProviderDailyTrend daily={provider.daily} peak={peak} />
+          <dl className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-3">
+            <UsageTotal label="Requests" value={formatNumber(provider.totals.requests)} />
+            <UsageTotal label="Tokens" value={formatNumber(provider.totals.tokens)} />
+            <UsageTotal label="Cost" value={formatCost(provider.totals.cost)} />
+          </dl>
+        </>
+      ) : (
+        <EmptyState
+          className="min-h-40 border border-dashed border-border"
+          isCompact
+          title="No settled provider usage"
+          description="No settled provider usage in this 30-day period."
+        />
+      )}
+      <div>
+        <Heading level={3}>Endpoint totals</Heading>
+        <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+          Your settled totals for the same 30-day period, including activity not tied to a current endpoint.
+        </Text>
+        {provider.endpoints.length === 0 ? (
+          <EmptyState className="mt-3" isCompact title="No endpoint usage" description="No endpoint usage in this period." />
+        ) : (
+          <>
+            <ul className="mt-4 divide-y divide-border border-y border-border md:hidden" aria-label="Your endpoint usage">
+              {provider.endpoints.map((endpoint) => (
+                <li className="py-4" key={endpoint.endpointId ?? "unassigned-endpoints"}>
+                  <Text weight="semibold" wordBreak="break-word">{endpoint.endpointName}</Text>
+                  <dl className="mt-3 grid gap-4">
+                    <div>
+                      <dt><Text type="supporting" color="secondary">Settled totals</Text></dt>
+                      <dd className="mt-1"><EndpointSettledTotals endpoint={endpoint} /></dd>
+                    </div>
+                    <div>
+                      <dt><Text type="supporting" color="secondary">Your rolling limits</Text></dt>
+                      <dd className="mt-1"><EndpointRollingLimits endpoint={endpoint} /></dd>
+                    </div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 hidden overflow-x-auto md:block">
+              <Table aria-label="Your endpoint usage" density="balanced" dividers="rows" verticalAlign="top">
+                <TableHeader>
+                  <TableRow isHeaderRow>
+                    <TableHeaderCell>Endpoint</TableHeaderCell>
+                    <TableHeaderCell>Settled totals</TableHeaderCell>
+                    <TableHeaderCell>Your rolling limits</TableHeaderCell>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {provider.endpoints.map((endpoint) => (
+                    <TableRow key={endpoint.endpointId ?? "unassigned-endpoints"}>
+                      <TableCell>{endpoint.endpointName}</TableCell>
+                      <TableCell><EndpointSettledTotals endpoint={endpoint} /></TableCell>
+                      <TableCell><EndpointRollingLimits endpoint={endpoint} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+type ProviderEndpoint = ProjectUsageOverview["provider"]["endpoints"][number];
+
+function EndpointSettledTotals({ endpoint }: { endpoint: ProviderEndpoint }) {
+  return (
+    <Text type="supporting" color="secondary">
+      {formatNumber(endpoint.requests)} requests · {formatNumber(endpoint.tokens)} tokens · {formatCost(endpoint.cost)}
+    </Text>
+  );
+}
+
+function EndpointRollingLimits({ endpoint }: { endpoint: ProviderEndpoint }) {
+  return endpoint.limits?.length ? endpoint.limits.map((limit) => (
+    <Text type="supporting" color="secondary" display="block" key={limit.metric}>
+      {labels[limit.metric]}: {limit.remaining === null ? "unlimited" : `${formatMetric(limit.metric, limit.remaining)} remaining`} · {formatUsageWindow(limit.window)}
+    </Text>
+  )) : <Text type="supporting" color="secondary">No rolling limits</Text>;
+}
+
+function ProviderDailyTrend({
+  daily,
+  peak,
+}: {
+  daily: ProjectUsageOverview["provider"]["daily"];
+  peak: number;
+}) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const detailsId = useId();
+  const chartWidth = 300;
+  const chartTop = 4;
+  const baseline = 116;
+  const slotWidth = chartWidth / daily.length;
+  return (
+    <figure>
+      <svg
+        className="h-40 w-full border-b border-border text-accent-bg"
+        viewBox={`0 0 ${chartWidth} 120`}
+        preserveAspectRatio="none"
+        role="img"
+        tabIndex={0}
+        aria-labelledby={titleId}
+        aria-describedby={`${descriptionId} ${detailsId}`}
+      >
+        <title id={titleId}>30-day provider request trend</title>
+        <desc id={descriptionId}>Daily request volume. Detailed requests, tokens, and cost for every day follow.</desc>
+        {daily.map((day, index) => {
+          const height = day.requests === 0 ? 0 : Math.max(3, day.requests / peak * (baseline - chartTop));
+          return (
+            <rect
+              key={day.date}
+              x={index * slotWidth + 0.5}
+              y={baseline - height}
+              width={Math.max(1, slotWidth - 1)}
+              height={height}
+              fill="currentColor"
+            />
+          );
+        })}
+      </svg>
+      <ul id={detailsId} className="sr-only">
+        {daily.map((day) => (
+          <li key={day.date}>
+            {day.date}: {formatNumber(day.requests)} requests, {formatNumber(day.tokens)} tokens, {formatCost(day.cost)}
+          </li>
+        ))}
+      </ul>
+      <div className="mt-2 flex justify-between" aria-hidden="true">
+        <Text type="supporting" color="secondary">{daily[0]?.date}</Text>
+        <Text type="supporting" color="secondary">{daily.at(-1)?.date}</Text>
+      </div>
+    </figure>
+  );
+}
+
+function SandboxUsage({
+  projectId,
+  overview,
+  members,
+  currentUserId,
+  canSelectUser,
+  selectedSandboxUserId,
+  historyOpen,
+  history,
+  historyPageIndex,
+  historyState,
+  historyError,
+  historyOperation,
+  onSandboxUserChange,
+  onHistoryOpenChange,
+  onHistoryPrevious,
+  onHistoryNext,
+  onHistoryRefresh,
+  onHistoryRetry,
+}: {
+  projectId: string;
+  overview: ProjectUsageOverview;
+  members: ProjectMember[];
+  currentUserId: string | undefined;
+  canSelectUser: boolean;
+  selectedSandboxUserId: string | undefined;
+  historyOpen: boolean;
+  history: ProjectSandboxRunHistoryPage | undefined;
+  historyPageIndex: number;
+  historyState: LoadState;
+  historyError: unknown;
+  historyOperation: HistoryOperation;
+  onSandboxUserChange: (userId: string) => void;
+  onHistoryOpenChange: (open: boolean) => void;
+  onHistoryPrevious: () => void;
+  onHistoryNext: () => void;
+  onHistoryRefresh: () => void;
+  onHistoryRetry: () => void;
+}) {
+  const sandbox = overview.sandbox;
+  const selectedMember = members.find((member) => member.userId === sandbox.selectedUserId);
+  const memberScope = selectedMember
+    ? memberLabel(selectedMember)
+    : !selectedSandboxUserId || sandbox.selectedUserId === currentUserId
+      ? "You"
+      : sandbox.selectedUserId;
+  return (
+    <section className="space-y-5" aria-labelledby="sandbox-usage">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <Heading level={2} id="sandbox-usage">Sandbox allocations</Heading>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+            {memberScope} · summary from {formatLocalDateTime(sandbox.summaryStartedAt)} through {formatLocalDateTime(sandbox.measuredAt)}
+          </Text>
+        </div>
+        {canSelectUser && currentUserId ? (
+          <Selector
+            label="Sandbox member"
+            options={members.map((member) => ({ value: member.userId, label: memberLabel(member) }))}
+            value={selectedSandboxUserId ?? currentUserId}
+            onChange={onSandboxUserChange}
+            size="lg"
+            className="w-72 max-w-full"
+          />
+        ) : null}
+      </div>
+      <dl className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 xl:grid-cols-5">
+        <SandboxTotal label="Unreleased runs" value={formatInteger(String(sandbox.unreleasedCount))} />
+        <SandboxTotal label="Launches" value={formatInteger(String(sandbox.launches))} />
+        <SandboxTotal label="Total runtime" value={`${formatDecimal(sandbox.totalDurationSeconds)} s`} />
+        <SandboxTotal label="CPU request-time" value={`${formatDecimal(sandbox.cpuRequestSeconds)} CPU-s`} />
+        <SandboxTotal label="Memory request-time" value={`${formatDecimal(sandbox.memoryRequestByteSeconds, 1_073_741_824n)} GiB-s`} />
+      </dl>
+      <div>
+        <Heading level={3}>Unreleased runs</Heading>
+        {sandbox.liveRuns.length ? (
+          <ul className="mt-3 divide-y divide-border border-y border-border" aria-label="Unreleased Sandbox runs">
+            {sandbox.liveRuns.map((run) => (
+              <li key={run.runId} className="grid gap-3 py-4 md:grid-cols-[minmax(14rem,1.2fr)_minmax(0,1fr)] md:gap-6">
+                <RunIdentity projectId={projectId} run={run} />
+                <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2">
+                  <RunDetail label="State" value={liveStateLabel(run.state)} />
+                  <RunDetail label="Started" value={run.startedAt ? formatLocalDateTime(run.startedAt) : "Waiting to start"} />
+                  <RunDetail label="Duration" value={formatDuration(run.durationSeconds)} />
+                  <RunDetail label="Requested" value={`${formatInteger(run.resources.cpuRequestMillis)} mCPU · ${formatBytes(run.resources.memoryRequestBytes)}`} />
+                  <RunDetail label="Limits" value={`${formatInteger(run.resources.cpuLimitMillis)} mCPU · ${formatBytes(run.resources.memoryLimitBytes)}`} />
+                </dl>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState
+            className="mt-3 border border-dashed border-border"
+            isCompact
+            title="No unreleased Sandbox runs"
+            description="This member is not currently holding a Sandbox allocation."
+          />
+        )}
+      </div>
+      <Collapsible trigger="View run history" isOpen={historyOpen} onOpenChange={onHistoryOpenChange}>
+        <div className="mt-4">
+          <HistoryContent
+            projectId={projectId}
+            history={history}
+            pageIndex={historyPageIndex}
+            state={historyState}
+            error={historyError}
+            operation={historyOperation}
+            onPrevious={onHistoryPrevious}
+            onNext={onHistoryNext}
+            onRefresh={onHistoryRefresh}
+            onRetry={onHistoryRetry}
+          />
+        </div>
+      </Collapsible>
+    </section>
+  );
+}
+
+function HistoryContent({
+  projectId,
+  history,
+  pageIndex,
+  state,
+  error,
+  operation,
+  onPrevious,
+  onNext,
+  onRefresh,
+  onRetry,
+}: {
+  projectId: string;
+  history: ProjectSandboxRunHistoryPage | undefined;
+  pageIndex: number;
+  state: LoadState;
+  error: unknown;
+  operation: HistoryOperation;
+  onPrevious: () => void;
+  onNext: () => void;
+  onRefresh: () => void;
+  onRetry: () => void;
+}) {
+  const errorCopy = historyErrorCopy(error);
+  if (state === "loading" && !history) {
+    return <div className="grid min-h-32 place-items-center" role="status"><Text color="secondary">Loading run history...</Text></div>;
+  }
+  if (state === "error" && !history) {
+    return (
+      <Banner
+        status="error"
+        title="Run history unavailable"
+        description={errorCopy}
+        endContent={<Button label="Try again" variant="ghost" onClick={onRetry} />}
+      />
+    );
+  }
+  if (!history) return null;
+  const start = pageIndex * 20 + 1;
+  const end = start + history.items.length - 1;
+  const isBusy = state === "loading";
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Heading level={3}>Settled run history</Heading>
+          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+            Summary from {formatLocalDateTime(history.summaryStartedAt)} · released through {formatLocalDateTime(history.scopeMeasuredAt)}
+          </Text>
+        </div>
+        <IconButton
+          label="Refresh run history"
+          tooltip="Refresh run history"
+          variant="ghost"
+          size="lg"
+          icon={<RefreshCw size={16} />}
+          isDisabled={isBusy}
+          onClick={onRefresh}
+        />
+      </div>
+      {isBusy ? (
+        <div role="status">
+          <Text type="supporting" color="secondary">
+            {operation === "pagination" ? "Loading run history page..." : "Refreshing run history..."}
+          </Text>
+        </div>
+      ) : null}
+      {state === "error" ? (
+        <Banner
+          status="error"
+          title={operation === "pagination" ? "Run history page could not be loaded" : "Run history could not be refreshed"}
+          description={`${errorCopy} The current page is still shown.`}
+          endContent={<Button label="Retry" variant="ghost" size="md" onClick={onRetry} />}
+        />
+      ) : null}
+      {history.items.length ? (
+        <>
+          <div className="hidden overflow-x-auto md:block">
+            <Table aria-label="Settled Sandbox run history" density="balanced" dividers="rows" verticalAlign="top">
+              <TableHeader>
+                <TableRow isHeaderRow>
+                  <TableHeaderCell>Task and run</TableHeaderCell>
+                  <TableHeaderCell>Started</TableHeaderCell>
+                  <TableHeaderCell>Released</TableHeaderCell>
+                  <TableHeaderCell>Duration</TableHeaderCell>
+                  <TableHeaderCell>Resources</TableHeaderCell>
+                  <TableHeaderCell>Release</TableHeaderCell>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {history.items.map((run) => (
+                  <TableRow key={run.runId}>
+                    <TableCell><RunIdentity projectId={projectId} run={run} /></TableCell>
+                    <TableCell>{run.startedAt ? formatLocalDateTime(run.startedAt) : "-"}</TableCell>
+                    <TableCell>{formatLocalDateTime(run.releasedAt)}</TableCell>
+                    <TableCell>{formatDuration(run.durationSeconds)}</TableCell>
+                    <TableCell>
+                      <Text display="block">{formatInteger(run.resources.cpuRequestMillis)} mCPU · {formatBytes(run.resources.memoryRequestBytes)} requested</Text>
+                      <Text type="supporting" color="secondary" display="block" className="mt-1">
+                        Limits {formatInteger(run.resources.cpuLimitMillis)} mCPU · {formatBytes(run.resources.memoryLimitBytes)}
+                      </Text>
+                    </TableCell>
+                    <TableCell>{releaseReasonLabel(run.releaseReason)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <ul className="divide-y divide-border border-y border-border md:hidden" aria-label="Settled Sandbox run history">
+            {history.items.map((run) => (
+              <li key={run.runId} className="grid gap-3 py-4">
+                <RunIdentity projectId={projectId} run={run} />
+                <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2">
+                  <RunDetail label="Started" value={run.startedAt ? formatLocalDateTime(run.startedAt) : "-"} />
+                  <RunDetail label="Released" value={formatLocalDateTime(run.releasedAt)} />
+                  <RunDetail label="Duration" value={formatDuration(run.durationSeconds)} />
+                  <RunDetail label="Requested" value={`${formatInteger(run.resources.cpuRequestMillis)} mCPU · ${formatBytes(run.resources.memoryRequestBytes)}`} />
+                  <RunDetail label="Limits" value={`${formatInteger(run.resources.cpuLimitMillis)} mCPU · ${formatBytes(run.resources.memoryLimitBytes)}`} />
+                  <RunDetail label="Release" value={releaseReasonLabel(run.releaseReason)} />
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <EmptyState
+          className="border border-dashed border-border"
+          isCompact
+          title="No settled Sandbox runs"
+          description="No released Sandbox runs are in this member's history."
+        />
+      )}
+      {history.items.length || pageIndex > 0 || history.nextCursor ? (
+        <nav className="flex flex-wrap items-center justify-between gap-3" aria-label="Run history pages">
+          <Text type="supporting" color="secondary">
+            {history.items.length ? `Runs ${start}-${end}` : "No runs on this page"} · {history.nextCursor ? "More available" : "End of history"}
+          </Text>
+          <div className="flex gap-2">
+            <Button label="Previous" variant="secondary" size="md" isDisabled={pageIndex === 0 || isBusy} onClick={onPrevious} />
+            <Button label="Next" variant="secondary" size="md" isDisabled={!history.nextCursor || isBusy} onClick={onNext} />
+          </div>
+        </nav>
+      ) : null}
+    </div>
+  );
+}
+
+type UsageRun = ProjectUsageOverview["sandbox"]["liveRuns"][number] | ProjectSandboxRunHistoryPage["items"][number];
+
+function RunIdentity({ projectId, run }: { projectId: string; run: UsageRun }) {
+  return (
+    <div className="min-w-0">
+      {run.taskAvailable ? (
+        <a className="inline-flex max-w-full items-center gap-1 hover:underline" href={taskHref(projectId, run.taskId)}>
+          <Text weight="semibold" maxLines={1}>{run.taskTitle || "Untitled task"}</Text>
+          <ExternalLink className="size-3 shrink-0" />
+        </a>
+      ) : (
+        <Text weight="semibold">Deleted task</Text>
+      )}
+      <div className="mt-2 grid gap-1">
+        <CopyIdentifier label="Task" value={run.taskId} />
+        <CopyIdentifier label="Run" value={run.runId} />
+      </div>
+    </div>
+  );
+}
+
+function CopyIdentifier({ label, value }: { label: "Task" | "Run"; value: string }) {
+  const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setStatus("copied");
+      window.setTimeout(() => setStatus("idle"), 1_500);
+    } catch {
+      setStatus("error");
+    }
+  }
+  const actionLabel = status === "copied" ? `${label} ID copied` : status === "error" ? `Copy ${label} ID failed` : `Copy ${label} ID`;
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <Text type="code" color="secondary" maxLines={1}>{label} {value}</Text>
+      <IconButton
+        className="shrink-0"
+        label={actionLabel}
+        tooltip={actionLabel}
+        variant="ghost"
+        size="sm"
+        icon={status === "copied" ? <Check size={14} /> : <Copy size={14} />}
+        onClick={() => void copy()}
+      />
+    </div>
+  );
+}
+
+function RunDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <>
+      <dt><Text type="supporting" color="secondary">{label}</Text></dt>
+      <dd><Text type="supporting" wordBreak="break-word">{value}</Text></dd>
+    </>
+  );
+}
+
+function SandboxTotal({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 bg-surface p-4">
+      <dt><Text type="supporting" color="secondary">{label}</Text></dt>
+      <dd className="mt-2 break-words"><Text type="large">{value}</Text></dd>
+    </div>
+  );
+}
+
+function UsageTotal({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 bg-surface p-4">
+      <dt><Text type="supporting" color="secondary">{label}</Text></dt>
+      <dd className="mt-1"><Text type="large">{value}</Text></dd>
+    </div>
+  );
+}
+
+function usageErrorCopy(error: unknown): { title: string; message: string } {
+  if (isApiError(error, 503, "sandbox_usage_unavailable")) {
+    return { title: "Sandbox allocations unavailable", message: "Sandbox accounting is temporarily unavailable. Retry after the run state is reconciled." };
+  }
+  return { title: "Usage unavailable", message: "Usage could not be loaded." };
+}
+
+function accessErrorCopy(error: unknown): { title: string; message: string } {
+  if (isApiError(error, 403)) return { title: "Member lookup not permitted", message: "Your usage is available, but project member access could not be loaded." };
+  return { title: "Member lookup unavailable", message: "Project members and Sandbox member selection could not be loaded." };
+}
+
+function historyErrorCopy(error: unknown): string {
+  if (isApiError(error, 400)) return "The run history cursor is no longer valid.";
+  if (isApiError(error, 503, "sandbox_usage_unavailable")) return "Sandbox accounting is temporarily unavailable.";
+  return "Run history could not be loaded.";
+}
+
+function fileStorageMeasurementError(error: unknown): string {
+  if (isApiError(error, 503)) return "File storage measurement is temporarily unavailable.";
+  return "File storage could not be measured.";
+}
+
+function isApiError(error: unknown, status: number, code?: string): boolean {
+  return !!error && typeof error === "object" && "status" in error && error.status === status && (code === undefined || ("code" in error && error.code === code));
+}
+
+function memberLabel(member: ProjectMember): string {
+  return member.displayName ? `${member.displayName} (${member.email})` : member.email;
+}
+
+function taskHref(_projectId: string, taskId: string): string {
+  const pathname = typeof window === "undefined" ? "" : window.location.pathname;
+  const projectBase = /^(.*)\/usage\/?$/.exec(pathname)?.[1] || "..";
+  return `${projectBase}/tasks/${encodeURIComponent(taskId)}`;
+}
+
+function liveStateLabel(state: ProjectUsageOverview["sandbox"]["liveRuns"][number]["state"]): string {
+  return {
+    starting: "Starting",
+    active: "Active",
+    release_requested: "Release requested",
+    failed: "Failed",
+  }[state];
+}
+
+function releaseReasonLabel(reason: ProjectSandboxRunHistoryPage["items"][number]["releaseReason"]): string {
+  return { requested: "Requested", failed: "Failed", cleanup: "Cleanup" }[reason];
+}
+
+function formatMetric(metric: keyof typeof labels, value: number): string {
+  return metric === "providerCost" ? formatCost(value) : formatNumber(value);
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatCost(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(value);
+}
+
+function formatProviderDay(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  return providerDayFormatter.format(new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))));
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "-";
+  if (seconds < 60) return `${seconds.toLocaleString(undefined, { maximumFractionDigits: 3 })} s`;
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const remainder = whole % 60;
+  return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", `${remainder}s`].filter(Boolean).join(" ");
+}
+
+function formatBytes(value: string): string {
+  if (!/^\d+$/.test(value)) return value;
+  const bytes = BigInt(value);
+  if (bytes >= 1_073_741_824n) return `${formatDecimal(value, 1_073_741_824n)} GiB`;
+  if (bytes >= 1_048_576n) return `${formatDecimal(value, 1_048_576n)} MiB`;
+  if (bytes >= 1_024n) return `${formatDecimal(value, 1_024n)} KiB`;
+  return `${formatInteger(value)} B`;
+}
+
+function formatInteger(value: string): string {
+  if (!/^\d+$/.test(value)) return value;
+  return BigInt(value).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function formatDecimal(value: string, divisor = 1n, maximumFractionDigits = 2): string {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match || divisor <= 0n) return value;
+  const fraction = match[2] ?? "";
+  const scale = 10n ** BigInt(fraction.length);
+  const numerator = BigInt(`${match[1]}${fraction}`);
+  const denominator = scale * divisor;
+  const displayScale = 10n ** BigInt(maximumFractionDigits);
+  const rounded = (numerator * displayScale + denominator / 2n) / denominator;
+  const whole = rounded / displayScale;
+  const decimals = (rounded % displayScale).toString().padStart(maximumFractionDigits, "0").replace(/0+$/, "");
+  return `${formatInteger(whole.toString())}${decimals ? `.${decimals}` : ""}`;
+}
+
+function formatUsageWindow(window: ProjectUsageWindow): string {
+  if (window.kind === "current_gauge") return "Current state";
+  if (window.kind === "rolling") {
+    return window.resetAt
+      ? `${duration(window.windowSeconds)} rolling · resets ${formatLocalTime(window.resetAt)}`
+      : `${duration(window.windowSeconds)} rolling · no usage in window`;
+  }
+  return `Project lifetime · started ${formatLocalDate(window.startedAt)}`;
+}
+
+function duration(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  return `${seconds}s`;
+}

@@ -78,8 +78,10 @@ describe("file library API", () => {
     }
 
     assert.equal((await raw("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}`, {})).status, 409);
+    await store.patchProjectResourcePolicy(projectId,{projectFileBytesLimit:1},new Date().toISOString());
     await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}/files`, { path: "payload.bin" });
     await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}/files`, { path: "readme.md" });
+    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,6);
     assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}`, {}), { deleted: true });
   });
 

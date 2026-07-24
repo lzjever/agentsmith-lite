@@ -573,6 +573,40 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal((await store.sandboxRuns.list()).some((candidate)=>candidate.projectId===task.projectId),false);
   });
 
+  it("reads measured file storage, Sandbox Usage summary, and tied history with PostgreSQL parity",async()=>{
+    assert.equal((await store.findProjectResourceUsage("project_atomic"))?.projectFileBytesMeasuredAt,null);
+    const fileMeasuredAt="2026-07-23T00:00:30.000Z";
+    await store.setProjectFileBytes("project_atomic",17,fileMeasuredAt);
+    const measuredUsage=await store.findProjectResourceUsage("project_atomic");
+    assert.equal(measuredUsage?.projectFileBytes,17);
+    assert.equal(measuredUsage?.projectFileBytesMeasuredAt,fileMeasuredAt);
+    await store.adjustProjectResourceUsage({projectId:"project_atomic",delta:{activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:1},updatedAt:"2026-07-23T00:00:45.000Z"});
+    const projectedUsage=await store.findProjectResourceUsage("project_atomic");
+    assert.equal(projectedUsage?.projectFileBytes,18);
+    assert.equal(projectedUsage?.projectFileBytesMeasuredAt,fileMeasuredAt);
+    const release=async(label:string)=>{
+      const task=taskRecord(`task_usage_${label}`,`library_usage_${label}`,`run_usage_${label}`),pending=run(task,task.currentRunId!,"starting");
+      assert.equal((await store.createTaskAtomically({task,reserveActive:true,newFileLibrary:library(task.fileLibraryId!,`Usage ${label}`),sandboxRun:pending})).kind,"created");
+      if(label==="a"){
+        const live=await store.readProjectUsageOverview(usageOverviewReadInput("2026-07-23T00:01:00.000Z"));
+        assert.equal(live.kind,"available");
+        if(live.kind==="available"){assert.equal(live.value.sandbox.unreleasedCount,1);assert.equal(live.value.sandbox.liveRuns[0]?.state,"starting");assert.equal(live.value.sandbox.liveRuns[0]?.durationSeconds,0)}
+      }
+      const releasedAt="2026-07-23T00:02:00.000Z",released={...pending,state:"released" as const,releaseReason:"requested" as const,releaseRequestedAt:releasedAt,releasedAt,fencingToken:2,updatedAt:releasedAt};
+      assert.equal(await store.completeSandboxRunRelease({runId:pending.runId,expectedFencingToken:1,run:released,settlement:{runId:pending.runId,workspaceId:pending.workspaceId,projectId:pending.projectId,taskId:pending.taskId,fileLibraryId:pending.fileLibraryId,startedByUserId:pending.startedByUserId,startedAt:null,releasedAt,durationSeconds:0,resources:pending.resourceSnapshot,releaseReason:"requested"},auditEvent:{id:`audit_usage_${label}`,projectId:pending.projectId,actorId:null,subjectUserId:pending.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:pending.taskId,detail:{taskId:pending.taskId,runId:pending.runId,releaseReason:"requested"},createdAt:releasedAt}}),"applied");
+      return task;
+    };
+    await release("a");
+    const taskB=await release("b");
+    assert.equal((await store.beginTaskDeletion(taskB.id,"2026-07-23T00:03:00.000Z")).kind,"ready");
+    const first=await store.querySandboxUsageSettlements({projectId:"project_atomic",selectedUserId:"user_atomic",scopeMeasuredAt:"2026-07-23T00:03:00.000Z",limit:1});
+    assert.equal(first.hasMore,true);assert.deepEqual(first.items.map((item)=>[item.runId,item.taskTitle,item.taskAvailable]),[["run_usage_b",null,false]]);
+    const second=await store.querySandboxUsageSettlements({projectId:"project_atomic",selectedUserId:"user_atomic",scopeMeasuredAt:"2026-07-23T00:03:00.000Z",after:{releasedAt:first.items[0]!.releasedAt,runId:first.items[0]!.runId},limit:1});
+    assert.deepEqual(second.items.map((item)=>item.runId),["run_usage_a"]);assert.equal(second.hasMore,false);
+    const summary=await store.readProjectUsageOverview(usageOverviewReadInput("2026-07-23T00:03:00.000Z"));
+    assert.equal(summary.kind,"available");if(summary.kind==="available"){assert.equal(summary.value.usage?.projectFileBytesMeasuredAt,fileMeasuredAt);assert.equal(summary.value.sandbox.unreleasedCount,0);assert.equal(summary.value.sandbox.totalDurationMilliseconds,"0");assert.deepEqual(summary.value.sandbox.liveRuns,[])}
+  });
+
   function atomicMessage(task:PersistedAgentTask,released:PersistedSandboxRunState,label:string,newRunId:string):AtomicTaskMessageInput{
     const replacement={...task,currentRunId:newRunId,updatedAt:`2026-07-23T00:01:0${label.length}.000Z`};
     return{taskId:task.id,expectedCurrentRunId:released.runId,message:message(`message_${label}`,task.id),idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"message",key:`key_${label}`,requestHash:`hash_${label}`,resourceId:`message_${label}`,claimToken:`claim_${label}`,now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"},auditEvent:{id:`audit_task_message_create_message_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId:`message_${label}`,deliveryStatus:"pending"},createdAt:at},restart:{task:replacement,runtimeState:{botifiedBaseUrl:"http://task"},sandboxRun:run(replacement,newRunId,"starting"),reservedAt:replacement.updatedAt}};
@@ -637,6 +671,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:"workspaces/workspace_atomic/projects/project_atomic",fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
+  function usageOverviewReadInput(measuredAt:string){const periodStart="2026-06-24T00:00:00.000Z",periodEnd="2026-07-24T00:00:00.000Z";return{projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",selectedEndpointId:null,periodStart,periodEnd,measuredAt}}
 
   async function seedProjectDeletionBusinessData(){
     const task={...taskRecord("task_project_finalize","library_project_finalize","unused"),currentRunId:null};

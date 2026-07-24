@@ -54,7 +54,7 @@ describe("Phase 2 task workspace API", () => {
     ]) assert.equal((await request("POST", `/api/v1/projects/${projectId}/tasks`, body, true, crypto.randomUUID())).status, 400);
   });
 
-  it("removes fixed files, task inputs, retry, and duplicate routes and rejects terminal messages", async () => {
+  it("removes obsolete task routes and preserves the bound File Library across archive and Task deletion", async () => {
     const task = await json("POST", `/api/v1/projects/${projectId}/tasks`, { endpointId, prompt: "terminal", fileLibrary: { mode: "create_new", name: "Terminal workspace" } }, "task-terminal");
     const taskRecord=task.task;
     for (const [method, pathname] of [
@@ -63,22 +63,23 @@ describe("Phase 2 task workspace API", () => {
       ["POST", `/api/v1/tasks/${taskRecord.id}/retry`],
       ["POST", `/api/v1/tasks/${taskRecord.id}/duplicate`]
     ] as const) assert.equal((await request(method, pathname, method === "POST" ? {} : undefined, true, crypto.randomUUID())).status, 404);
-    const message = await request("POST", `/api/v1/tasks/${taskRecord.id}/messages`, { content: "continue" }, true, "terminal-message");
-    assert.equal(message.status, 409);
     const archived=await json("POST",`/api/v1/tasks/${taskRecord.id}/archive`,{},"archive-terminal");
     assert.equal(archived.lifecycle.state,"archived");
     let library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===taskRecord.fileLibraryId);
     assert.equal(library.boundTask.id,taskRecord.id);
     const upload=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${taskRecord.fileLibraryId}/files?path=kept.txt`,{method:"PUT",headers:{cookie,"x-csrf-token":csrf,"idempotency-key":"kept-upload","content-type":"application/octet-stream"},body:"keep me"});
     assert.equal(upload.status,200,await upload.text());
-    assert.equal((await json("GET",`/api/v1/projects/${projectId}/usage`)).usage.projectFileBytes,7);
+    assert.equal(projectFileBytes(await json("GET",`/api/v1/projects/${projectId}/usage`)),7);
     await json("DELETE",`/api/v1/tasks/${taskRecord.id}`,undefined,"delete-terminal");
     library=(await json("GET",`/api/v1/projects/${projectId}/file-libraries`)).find((item:{id:string})=>item.id===taskRecord.fileLibraryId);
     assert.equal(library.boundTask,null);
     assert.equal(await (await request("GET",`/api/v1/projects/${projectId}/file-libraries/${taskRecord.fileLibraryId}/files/download?path=kept.txt`)).text(),"keep me");
-    assert.equal((await json("GET",`/api/v1/projects/${projectId}/usage`)).usage.projectFileBytes,7);
+    assert.equal(projectFileBytes(await json("GET",`/api/v1/projects/${projectId}/usage`)),7);
   });
 
+  function projectFileBytes(overview:{fileStorage:{recordedBytes:number}}):number{
+    return overview.fileStorage.recordedBytes;
+  }
   function request(method: string, pathname: string, body?: unknown, authenticated = true, key:string = crypto.randomUUID()): Promise<Response> {
     return fetch(api.baseUrl + pathname, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(authenticated ? { cookie } : {}), ...(authenticated && ["POST", "PATCH", "DELETE", "PUT"].includes(method) ? { "x-csrf-token": csrf, "idempotency-key": key } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   }

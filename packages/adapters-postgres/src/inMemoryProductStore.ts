@@ -38,6 +38,10 @@ import type {
   LegacyExternalIdentityBinding,
   ProductStore,
   ProjectProviderUsageSettlement, ReserveProjectProviderSettlementInput,
+  ProjectUsageOverviewReadInput,
+  ProjectUsageOverviewReadResult,
+  ProjectSandboxSettlementQuery,
+  ProjectSandboxSettlementPage,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
   AtomicTaskSandboxRestartInput,
@@ -291,6 +295,7 @@ export class InMemoryProductStore implements ProductStore {
       providerTokens: 0,
       providerCost: 0,
       projectFileBytes: 0,
+      projectFileBytesMeasuredAt: null,
       updatedAt: project.updatedAt
     });
     return clone(project);
@@ -475,10 +480,10 @@ export class InMemoryProductStore implements ProductStore {
   }
   async findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null> { return clone(this.usage.get(projectId) ?? null); }
   async upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage> { this.usage.set(usage.projectId, clone(usage)); return clone(usage); }
-  async setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null> {
+  async setProjectFileBytes(projectId: string, bytes: number, measuredAt: string): Promise<ProjectResourceUsage | null> {
     const usage = this.usage.get(projectId);
     if (!usage) return null;
-    const next = { ...usage, projectFileBytes: bytes, updatedAt };
+    const next = { ...usage, projectFileBytes: bytes, projectFileBytesMeasuredAt: measuredAt, updatedAt: measuredAt };
     this.usage.set(projectId, clone(next));
     return clone(next);
   }
@@ -547,6 +552,60 @@ export class InMemoryProductStore implements ProductStore {
   async expireProjectProviderSettlements(now: string): Promise<number> { let count = 0; for (const value of this.providerSettlements.values()) if (["reserved", "dispatched", "delivered"].includes(value.status) && value.expiresAt <= now) { if (value.status === "reserved") await this.failProjectProviderSettlement(value.id, now); else await this.markProjectProviderSettlementUnknown(value.id, now); count += 1; } return count; }
   async pruneProjectProviderSettlements(before: string, limit: number): Promise<number> { let count = 0; for (const [id, value] of this.providerSettlements) if (count < limit && value.updatedAt < before && ["settled", "unknown", "failed"].includes(value.status)) { this.providerSettlements.delete(id); count += 1; } return count; }
   async listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]> { return [...this.providerSettlements.values()].filter((value) => value.projectId === projectId && value.status === "settled" && value.settledAt !== null && value.settledAt >= since && (endpointId === undefined || value.endpointId === endpointId)).sort((left, right) => left.settledAt!.localeCompare(right.settledAt!)).map(clone); }
+  async readProjectUsageOverview(input:ProjectUsageOverviewReadInput):Promise<ProjectUsageOverviewReadResult>{
+    const project=clone(this.projects.get(input.projectId)??null);
+    if(!project)return{kind:"project_not_found"};
+    const policy=clone(this.policies.get(input.projectId)??null);
+    if(!policy)return{kind:"policy_not_found"};
+    if(![...this.memberships.values()].some((membership)=>membership.projectId===input.projectId&&membership.userId===input.selectedUserId))return{kind:"selected_member_not_found"};
+    const usage=clone(this.usage.get(input.projectId)??null);
+    const endpoints=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===input.projectId).sort((left,right)=>left.createdAt.localeCompare(right.createdAt)||compareOrdinal(left.id,right.id)).map(clone);
+    if(input.selectedEndpointId!==null&&!endpoints.some((endpoint)=>endpoint.id===input.selectedEndpointId))return{kind:"endpoint_not_found"};
+    const providerSettlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId).map(clone);
+    const sandboxRuns=this.sandboxRuns.snapshot().filter((run)=>run.projectId===input.projectId&&run.startedByUserId===input.selectedUserId);
+    const tasks=new Map([...this.tasks.values()].filter((task)=>task.projectId===input.projectId).map((task)=>[task.id,clone(task)] as const));
+    const sandboxSettlements=[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.startedByUserId===input.selectedUserId).map(clone);
+    const settled=providerSettlements.filter((value)=>value.actorId===input.userId&&value.status==="settled"&&value.settledAt!==null&&value.settledAt>=input.periodStart&&value.settledAt<input.periodEnd);
+    const selected=settled.filter((value)=>input.selectedEndpointId===null||value.endpointId===input.selectedEndpointId);
+    const byDay=new Map<string,{requests:number;tokens:number;cost:number}>();
+    for(const value of selected){const date=value.settledAt!.slice(0,10),current=byDay.get(date)??{requests:0,tokens:0,cost:0};current.requests+=1;current.tokens+=value.usage?.tokens??0;current.cost+=value.usage?.cost??0;byDay.set(date,current)}
+    const daily=[...byDay].sort(([left],[right])=>left.localeCompare(right)).map(([date,total])=>({date,...total}));
+    const totals=selected.reduce((total,value)=>({requests:total.requests+1,tokens:total.tokens+(value.usage?.tokens??0),cost:total.cost+(value.usage?.cost??0)}),{requests:0,tokens:0,cost:0});
+    const endpointUsage=new Map<string,import("../../contracts/src/api.js").ProjectUsageEndpoint>();
+    for(const endpoint of endpoints)endpointUsage.set(endpoint.id,{endpointId:endpoint.id,endpointName:endpoint.name,requests:0,tokens:0,cost:0,limits:[]});
+    let unassigned:import("../../contracts/src/api.js").ProjectUsageEndpoint|undefined;
+    for(const value of settled){
+      if(value.endpointId===null){unassigned??={endpointId:null,endpointName:"Other provider activity",requests:0,tokens:0,cost:0};unassigned.requests+=1;unassigned.tokens+=value.usage?.tokens??0;unassigned.cost+=value.usage?.cost??0;continue}
+      const endpoint=endpointUsage.get(value.endpointId);if(!endpoint)continue;endpoint.requests+=1;endpoint.tokens+=value.usage?.tokens??0;endpoint.cost+=value.usage?.cost??0;
+    }
+    for(const endpoint of endpointUsage.values()){
+      for(const window of policy.endpointWindows??[]){
+        if(window.endpointId!==endpoint.endpointId)continue;
+        const cutoff=new Date(Date.parse(input.measuredAt)-window.windowSeconds*1000).toISOString();
+        const inWindow=providerSettlements.filter((value)=>value.endpointId===window.endpointId&&(value.actorId??null)===input.userId&&value.status!=="failed"&&value.reservedAt>=cutoff).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||compareOrdinal(left.id,right.id));
+        const current=inWindow.reduce((sum,value)=>sum+providerWindowValue(value,window.metric),0),oldestReservedAt=inWindow[0]?.reservedAt??null;
+        endpoint.limits!.push({metric:window.metric,current,limit:window.limit,remaining:Math.max(0,window.limit-current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt:oldestReservedAt?new Date(Date.parse(oldestReservedAt)+window.windowSeconds*1000).toISOString():null}});
+      }
+    }
+    const settlementIds=new Set(sandboxSettlements.map((value)=>value.runId));
+    for(const run of sandboxRuns){
+      if(run.state==="released"){if(!settlementIds.has(run.runId))return{kind:"integrity_error"};continue}
+      const task=tasks.get(run.taskId);
+      if(!task||task.deletedAt||task.currentRunId!==run.runId||task.id!==run.taskId||task.projectId!==run.projectId||task.workspaceId!==run.workspaceId||task.fileLibraryId!==run.fileLibraryId)return{kind:"integrity_error"};
+    }
+    const measured=Date.parse(input.measuredAt);
+    if(!Number.isFinite(measured))return{kind:"integrity_error"};
+    const liveRuns=sandboxRuns.filter((run)=>run.state!=="released").sort((left,right)=>(right.startedAt??right.createdAt).localeCompare(left.startedAt??left.createdAt)||compareOrdinal(right.runId,left.runId)).map((run)=>{
+      const task=tasks.get(run.taskId)!;
+      return{taskId:run.taskId,taskTitle:task.title??null,taskAvailable:true,runId:run.runId,fileLibraryId:run.fileLibraryId,state:run.state as Exclude<PersistedSandboxRunState["state"],"released">,startedAt:run.startedAt,durationSeconds:run.startedAt?Math.max(0,(measured-Date.parse(run.startedAt))/1000):0,resources:clone(run.resourceSnapshot)};
+    });
+    let totalDurationMilliseconds=0n,cpuRequestMillisMilliseconds=0n,memoryRequestByteMilliseconds=0n;
+    const rows=[...sandboxSettlements.map((value)=>({durationSeconds:value.durationSeconds,resources:value.resources})),...liveRuns];
+    try{
+      for(const row of rows){const rounded=Math.round(row.durationSeconds*1000);if(!Number.isSafeInteger(rounded)||rounded<0)return{kind:"integrity_error"};const duration=BigInt(rounded);totalDurationMilliseconds+=duration;cpuRequestMillisMilliseconds+=BigInt(row.resources.cpuRequestMillis)*duration;memoryRequestByteMilliseconds+=BigInt(row.resources.memoryRequestBytes)*duration}
+    }catch{return{kind:"integrity_error"}}
+    return{kind:"available",value:{projectCreatedAt:project.createdAt,policy,usage,provider:{daily,totals,endpoints:[...endpointUsage.values(),...(unassigned?[unassigned]:[])].map(clone)},sandbox:{unreleasedCount:liveRuns.length,launches:sandboxSettlements.filter((value)=>value.startedAt!==null).length+liveRuns.filter((run)=>run.startedAt!==null).length,totalDurationMilliseconds:totalDurationMilliseconds.toString(),cpuRequestMillisMilliseconds:cpuRequestMillisMilliseconds.toString(),memoryRequestByteMilliseconds:memoryRequestByteMilliseconds.toString(),liveRuns}}};
+  }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&(value.actorId??null)===input.actorId&&value.status!=="failed"&&value.reservedAt>=input.since).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||left.id.localeCompare(right.id));return{current:settlements.reduce((sum,value)=>sum+providerWindowValue(value,input.metric),0),oldestReservedAt:settlements[0]?.reservedAt??null};}
   async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlertType; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
     const usage=this.usage.get(input.projectId);
@@ -600,6 +659,11 @@ export class InMemoryProductStore implements ProductStore {
   }
   async runSandboxStartupOperation<T>(input:SandboxStartupOperationInput,operation:()=>Promise<T>):Promise<{kind:"applied";value:T}|{kind:"conflict"}>{
     return this.sandboxRuns.runStartupOperation(input,()=>this.tasks.get(input.taskId),operation);
+  }
+  async querySandboxUsageSettlements(query:ProjectSandboxSettlementQuery):Promise<ProjectSandboxSettlementPage>{
+    const filtered=[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===query.projectId&&value.startedByUserId===query.selectedUserId&&value.releasedAt<=query.scopeMeasuredAt&&(!query.after||value.releasedAt<query.after.releasedAt||value.releasedAt===query.after.releasedAt&&compareOrdinal(value.runId,query.after.runId)<0)).sort((left,right)=>right.releasedAt.localeCompare(left.releasedAt)||compareOrdinal(right.runId,left.runId));
+    const page=filtered.slice(0,query.limit),items=page.map((value)=>{const task=this.tasks.get(value.taskId),taskAvailable=Boolean(task&&!task.deletedAt);return{taskId:value.taskId,taskTitle:taskAvailable?task!.title??null:null,taskAvailable,runId:value.runId,fileLibraryId:value.fileLibraryId,startedAt:value.startedAt,releasedAt:value.releasedAt,durationSeconds:value.durationSeconds,resources:clone(value.resources),releaseReason:value.releaseReason}});
+    return{items,hasMore:filtered.length>query.limit};
   }
   async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{return[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===projectId&&value.startedByUserId===startedByUserId).sort((a,b)=>b.releasedAt.localeCompare(a.releasedAt)||b.runId.localeCompare(a.runId)).map(clone)}
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }

@@ -126,15 +126,15 @@ export class FileLibraryService {
     return this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId));
   }
 
-  async reconcileProjectFileBytes(userId:string,projectId:string,reconcile:(bytes:number)=>Promise<void>):Promise<void>{
+  async refreshProjectFileStorage<T>(userId:string,projectId:string,projectMeasurement:(bytes:number)=>Promise<T>):Promise<T>{
     const project=await this.authorization.requireProject(userId,projectId,"view");
-    await reconcile(await this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId)));
+    return this.files.measureFileRootsBytesAndProject(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId),projectMeasurement);
   }
 
-  async reconcileStoredProjectFileBytes(projectId:string,reconcile:(bytes:number)=>Promise<void>):Promise<void>{
+  async reconcileStoredProjectFileBytes<T>(projectId:string,reconcile:(bytes:number)=>Promise<T>):Promise<T>{
     const project=await this.store.findProject(projectId);
     if(!project)throw new NotFoundError("Project not found");
-    await reconcile(await this.files.measureFileRootsBytes(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId)));
+    return this.files.measureFileRootsBytesAndProject(this.projectAbsoluteRoot(project.rootPath),await this.rootSubPaths(projectId),reconcile);
   }
 
   private async rootSubPaths(projectId: string): Promise<string[]> {

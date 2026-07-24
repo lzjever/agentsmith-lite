@@ -1,70 +1,76 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectUsageEndpoint, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertType, type ProjectAuditAction, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
-import type { PersistedAgentTask, PersistedSandboxRunState, ProductStore } from "../../ports/src/store.js";
+import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
 type Limit = ProjectAlertType;
-const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, updatedAt: nowIso() });
+const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, projectFileBytesMeasuredAt: null, updatedAt: nowIso() });
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
-function ownedRunMatchesTask(run:PersistedSandboxRunState,task:PersistedAgentTask):boolean{return run.runId===task.currentRunId&&run.taskId===task.id&&run.projectId===task.projectId&&run.workspaceId===task.workspaceId&&run.fileLibraryId===task.fileLibraryId}
+interface SandboxRunCursor { v:1;projectId:string;selectedUserId:string;scopeMeasuredAt:string;key:{releasedAt:string;runId:string}; }
+
+function encodeSandboxRunCursor(value:SandboxRunCursor):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url")}
+function decodeSandboxRunCursor(cursor:string,projectId:string,selectedUserId:string):SandboxRunCursor{
+  const invalid=()=>new ProductError("Sandbox Run history cursor is invalid");
+  if(cursor.length<1||cursor.length>4096||!/^[A-Za-z0-9_-]+$/u.test(cursor))throw invalid();
+  let parsed:unknown;
+  try{parsed=JSON.parse(Buffer.from(cursor,"base64url").toString("utf8"))}catch{throw invalid()}
+  if(!isRecord(parsed)||!hasExactKeys(parsed,["v","projectId","selectedUserId","scopeMeasuredAt","key"])||parsed.v!==1||typeof parsed.projectId!=="string"||typeof parsed.selectedUserId!=="string"||typeof parsed.scopeMeasuredAt!=="string"||!isRecord(parsed.key)||!hasExactKeys(parsed.key,["releasedAt","runId"])||typeof parsed.key.releasedAt!=="string"||typeof parsed.key.runId!=="string")throw invalid();
+  const value=parsed as unknown as SandboxRunCursor;
+  if(value.projectId!==projectId||value.selectedUserId!==selectedUserId||!isCanonicalIso(value.scopeMeasuredAt)||!isCanonicalIso(value.key.releasedAt)||value.key.releasedAt>value.scopeMeasuredAt||!validCursorId(value.key.runId)||encodeSandboxRunCursor(value)!==cursor)throw invalid();
+  return value;
+}
+function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==="object"&&value!==null&&!Array.isArray(value)}
+function hasExactKeys(value:Record<string,unknown>,keys:string[]):boolean{const actual=Object.keys(value);return actual.length===keys.length&&keys.every((key,index)=>actual[index]===key)}
+function isCanonicalIso(value:string):boolean{const time=Date.parse(value);return Number.isFinite(time)&&new Date(time).toISOString()===value}
+function validCursorId(value:string):boolean{return value.length>0&&value.length<=1024&&!/[\u0000-\u001f\u007f]/u.test(value)}
 
 export class ProjectPolicyService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
 
   async getPolicy(userId: string, projectId: string): Promise<ProjectResourcePolicy> { await this.authorization.requireProject(userId, projectId); return this.requirePolicy(projectId); }
   async getUsageOverview(userId: string, projectId: string, endpointId?: string, selectedUserId = userId): Promise<ProjectUsageOverview> {
+    await this.requireUsageScope(userId,projectId,selectedUserId);
+    const measuredAt=nowIso(),today=new Date(measuredAt);today.setUTCHours(0,0,0,0);
+    const firstDay = new Date(today); firstDay.setUTCDate(firstDay.getUTCDate() - 29);
+    const periodStart=firstDay.toISOString(),periodEnd=new Date(today.getTime()+24*60*60_000).toISOString();
+    const read=await this.store.readProjectUsageOverview({projectId,userId,selectedUserId,periodStart,periodEnd,selectedEndpointId:endpointId??null,measuredAt});
+    const resultKind=read.kind;
+    switch(resultKind){
+      case "available":{
+        const daily = Array.from({ length: 30 }, (_, index) => { const date = new Date(firstDay); date.setUTCDate(firstDay.getUTCDate() + index); return { date: date.toISOString().slice(0, 10), requests: 0, tokens: 0, cost: 0 }; });
+        const dailyByDate = new Map(daily.map((day) => [day.date, day]));
+        for(const aggregate of read.value.provider.daily){const day=dailyByDate.get(aggregate.date);if(day)Object.assign(day,aggregate)}
+        const {projectCreatedAt,policy,provider,sandbox}=read.value,usage=read.value.usage??zeroUsage(projectId);
+        return{projectId,limits:usageLimits(policy,usage,projectCreatedAt),fileStorage:fileStorageUsage(policy,usage),provider:{userId,periodStart,periodEnd,selectedEndpointId:endpointId??null,daily,totals:provider.totals,endpoints:provider.endpoints},sandbox:{selectedUserId,summaryStartedAt:projectCreatedAt,measuredAt,unreleasedCount:sandbox.unreleasedCount,launches:sandbox.launches,totalDurationSeconds:formatDecimal(BigInt(sandbox.totalDurationMilliseconds),3),cpuRequestSeconds:formatDecimal(BigInt(sandbox.cpuRequestMillisMilliseconds),6),memoryRequestByteSeconds:formatDecimal(BigInt(sandbox.memoryRequestByteMilliseconds),3),liveRuns:sandbox.liveRuns}};
+      }
+      case "project_not_found":throw new ProductError("Project not found",404);
+      case "policy_not_found":throw new ProductError("Project policy not found",409);
+      case "endpoint_not_found":throw new ProductError("Endpoint not found",404);
+      case "selected_member_not_found":throw new ProductError("Project member not found",404);
+      case "integrity_error":throw new ProductError("Sandbox usage is unavailable because stored Run ownership or settlement data is inconsistent",503,"sandbox_usage_unavailable");
+      default:{
+        const exhaustive:never=resultKind;
+        return exhaustive;
+      }
+    }
+  }
+  async getSandboxRunHistory(userId:string,projectId:string,query:Readonly<{selectedUserId?:string;cursor?:string;limit?:number}>={}):Promise<ProjectSandboxRunHistoryPage>{
+    const selectedUserId=query.selectedUserId??userId,project=await this.requireUsageScope(userId,projectId,selectedUserId),limit=query.limit??20;
+    if(!Number.isSafeInteger(limit)||limit<1||limit>50)throw new ProductError("Sandbox Run history limit must be between 1 and 50");
+    const decoded=query.cursor?decodeSandboxRunCursor(query.cursor,projectId,selectedUserId):null,scopeMeasuredAt=decoded?.scopeMeasuredAt??nowIso();
+    const page=await this.store.querySandboxUsageSettlements({projectId,selectedUserId,scopeMeasuredAt,...(decoded?{after:decoded.key}:{}),limit});
+    const last=page.items.at(-1);
+    return{projectId,selectedUserId,summaryStartedAt:project.createdAt,scopeMeasuredAt,items:page.items,nextCursor:page.hasMore&&last?encodeSandboxRunCursor({v:1,projectId,selectedUserId,scopeMeasuredAt,key:{releasedAt:last.releasedAt,runId:last.runId}}):null};
+  }
+  private async requireUsageScope(userId:string,projectId:string,selectedUserId:string){
     const access=await this.authorization.projectAccess(userId,projectId);
     if(selectedUserId!==userId&&!access.canAdmin)throw new ProductError("Project admin permission is required to view another member's sandbox usage",403);
-    if(!await this.store.findProjectMembership(projectId,selectedUserId))throw new ProductError("Project member not found",404);
-    const [project, policy, usage, endpoints] = await Promise.all([this.store.findProject(projectId), this.requirePolicy(projectId), this.usage(projectId), this.store.listEndpointsForProject(projectId)]);
-    if (!project) throw new ProductError("Project not found", 404);
-    if (endpointId !== undefined && !endpoints.some((endpoint) => endpoint.id === endpointId)) throw new ProductError("Endpoint not found", 404);
-    const today = new Date(); today.setUTCHours(0, 0, 0, 0);
-    const firstDay = new Date(today); firstDay.setUTCDate(firstDay.getUTCDate() - 29);
-    const since = firstDay.toISOString();
-    const allSettlements = await this.store.listSettledProjectProviderSettlements(projectId, since);
-    const selectedSettlements = endpointId === undefined ? allSettlements : allSettlements.filter((settlement) => settlement.endpointId === endpointId);
-    const userSettlements = selectedSettlements.filter((settlement) => settlement.actorId === userId);
-    const daily = Array.from({ length: 30 }, (_, index) => { const date = new Date(firstDay); date.setUTCDate(firstDay.getUTCDate() + index); return { date: date.toISOString().slice(0, 10), requests: 0, tokens: 0, cost: 0 }; });
-    const dailyByDate = new Map(daily.map((day) => [day.date, day]));
-    for (const settlement of userSettlements) {
-      const day = dailyByDate.get(settlement.settledAt!.slice(0, 10));
-      if (!day) continue;
-      day.requests += 1; day.tokens += settlement.usage?.tokens ?? 0; day.cost += settlement.usage?.cost ?? 0;
-    }
-    const endpointUsage = new Map<string, ProjectUsageEndpoint & { endpointId: string }>(endpoints.map((endpoint) => [endpoint.id, { endpointId: endpoint.id, endpointName: endpoint.name, requests: 0, tokens: 0, cost: 0, limits: [] }]));
-    let unassignedEndpointUsage: ProjectUsageEndpoint | undefined;
-    for (const settlement of allSettlements) {
-      if (settlement.endpointId === null) {
-        unassignedEndpointUsage ??= { endpointId: null, endpointName: "Other provider activity", requests: 0, tokens: 0, cost: 0 };
-        unassignedEndpointUsage.requests += 1; unassignedEndpointUsage.tokens += settlement.usage?.tokens ?? 0; unassignedEndpointUsage.cost += settlement.usage?.cost ?? 0;
-        continue;
-      }
-      const endpoint = endpointUsage.get(settlement.endpointId);
-      if (!endpoint) continue;
-      endpoint.requests += 1; endpoint.tokens += settlement.usage?.tokens ?? 0; endpoint.cost += settlement.usage?.cost ?? 0;
-    }
-    const measuredAt=Date.now();
-    for(const endpoint of endpointUsage.values()){const windows=(policy.endpointWindows??[]).filter(item=>item.endpointId===endpoint.endpointId);endpoint.limits=[];for(const window of windows){const cutoff=new Date(measuredAt-window.windowSeconds*1000).toISOString();const measured=await this.store.measureProjectProviderWindow({projectId,endpointId:endpoint.endpointId,actorId:userId,metric:window.metric,since:cutoff});const resetAt=measured.oldestReservedAt?new Date(Date.parse(measured.oldestReservedAt)+window.windowSeconds*1000).toISOString():null;endpoint.limits.push({metric:window.metric,current:measured.current,limit:window.limit,remaining:Math.max(0,window.limit-measured.current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt}})}}
-    const trendTotals = daily.reduce((total, day) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 });
-    const sandbox=await this.sandboxUsage(projectId,selectedUserId);
-    return { projectId, usage, limits: usageLimits(policy, usage, project.createdAt), daily, trendTotals, endpoints: [...endpointUsage.values(), ...(unassignedEndpointUsage ? [unassignedEndpointUsage] : [])], selectedEndpointId: endpointId ?? null, sandbox };
-  }
-  private async sandboxUsage(projectId:string,selectedUserId:string):Promise<import("../../contracts/src/api.js").ProjectSandboxUsage>{
-    const [tasks,runs,settlements]=await Promise.all([this.store.listTasksForProject(projectId),this.store.sandboxRuns.list(),this.store.listSandboxUsageSettlements(projectId,selectedUserId)]);
-    const projectRuns=runs.filter((run)=>run.projectId===projectId&&run.startedByUserId===selectedUserId),settlementsById=new Map(settlements.map((value)=>[value.runId,value]));
-    const tasksByRun=new Map(tasks.filter((task)=>!task.deletedAt).flatMap((task)=>task.currentRunId?[[task.currentRunId,task] as const]:[]));
-    const availableTaskIds=new Set(tasks.filter((task)=>!task.deletedAt).map((task)=>task.id));
-    for(const run of projectRuns){if(run.state==="released"){if(!settlementsById.has(run.runId))throw new ProductError("Sandbox usage is unavailable because a released Run settlement is missing",503,"sandbox_usage_unavailable");continue;}const task=tasksByRun.get(run.runId);if(!task||!ownedRunMatchesTask(run,task))throw new ProductError("Sandbox usage is unavailable because an owned Run is missing or mismatched",503,"sandbox_usage_unavailable");}
-    const measuredAt=Date.now();
-    const rows:import("../../contracts/src/api.js").ProjectSandboxUsageRow[]=[...settlements.map((value)=>({taskId:value.taskId,taskAvailable:availableTaskIds.has(value.taskId),runId:value.runId,fileLibraryId:value.fileLibraryId,state:"settled" as const,startedAt:value.startedAt,releasedAt:value.releasedAt,durationSeconds:value.durationSeconds,resources:structuredClone(value.resources),releaseReason:value.releaseReason})),...projectRuns.filter((run)=>run.state!=="released").map((run)=>({taskId:run.taskId,taskAvailable:availableTaskIds.has(run.taskId),runId:run.runId,fileLibraryId:run.fileLibraryId,state:"live" as const,startedAt:run.startedAt,releasedAt:null,durationSeconds:run.startedAt?Math.max(0,(measuredAt-Date.parse(run.startedAt))/1000):0,resources:structuredClone(run.resourceSnapshot),releaseReason:null}))].sort((a,b)=>(b.startedAt??b.releasedAt??"").localeCompare(a.startedAt??a.releasedAt??"")||b.runId.localeCompare(a.runId));
-    let totalDurationMs=0n,cpuRequestMillisMs=0n,memoryRequestByteMs=0n;
-    for(const row of rows){const roundedDurationMs=Math.round(row.durationSeconds*1000);if(!Number.isSafeInteger(roundedDurationMs)||roundedDurationMs<0)throw new ProductError("Sandbox usage is unavailable because a duration is outside the supported range",503,"sandbox_usage_unavailable");const durationMs=BigInt(roundedDurationMs);totalDurationMs+=durationMs;cpuRequestMillisMs+=BigInt(row.resources.cpuRequestMillis)*durationMs;memoryRequestByteMs+=BigInt(row.resources.memoryRequestBytes)*durationMs;}
-    return{selectedUserId,activeCount:rows.filter((row)=>row.state==="live"&&row.startedAt!==null).length,launches:rows.filter((row)=>row.startedAt!==null).length,totalDurationSeconds:formatDecimal(totalDurationMs,3),cpuRequestSeconds:formatDecimal(cpuRequestMillisMs,6),memoryRequestByteSeconds:formatDecimal(memoryRequestByteMs,3),rows};
+    if(selectedUserId!==userId&&!await this.store.findProjectMembership(projectId,selectedUserId))throw new ProductError("Project member not found",404);
+    return access.project;
   }
   async alerts(userId:string,projectId:string):Promise<ProjectAlert[]>;
   async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery):Promise<import("../../contracts/src/api.js").ProjectAlertPage>;
@@ -239,7 +245,10 @@ export class ProjectPolicyService {
       updatedAt: nowIso()
     });
     if (adjusted) {
-      await this.bestEffortFileProjection("file alert evaluation",async()=>{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");if(delta<0)await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")});
+      await this.bestEffortFileProjection("file alert evaluation",async()=>{
+        const policy=await this.requirePolicy(projectId);
+        await this.projectFileAlertProjection(projectId,adjusted.projectFileBytes,policy.projectFileBytesLimit);
+      });
       return;
     }
     if (delta > 0) {
@@ -249,19 +258,26 @@ export class ProjectPolicyService {
     }
     throw new ProductError("Project policy usage not found", 409);
   }
-  async reconcileFileLibraryBytes(projectId: string, fileLibraryBytes: number): Promise<void> {
+  async reconcileFileLibraryBytes(projectId: string, fileLibraryBytes: number): Promise<ProjectFileStorageUsage> {
     if (!Number.isSafeInteger(fileLibraryBytes) || fileLibraryBytes < 0) throw new ProductError("Project file bytes must be a non-negative integer");
     const usage = await this.store.setProjectFileBytes(projectId, fileLibraryBytes, nowIso());
     if (!usage) throw new ProductError("Project policy usage not found", 409);
-    await this.bestEffortFileProjection("file reconciliation projection",async()=>{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")});
     const policy=await this.requirePolicy(projectId);
-    if(policy.projectFileBytesLimit!==null&&fileLibraryBytes>policy.projectFileBytesLimit){await this.bestEffortFileProjection("file quota projection",()=>this.openAlert(projectId,"project_file_bytes_limit"));throw new ProductError("Project file bytes limit reached",409,"project_file_bytes_limit_reached");}
+    await this.bestEffortFileProjection("file reconciliation projection",()=>this.projectFileAlertProjection(projectId,fileLibraryBytes,policy.projectFileBytesLimit));
+    return fileStorageUsage(policy,usage);
   }
   async recordFileMutation(projectId:string,actorId:string,action:Extract<ProjectAuditAction,"file.upload"|"file.delete">,resourceId:string,filePath:string,delta:number,bytes:number,mediaType:string):Promise<void>{
     await this.recordFileBytes(projectId,actorId,filePath,delta);
     await this.bestEffortFileProjection("file mutation audit",()=>this.recordOperation(projectId,actorId,action,"accepted",resourceId,"file",{filePath,bytes,mediaType}));
   }
-  async refreshFileAlerts(projectId: string): Promise<void> { await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit"); }
+  async refreshFileAlerts(projectId: string): Promise<void> {
+    const [policy,usage]=await Promise.all([this.requirePolicy(projectId),this.usage(projectId)]);
+    await this.projectFileAlertProjection(projectId,usage.projectFileBytes,policy.projectFileBytesLimit);
+  }
+  private async projectFileAlertProjection(projectId:string,bytes:number,limit:number|null):Promise<void>{
+    if(limit!==null&&bytes>limit)await this.openAlert(projectId,"project_file_bytes_limit");
+    else{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit")}
+  }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
   private async bestEffortFileProjection(label:string,action:()=>Promise<void>):Promise<void>{try{await action()}catch(error){console.error(`${label} failed`,error)}}
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
@@ -329,12 +345,16 @@ function usageLimits(policy: ProjectResourcePolicy, usage: ProjectResourceUsage,
     usageLimit("activeTasks", usage.activeTasks, policy.activeTasksLimit, projectCreatedAt),
     usageLimit("providerRequests", usage.providerRequests, policy.providerRequestsLimit, projectCreatedAt),
     usageLimit("providerTokens", usage.providerTokens, policy.providerTokensLimit, projectCreatedAt),
-    usageLimit("providerCost", usage.providerCost, policy.providerCostLimit, projectCreatedAt),
-    usageLimit("projectFileBytes", usage.projectFileBytes, policy.projectFileBytesLimit, projectCreatedAt)
+    usageLimit("providerCost", usage.providerCost, policy.providerCostLimit, projectCreatedAt)
   ];
 }
+
+function fileStorageUsage(policy:ProjectResourcePolicy,usage:ProjectResourceUsage):ProjectFileStorageUsage{
+  const limitBytes=policy.projectFileBytesLimit;
+  return{recordedBytes:usage.projectFileBytes,measuredAt:usage.projectFileBytesMeasuredAt,limitBytes,remainingBytes:limitBytes===null?null:Math.max(0,limitBytes-usage.projectFileBytes)};
+}
 function usageLimit(metric: ProjectUsageLimit["metric"], current: number, limit: number | null, projectCreatedAt: string): ProjectUsageLimit {
-  const window = metric === "activeTasks" || metric === "projectFileBytes"
+  const window = metric === "activeTasks"
     ? { kind: "current_gauge", resetAt: null } as const
     : { kind: "project_lifetime", startedAt: projectCreatedAt, resetAt: null } as const;
   return { metric, current, limit, remaining: limit === null ? null : Math.max(0, limit - current), window };

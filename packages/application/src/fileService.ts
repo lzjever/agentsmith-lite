@@ -135,6 +135,9 @@ export class FileService {
   private async listFilesAtRoot(projectRoot:string,input:string,rootSubPath:string):Promise<ProjectFileListResponse>{return withProjectFileLock(projectRoot,()=>this.listFilesUnlocked(projectRoot,input,rootSubPath))}
 
   async measureFileRootsBytes(projectRoot:string,rootSubPaths:string[]):Promise<number>{return withProjectFileLock(projectRoot,()=>this.measureFileRootsBytesUnlocked(projectRoot,rootSubPaths))}
+  async measureFileRootsBytesAndProject<T>(projectRoot:string,rootSubPaths:string[],project:(bytes:number)=>Promise<T>):Promise<T>{
+    return withProjectFileLock(projectRoot,async()=>project(await this.measureFileRootsBytesUnlocked(projectRoot,rootSubPaths)));
+  }
 
   private async listFilesUnlocked(projectRoot: string, input: string,rootSubPath:string): Promise<ProjectFileListResponse> {
       const { normalizedPath, absolutePath } = await this.resolveLibraryFilePath(projectRoot,rootSubPath,input,true);

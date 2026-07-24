@@ -152,10 +152,11 @@ export interface ProjectResourceUsage {
   providerTokens: number;
   providerCost: number;
   projectFileBytes: number;
+  projectFileBytesMeasuredAt: ISODateString | null;
   updatedAt: ISODateString;
 }
 
-export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes";
+export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost";
 
 export type ProjectUsageWindow =
   | { kind: "current_gauge"; resetAt: null }
@@ -195,38 +196,82 @@ export interface SandboxResourceSnapshot {
 
 export type SandboxReleaseReason = "requested" | "failed" | "cleanup";
 
-export interface ProjectSandboxUsageRow {
+export type ProjectSandboxLiveRunState = "starting" | "active" | "release_requested" | "failed";
+
+export interface ProjectSandboxLiveRun {
   taskId: string;
+  taskTitle: string | null;
   taskAvailable: boolean;
   runId: string;
   fileLibraryId: string;
-  state: "live" | "settled";
+  state: ProjectSandboxLiveRunState;
   startedAt: ISODateString | null;
-  releasedAt: ISODateString | null;
   durationSeconds: number;
   resources: SandboxResourceSnapshot;
-  releaseReason: SandboxReleaseReason | null;
 }
 
 export interface ProjectSandboxUsage {
   selectedUserId: string;
-  activeCount: number;
+  summaryStartedAt: ISODateString;
+  measuredAt: ISODateString;
+  unreleasedCount: number;
   launches: number;
   totalDurationSeconds: string;
   cpuRequestSeconds: string;
   memoryRequestByteSeconds: string;
-  rows: ProjectSandboxUsageRow[];
+  liveRuns: ProjectSandboxLiveRun[];
+}
+
+export interface ProjectSandboxSettledRun {
+  taskId: string;
+  taskTitle: string | null;
+  taskAvailable: boolean;
+  runId: string;
+  fileLibraryId: string;
+  startedAt: ISODateString | null;
+  releasedAt: ISODateString;
+  durationSeconds: number;
+  resources: SandboxResourceSnapshot;
+  releaseReason: SandboxReleaseReason;
+}
+
+export interface ProjectSandboxRunHistoryPage {
+  projectId: string;
+  selectedUserId: string;
+  summaryStartedAt: ISODateString;
+  scopeMeasuredAt: ISODateString;
+  items: ProjectSandboxSettledRun[];
+  nextCursor: string | null;
+}
+
+export interface ProjectProviderUsage {
+  userId: string;
+  periodStart: ISODateString;
+  periodEnd: ISODateString;
+  selectedEndpointId: string | null;
+  daily: ProjectUsageDay[];
+  totals: { requests: number; tokens: number; cost: number };
+  endpoints: ProjectUsageEndpoint[];
+}
+
+export interface ProjectFileStorageUsage {
+  recordedBytes: number;
+  measuredAt: ISODateString | null;
+  limitBytes: number | null;
+  remainingBytes: number | null;
 }
 
 export interface ProjectUsageOverview {
   projectId: string;
-  usage: ProjectResourceUsage;
   limits: ProjectUsageLimit[];
-  daily: ProjectUsageDay[];
-  trendTotals: { requests: number; tokens: number; cost: number };
-  endpoints: ProjectUsageEndpoint[];
-  selectedEndpointId: string | null;
+  fileStorage: ProjectFileStorageUsage;
+  provider: ProjectProviderUsage;
   sandbox: ProjectSandboxUsage;
+}
+
+export interface ProjectFileStorageRefreshResponse {
+  projectId: string;
+  fileStorage: ProjectFileStorageUsage;
 }
 
 export type ProjectAlertType = "active_tasks_limit" | "provider_requests_limit" | "provider_tokens_limit" | "provider_cost_limit" | "project_file_bytes_limit" | "endpoint_failure" | "provider_failure" | "sandbox_failure";

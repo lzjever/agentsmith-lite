@@ -1,12 +1,13 @@
 "use client";
 
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, ProjectAlert as ApiProjectAlert, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAuditAction, ProjectAuditEventView, ProjectAuditResourceKind, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
 export type ProjectAuditEvent = ProjectAuditEventView;
+export type ProjectSandboxRunHistoryPage = ApiProjectSandboxRunHistoryPage;
 export type ProjectUsageOverview = ApiProjectUsageOverview;
 
 export class ApiError extends Error {
@@ -113,7 +114,7 @@ export interface ProjectResourceUsage {
   projectFileBytes: number;
   updatedAt: string;
 }
-export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes";
+export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost";
 export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { kind: "project_lifetime"; startedAt: string; resetAt: null; } | { kind:"rolling";windowSeconds:number;startedAt:string;resetAt:string|null };
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
@@ -260,6 +261,8 @@ export const apiClient = {
   updatePolicy: (projectId: string, input: ProjectPolicyUpdate, idempotencyKey: string) =>
     jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
   usage: (projectId: string, query: { endpointId?: string; userId?: string } = {}) => { const params = new URLSearchParams(); if (query.endpointId) params.set("endpointId", query.endpointId); if (query.userId) params.set("userId", query.userId); return request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${params.size ? `?${params}` : ""}`); },
+  measureFileStorage: (projectId: string) => json<ProjectFileStorageRefreshResponse>(`/projects/${encodeURIComponent(projectId)}/usage/file-storage/refresh`, "POST", {}),
+  sandboxRunHistory: (projectId: string, query: { userId?: string; cursor?: string; limit?: number } = {}) => { const params = new URLSearchParams(); if (query.userId) params.set("userId", query.userId); if (query.cursor) params.set("cursor", query.cursor); if (query.limit) params.set("limit", String(query.limit)); return request<ProjectSandboxRunHistoryPage>(`/projects/${encodeURIComponent(projectId)}/usage/sandbox-runs${params.size ? `?${params}` : ""}`); },
   alerts: (projectId: string, query: { status?: ProjectAlert["status"]; cursor?: string; limit?: number } = {}) => { const params=new URLSearchParams();if(query.status)params.set("status",query.status);if(query.cursor)params.set("cursor",query.cursor);if(query.limit)params.set("limit",String(query.limit));return request<ProjectAlertPage>(`/projects/${encodeURIComponent(projectId)}/alerts${params.size?`?${params}`:""}`); },
   alert: (projectId:string,alertId:string) => request<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`),
   transitionAlert: (projectId: string, alertId: string, status: "resolved" | "dismissed", idempotencyKey: string) => jsonIdempotent<ProjectAlert>(`/projects/${encodeURIComponent(projectId)}/alerts/${encodeURIComponent(alertId)}`, "PATCH", idempotencyKey, { status }),

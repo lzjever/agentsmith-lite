@@ -35,7 +35,11 @@ import type {
   SandboxRenderResult,
   SandboxResourceSnapshot,
   SandboxReleaseReason,
-  SandboxFailureCode
+  SandboxFailureCode,
+  ProjectSandboxLiveRun,
+  ProjectSandboxSettledRun,
+  ProjectUsageDay,
+  ProjectUsageEndpoint
 } from "../../contracts/src/api.js";
 
 export interface PersistedDeliveryReceipt {
@@ -293,6 +297,56 @@ export interface SandboxUsageSettlement {
   releaseReason: SandboxReleaseReason;
 }
 
+export interface ProjectUsageOverviewReadInput {
+  projectId: string;
+  userId: string;
+  selectedUserId: string;
+  periodStart: string;
+  periodEnd: string;
+  selectedEndpointId: string | null;
+  measuredAt: string;
+}
+
+export interface ProjectProviderUsageRead {
+  daily: ProjectUsageDay[];
+  totals: { requests: number; tokens: number; cost: number };
+  endpoints: ProjectUsageEndpoint[];
+}
+
+export interface ProjectSandboxUsageOverviewRead {
+  unreleasedCount: number;
+  launches: number;
+  totalDurationMilliseconds: string;
+  cpuRequestMillisMilliseconds: string;
+  memoryRequestByteMilliseconds: string;
+  liveRuns: ProjectSandboxLiveRun[];
+}
+
+export interface ProjectUsageOverviewRead {
+  projectCreatedAt: string;
+  policy: ProjectResourcePolicy;
+  usage: ProjectResourceUsage | null;
+  provider: ProjectProviderUsageRead;
+  sandbox: ProjectSandboxUsageOverviewRead;
+}
+
+export type ProjectUsageOverviewReadResult =
+  | { kind: "available"; value: ProjectUsageOverviewRead }
+  | { kind: "project_not_found" | "policy_not_found" | "endpoint_not_found" | "selected_member_not_found" | "integrity_error" };
+
+export interface ProjectSandboxSettlementQuery {
+  projectId: string;
+  selectedUserId: string;
+  scopeMeasuredAt: string;
+  after?: { releasedAt: string; runId: string };
+  limit: number;
+}
+
+export interface ProjectSandboxSettlementPage {
+  items: ProjectSandboxSettledRun[];
+  hasMore: boolean;
+}
+
 export interface ConfirmSandboxRunStartedInput {
   runId: string;
   expectedFencingToken: number;
@@ -473,7 +527,7 @@ export interface ProductStore {
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;
   findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null>;
   upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage>;
-  setProjectFileBytes(projectId: string, bytes: number, updatedAt: string): Promise<ProjectResourceUsage | null>;
+  setProjectFileBytes(projectId: string, bytes: number, measuredAt: string): Promise<ProjectResourceUsage | null>;
   adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null>;
   reserveProjectProviderSettlement(input: ReserveProjectProviderSettlementInput): Promise<ProjectProviderSettlement | null>;
   markProjectProviderSettlementDispatched(id: string, updatedAt: string): Promise<ProjectProviderSettlement | null>;
@@ -484,6 +538,7 @@ export interface ProductStore {
   expireProjectProviderSettlements(now: string): Promise<number>;
   pruneProjectProviderSettlements(before: string, limit: number): Promise<number>;
   listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]>;
+  readProjectUsageOverview(input: ProjectUsageOverviewReadInput): Promise<ProjectUsageOverviewReadResult>;
   measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>;
   measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
   upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert>;
@@ -502,6 +557,7 @@ export interface ProductStore {
   completeSandboxRunRelease(input: CompleteSandboxRunReleaseInput): Promise<CompleteSandboxRunReleaseResult>;
   failSandboxRun(input: SandboxRunFailureInput): Promise<PersistedSandboxRunState | null>;
   runSandboxStartupOperation<T>(input: SandboxStartupOperationInput, operation: () => Promise<T>): Promise<{ kind: "applied"; value: T } | { kind: "conflict" }>;
+  querySandboxUsageSettlements(query: ProjectSandboxSettlementQuery): Promise<ProjectSandboxSettlementPage>;
   listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;
 
   createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential>;

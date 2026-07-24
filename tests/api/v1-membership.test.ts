@@ -134,10 +134,19 @@ describe("v1 project membership API", () => {
       updatedAt: created.updatedAt
     });
     const ownerSelectedUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=user_member`,{headers:{cookie}});
-    assert.equal(ownerSelectedUsage.status,200);assert.deepEqual((await ownerSelectedUsage.json() as {sandbox:unknown}).sandbox,{selectedUserId:"user_member",activeCount:0,launches:0,totalDurationSeconds:"0",cpuRequestSeconds:"0",memoryRequestByteSeconds:"0",rows:[]});
+    assert.equal(ownerSelectedUsage.status,200);
+    const selectedSandbox=(await ownerSelectedUsage.json() as {sandbox:{selectedUserId:string;summaryStartedAt:string;measuredAt:string;unreleasedCount:number;launches:number;totalDurationSeconds:string;cpuRequestSeconds:string;memoryRequestByteSeconds:string;liveRuns:unknown[]}}).sandbox;
+    assert.deepEqual({...selectedSandbox,summaryStartedAt:"scope",measuredAt:"scope"},{selectedUserId:"user_member",summaryStartedAt:"scope",measuredAt:"scope",unreleasedCount:0,launches:0,totalDurationSeconds:"0",cpuRequestSeconds:"0",memoryRequestByteSeconds:"0",liveRuns:[]});
     const memberSelfUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage`,{headers:{cookie:`asl_session=${memberSession}`}});assert.equal(memberSelfUsage.status,200);assert.equal((await memberSelfUsage.json() as {sandbox:{selectedUserId:string}}).sandbox.selectedUserId,"user_member");
+    const memberStorageRefresh=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/file-storage/refresh`,{method:"POST",headers:{cookie:`asl_session=${memberSession}`,"x-csrf-token":"member-csrf-token","content-type":"application/json"},body:"{}"});
+    assert.equal(memberStorageRefresh.status,200);
+    assert.equal((await memberStorageRefresh.json() as {projectId:string}).projectId,projectId);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=${ownerUserId}`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=missing-user`,{headers:{cookie}})).status,404);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/sandbox-runs?userId=user_member`,{headers:{cookie}})).status,200);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/sandbox-runs`,{headers:{cookie:`asl_session=${memberSession}`}})).status,200);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/sandbox-runs?userId=${ownerUserId}`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/sandbox-runs?userId=missing-user`,{headers:{cookie}})).status,404);
     await store.appendProjectAuditEvent({id:"audit_actor_owner_subject_member",projectId,actorId:ownerUserId,subjectUserId:"user_member",action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:"task_audit_1",detail:{taskId:"task_audit_1",runId:"run_audit_1"},createdAt:"2026-07-19T00:00:00.000Z"});
     await store.appendProjectAuditEvent({id:"audit_actor_member_subject_owner",projectId,actorId:"user_member",subjectUserId:ownerUserId,action:"sandbox.release_requested",status:"accepted",resourceKind:"sandbox",resourceId:"task_audit_2",detail:{taskId:"task_audit_2",runId:"run_audit_2"},createdAt:"2026-07-19T00:01:00.000Z"});
     const actorAudit=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit?actorId=${ownerUserId}&action=sandbox.release_requested`,{headers:{cookie}});assert.equal(actorAudit.status,200);assert.deepEqual((await actorAudit.json() as {items:Array<{id:string}>}).items.map((item)=>item.id),["audit_actor_owner_subject_member"]);

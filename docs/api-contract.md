@@ -6,6 +6,49 @@ Project credential create and rotate requests accept a plaintext provider secret
 
 `GET /api/v1/workspaces` projects include the current user's nullable `pinnedAt`; it is never shared with other members. `PUT /api/v1/projects/{projectId}/pin` accepts `{ pinned: boolean }` and naturally idempotently sets that member's pin. Removing project membership removes the pin.
 
+## Project Usage
+
+`GET /api/v1/projects/{projectId}/usage` accepts only `endpointId` and `userId`.
+It is a bounded database read and returns
+`{ projectId, limits, fileStorage, provider, sandbox }`; it never traverses
+Project files. Provider data is always scoped to the authenticated user and one
+explicit 30 UTC-day period. The endpoint selector filters `daily` and `totals`;
+`endpoints` retains that user's per-endpoint period totals and rolling limits.
+Sandbox data is scoped to the selected member and returns the Project-lifetime
+summary plus every capacity-holding Run in `liveRuns`; `unreleasedCount` counts
+all of them, including `starting`, `release_requested`, and `failed`. It never
+returns settled Runs.
+
+`fileStorage` is the last recorded storage projection:
+`{ recordedBytes, measuredAt, limitBytes, remainingBytes }`. It is separate
+from `limits`; `measuredAt` is the time of the most recent complete File Library
+root traversal, and `null` means no such measurement exists. Known API file
+mutations can update `recordedBytes` without changing that measurement time.
+The scope is every regular file under the Project's current File Library roots,
+including workspace and projected artifact files; symbolic links are not
+followed. Sandbox containers write directly to the shared JuiceFS volume, so
+the recorded value can change immediately after any measurement.
+
+`POST /api/v1/projects/{projectId}/usage/file-storage/refresh` accepts no query
+parameters and requires an empty JSON object. Any current Project member may
+call it with the normal session and CSRF token; it deliberately has no
+idempotency key because every request performs a new measurement. It measures
+and stores File Library bytes while holding the process-local Project file
+lock, then returns `{ projectId, fileStorage }`. This is a point-in-time
+measurement, not a filesystem snapshot or a lock against concurrent sandbox
+writes. An over-limit measurement is still recorded and returned with HTTP
+200, and file-storage alerts are updated or recovered from the measured value.
+
+`GET /api/v1/projects/{projectId}/usage/sandbox-runs` accepts only `userId`,
+`cursor`, and `limit`; the default is 20 and the maximum is 50. It returns
+`{ projectId, selectedUserId, summaryStartedAt, scopeMeasuredAt, items,
+nextCursor }`, ordered by release time and Run ID descending. Its opaque v1
+cursor binds the Project, selected member, first-page snapshot timestamp, and
+final item key. Later pages exclude Runs released after that snapshot. Deleted
+Tasks retain a null title and `taskAvailable: false`. Members may select only
+themselves; Project owners and administrators may select another current
+member.
+
 Alert, rule, and Audit reads retain legacy Task-terminal records only as
 history. Legacy `task_failure` alerts and rules are returned as
 `historical_task_failure`; historical alerts are never `active`, and historical
