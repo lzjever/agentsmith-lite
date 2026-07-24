@@ -23,7 +23,7 @@ test("endpoint model discovery and health rechecks are authorized and expose onl
     const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const { csrfToken } = await login.json() as { csrfToken: string };
-    const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
+    const workspace = (await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken)).workspace;
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
     const credential = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-return-this" }, cookie, csrfToken);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/endpoints?includeCatalog=true`, { headers: { cookie } })).status, 400);

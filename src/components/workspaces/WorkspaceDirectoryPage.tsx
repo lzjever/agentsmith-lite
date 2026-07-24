@@ -4,7 +4,7 @@ import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
 import { Badge, Banner, Button, EmptyState, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useState } from "react";
-import { ApiError, apiClient, type Workspace, type WorkspaceMemberRole } from "../../lib/api/client";
+import { ApiError, apiClient, notifyDirectoryChanged, type WorkspaceDetail, type WorkspaceDirectoryItem, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
@@ -13,16 +13,22 @@ import { Dialog } from "../ui/Dialog";
 type LoadState = "loading" | "ready" | "error";
 
 export function WorkspaceDirectoryPage() {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceDirectoryItem[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [currentCursor, setCurrentCursor] = useState<string>();
+  const [cursorHistory, setCursorHistory] = useState<string[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
 
-  async function load() {
+  async function load(cursor?:string) {
     setState("loading");
     setError("");
     try {
-      setWorkspaces(await apiClient.workspaces());
+      const page=await apiClient.workspaces({...(cursor?{cursor}:{}),limit:20});
+      setWorkspaces(page.items);
+      setNextCursor(page.nextCursor);
+      setCurrentCursor(cursor);
       setState("ready");
     } catch (reason) {
       setError(errorMessage(reason, "Workspaces could not be loaded."));
@@ -36,16 +42,16 @@ export function WorkspaceDirectoryPage() {
     {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading workspaces..." /></div> : null}
     {state === "error" ? <WorkspaceError message={error} onRetry={load} /> : null}
     {state === "ready" && workspaces.length === 0 ? <WorkspaceEmpty onCreate={() => setCreateOpen(true)} /> : null}
-    {state === "ready" && workspaces.length > 0 ? <WorkspaceList workspaces={workspaces} /> : null}
-    <CreateWorkspaceDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(workspace) => { setWorkspaces((items) => [...items, workspace]); setCreateOpen(false); }} />
+    {state === "ready" && workspaces.length > 0 ? <><WorkspaceList workspaces={workspaces} /><div className="mt-4 flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={cursorHistory.length===0} onClick={()=>{const history=cursorHistory.slice(0,-1);const previous=cursorHistory.at(-1)||undefined;setCursorHistory(history);void load(previous);}}/><Text type="supporting" color="secondary">Page {cursorHistory.length+1}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={!nextCursor} onClick={()=>{if(!nextCursor)return;setCursorHistory((items)=>[...items,currentCursor??""]);void load(nextCursor);}}/></div></> : null}
+    <CreateWorkspaceDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={() => { setCreateOpen(false); setCursorHistory([]); void load(); }} />
   </PageLayout>;
 }
 
-function WorkspaceList({ workspaces }: { workspaces: Workspace[] }) {
-  return <div className="divide-y divide-border border-y border-border">{workspaces.map((workspace) => <Link key={workspace.id} href={`/workspaces/${workspace.id}`} className="group flex items-center justify-between gap-5 px-2 py-5 no-underline hover:bg-overlay-hover"><div className="flex min-w-0 items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-sm bg-muted text-icon-secondary"><FolderKanban size={18} /></span><span className="min-w-0"><span className="flex min-w-0 items-center gap-2"><Text weight="medium" maxLines={1}>{workspace.name}</Text><WorkspaceLifecycleBadge workspace={workspace} /></span><Text type="supporting" color="secondary" display="block" className="mt-1">{workspace.projects.length} {workspace.projects.length === 1 ? "project" : "projects"}</Text><Text type="supporting" color="secondary" display="block" maxLines={1} className="mt-1">Owner: {workspaceOwnerLabel(workspace)} · Your access: {roleLabel(workspace.memberRole)}</Text></span></div><Text type="supporting" color="secondary" className="group-hover:text-primary">{workspace.lifecycleStatus && workspace.lifecycleStatus !== "active" ? "View" : "Open"}</Text></Link>)}</div>;
+function WorkspaceList({ workspaces }: { workspaces: WorkspaceDirectoryItem[] }) {
+  return <div className="divide-y divide-border border-y border-border">{workspaces.map((workspace) => <Link key={workspace.id} href={`/workspaces/${workspace.id}`} className="group flex items-center justify-between gap-5 px-2 py-5 no-underline hover:bg-overlay-hover"><div className="flex min-w-0 items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-sm bg-muted text-icon-secondary"><FolderKanban size={18} /></span><span className="min-w-0"><span className="flex min-w-0 items-center gap-2"><Text weight="medium" maxLines={1}>{workspace.name}</Text><WorkspaceLifecycleBadge workspace={workspace} /></span><Text type="supporting" color="secondary" display="block" className="mt-1">{workspace.projectCount} {workspace.projectCount === 1 ? "project" : "projects"}</Text><Text type="supporting" color="secondary" display="block" maxLines={1} className="mt-1">Owner: {workspaceOwnerLabel(workspace)} · Your access: {roleLabel(workspace.memberRole)}</Text></span></div><Text type="supporting" color="secondary" className="group-hover:text-primary">{workspace.lifecycleStatus && workspace.lifecycleStatus !== "active" ? "View" : "Open"}</Text></Link>)}</div>;
 }
 
-function WorkspaceLifecycleBadge({ workspace }: { workspace: Workspace }) {
+function WorkspaceLifecycleBadge({ workspace }: { workspace: WorkspaceDirectoryItem }) {
   const status = workspace.lifecycleStatus ?? "active";
   if (status === "active") return null;
   return <Badge className="shrink-0" variant={status === "archived" ? "warning" : "error"} label={status[0]!.toUpperCase() + status.slice(1)} />;
@@ -59,7 +65,7 @@ function WorkspaceError({ message, onRetry }: { message: string; onRetry: () => 
   return <Banner status="error" title="Workspace directory unavailable" description={message} endContent={<Button label="Try again" variant="secondary" onClick={() => void onRetry()} />} />;
 }
 
-function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (workspace: Workspace) => void }) {
+function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (workspace: WorkspaceDetail) => void }) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -84,6 +90,7 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
       const workspace = await apiClient.createWorkspace(nextName, mutationKeys.key("workspace.create", requestIdentity));
       mutationKeys.complete("workspace.create", requestIdentity);
       onCreated(workspace);
+      notifyDirectoryChanged();
       showToast({ body: "Workspace created" });
       setName("");
     } catch (reason) {
@@ -105,5 +112,5 @@ function errorMessage(reason: unknown, fallback: string): string {
   return reason instanceof ApiError ? reason.message : fallback;
 }
 
-function workspaceOwnerLabel(workspace: Workspace): string { return workspace.owner?.displayName || workspace.owner?.email || "Workspace owner"; }
+function workspaceOwnerLabel(workspace: WorkspaceDirectoryItem): string { return workspace.owner.displayName || workspace.owner.email || "Workspace owner"; }
 function roleLabel(role: WorkspaceMemberRole | undefined): string { return role ? role[0]!.toUpperCase() + role.slice(1) : "Member"; }

@@ -21,7 +21,7 @@ describe("file library API", () => {
     const login = await raw("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }, false);
     cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrf = (await login.json()).csrfToken;
-    const workspace = await json("POST", "/api/v1/workspaces", { name: "Files" });
+    const workspace = (await json("POST", "/api/v1/workspaces", { name: "Files" })).workspace;
     projectId = (await json("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Project" })).id;
   });
 

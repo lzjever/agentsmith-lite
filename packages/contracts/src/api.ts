@@ -376,13 +376,40 @@ export interface WorkspaceListProjection extends Workspace {
   memberRole: WorkspaceMembershipRole;
 }
 
-export interface ProjectListProjection extends Project {
+export interface WorkspaceDirectoryItem extends WorkspaceListProjection {
+  projectCount: number;
+}
+
+export interface WorkspaceDirectoryPage {
+  items: WorkspaceDirectoryItem[];
+  nextCursor: string | null;
+}
+
+export interface WorkspaceDetail {
+  workspace: Workspace;
+  owner: MembershipIdentity;
+  memberRole: WorkspaceMembershipRole;
+  capabilities: WorkspaceCapabilities;
+  projectCount: number;
+}
+
+export interface ProjectDirectoryItem extends Project {
   pinnedAt: ISODateString | null;
 }
 
-export interface WorkspaceWithProjects extends WorkspaceListProjection {
-  projects: ProjectListProjection[];
-  capabilities: WorkspaceCapabilities;
+export interface ProjectDirectoryPage {
+  items: ProjectDirectoryItem[];
+  nextCursor: string | null;
+  total: number;
+}
+
+export interface ProjectDetail {
+  project: ProjectDirectoryItem;
+  workspace: {
+    id: string;
+    name: string;
+    lifecycleStatus: "active" | "archived" | "deleting";
+  };
 }
 
 export interface WorkspaceCapabilities {
@@ -770,16 +797,6 @@ export interface KubernetesResource {
 export interface SandboxRenderResult {
   namespace: string;
   resources: KubernetesResource[];
-}
-
-export interface DashboardResponse {
-  health: {
-    status: "ok";
-    version: string;
-  };
-  user: User;
-  workspaces: WorkspaceWithProjects[];
-  endpoints: PublicModelEndpoint[];
 }
 
 export interface CreateWorkspaceInput {

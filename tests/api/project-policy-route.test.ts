@@ -17,7 +17,7 @@ describe("PATCH project policy", () => {
       });
       const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
       const csrf = (await login.json() as { csrfToken: string }).csrfToken;
-      const workspace = await requestJson(api.baseUrl, "POST", "/api/v1/workspaces", { name: "Policy" }, cookie, csrf);
+      const workspace = (await requestJson(api.baseUrl, "POST", "/api/v1/workspaces", { name: "Policy" }, cookie, csrf)).workspace;
       const project = await requestJson(api.baseUrl, "POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Patch" }, cookie, csrf);
       const currentProfile = await (await fetch(`${api.baseUrl}/api/v1/me/profile`, { headers: { cookie } })).json() as { preferences: { updatedAt: string } };
       await requestJson(api.baseUrl, "PATCH", "/api/v1/me/profile", { displayName: "Policy Owner", expectedUpdatedAt: currentProfile.preferences.updatedAt }, cookie, csrf);

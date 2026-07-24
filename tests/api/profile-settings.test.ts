@@ -11,13 +11,13 @@ import type { CompleteTaskIdempotencyInput } from "../../packages/ports/src/stor
 describe("profile and settings API", () => {
   const store = createLocalInMemoryProductStore();
   let api: RunningApiServer; let root = ""; let cookie = ""; let csrf = ""; let workspaceId = ""; let projectId = "";
-  before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password", store }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
+  before(async () => { root = await mkdtemp(path.join(tmpdir(), "asl-profile-settings-")); api = await createApiServer({ port: 0, dataRoot: root, builtinAdminPassword: "admin-password", store }); await call("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }); const login = await call("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }); cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? ""; csrf = login.body.csrfToken; workspaceId = (await json("POST", "/api/v1/workspaces", { name: "Old workspace" })).workspace.id; projectId = (await json("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Old project" })).id; });
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });
   it("keeps workspace and project creation on the Lite contract", async () => {
     assert.equal((await call("GET", "/api/v1/workspaces?includePublished=true")).response.status, 400);
-    assert.equal((await call("GET", "/api/v1/projects?includePermissions=true")).response.status, 400);
+    assert.equal((await call("GET", "/api/v1/projects?includePermissions=true")).response.status, 404);
     assert.equal((await call("POST", "/api/v1/workspaces", { name: "Legacy workspace", publish: true }, "legacy-workspace-create")).response.status, 400);
-    const strictWorkspace = await json("POST", "/api/v1/workspaces", { name: "Strict workspace" }, "strict-workspace-create");
+    const strictWorkspace = (await json("POST", "/api/v1/workspaces", { name: "Strict workspace" }, "strict-workspace-create")).workspace;
     try {
       assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects/legacy`, { name: "Legacy project" }, "legacy-project-create")).response.status, 404);
       assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects`, { name: "Legacy project", governance: {} }, "legacy-project-body")).response.status, 400);

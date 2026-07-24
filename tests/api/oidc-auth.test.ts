@@ -114,9 +114,9 @@ describe("api OIDC auth", () => {
     const workspace = await fetch(baseUrl + apiPath("/api/v1/workspaces"), workspaceRequest);
     assert.equal(workspace.status, 200);
 
-    const memberWorkspace = await workspace.json();
+    const memberWorkspace = (await workspace.json()).workspace;
     const replayedWorkspace = await fetch(baseUrl + apiPath("/api/v1/workspaces"), workspaceRequest);
-    assert.equal((await replayedWorkspace.json()).id, memberWorkspace.id);
+    assert.equal((await replayedWorkspace.json()).workspace.id, memberWorkspace.id);
     const projectRequest = {
       method: "POST",
       headers: {

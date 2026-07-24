@@ -930,7 +930,7 @@ async function createProjectWithEndpoint(baseUrl: string, password = "admin-pass
     return response.json();
   };
 
-  const workspace = await requestJson("POST", "/api/v1/workspaces", { name: "Ops" });
+  const workspace = (await requestJson("POST", "/api/v1/workspaces", { name: "Ops" })).workspace;
   const project = await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" });
   const credential = await requestJson("POST", `/api/v1/projects/${project.id}/credentials`, { name: "Mock credential", baseUrl: "https://models.example.com/v1", secret: "sk-real-model-key" });
   const endpoint = await requestJson("POST", `/api/v1/projects/${project.id}/endpoints`, {

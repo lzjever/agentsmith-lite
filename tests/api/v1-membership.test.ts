@@ -57,7 +57,7 @@ describe("v1 project membership API", () => {
     });
     cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrfToken = (login.body as { csrfToken: string }).csrfToken;
-    const workspace = await requestJson("POST", "/api/v1/workspaces", { name: "Membership workspace" });
+    const workspace = (await requestJson("POST", "/api/v1/workspaces", { name: "Membership workspace" })).workspace;
     workspaceId = workspace.id;
     const project = await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Membership project" });
     projectId = project.id;

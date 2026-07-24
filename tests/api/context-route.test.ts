@@ -20,7 +20,7 @@ describe("context API", () => {
     const login = await request("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }, "", "");
     cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrf = (login.body as { csrfToken: string }).csrfToken;
-    workspaceId = (await requestJson("POST", "/api/v1/workspaces", { name: "Workspace" })).id;
+    workspaceId = (await requestJson("POST", "/api/v1/workspaces", { name: "Workspace" })).workspace.id;
     projectId = (await requestJson("POST", `/api/v1/workspaces/${workspaceId}/projects`, { name: "Project" })).id;
   });
   after(async () => { await api.close(); await rm(root, { recursive: true, force: true }); });

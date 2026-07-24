@@ -279,7 +279,7 @@ describe("Botified Chat Completions broker", () => {
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const loginBody = await login.json() as { csrfToken: string; user: { id: string } };
     const csrf = loginBody.csrfToken;
-    const workspace = await post("/api/v1/workspaces", { name: `Workspace ${name}` }, cookie, csrf, `workspace-${name}`);
+    const workspace = (await post("/api/v1/workspaces", { name: `Workspace ${name}` }, cookie, csrf, `workspace-${name}`)).workspace;
     const project = await post(`/api/v1/workspaces/${workspace.id}/projects`, { name: `Project ${name}` }, cookie, csrf, `project-${name}`);
     const credential = await post(`/api/v1/projects/${project.id}/credentials`, {
       name: "provider",

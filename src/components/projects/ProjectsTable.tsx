@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, FolderKanban, Pin, PinOff, Search } from "lucide-react";
+import { ArrowRight, FolderKanban, Pin, PinOff } from "lucide-react";
 import {
   Badge,
   Button,
@@ -12,13 +12,10 @@ import {
   TableHeaderCell,
   TableRow,
   Text,
-  TextInput,
 } from "@astryxdesign/core";
 import Link from "next/link";
-import { useMemo, useState } from "react";
 import type { Project } from "../../lib/api/client";
 import { formatLocalDate as formatDate } from "../../lib/format/date";
-import { orderProjectsForDisplay } from "../../lib/project-order";
 export function ProjectsTable({
   workspaceId,
   projects,
@@ -30,44 +27,8 @@ export function ProjectsTable({
   pinBusyId?: string | null;
   onTogglePin?: (projectId: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
-  const filtered = useMemo(
-    () =>
-      orderProjectsForDisplay(
-        projects.filter((project) =>
-          project.name.toLowerCase().includes(query.trim().toLowerCase()),
-        ),
-      ),
-    [projects, query],
-  );
-  const pageSize = 20;
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const currentPage = Math.min(page, pageCount);
-  const visible = useMemo(
-    () =>
-      filtered.slice(
-        (currentPage - 1) * pageSize,
-        currentPage * pageSize,
-      ),
-    [currentPage, filtered],
-  );
-  function changeQuery(value: string) {
-    setQuery(value);
-    setPage(1);
-  }
   return (
-    <section aria-label="Projects" className="space-y-4">
-      <TextInput
-        label="Search projects"
-        isLabelHidden
-        startIcon={<Search size={16} />}
-        value={query}
-        onChange={changeQuery}
-        className="max-w-sm"
-        placeholder="Search projects"
-        size="lg"
-      />
+    <section aria-label="Projects">
       <div className="hidden md:block">
         <Table
           aria-label="Projects"
@@ -87,7 +48,7 @@ export function ProjectsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {visible.map((project) => (
+            {projects.map((project) => (
               <TableRow
                 data-row-id={project.id}
                 data-testid="projects-table__row"
@@ -134,7 +95,7 @@ export function ProjectsTable({
         </Table>
       </div>
       <div className="divide-y divide-border border-y border-border md:hidden">
-        {visible.map((project) => (
+        {projects.map((project) => (
           <ProjectCard
             workspaceId={workspaceId}
             project={project}
@@ -145,16 +106,6 @@ export function ProjectsTable({
           />
         ))}
       </div>
-      {filtered.length === 0 ? (
-        <Text as="p" type="supporting" color="secondary" justify="center" display="block" className="py-6">No projects match this search.</Text>
-      ) : null}
-      {pageCount > 1 ? (
-        <Pagination
-          page={currentPage}
-          pageCount={pageCount}
-          onPageChange={setPage}
-        />
-      ) : null}
     </section>
   );
 }
@@ -231,35 +182,6 @@ function ButtonPin({
       icon={pinned ? <PinOff size={16} /> : <Pin size={16} />}
       onClick={() => onTogglePin(project.id)}
     />
-  );
-}
-function Pagination({
-  page,
-  pageCount,
-  onPageChange,
-}: {
-  page: number;
-  pageCount: number;
-  onPageChange: (page: number) => void;
-}) {
-  return (
-    <div className="flex items-center justify-end gap-2">
-      <Button
-        label="Previous"
-        variant="secondary"
-        size="sm"
-        isDisabled={page === 1}
-        onClick={() => onPageChange(page - 1)}
-      />
-      <Text type="supporting" color="secondary">Page {page} of {pageCount}</Text>
-      <Button
-        label="Next"
-        variant="secondary"
-        size="sm"
-        isDisabled={page === pageCount}
-        onClick={() => onPageChange(page + 1)}
-      />
-    </div>
   );
 }
 export function projectHref(workspaceId: string, projectId: string): string {

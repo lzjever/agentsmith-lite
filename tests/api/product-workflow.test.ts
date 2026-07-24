@@ -43,15 +43,15 @@ describe("api product workflow", () => {
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const csrf = (await login.json()).csrfToken;
 
-    const workspace = await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf);
+    const workspace = (await postJson("/api/v1/workspaces", { name: "Ops" }, cookie, csrf)).workspace;
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Demo" }, cookie, csrf);
     const library=await postJson(`/api/v1/projects/${project.id}/file-libraries`,{name:"Task files"},cookie,csrf);
     const emptyOverview = await requestJson("GET", `/api/v1/projects/${project.id}/overview`, undefined, cookie);
     assert.deepEqual(emptyOverview.recommendedActions, ["configure_endpoint", "add_collaborator"]);
     const pinnedProject = await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: true }, cookie, csrf);
     assert.ok(pinnedProject.pinnedAt);
-    const pinnedWorkspace = (await requestJson("GET", "/api/v1/workspaces", undefined, cookie))[0];
-    assert.equal(pinnedWorkspace.projects.find((item: { id: string }) => item.id === project.id)?.pinnedAt, pinnedProject.pinnedAt);
+    const pinnedProjects = await requestJson("GET", `/api/v1/workspaces/${workspace.id}/projects`, undefined, cookie);
+    assert.equal(pinnedProjects.items.find((item: { id: string }) => item.id === project.id)?.pinnedAt, pinnedProject.pinnedAt);
     assert.equal((await requestJson("PUT", `/api/v1/projects/${project.id}/pin`, { pinned: false }, cookie, csrf)).pinnedAt, null);
     const credential = await postJson(`/api/v1/projects/${project.id}/credentials`, { name: "OpenAI-compatible credential", baseUrl: "https://models.example.com/v1", secret: "sk-from-api-workflow" }, cookie, csrf);
     const endpoint = await postJson(`/api/v1/projects/${project.id}/endpoints`, {
@@ -173,11 +173,6 @@ describe("api product workflow", () => {
       endpointId: endpoint.id,
       fileLibrary:{mode:"use_existing",id:library.id}
     }, cookie, csrf);
-    const dashboard = await requestJson("GET", "/api/v1/dashboard", undefined, cookie);
-
-    assertNoApiKeySecretRef(dashboard);
-    assert.equal(dashboard.endpoints[0]?.hasCredentialRef, true);
-    assert.equal(dashboard.endpoints[0]?.credentialId, credential.id);
     const { updatedAt: uploadedAt, ...uploadedFileDetails } = uploadedFile;
     assert.deepEqual(uploadedFileDetails, { path: filePath, bytes: fileContent.byteLength, mediaType: "application/octet-stream" });
     assert.equal(Number.isNaN(Date.parse(uploadedAt)), false);
@@ -255,7 +250,7 @@ describe("api product workflow", () => {
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const csrf = (await login.json()).csrfToken;
-    const workspace = await postJson("/api/v1/workspaces", { name: "Upload MIME types" }, cookie, csrf);
+    const workspace = (await postJson("/api/v1/workspaces", { name: "Upload MIME types" }, cookie, csrf)).workspace;
     const project = await postJson(`/api/v1/workspaces/${workspace.id}/projects`, { name: "Browser files" }, cookie, csrf);
     const library=await postJson(`/api/v1/projects/${project.id}/file-libraries`,{name:"Browser files"},cookie,csrf);
     const uploads = [

@@ -16,8 +16,8 @@ describe("notification API", () => {
       const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
       const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
       const identity = await login.json() as { user: { id: string }; csrfToken: string };
-      const workspace = await authenticatedPost(api.baseUrl, "/api/v1/workspaces", { name: "Notifications" }, cookie, identity.csrfToken);
-      const project = await authenticatedPost(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "Notification project" }, cookie, identity.csrfToken);
+      const workspace = (await authenticatedPost<{workspace:{id:string}}>(api.baseUrl, "/api/v1/workspaces", { name: "Notifications" }, cookie, identity.csrfToken)).workspace;
+      const project = await authenticatedPost<{id:string}>(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "Notification project" }, cookie, identity.csrfToken);
       await store.createUserNotification({ id: "notice_route", userId: identity.user.id, type: "project_alert", title: "Project alert: active tasks limit", body: "Alert project: active tasks limit.", projectId: project.id, resourceKind: "project", resourceId: project.id, linkPath: `/workspaces/${workspace.id}/projects/${project.id}/alerts`, readAt: null, createdAt: "2026-07-12T00:00:00.000Z" }, "project-alert:alert_route:" + identity.user.id);
       await store.createUserNotification({ id: "notice_newer", userId: identity.user.id, type: "task", title: "Task finished", body: "A newer event.", projectId: project.id, resourceKind: "task", resourceId: "task", linkPath: `/workspaces/${workspace.id}/projects/${project.id}/tasks/task`, readAt: null, createdAt: "2026-07-13T00:00:00.000Z" });
 
@@ -55,8 +55,8 @@ async function post(baseUrl: string, pathname: string, body: unknown): Promise<R
   return fetch(baseUrl + pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
 
-async function authenticatedPost(baseUrl: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<{ id: string }> {
+async function authenticatedPost<T>(baseUrl: string, pathname: string, body: unknown, cookie: string, csrf: string): Promise<T> {
   const response = await fetch(baseUrl + pathname, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": `notification-route-${pathname.replaceAll("/", "-")}` }, body: JSON.stringify(body) });
   assert.equal(response.status, 200);
-  return response.json() as Promise<{ id: string }>;
+  return response.json() as Promise<T>;
 }

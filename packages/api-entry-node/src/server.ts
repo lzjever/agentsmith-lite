@@ -423,25 +423,14 @@ async function routeApi(
     return sendJson(res, 200, { loggedOut: true, redirectUrl });
   }
 
-  if (method === "GET" && url.pathname === "/api/v1/dashboard") {
-    const dashboard = await services.dashboard(user.id);
-    return sendJson(res, 200, {
-      health: { status: "ok", version: "0.1.0" },
-      user,
-      ...dashboard,
-      endpoints: dashboard.endpoints.map(toPublicEndpoint)
-    });
-  }
-
   if (method === "GET" && url.pathname === "/api/v1/workspaces") {
-    assertOnlySearchParams(url, []);
-    return sendJson(res, 200, await services.workspaces.listWorkspaces(user.id));
-  }
-
-  if (method === "GET" && url.pathname === "/api/v1/projects") {
-    assertOnlySearchParams(url, []);
-    const workspaces = await services.workspaces.listWorkspaces(user.id);
-    return sendJson(res, 200, workspaces.flatMap((workspace) => workspace.projects));
+    assertOnlySearchParams(url, ["cursor","limit"]);
+    const cursor=url.searchParams.get("cursor");
+    const limit=url.searchParams.get("limit");
+    return sendJson(res, 200, await services.workspaces.listWorkspaceDirectory(user.id, {
+      ...(cursor!==null?{cursor}:{}),
+      ...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})
+    }));
   }
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "context" && segments[3] && segments.length === 4 && method === "GET") {
@@ -485,23 +474,34 @@ async function routeApi(
     const body = await readJson(req);
     assertOnlyKeys(body, ["name"]);
     const created = await services.workspaces.createWorkspace(user.id, { name: asString(body.name) }, requireIdempotencyKey(req));
-    const workspace = (await services.workspaces.listWorkspaces(user.id)).find((candidate) => candidate.id === created.id);
-    if (!workspace) {
-      throw new ProductError("Created workspace could not be loaded", 500);
-    }
-    return sendJson(res, 200, workspace);
+    return sendJson(res, 200, await services.workspaces.workspaceDetail(user.id,created.id));
   }
 
-  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments.length === 4 && method === "DELETE") {
-    assertOnlySearchParams(url, []);
-    const body = await readJson(req);
-    assertOnlyKeys(body, []);
-    const workspaceId=segments[3];const result=await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.delete",requireIdempotencyKey(req),{workspaceId},workspaceId,async()=>{await services.deletion.deleteWorkspace(user.id,workspaceId);return{deleted:true as const}});
-    return sendJson(res, 200, result);
+  if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments.length === 4) {
+    const workspaceId=segments[3];
+    if(method==="GET"){assertOnlySearchParams(url,[]);return sendJson(res,200,await services.workspaces.workspaceDetail(user.id,workspaceId));}
+    if(method==="DELETE"){
+      assertOnlySearchParams(url, []);
+      const body = await readJson(req);
+      assertOnlyKeys(body, []);
+      const result=await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.delete",requireIdempotencyKey(req),{workspaceId},workspaceId,async()=>{await services.deletion.deleteWorkspace(user.id,workspaceId);return{deleted:true as const}});
+      return sendJson(res, 200, result);
+    }
   }
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "projects") {
     const workspaceId = segments[3];
+    if (!segments[5] && method === "GET") {
+      assertOnlySearchParams(url,["q","cursor","limit"]);
+      const q=url.searchParams.get("q");
+      const cursor=url.searchParams.get("cursor");
+      const limit=url.searchParams.get("limit");
+      return sendJson(res,200,await services.workspaces.listProjectDirectory(user.id,workspaceId,{
+        ...(q!==null?{q}:{}),
+        ...(cursor!==null?{cursor}:{}),
+        ...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})
+      }));
+    }
     if (!segments[5] && method === "POST") {
       assertOnlySearchParams(url, []);
       const body = await readJson(req);
@@ -531,6 +531,10 @@ async function routeApi(
 
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "projects" && segments[3]) {
     const projectId = segments[3];
+    if (segments.length === 4 && method === "GET") {
+      assertOnlySearchParams(url,[]);
+      return sendJson(res,200,await services.workspaces.projectDetail(user.id,projectId));
+    }
     if (segments.length === 4 && method === "DELETE") {
       const result=await services.settings.runIdempotentProjectDeletion(user.id,projectId,requireIdempotencyKey(req),(completion)=>services.deletion.deleteProject(user.id,projectId,completion));
       return sendJson(res, 200, result);
@@ -1037,9 +1041,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     "/api/v1/me/profile",
     "/api/v1/notifications",
     "/api/v1/auth/logout",
-    "/api/v1/dashboard",
     "/api/v1/workspaces",
-    "/api/v1/projects",
     "/api/v1/context"
   ].includes(pathname) ||
     /^\/api\/v1\/context\/[^/]+$/.test(pathname) ||

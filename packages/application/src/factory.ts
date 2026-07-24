@@ -139,15 +139,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     dataRoot: input.dataRoot,
     projectAbsoluteRoot(projectRootPath: string): string {
       return projectAbsoluteRoot(projectRootPath);
-    },
-    async dashboard(userId: string) {
-      const workspaceList = await workspaces.listWorkspaces(userId);
-      const projectIds = workspaceList.flatMap((workspace) => workspace.projects.map((project) => project.id));
-      const endpointGroups = await Promise.all(projectIds.map((projectId) => input.store.listEndpointsForProject(projectId)));
-      return {
-        workspaces: workspaceList,
-        endpoints: endpointGroups.flat()
-      };
     }
   };
 }

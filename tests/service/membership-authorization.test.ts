@@ -67,8 +67,8 @@ describe("project membership authorization", () => {
       ["membership.add", owner.user.id, member.user.id, "rejected"]
     ].sort());
 
-    assert.equal((await services.workspaces.listWorkspaces(owner.user.id))[0]?.capabilities.canCreateProject, true);
-    assert.equal((await services.workspaces.listWorkspaces(member.user.id))[0]?.capabilities.canCreateProject, false);
+    assert.equal((await services.workspaces.workspaceDetail(owner.user.id,workspace.id)).capabilities.canCreateProject, true);
+    assert.equal((await services.workspaces.workspaceDetail(member.user.id,workspace.id)).capabilities.canCreateProject, false);
 
     assert.equal((await services.authorization.requireProject(member.user.id, project.id, "view")).id, project.id);
     await assert.rejects(() => services.authorization.requireProject(member.user.id, project.id, "write"));

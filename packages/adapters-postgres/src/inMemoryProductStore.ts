@@ -19,7 +19,7 @@ import type {
   User,
   Workspace,
   ManagedWorkspaceMembershipRole,
-  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection
+  UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceDirectoryItem, ProjectDirectoryItem
 } from "../../contracts/src/api.js";
 import { classifyPreviewMediaType, isActiveProjectAlert, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
@@ -230,14 +230,22 @@ export class InMemoryProductStore implements ProductStore {
     return clone(workspace);
   }
 
-  async listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]> {
+  async listWorkspaceDirectoryPage(query: import("../../ports/src/store.js").WorkspaceDirectoryStoreQuery): Promise<WorkspaceDirectoryItem[]> {
     return [...this.workspaces.values()]
       .flatMap((workspace) => {
-        const membership = this.workspaceMemberships.get(workspaceMembershipKey(workspace.id, userId));
+        const membership = this.workspaceMemberships.get(workspaceMembershipKey(workspace.id, query.userId));
         const owner = this.users.get(workspace.ownerUserId);
         if (!membership || !owner) return [];
-        return [{ ...clone(workspace), owner: { displayName: this.profiles.get(owner.id)?.displayName ?? null, email: owner.email }, memberRole: membership.role }];
-      });
+        const projectCount = [...this.projects.values()].filter((project) => project.workspaceId === workspace.id && this.memberships.has(membershipKey(project.id, query.userId))).length;
+        return [{ ...clone(workspace), owner: { displayName: this.profiles.get(owner.id)?.displayName ?? null, email: owner.email }, memberRole: membership.role, projectCount }];
+      })
+      .sort((left, right) => compareOrdinal(left.createdAt, right.createdAt) || compareOrdinal(left.id, right.id))
+      .filter((workspace) => !query.after || compareOrdinal(workspace.createdAt, query.after.createdAt) > 0 || (workspace.createdAt === query.after.createdAt && compareOrdinal(workspace.id, query.after.id) > 0))
+      .slice(0, query.limit);
+  }
+
+  async countProjectsForUserInWorkspace(userId: string, workspaceId: string): Promise<number> {
+    return [...this.projects.values()].filter((project) => project.workspaceId === workspaceId && this.memberships.has(membershipKey(project.id, userId))).length;
   }
 
   async findWorkspace(id: string): Promise<Workspace | null> {
@@ -304,7 +312,25 @@ export class InMemoryProductStore implements ProductStore {
     return [...this.projects.values()].filter((project) => project.workspaceId === workspaceId).map(clone);
   }
 
-  async listProjectPinsForUser(userId: string) { return [...this.projectPins.values()].filter((pin) => pin.userId === userId).map((pin) => clone({ projectId:pin.projectId,pinnedAt:pin.pinnedAt })); }
+  async listProjectDirectoryPage(query: import("../../ports/src/store.js").ProjectDirectoryStoreQuery): Promise<import("../../ports/src/store.js").ProjectDirectoryStorePage> {
+    const q = query.q.toLowerCase();
+    const all = [...this.projects.values()]
+      .filter((project) => project.workspaceId === query.workspaceId && this.memberships.has(membershipKey(project.id, query.userId)))
+      .map((project): ProjectDirectoryItem => ({ ...clone(project), pinnedAt: this.projectPins.get(membershipKey(project.id, query.userId))?.pinnedAt ?? null }))
+      .filter((project) => project.name.toLowerCase().includes(q))
+      .sort(compareProjectDirectoryItems);
+    return {
+      items: all.filter((project) => !query.after || compareProjectDirectoryItemToCursor(project, query.after) > 0).slice(0, query.limit),
+      total: all.length
+    };
+  }
+
+  async findProjectDirectoryItem(userId: string, projectId: string): Promise<ProjectDirectoryItem | null> {
+    const project = this.projects.get(projectId);
+    if (!project || !this.memberships.has(membershipKey(projectId, userId))) return null;
+    return clone({ ...project, pinnedAt: this.projectPins.get(membershipKey(projectId, userId))?.pinnedAt ?? null });
+  }
+
   async setProjectPin(userId:string,projectId:string,pinnedAt:string|null){const key=membershipKey(projectId,userId);if(!this.memberships.has(key))return false;if(pinnedAt)this.projectPins.set(key,{projectId,userId,pinnedAt});else this.projectPins.delete(key);return true}
 
   async findProject(id: string): Promise<Project | null> {
@@ -410,12 +436,6 @@ export class InMemoryProductStore implements ProductStore {
       throw error;
     }
     });
-  }
-
-  async listProjectsForUser(userId: string): Promise<Project[]> {
-    return [...this.projects.values()]
-      .filter((project) => this.memberships.has(membershipKey(project.id, userId)))
-      .map(clone);
   }
 
   async findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null> {
@@ -1847,6 +1867,16 @@ function compareOrdinal(left:string,right:string):number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 function compareC(left:string,right:string):number{return Buffer.compare(Buffer.from(left,"utf8"),Buffer.from(right,"utf8"))}
+function compareProjectDirectoryItems(left:ProjectDirectoryItem,right:ProjectDirectoryItem):number {
+  return Number(left.pinnedAt === null) - Number(right.pinnedAt === null)
+    || compareOrdinal(left.name, right.name)
+    || compareOrdinal(left.id, right.id);
+}
+function compareProjectDirectoryItemToCursor(item:ProjectDirectoryItem,cursor:{pinned:boolean;name:string;id:string}):number {
+  return Number(item.pinnedAt === null) - Number(!cursor.pinned)
+    || compareOrdinal(item.name, cursor.name)
+    || compareOrdinal(item.id, cursor.id);
+}
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {
   if(type==="provider_failure")return event.action==="provider.request"&&event.status==="rejected"&&event.resourceKind==="provider"&&event.detail?.errorCategory!==undefined;

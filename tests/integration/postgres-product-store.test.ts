@@ -57,6 +57,24 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findProjectContextEntryById("context_page_0","workspace_atomic","project_atomic","project_personal","user_atomic"),null);
   });
 
+  it("pages workspace and project directories with exact pin projections",async()=>{
+    await store.createProject({id:"project_alpha",workspaceId:"workspace_atomic",name:"Alpha",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_alpha",taskConcurrencyLimit:1,createdAt:"2026-07-23T00:00:01.000Z",updatedAt:at});
+    await store.createProject({id:"project_beta",workspaceId:"workspace_atomic",name:"beta",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_beta",taskConcurrencyLimit:1,createdAt:"2026-07-23T00:00:02.000Z",updatedAt:at});
+    assert.equal(await store.setProjectPin("user_atomic","project_beta",at),true);
+
+    const workspaces=await store.listWorkspaceDirectoryPage({userId:"user_atomic",limit:2});
+    assert.deepEqual(workspaces.map((workspace)=>[workspace.id,workspace.projectCount]),[["workspace_atomic",3]]);
+    assert.equal(await store.countProjectsForUserInWorkspace("user_atomic","workspace_atomic"),3);
+    const first=await store.listProjectDirectoryPage({userId:"user_atomic",workspaceId:"workspace_atomic",q:"",limit:2});
+    assert.deepEqual(first.items.map((project)=>project.id),["project_beta","project_alpha"]);
+    assert.equal(first.total,3);
+    const last=first.items.at(-1)!;
+    const second=await store.listProjectDirectoryPage({userId:"user_atomic",workspaceId:"workspace_atomic",q:"",after:{pinned:false,name:last.name,id:last.id},limit:2});
+    assert.deepEqual(second.items.map((project)=>project.id),["project_atomic"]);
+    assert.equal((await store.findProjectDirectoryItem("user_atomic","project_beta"))?.pinnedAt,at);
+    assert.equal(await store.findProjectDirectoryItem("missing","project_beta"),null);
+  });
+
   it("uses stable keysets, ordinal title order, and literal Task search patterns",async()=>{
     const records=[
       {id:"task_page_percent",title:"100%",createdAt:"2026-07-23T00:00:01.000Z"},

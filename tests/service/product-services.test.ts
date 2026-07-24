@@ -25,23 +25,23 @@ describe("product services", () => {
     const workspace = await services.workspaces.createWorkspace(session.user.id, { name: "Ops" });
     const project = await services.workspaces.createProject(session.user.id, workspace.id, { name: "Sandbox" });
     const pinned = await services.workspaces.setProjectPinned(session.user.id, project.id, true);
-    const listed = await services.workspaces.listWorkspaces(session.user.id);
+    const listed = await services.workspaces.listProjectDirectory(session.user.id,workspace.id);
 
     assert.ok(pinned.pinnedAt);
-    assert.equal(listed.length, 1);
-    assert.equal(listed[0]?.projects[0]?.id, project.id);
-    assert.equal(listed[0]?.projects[0]?.pinnedAt, pinned.pinnedAt);
-    assert.equal(listed[0]?.projects[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
+    assert.equal(listed.items.length, 1);
+    assert.equal(listed.items[0]?.id, project.id);
+    assert.equal(listed.items[0]?.pinnedAt, pinned.pinnedAt);
+    assert.equal(listed.items[0]?.rootPath, "workspaces/" + workspace.id + "/projects/" + project.id);
     const member = await services.auth.loginExternalPrincipal({ issuer:"https://idp.test",subject:"pin-member",email:"pin-member@example.test",emailVerified:true });
     const membershipAt = new Date().toISOString();
     await store.upsertWorkspaceMembership({ workspaceId:workspace.id,userId:member.user.id,role:"member",createdAt:membershipAt,updatedAt:membershipAt });
     await store.upsertProjectMembership({ projectId:project.id,userId:member.user.id,role:"member",createdAt:membershipAt,updatedAt:membershipAt });
     assert.ok((await services.workspaces.setProjectPinned(member.user.id, project.id, true)).pinnedAt);
     assert.equal((await services.workspaces.setProjectPinned(session.user.id, project.id, false)).pinnedAt, null);
-    assert.equal((await services.workspaces.listWorkspaces(session.user.id))[0]?.projects[0]?.pinnedAt, null);
-    assert.ok((await services.workspaces.listWorkspaces(member.user.id))[0]?.projects[0]?.pinnedAt);
+    assert.equal((await services.workspaces.listProjectDirectory(session.user.id,workspace.id)).items[0]?.pinnedAt, null);
+    assert.ok((await services.workspaces.listProjectDirectory(member.user.id,workspace.id)).items[0]?.pinnedAt);
     await store.deleteProjectMembership(project.id, member.user.id);
-    assert.deepEqual(await store.listProjectPinsForUser(member.user.id), []);
+    assert.equal(await store.setProjectPin(member.user.id,project.id,new Date().toISOString()),false);
   });
 
   it("replays workspace and project creation without duplicating resources", async () => {
@@ -56,8 +56,8 @@ describe("product services", () => {
 
     assert.equal(replayedWorkspace.id, workspace.id);
     assert.equal(replayedProject.id, project.id);
-    assert.equal((await services.workspaces.listWorkspaces(owner.user.id)).length, 1);
-    assert.equal((await store.listProjectsForUser(owner.user.id)).length, 1);
+    assert.equal((await services.workspaces.listWorkspaceDirectory(owner.user.id)).items.length, 1);
+    assert.equal((await services.workspaces.listProjectDirectory(owner.user.id,workspace.id)).total, 1);
     await assert.rejects(
       () => services.workspaces.createWorkspace(owner.user.id, { name: "Different" }, "workspace-create-key"),
       /Idempotency-Key was already used with a different request/

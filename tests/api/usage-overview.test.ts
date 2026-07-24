@@ -24,7 +24,7 @@ test("usage overview returns project limits and authenticated-user provider aggr
     const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const { csrfToken, user } = await login.json() as { csrfToken: string; user:{id:string} };
-    const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "Usage" }, cookie, csrfToken);
+    const workspace = (await json(api.baseUrl, "/api/v1/workspaces", { name: "Usage" }, cookie, csrfToken)).workspace;
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "Usage project" }, cookie, csrfToken);
     const library = await json(api.baseUrl, `/api/v1/projects/${project.id}/file-libraries`, { name:"Usage files" }, cookie, csrfToken);
     const credential = await json(api.baseUrl, `/api/v1/projects/${project.id}/credentials`, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "usage-secret" }, cookie, csrfToken);

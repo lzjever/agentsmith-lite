@@ -3,7 +3,7 @@
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { Badge, Banner, Button, EmptyState, IconButton, Selector, Spinner, Text, TextInput } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Workspace, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type WorkspaceDetail, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
@@ -22,7 +22,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
   const loadRequest = useRef(0);
   const refreshRequest = useRef(0);
   const workspaceRequest = useRef(0);
-  const [workspace, setWorkspace] = useState<Workspace>();
+  const [workspace, setWorkspace] = useState<WorkspaceDetail>();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [open, setOpen] = useState(false);
@@ -36,9 +36,7 @@ function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
   const refreshWorkspace = useCallback(async () => {
     const request = ++workspaceRequest.current;
-    const workspaces = await apiClient.workspaces();
-    const found = workspaces.find((item) => item.id === workspaceId);
-    if (!found) throw new ApiError(404, "Workspace not found");
+    const found = await apiClient.workspace(workspaceId);
     if (!mounted.current || request !== workspaceRequest.current) return;
     setWorkspace(found);
   }, [workspaceId]);

@@ -27,7 +27,7 @@ describe("Task-only project boundary", () => {
     const login = await request("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
     cookie = login.response.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrf = (login.body as { csrfToken: string }).csrfToken;
-    const workspace = await requestJson("POST", "/api/v1/workspaces", { name: "Workspace" });
+    const workspace = (await requestJson("POST", "/api/v1/workspaces", { name: "Workspace" })).workspace;
     projectId = (await requestJson("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Project" })).id;
     const credential = await requestJson("POST", `/api/v1/projects/${projectId}/credentials`, {
       name: "Provider credential",

@@ -21,6 +21,7 @@ import type {
   ProviderUsage,
   ProjectProviderSettlement,
   Project,
+  ProjectDirectoryItem,
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
@@ -29,7 +30,7 @@ import type {
   ProjectContextEntry,
   ProjectContextEntryMetadata,
   Workspace,
-  WorkspaceListProjection,
+  WorkspaceDirectoryItem,
   WorkspaceMembership,
   ManagedWorkspaceMembershipRole,
   WorkspaceMembershipView,
@@ -86,6 +87,25 @@ export interface ProjectContextMetadataStoreQuery {
   ownerUserId: string | null;
   afterContextKey?: string;
   limit: number;
+}
+
+export interface WorkspaceDirectoryStoreQuery {
+  userId: string;
+  after?: { createdAt: string; id: string };
+  limit: number;
+}
+
+export interface ProjectDirectoryStoreQuery {
+  userId: string;
+  workspaceId: string;
+  q: string;
+  after?: { pinned: boolean; name: string; id: string };
+  limit: number;
+}
+
+export interface ProjectDirectoryStorePage {
+  items: ProjectDirectoryItem[];
+  total: number;
 }
 
 export interface ProjectAuditStoreQuery {
@@ -527,7 +547,8 @@ export interface ProductStore {
   deleteExpiredSessions(now: string): Promise<number>;
 
   createWorkspace(workspace: Workspace): Promise<Workspace>;
-  listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]>;
+  listWorkspaceDirectoryPage(query: WorkspaceDirectoryStoreQuery): Promise<WorkspaceDirectoryItem[]>;
+  countProjectsForUserInWorkspace(userId: string, workspaceId: string): Promise<number>;
   findWorkspace(id: string): Promise<Workspace | null>;
   updateWorkspaceName(workspaceId: string, name: string, updatedAt: string, expectedName: string): Promise<Workspace | null>;
   beginWorkspaceDeletion(id: string, updatedAt: string, expectedOwnerUserId?: string): Promise<SandboxGuardedDeletionResult<Workspace>>;
@@ -544,7 +565,8 @@ export interface ProductStore {
 
   createProject(project: Project): Promise<Project>;
   listProjectsForWorkspace(workspaceId: string): Promise<Project[]>;
-  listProjectPinsForUser(userId: string): Promise<Array<{ projectId: string; pinnedAt: string }>>;
+  listProjectDirectoryPage(query: ProjectDirectoryStoreQuery): Promise<ProjectDirectoryStorePage>;
+  findProjectDirectoryItem(userId: string, projectId: string): Promise<ProjectDirectoryItem | null>;
   setProjectPin(userId: string, projectId: string, pinnedAt: string | null): Promise<boolean>;
   findProject(id: string): Promise<Project | null>;
   updateProjectName(projectId: string, name: string, updatedAt: string, expectedName: string): Promise<Project | null>;
@@ -570,7 +592,6 @@ export interface ProductStore {
   findProjectAlertRule(projectId: string, id: string): Promise<ProjectAlertRule | null>;
   updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
-  listProjectsForUser(userId: string): Promise<Project[]>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
   listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]>;
   upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership>;

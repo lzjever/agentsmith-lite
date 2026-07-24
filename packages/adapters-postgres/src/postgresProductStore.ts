@@ -26,7 +26,7 @@ import type {
   StoredUser,
   UpdateProjectResourcePolicyInput,
   User,
-  Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential
+  Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, WorkspaceDirectoryItem, ProjectDirectoryItem, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential
 } from "../../contracts/src/api.js";
 import { PREVIEW_IMAGE_MEDIA_TYPES, PREVIEW_TEXT_MEDIA_TYPES, PROFILE_GREETING_PREFERENCES, isActiveProjectAlert, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
@@ -243,12 +243,38 @@ export class PostgresProductStore implements ProductStore {
     return structuredClone(workspace);
   }
 
-  async listWorkspacesForUser(userId: string): Promise<WorkspaceListProjection[]> {
-    const rows = await this.queryRows<WorkspaceRow>(
-      `select w.*, viewer.role as member_role, owner.email as owner_email, owner_profile.display_name as owner_display_name from workspaces w join workspace_memberships viewer on viewer.workspace_id = w.id and viewer.user_id = $1 join users owner on owner.id = w.owner_user_id left join user_profile_preferences owner_profile on owner_profile.user_id = owner.id order by w.created_at, w.id`,
-      [userId]
+  async listWorkspaceDirectoryPage(query: import("../../ports/src/store.js").WorkspaceDirectoryStoreQuery): Promise<WorkspaceDirectoryItem[]> {
+    const values: unknown[] = [query.userId];
+    const after = query.after
+      ? `and (w.created_at > $2 or (w.created_at = $2 and w.id collate "C" > $3 collate "C"))`
+      : "";
+    if (query.after) values.push(query.after.createdAt, query.after.id);
+    values.push(query.limit);
+    const limitParameter = `$${values.length}`;
+    const rows = await this.queryRows<WorkspaceRow & { project_count: string | number }>(
+      `select w.*, viewer.role as member_role, owner.email as owner_email, owner_profile.display_name as owner_display_name,
+        (select count(*) from projects p join project_memberships pm on pm.project_id=p.id and pm.user_id=$1 where p.workspace_id=w.id) as project_count
+       from workspaces w
+       join workspace_memberships viewer on viewer.workspace_id=w.id and viewer.user_id=$1
+       join users owner on owner.id=w.owner_user_id
+       left join user_profile_preferences owner_profile on owner_profile.user_id=owner.id
+       where true ${after}
+       order by w.created_at, w.id collate "C"
+       limit ${limitParameter}`,
+      values
     );
-    return rows.map(mapWorkspaceListProjection);
+    return rows.map((row) => ({ ...mapWorkspaceListProjection(row), projectCount: Number(row.project_count) }));
+  }
+
+  async countProjectsForUserInWorkspace(userId: string, workspaceId: string): Promise<number> {
+    const rows = await this.queryRows<{ count: string }>(
+      `select count(*)::text as count
+       from projects p
+       join project_memberships pm on pm.project_id=p.id and pm.user_id=$1
+       where p.workspace_id=$2`,
+      [userId, workspaceId]
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   async findWorkspace(id: string): Promise<Workspace | null> {
@@ -317,7 +343,53 @@ export class PostgresProductStore implements ProductStore {
     return rows.map(mapProject);
   }
 
-  async listProjectPinsForUser(userId:string){return this.queryRows<{project_id:string;pinned_at:unknown}>("select project_id,pinned_at from user_project_pins where user_id=$1 order by pinned_at desc,project_id",[userId]).then((rows)=>rows.map((row)=>({projectId:row.project_id,pinnedAt:toIso(row.pinned_at)})))}
+  async listProjectDirectoryPage(query: import("../../ports/src/store.js").ProjectDirectoryStoreQuery): Promise<import("../../ports/src/store.js").ProjectDirectoryStorePage> {
+    const baseValues: unknown[] = [query.userId, query.workspaceId, query.q];
+    const after = query.after
+      ? `and (
+          (case when pin.pinned_at is null then 1 else 0 end) > $4
+          or ((case when pin.pinned_at is null then 1 else 0 end) = $4 and p.name collate "C" > $5 collate "C")
+          or ((case when pin.pinned_at is null then 1 else 0 end) = $4 and p.name = $5 and p.id collate "C" > $6 collate "C")
+        )`
+      : "";
+    const values = query.after
+      ? [...baseValues, query.after.pinned ? 0 : 1, query.after.name, query.after.id, query.limit]
+      : [...baseValues, query.limit];
+    const rows = await this.queryRows<ProjectRow & { pinned_at: unknown | null }>(
+      `select p.*, pin.pinned_at
+       from projects p
+       join project_memberships membership on membership.project_id=p.id and membership.user_id=$1
+       left join user_project_pins pin on pin.project_id=p.id and pin.user_id=$1
+       where p.workspace_id=$2 and strpos(lower(p.name),$3)>0 ${after}
+       order by (case when pin.pinned_at is null then 1 else 0 end), p.name collate "C", p.id collate "C"
+       limit $${values.length}`,
+      values
+    );
+    const totals = await this.queryRows<{ count: string }>(
+      `select count(*)::text as count
+       from projects p
+       join project_memberships membership on membership.project_id=p.id and membership.user_id=$1
+       where p.workspace_id=$2 and strpos(lower(p.name),$3)>0`,
+      baseValues
+    );
+    return {
+      items: rows.map((row) => ({ ...mapProject(row), pinnedAt: row.pinned_at === null ? null : toIso(row.pinned_at) })),
+      total: Number(totals[0]?.count ?? 0)
+    };
+  }
+
+  async findProjectDirectoryItem(userId:string,projectId:string):Promise<ProjectDirectoryItem|null>{
+    const rows=await this.queryRows<ProjectRow & {pinned_at:unknown|null}>(
+      `select p.*,pin.pinned_at
+       from projects p
+       join project_memberships membership on membership.project_id=p.id and membership.user_id=$1
+       left join user_project_pins pin on pin.project_id=p.id and pin.user_id=$1
+       where p.id=$2`,
+      [userId,projectId]
+    );
+    return rows[0]?{...mapProject(rows[0]),pinnedAt:rows[0].pinned_at===null?null:toIso(rows[0].pinned_at)}:null;
+  }
+
   async setProjectPin(userId:string,projectId:string,pinnedAt:string|null){return transaction(this.pool,async(client)=>{const membership=await client.query("select 1 from project_memberships where project_id=$1 and user_id=$2 for share",[projectId,userId]);if(!membership.rowCount)return false;if(pinnedAt)await client.query("insert into user_project_pins (project_id,user_id,pinned_at) values ($1,$2,$3) on conflict (project_id,user_id) do update set pinned_at=excluded.pinned_at",[projectId,userId,pinnedAt]);else await client.query("delete from user_project_pins where project_id=$1 and user_id=$2",[projectId,userId]);return true})}
 
   async findProject(id: string): Promise<Project | null> {
@@ -422,17 +494,6 @@ export class PostgresProductStore implements ProductStore {
   async listProjectAlertRules(id:string){const rows=await this.queryRows<AlertRuleRow>('select * from project_alert_rules where project_id=$1 order by created_at,id collate "C" limit 51',[id]);if(rows.length>50)throw new Error("Project alert rule limit exceeded");return rows.map(mapAlertRule)}
   async findProjectAlertRule(projectId:string,id:string){const rows=await this.queryRows<AlertRuleRow>("select * from project_alert_rules where project_id=$1 and id=$2",[projectId,id]);return rows[0]?mapAlertRule(rows[0]):null}
   async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const scope=v.scope??{kind:'project' as const};const values:unknown[]=[v.id,v.alertType,v.name??v.alertType.replaceAll('_',' '),v.metric??'failure_count',v.condition??'greater_than_or_equal',v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==='endpoint'?scope.endpointId:null,v.enabled,v.updatedAt,v.projectId];const expected=expectedUpdatedAt===undefined?'':` and updated_at=$13`;if(expectedUpdatedAt!==undefined)values.push(expectedUpdatedAt);const r=await this.queryRows<AlertRuleRow>(`update project_alert_rules set alert_type=$2,name=$3,metric=$4,condition=$5,threshold=$6,window_seconds=$7,scope_kind=$8,endpoint_id=$9,enabled=$10,updated_at=$11 where id=$1 and project_id=$12${expected} returning *`,values);return r[0]?mapAlertRule(r[0]):null} async deleteProjectAlertRule(projectId:string,id:string){return (await this.pool.query('delete from project_alert_rules where id=$1 and project_id=$2',[id,projectId])).rowCount===1}
-
-  async listProjectsForUser(userId: string): Promise<Project[]> {
-    const rows = await this.queryRows<ProjectRow>(
-      `select distinct p.* from projects p
-       left join project_memberships pm on pm.project_id = p.id
-       where pm.user_id = $1
-       order by p.created_at, p.id`,
-      [userId]
-    );
-    return rows.map(mapProject);
-  }
 
   async createFileLibrary(value:FileLibrary):Promise<FileLibrary|null>{
     const rows=await this.queryRows<FileLibraryRow>(`insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing returning *`,[value.id,value.workspaceId,value.projectId,value.name,value.rootSubPath,value.createdByUserId,value.createdAt,value.updatedAt]);

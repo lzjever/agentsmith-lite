@@ -21,7 +21,7 @@ test("credential routes never return submitted secret material", async () => {
     const login = await post(api.baseUrl, "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     const { csrfToken } = await login.json() as { csrfToken: string };
-    const workspace = await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken);
+    const workspace = (await json(api.baseUrl, "/api/v1/workspaces", { name: "W" }, cookie, csrfToken)).workspace;
     const project = await json(api.baseUrl, `/api/v1/workspaces/${workspace.id}/projects`, { name: "P" }, cookie, csrfToken);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials?includeSecrets=true`, { headers: { cookie } })).status, 400);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/credentials/legacy`, { method: "POST", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrfToken, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ name: "Legacy", baseUrl: "https://models.example.test/v1", secret: "secret" }) })).status, 404);

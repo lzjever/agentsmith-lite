@@ -3,7 +3,7 @@
 import { FolderPlus } from "lucide-react";
 import { Button, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useId, useState } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Project } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type Project } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { Dialog } from "../ui/Dialog";
 
@@ -26,6 +26,7 @@ export function CreateProjectDialog({ workspaceId, open, onOpenChange, onCreated
       const project = await apiClient.createProject(workspaceId, { name: nextName }, mutationKeys.key("project.create", requestIdentity));
       mutationKeys.complete("project.create", requestIdentity);
       onCreated(project);
+      notifyDirectoryChanged();
       showToast({ body: "Project created" });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("project.create", requestIdentity);
