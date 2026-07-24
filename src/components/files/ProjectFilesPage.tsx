@@ -1,9 +1,9 @@
 "use client";
 
-import { ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Banner, Button, Collapsible, DialogHeader, EmptyState, FileInput, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
-import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
+import { Banner, Button, Collapsible, DialogHeader, EmptyState, FileInput, Heading, IconButton, Layout, LayoutContent, LayoutFooter, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
+import { type FormEvent, useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
@@ -11,15 +11,30 @@ import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { Dialog } from "../ui/Dialog";
-import { showFileDetails, sortFileEntries } from "./fileBrowserState";
+import {
+  createFileBrowserState,
+  reduceFileBrowserState,
+  selectFileBrowserPage,
+  type FileBrowserSort
+} from "./fileBrowserState";
 
 type LoadState = "loading" | "ready" | "error";
 const maxPreviewBytes = 512_000;
+const fileSortOptions = [
+  { value: "name:asc", label: "Name A-Z" },
+  { value: "name:desc", label: "Name Z-A" },
+  { value: "size:asc", label: "Smallest first" },
+  { value: "size:desc", label: "Largest first" },
+  { value: "updatedAt:desc", label: "Recently updated" },
+  { value: "updatedAt:asc", label: "Oldest updated" }
+];
 export type FilePreview = { kind: "text" | "image"; value: string; name: string; path: string };
-
-export function invalidateFilePreview(preview: FilePreview | null, path: string): FilePreview | null {
-  return preview?.path === path ? null : preview;
-}
+type FilePreviewState =
+  | { status: "idle" }
+  | { status: "loading"; path: string }
+  | { status: "error"; path: string; message: string }
+  | { status: "ready"; preview: FilePreview };
+type DeleteFileTarget = { libraryId: string; entry: ProjectFile };
 
 export function ProjectFilesPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
   return <ProjectFiles key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
@@ -44,21 +59,22 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [canCreateLibrary, setCanCreateLibrary] = useState(false);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
   const [path, setPath] = useState("");
-  const [entries, setEntries] = useState<ProjectFile[]>([]);
-  const [filesState, setFilesState] = useState<LoadState>("ready");
-  const [filesMessage, setFilesMessage] = useState("");
+  const [browser, dispatchBrowser] = useReducer(
+    reduceFileBrowserState,
+    createFileBrowserState([])
+  );
+  const browserRef = useRef(browser);
+  browserRef.current = browser;
+  const [operationMessage, setOperationMessage] = useState("");
   const [filesNotice, setFilesNotice] = useState("");
-  const [selected, setSelected] = useState<ProjectFile>();
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [preview, setPreview] = useState<FilePreview | null>(null);
-  const [previewError, setPreviewError] = useState("");
+  const [previewState, setPreviewState] = useState<FilePreviewState>({ status: "idle" });
   const [dropReady, setDropReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [deletingFile, setDeletingFile] = useState(false);
   const [uploadFailure, setUploadFailure] = useState<{ libraryId: string; file: File; path: string; message: string; code?: string }>();
   const [replaceTarget, setReplaceTarget] = useState<{ libraryId: string; file: File; path: string }>();
-  const [deleteFileTarget, setDeleteFileTarget] = useState<ProjectFile>();
+  const [deleteFileTarget, setDeleteFileTarget] = useState<DeleteFileTarget>();
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<FileLibrary>();
   const [deleteLibraryTarget, setDeleteLibraryTarget] = useState<FileLibrary>();
@@ -68,24 +84,34 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [replaceError, setReplaceError] = useState("");
   const [libraryMutationPending, setLibraryMutationPending] = useState(false);
 
-  const resetFileSelection = useCallback(() => {
-    previewVersion.current += 1;
-    setSelected(undefined);
-    setPreview(null);
-    setPreviewError("");
-    setMobileDetailsOpen(false);
+  const invalidateFileReads = useCallback(() => {
+    fileLoadVersion.current += 1;
   }, []);
 
+  const clearPreview = useCallback(() => {
+    previewVersion.current += 1;
+    setPreviewState({ status: "idle" });
+  }, []);
+
+  const resetFileContext = useCallback(() => {
+    dispatchBrowser({ type: "location_changed" });
+    clearPreview();
+    setMobileDetailsOpen(false);
+  }, [clearPreview]);
+
   const applyLocation = useCallback((libraryId: string | null, nextPath: string) => {
-    fileLoadVersion.current += 1;
+    const changed = selectedLibraryRef.current !== libraryId || pathRef.current !== nextPath;
+    if (changed) {
+      invalidateFileReads();
+      resetFileContext();
+    }
     selectedLibraryRef.current = libraryId;
     pathRef.current = nextPath;
     setSelectedLibraryId(libraryId);
     setPath(nextPath);
     setUploadFailure(undefined);
     setReplaceTarget(undefined);
-    resetFileSelection();
-  }, [resetFileSelection]);
+  }, [invalidateFileReads, resetFileContext]);
 
   const loadLibraries = useCallback(async () => {
     const version = ++libraryLoadVersion.current;
@@ -96,13 +122,12 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       apiClient.projectCapabilities(projectId)
     ]);
     if (!mounted.current || version !== libraryLoadVersion.current) return;
-    setCanCreateLibrary(capabilityResult.status === "fulfilled" && capabilityResult.value.canWriteFiles);
+    if (capabilityResult.status === "fulfilled") {
+      setCanCreateLibrary(capabilityResult.value.canWriteFiles);
+    }
     if (libraryResult.status === "rejected") {
-      setLibraries([]);
-      librariesRef.current = [];
       setLibrariesMessage(errorMessage(libraryResult.reason, "File Libraries could not be loaded."));
       setLibrariesState("error");
-      applyLocation(null, "");
       return;
     }
     const nextLibraries = libraryResult.value;
@@ -136,7 +161,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     function restoreLocation() {
       const location = readFileBrowserLocation();
       const available = librariesRef.current;
-      const nextId = available.some((library) => library.id === location.libraryId) ? location.libraryId : available[0]?.id ?? null;
+      const nextId = available.length === 0 || available.some((library) => library.id === location.libraryId) ? location.libraryId : available[0]?.id ?? null;
       applyLocation(nextId, nextId === location.libraryId ? location.path : "");
     }
     window.addEventListener("popstate", restoreLocation);
@@ -145,81 +170,95 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
 
   const loadFiles = useCallback(async () => {
     if (!selectedLibraryId) {
-      setEntries([]);
-      setFilesState("ready");
+      dispatchBrowser({ type: "refresh_succeeded", entries: [] });
       return;
     }
     const requestedLibraryId = selectedLibraryId;
     const requestedPath = path;
     const version = ++fileLoadVersion.current;
-    setFilesState("loading");
-    setFilesMessage("");
+    dispatchBrowser({ type: "refresh_started" });
+    setOperationMessage("");
     setUploadFailure(undefined);
     try {
       const result = await apiClient.libraryFiles(projectId, requestedLibraryId, requestedPath);
       if (!mounted.current || version !== fileLoadVersion.current || selectedLibraryRef.current !== requestedLibraryId || pathRef.current !== requestedPath) return;
-      setEntries(sortFileEntries(result.entries));
-      setSelected((current) => result.entries.find((entry) => entry.path === current?.path));
-      setFilesState("ready");
+      const selectedPath = browserRef.current.selectedPath;
+      if (selectedPath) {
+        const currentSelected = browserRef.current.entries.find((entry) => entry.path === selectedPath);
+        const refreshedSelected = result.entries.find((entry) => entry.path === selectedPath);
+        if (!refreshedSelected) {
+          clearPreview();
+          setMobileDetailsOpen(false);
+        } else if (currentSelected && fileEntryVersionChanged(currentSelected, refreshedSelected)) {
+          clearPreview();
+        }
+      }
+      dispatchBrowser({ type: "refresh_succeeded", entries: result.entries });
     } catch (error) {
       if (!mounted.current || version !== fileLoadVersion.current || selectedLibraryRef.current !== requestedLibraryId || pathRef.current !== requestedPath) return;
-      if (error instanceof ApiError && error.status === 404 && error.message === "File Library not found") {
-        await loadLibraries();
-        return;
-      }
-      setEntries([]);
-      resetFileSelection();
-      setFilesMessage(errorMessage(error, "Files could not be loaded."));
-      setFilesState("error");
+      dispatchBrowser({
+        type: "refresh_failed",
+        message: errorMessage(error, "Files could not be loaded.")
+      });
     }
-  }, [loadLibraries, path, projectId, resetFileSelection, selectedLibraryId]);
+  }, [clearPreview, path, projectId, selectedLibraryId]);
 
   useEffect(() => {
     if (librariesState === "ready") void loadFiles();
   }, [librariesState, loadFiles]);
 
   useEffect(() => () => {
-    if (preview?.kind === "image") URL.revokeObjectURL(preview.value);
-  }, [preview]);
+    if (previewState.status === "ready" && previewState.preview.kind === "image") {
+      URL.revokeObjectURL(previewState.preview.value);
+    }
+  }, [previewState]);
 
   const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId);
+  const selected = browser.entries.find((entry) => entry.path === browser.selectedPath);
+  const page = useMemo(() => selectFileBrowserPage(browser), [browser]);
+  const activePreviewPath =
+    previewState.status === "ready"
+      ? previewState.preview.path
+      : previewState.status === "idle"
+        ? null
+        : previewState.path;
   const canWriteFiles = selectedLibrary?.capabilities.canWriteFiles === true;
   const mutationBusy = uploading || deletingFile || libraryMutationPending;
 
   function selectLibrary(libraryId: string) {
     if (libraryId === selectedLibraryRef.current) return;
     applyLocation(libraryId, "");
-    setEntries([]);
-    setQuery("");
-    setFilesMessage("");
     writeFileBrowserLocation(libraryId, "", false);
   }
 
   function navigate(nextPath: string) {
     const normalized = normalizeLibraryPath(nextPath);
-    pathRef.current = normalized;
-    setPath(normalized);
-    setEntries([]);
-    resetFileSelection();
+    if (normalized === pathRef.current) return;
+    applyLocation(selectedLibraryRef.current, normalized);
     writeFileBrowserLocation(selectedLibraryRef.current, normalized, false);
   }
 
   function selectFile(entry: ProjectFile) {
-    previewVersion.current += 1;
-    setSelected(entry);
-    setPreview((current) => current?.path === entry.path ? current : null);
-    setPreviewError("");
+    dispatchBrowser({ type: "selection_changed", path: entry.path });
+    if (activePreviewPath !== entry.path) clearPreview();
     setMobileDetailsOpen(true);
   }
 
-  function forgetFile(filePath: string) {
-    previewVersion.current += 1;
-    setDeleteFileTarget((current) => current?.path === filePath ? undefined : current);
-    setSelected((current) => current?.path === filePath ? undefined : current);
-    setPreview((current) => invalidateFilePreview(current, filePath));
-    setPreviewError("");
-    setMobileDetailsOpen(false);
-    setEntries((current) => current.filter((entry) => entry.path !== filePath));
+  function openDeleteFile(entry: ProjectFile) {
+    if (!selectedLibrary) return;
+    setDeleteFileTarget({ libraryId: selectedLibrary.id, entry });
+  }
+
+  function forgetFile(libraryId: string, filePath: string) {
+    setDeleteFileTarget((current) => current?.libraryId === libraryId && current.entry.path === filePath ? undefined : current);
+    if (selectedLibraryRef.current !== libraryId || pathRef.current !== parentLibraryPath(filePath)) return;
+    invalidateFileReads();
+    const selectedPath = browserRef.current.selectedPath;
+    dispatchBrowser({ type: "entry_removed", path: filePath });
+    if (selectedPath === filePath) {
+      clearPreview();
+      setMobileDetailsOpen(false);
+    }
   }
 
   async function revokeWriteAccess(error: unknown, libraryId: string) {
@@ -230,8 +269,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (selectedLibraryRef.current === libraryId) {
       setUploadFailure(undefined);
       setReplaceTarget(undefined);
-      setDeleteFileTarget(undefined);
-      setFilesMessage("File write access changed. This library is now read-only.");
+      setOperationMessage("File write access changed. This library is now read-only.");
     }
     return true;
   }
@@ -245,7 +283,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     }
     setUploading(true);
     setUploadFailure(undefined);
-    setFilesMessage("");
+    setOperationMessage("");
     const filePath = childLibraryPath(uploadPath, file.name);
     const requestIdentity = `${libraryId}:${filePath}:${overwrite}:${file.size}:${file.lastModified}`;
     try {
@@ -254,12 +292,11 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       if (!mounted.current) return;
       const entry: ProjectFile = { name: written.path.slice(written.path.lastIndexOf("/") + 1), path: written.path, type: "file", size: written.bytes, mediaType: written.mediaType, updatedAt: written.updatedAt };
       if (selectedLibraryRef.current === libraryId && pathRef.current === uploadPath) {
-        setEntries((current) => sortFileEntries([...current.filter((item) => item.path !== written.path), entry]));
-        setSelected((current) => current?.path === written.path ? entry : current);
+        invalidateFileReads();
+        if (overwrite && browserRef.current.selectedPath === written.path) clearPreview();
+        dispatchBrowser({ type: "entry_upserted", entry });
       }
       if (overwrite) {
-        previewVersion.current += 1;
-        setPreview((current) => invalidateFilePreview(current, written.path));
         setReplaceTarget(undefined);
         setReplaceError("");
       }
@@ -291,8 +328,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (entry.type !== "file" || !selectedLibrary) return;
     const libraryId = selectedLibrary.id;
     const version = ++previewVersion.current;
-    setPreview(null);
-    setPreviewError("");
+    setPreviewState({ status: "loading", path: entry.path });
     try {
       const listedKind = classifyPreviewMediaType(entry.mediaType);
       if (listedKind === null || (entry.size ?? 0) > maxPreviewBytes) throw new Error("This file type cannot be previewed safely.");
@@ -304,47 +340,60 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       if (downloadedKind === "image") {
         const value = URL.createObjectURL(blob);
         if (version !== previewVersion.current) { URL.revokeObjectURL(value); return; }
-        setPreview({ kind: "image", value, name: entry.name, path: entry.path });
+        setPreviewState({
+          status: "ready",
+          preview: { kind: "image", value, name: entry.name, path: entry.path }
+        });
         return;
       }
       if (downloadedKind === "text") {
         const value = (await blob.text()).slice(0, 16_000);
         if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
-        setPreview({ kind: "text", value, name: entry.name, path: entry.path });
+        setPreviewState({
+          status: "ready",
+          preview: { kind: "text", value, name: entry.name, path: entry.path }
+        });
         return;
       }
       throw new Error("This file type cannot be previewed safely.");
     } catch (error) {
       if (!mounted.current || version !== previewVersion.current) return;
       if (isMissingFile(error)) {
-        forgetFile(entry.path);
+        forgetFile(libraryId, entry.path);
         setFilesNotice("File no longer exists. It was removed from this File Library view.");
         return;
       }
-      setPreviewError(errorMessage(error, "File preview could not be loaded."));
+      setPreviewState({
+        status: "error",
+        path: entry.path,
+        message: errorMessage(error, "File preview could not be loaded.")
+      });
     }
   }
 
   async function removeFile() {
-    if (!deleteFileTarget || !selectedLibrary || uploading || deletingFile) return;
+    if (!deleteFileTarget || uploading || deletingFile) return;
     const target = deleteFileTarget;
-    const libraryId = selectedLibrary.id;
-    const requestIdentity = `${libraryId}:${target.path}`;
+    const libraryId = target.libraryId;
+    const requestIdentity = `${libraryId}:${target.entry.path}`;
     setDeletingFile(true);
     try {
       let alreadyMissing = false;
-      await apiClient.deleteLibraryFile(projectId, libraryId, target.path, mutationKeys.key("library-file.delete", requestIdentity)).catch((error) => {
+      await apiClient.deleteLibraryFile(projectId, libraryId, target.entry.path, mutationKeys.key("library-file.delete", requestIdentity)).catch((error) => {
         if (!isMissingFile(error)) throw error;
         alreadyMissing = true;
       });
       mutationKeys.complete("library-file.delete", requestIdentity);
-      if (!mounted.current || selectedLibraryRef.current !== libraryId) return;
-      forgetFile(target.path);
-      if (alreadyMissing) setFilesNotice("File no longer exists. The File Library view has been updated.");
+      if (!mounted.current) return;
+      const targetIsCurrent = selectedLibraryRef.current === libraryId && pathRef.current === parentLibraryPath(target.entry.path);
+      setDeleteFileTarget(undefined);
+      forgetFile(libraryId, target.entry.path);
+      if (alreadyMissing && targetIsCurrent) setFilesNotice("File no longer exists. The File Library view has been updated.");
+      else if (alreadyMissing) showToast({ body: "File no longer exists", type: "info" });
       else showToast({ body: "File deleted", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("library-file.delete", requestIdentity);
-      if (await revokeWriteAccess(error, libraryId)) return;
+      await revokeWriteAccess(error, libraryId);
       throw new Error(errorMessage(error, "File could not be deleted."));
     } finally {
       if (mounted.current) setDeletingFile(false);
@@ -429,7 +478,6 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       setDeleteLibraryTarget(undefined);
       const fallback = next[Math.min(Math.max(deletedIndex, 0), next.length - 1)]?.id ?? null;
       applyLocation(fallback, "");
-      setEntries([]);
       writeFileBrowserLocation(fallback, "", true);
       showToast({ body: "File Library deleted", type: "info" });
     } catch (error) {
@@ -442,59 +490,75 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
 
   const parent = parentLibraryPath(path);
   const crumbs = libraryBreadcrumbs(selectedLibrary?.name ?? "File Library", path);
-  const normalizedQuery = query.trim().toLowerCase();
-  const visibleEntries = entries.filter((entry) => entry.name.toLowerCase().includes(normalizedQuery));
-  const noMatches = filesState === "ready" && entries.length > 0 && normalizedQuery.length > 0 && visibleEntries.length === 0;
+  const noMatches = browser.entries.length > 0 && browser.query.trim().length > 0 && page.totalCount === 0;
+  const initialFilesLoading = browser.entries.length === 0 && (browser.loadState === "idle" || browser.loadState === "loading");
+  const initialFilesError = browser.entries.length === 0 && browser.loadState === "error";
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Browse and manage the File Libraries available in this project." actions={<div className="flex items-center gap-2"><IconButton label="Refresh File Libraries" tooltip="Refresh File Libraries" variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void loadLibraries()} isDisabled={librariesState === "loading" || mutationBusy} />{canCreateLibrary ? <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={openCreateLibrary} /> : null}</div>} />}>
+    <MobileLibraryControls libraries={libraries} selectedLibrary={selectedLibrary} state={librariesState} message={librariesMessage} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
       <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
-      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={filesState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
+      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={browser.loadState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
         {!selectedLibrary ? <NoLibrarySelected canCreate={canCreateLibrary} onCreate={openCreateLibrary} /> : <>
           <p className="sr-only" aria-live="polite">{dropReady ? "Drop a file to upload" : ""}</p>
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border px-3">
             <nav className="min-w-0 overflow-x-auto" aria-label="Library path"><ol className="flex min-w-max items-center gap-1 text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-icon-secondary" aria-hidden="true" /> : null}<button type="button" className="max-w-56 truncate rounded-sm px-1.5 py-1 hover:bg-overlay-hover hover:text-primary" title={crumb.label} onClick={() => navigate(crumb.path)}><Text type="supporting" color="secondary">{crumb.label}</Text></button></li>)}</ol></nav>
-            {canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}
+            <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh files" tooltip="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={browser.loadState === "loading" || mutationBusy} />{canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}</div>
           </div>
-          <div className="border-b border-border p-3"><TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} hasClear placeholder="Filter files" size="lg" width="100%" /></div>
+          <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row">
+            <TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={browser.query} onChange={(query) => dispatchBrowser({ type: "filter_changed", query })} hasClear placeholder="Filter files" size="lg" width="100%" />
+            <Selector label="Sort files" isLabelHidden options={fileSortOptions} value={`${browser.sort.field}:${browser.sort.direction}`} onChange={(value) => { const [field, direction] = value.split(":") as [FileBrowserSort["field"], FileBrowserSort["direction"]]; dispatchBrowser({ type: "sort_changed", sort: { field, direction } }); }} size="lg" className="w-full shrink-0 sm:w-44" />
+          </div>
           {filesNotice ? <Banner className="mx-3 mt-3" status="info" title="File Library updated" description={filesNotice} isDismissable onDismiss={() => setFilesNotice("")} /> : null}
-          {filesMessage ? <InlineError message={filesMessage} onDismiss={() => setFilesMessage("")} /> : null}
+          {operationMessage ? <InlineError message={operationMessage} onDismiss={() => setOperationMessage("")} /> : null}
+          {browser.loadState === "error" && browser.entries.length > 0 ? <Banner className="mx-3 mt-3" status="error" title="Files could not be refreshed" description={browser.message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void loadFiles()} />} /> : null}
           {uploadFailure ? <Banner className="mx-3 mt-3" status="error" title={uploadFailure.code === "project_file_bytes_limit_reached" ? "File storage limit reached" : "File upload failed"} description={uploadFailure.code === "project_file_bytes_limit_reached" ? <>Delete files or ask a project administrator to change the limit. <Link className="underline" href={`${projectBasePath}/policy`}><Text weight="medium">Open resource policy</Text></Link>.</> : uploadFailure.message} endContent={<div className="flex shrink-0 gap-1">{uploadFailure.code !== "project_file_bytes_limit_reached" ? <Button label="Retry upload" variant="ghost" size="md" onClick={() => void upload(uploadFailure.file, false, uploadFailure.path, uploadFailure.libraryId)} isDisabled={mutationBusy} /> : null}<IconButton label="Refresh files" tooltip="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={mutationBusy} /></div>} /> : null}
-          {filesState === "loading" ? <FileBrowserLoading /> : null}
-          {filesState === "error" ? <FileBrowserError onRetry={loadFiles} /> : null}
-          {filesState === "ready" && entries.length === 0 ? <FileBrowserEmpty nested={path !== ""} canUpload={canWriteFiles} onUpload={() => input.current?.click()} /> : null}
-          {noMatches ? <FileBrowserNoMatches query={query.trim()} onClear={() => setQuery("")} /> : null}
-          {filesState === "ready" && entries.length > 0 && !noMatches ? <FileBrowserList entries={visibleEntries} parent={parent} selectedPath={selected?.path} onNavigate={navigate} onSelect={selectFile} /> : null}
+          {initialFilesLoading ? <FileBrowserLoading /> : null}
+          {initialFilesError ? <FileBrowserError message={browser.message} onRetry={loadFiles} /> : null}
+          {browser.loadState === "ready" && browser.entries.length === 0 ? <FileBrowserEmpty nested={path !== ""} canUpload={canWriteFiles} onUpload={() => input.current?.click()} /> : null}
+          {noMatches ? <FileBrowserNoMatches query={browser.query.trim()} onClear={() => dispatchBrowser({ type: "filter_changed", query: "" })} /> : null}
+          {browser.entries.length > 0 && !noMatches ? <FileBrowserList entries={page.entries} parent={parent} selectedPath={browser.selectedPath} onNavigate={navigate} onSelect={selectFile} /> : null}
+          {page.totalCount > 0 ? <FileBrowserPagination page={page.page} pageCount={page.pageCount} range={page.range} totalCount={page.totalCount} onPageChange={(nextPage) => dispatchBrowser({ type: "page_changed", page: nextPage })} /> : null}
         </>}
       </section>
-      <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /></aside>
+      <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></aside>
     </div>
-    <div className="lg:hidden">{selected ? <Collapsible trigger="File details" isOpen={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}><div className="mt-2 rounded-md border border-border bg-surface p-4">{showFileDetails(selected, true, mobileDetailsOpen) ? <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} onDelete={setDeleteFileTarget} onPreview={openPreview} /> : null}</div></Collapsible> : null}</div>
-    {previewError && selected ? <Banner className="mt-4" status="error" title="File preview unavailable" description={previewError} endContent={<div className="flex items-center gap-2"><Button label="Try preview again" variant="ghost" size="md" icon={<RefreshCw size={14} />} onClick={() => void openPreview(selected)} /><IconButton label="Dismiss preview error" tooltip="Dismiss preview error" variant="ghost" icon={<X size={15} />} onClick={() => setPreviewError("")} /></div>} /> : null}
-    {preview ? <div className="mt-4 rounded-md border border-border bg-surface p-4"><div className="mb-3 flex min-w-0 justify-between gap-3"><Text weight="semibold" maxLines={1}>{preview.name}</Text><IconButton label="Close preview" tooltip="Close preview" variant="ghost" icon={<X size={15} />} onClick={() => { previewVersion.current += 1; setPreview(null); }} /></div>{preview.kind === "image" ? <img className="max-h-96 max-w-full" src={preview.value} alt={preview.name} /> : <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words"><Text type="code">{preview.value}</Text></pre>}</div> : null}
+    <div className="lg:hidden">{selected ? <Collapsible trigger="File details" isOpen={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}><div className="mt-2 rounded-md border border-border bg-surface p-4"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></div></Collapsible> : null}</div>
     <LibraryNameDialog mode="create" open={createOpen} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!libraryMutationPending) { setCreateOpen(open); if (!open) setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={createLibrary} />
     <LibraryNameDialog mode="rename" open={Boolean(renameTarget)} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setRenameTarget(undefined); setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={renameLibrary} />
     <DeleteLibraryDialog library={deleteLibraryTarget} pending={libraryMutationPending} error={libraryDeleteError} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setDeleteLibraryTarget(undefined); setLibraryDeleteError(""); } }} onConfirm={deleteLibrary} />
-    <DeleteFileDialog entry={deleteFileTarget} deleting={deletingFile} onCancel={() => !deletingFile && setDeleteFileTarget(undefined)} onConfirm={removeFile} />
+    <DeleteFileDialog entry={deleteFileTarget?.entry} deleting={deletingFile} onCancel={() => !deletingFile && setDeleteFileTarget(undefined)} onConfirm={removeFile} />
     <ReplaceFileDialog target={replaceTarget} pending={uploading} error={replaceError} onOpenChange={(open) => { if (!open && !uploading) { setReplaceTarget(undefined); setReplaceError(""); } }} onConfirm={() => replaceTarget ? upload(replaceTarget.file, true, replaceTarget.path, replaceTarget.libraryId) : undefined} />
   </PageLayout>;
 }
 
+function MobileLibraryControls({ libraries, selectedLibrary, state, message, canCreate, mutationBusy, onRetry, onSelect, onCreate, onRename, onDelete }: { libraries: FileLibrary[]; selectedLibrary: FileLibrary | undefined; state: LoadState; message: string; canCreate: boolean; mutationBusy: boolean; onRetry: () => Promise<void>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void }) {
+  return <section className="mb-4 space-y-2 lg:hidden" aria-label="File Library selection">
+    <div className="flex items-end gap-1">
+      <Selector label="File Library" options={libraries.map((library) => ({ value: library.id, label: library.name }))} value={selectedLibrary?.id ?? ""} onChange={onSelect} placeholder={state === "loading" ? "Loading libraries" : "Select a library"} isDisabled={libraries.length === 0 || mutationBusy} size="lg" className="min-w-0 flex-1" />
+      {canCreate ? <IconButton label="Create library" tooltip="Create File Library" variant="ghost" size="lg" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}
+      {selectedLibrary ? <IconButton label={`Rename ${selectedLibrary.name}`} tooltip={selectedLibrary.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" size="lg" icon={<Pencil size={15} />} isDisabled={!selectedLibrary.capabilities.canRename || mutationBusy} onClick={() => onRename(selectedLibrary)} /> : null}
+      {selectedLibrary ? <IconButton label={`Delete ${selectedLibrary.name}`} tooltip={selectedLibrary.boundTask ? "This library is bound to a Task and cannot be deleted" : selectedLibrary.capabilities.canDelete ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" size="lg" icon={<Trash2 size={15} />} isDisabled={!selectedLibrary.capabilities.canDelete || mutationBusy} onClick={() => onDelete(selectedLibrary)} /> : null}
+    </div>
+    {state === "error" ? <Banner status="error" title="Libraries could not be refreshed" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
+  </section>;
+}
+
 function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBasePath, canCreate, mutationBusy, onRetry, onSelect, onCreate, onRename, onDelete }: { state: LoadState; message: string; libraries: FileLibrary[]; selectedLibraryId: string | null; projectBasePath: string; canCreate: boolean; mutationBusy: boolean; onRetry: () => Promise<void>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void }) {
-  return <section className="flex min-h-0 max-h-72 flex-col overflow-hidden rounded-md border border-border bg-surface lg:max-h-none" aria-label="File Libraries">
+  return <section className="hidden min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface lg:flex" aria-label="File Libraries">
     <div className="flex min-h-12 items-center justify-between border-b border-border px-3"><div className="min-w-0"><Heading level={3}>File Libraries</Heading><Text type="supporting" color="secondary" display="block" className="mt-0.5">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</Text></div>{canCreate ? <IconButton label="Create library" tooltip="Create library" variant="ghost" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}</div>
     <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-      {state === "loading" ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton height={48} /><Skeleton height={48} /></div> : null}
-      {state === "error" ? <Banner status="error" title="Libraries unavailable" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
+      {state === "loading" && libraries.length === 0 ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton height={48} /><Skeleton height={48} /></div> : null}
+      {state === "error" ? <Banner status="error" title="Libraries could not be refreshed" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
       {state === "ready" && libraries.length === 0 ? <EmptyState isCompact title="No File Libraries available" /> : null}
-      {state === "ready" ? libraries.map((library) => {
+      {libraries.map((library) => {
         const active = library.id === selectedLibraryId;
         const boundLabel = library.boundTask ? `Bound to ${library.boundTask.title || "Task"}` : null;
         return <div key={library.id} className={`group flex items-center gap-1 rounded-sm ${active ? "bg-accent-muted ring-1 ring-inset ring-accent" : "hover:bg-overlay-hover"}`}>
           <div className="min-w-0 flex-1 py-2"><button type="button" className="flex w-full min-w-0 items-center gap-2 px-2 text-left" aria-current={active ? "true" : undefined} aria-label={`Select library ${library.name}`} onClick={() => onSelect(library.id)} title={library.name}><FolderOpen className={`size-4 shrink-0 ${active ? "text-accent-text" : "text-icon-secondary"}`} /><Text maxLines={1}>{library.name}</Text></button>{library.boundTask && boundLabel ? <Link className="mt-1 block truncate pl-8 pr-2 text-warning hover:underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`} title={boundLabel}><Text type="supporting" color="inherit">{boundLabel}</Text></Link> : <Text type="supporting" color="secondary" display="block" className="mt-1 pl-8">Available</Text>}</div>
           {active ? <div className="flex shrink-0 items-center pr-1"><IconButton label={`Rename ${library.name}`} tooltip={library.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" className="h-7 w-7" icon={<Pencil size={14} />} isDisabled={!library.capabilities.canRename || mutationBusy} onClick={() => onRename(library)} /><IconButton label={`Delete ${library.name}`} tooltip={library.boundTask ? "This library is bound to a Task and cannot be deleted" : library.capabilities.canDelete ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" className="h-7 w-7 text-error" icon={<Trash2 size={14} />} isDisabled={!library.capabilities.canDelete || mutationBusy} onClick={() => onDelete(library)} /></div> : null}
         </div>;
-      }) : null}
+      })}
     </div>
   </section>;
 }
@@ -520,8 +584,8 @@ function FileBrowserLoading() {
   return <div className="space-y-2 p-3" aria-label="Loading files"><Skeleton height={40} /><Skeleton height={40} /><Skeleton height={40} /></div>;
 }
 
-function FileBrowserError({ onRetry }: { onRetry: () => Promise<unknown> }) {
-  return <Banner className="m-3" status="error" title="Files unavailable" description="This library directory could not be loaded." endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} />;
+function FileBrowserError({ message, onRetry }: { message: string; onRetry: () => Promise<unknown> }) {
+  return <Banner className="m-3" status="error" title="Files unavailable" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} />;
 }
 
 function FileBrowserEmpty({ nested, canUpload, onUpload }: { nested: boolean; canUpload: boolean; onUpload: () => void }) {
@@ -532,8 +596,19 @@ function FileBrowserNoMatches({ query, onClear }: { query: string; onClear: () =
   return <EmptyState className="min-h-64" icon={<Search />} title="No matching files" description={`No files in this folder match "${query}".`} actions={<Button label="Clear filter" variant="ghost" size="lg" onClick={onClear} />} />;
 }
 
-function FileBrowserList({ entries, parent, selectedPath, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | undefined; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
+function FileBrowserList({ entries, parent, selectedPath, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | null; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
   return <div className="divide-y divide-border">{parent !== null ? <button type="button" className="grid w-full grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 text-left text-secondary hover:bg-overlay-hover hover:text-primary" onClick={() => onNavigate(parent)}><FolderUp className="size-5" /><span>Up one folder</span><Text type="supporting" color="secondary">..</Text></button> : null}{entries.map((entry) => <FileRow key={entry.path} entry={entry} selected={entry.path === selectedPath} onNavigate={onNavigate} onSelect={onSelect} />)}</div>;
+}
+
+function FileBrowserPagination({ page, pageCount, range, totalCount, onPageChange }: { page: number; pageCount: number; range: { start: number; end: number }; totalCount: number; onPageChange: (page: number) => void }) {
+  return <div className="flex min-h-12 items-center justify-between gap-3 border-t border-border px-3">
+    <Text type="supporting" color="secondary">{range.start}-{range.end} of {totalCount}</Text>
+    <div className="flex items-center gap-1">
+      <IconButton label="Previous page" tooltip="Previous page" variant="ghost" size="md" icon={<ChevronLeft size={16} />} isDisabled={page === 1} onClick={() => onPageChange(page - 1)} />
+      <Text type="supporting" color="secondary">Page {page} of {pageCount}</Text>
+      <IconButton label="Next page" tooltip="Next page" variant="ghost" size="md" icon={<ChevronRight size={16} />} isDisabled={page === pageCount} onClick={() => onPageChange(page + 1)} />
+    </div>
+  </div>;
 }
 
 function FileRow({ entry, selected, onNavigate, onSelect }: { entry: ProjectFile; selected: boolean; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
@@ -541,10 +616,33 @@ function FileRow({ entry, selected, onNavigate, onSelect }: { entry: ProjectFile
   return <div className={`grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 ${selected ? "bg-muted" : "hover:bg-overlay-hover"}`}><span className="text-icon-secondary">{directory ? <Folder className="size-5" /> : <FileText className="size-5" />}</span><button type="button" className="min-w-0 truncate text-left text-primary" title={entry.name} onClick={() => directory ? onNavigate(entry.path) : onSelect(entry)}><Text type="supporting">{entry.name}</Text></button><button type="button" className="rounded-sm px-2 py-1 text-secondary hover:bg-overlay-hover hover:text-primary" aria-label={`Show details for ${entry.name}`} onClick={() => onSelect(entry)}><Text type="supporting" color="secondary">{directory ? "Folder" : formatBytes(entry.size ?? 0)}</Text></button></div>;
 }
 
-function FileDetails({ entry, projectId, library, mutationBusy, onDelete, onPreview }: { entry: ProjectFile | undefined; projectId: string; library: FileLibrary | undefined; mutationBusy: boolean; onDelete: (entry: ProjectFile) => void; onPreview: (entry: ProjectFile) => void }) {
+function FileDetails({ entry, projectId, library, mutationBusy, previewState, onDelete, onPreview, onClosePreview }: { entry: ProjectFile | undefined; projectId: string; library: FileLibrary | undefined; mutationBusy: boolean; previewState: FilePreviewState; onDelete: (entry: ProjectFile) => void; onPreview: (entry: ProjectFile) => void; onClosePreview: () => void }) {
   if (!entry || !library) return <EmptyState className="min-h-48" isCompact title="No file selected" description="Select a file to view its details." />;
   const file = entry.type === "file";
-  return <div className="space-y-4"><div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div><dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>{file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{classifyPreviewMediaType(entry.mediaType) !== null && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}</div>;
+  const previewForEntry =
+    (previewState.status === "ready" && previewState.preview.path === entry.path) ||
+    (previewState.status !== "idle" && previewState.status !== "ready" && previewState.path === entry.path);
+  return <div className="space-y-4">
+    <div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div>
+    <dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>
+    {file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{classifyPreviewMediaType(entry.mediaType) !== null && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} isLoading={previewState.status === "loading" && previewState.path === entry.path} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}
+    {previewForEntry ? <FilePreviewPanel state={previewState} entry={entry} onRetry={() => onPreview(entry)} onClose={onClosePreview} /> : null}
+  </div>;
+}
+
+function FilePreviewPanel({ state, entry, onRetry, onClose }: { state: FilePreviewState; entry: ProjectFile; onRetry: () => void; onClose: () => void }) {
+  return <section className="h-64 overflow-hidden border-t border-border pt-3" aria-label={`Preview ${entry.name}`}>
+    <div className="mb-2 flex h-8 items-center justify-between gap-2">
+      <Text weight="semibold" maxLines={1}>Preview</Text>
+      <IconButton label="Close preview" tooltip="Close preview" variant="ghost" size="sm" icon={<X size={14} />} onClick={onClose} />
+    </div>
+    <div className="h-48 min-h-0 overflow-auto">
+      {state.status === "loading" ? <div className="space-y-2" aria-label="Loading file preview"><Skeleton height={32} /><Skeleton height={120} /></div> : null}
+      {state.status === "error" ? <Banner status="error" title="File preview unavailable" description={state.message} endContent={<Button label="Try again" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={onRetry} />} /> : null}
+      {state.status === "ready" && state.preview.kind === "image" ? <div className="grid h-full place-items-center"><img className="max-h-full max-w-full object-contain" src={state.preview.value} alt={state.preview.name} /></div> : null}
+      {state.status === "ready" && state.preview.kind === "text" ? <pre className="min-h-full whitespace-pre-wrap break-words"><Text type="code">{state.preview.value}</Text></pre> : null}
+    </div>
+  </section>;
 }
 
 export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { entry: ProjectFile | undefined; deleting: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
@@ -619,6 +717,13 @@ function writeFileBrowserLocation(libraryId: string | null, path: string, replac
   const url = `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`;
   if (replace) window.history.replaceState(window.history.state, "", url);
   else window.history.pushState(window.history.state, "", url);
+}
+
+function fileEntryVersionChanged(current: ProjectFile, refreshed: ProjectFile): boolean {
+  return current.type !== refreshed.type ||
+    current.size !== refreshed.size ||
+    current.mediaType !== refreshed.mediaType ||
+    current.updatedAt !== refreshed.updatedAt;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
